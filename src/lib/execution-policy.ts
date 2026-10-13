@@ -106,17 +106,11 @@ function gateCommand(command: VerificationDeclaration, field: string): void {
   if (command.cwd !== undefined) containedCwd(command.cwd, `${field}.cwd`);
 }
 
-/**
- * The landing gate. `requiredLocalVerification` is its former name, accepted for one
- * release: a runner that predates the rename reads only the old name (and an empty gate
- * without it), so repositories rename the key only once every runner reads both.
- */
+/** The landing gate. Its former name is refused, so a stale policy never lands with an empty gate. */
 function landingGate(parsed: Record<string, unknown>): VerificationDeclaration[] {
-  if (parsed.requiredLandingVerification !== undefined && parsed.requiredLocalVerification !== undefined)
-    fail("Declare requiredLandingVerification only; requiredLocalVerification is its former name");
-  return parsed.requiredLocalVerification !== undefined
-    ? gateChecks(parsed.requiredLocalVerification, "requiredLocalVerification")
-    : gateChecks(parsed.requiredLandingVerification);
+  if (parsed.requiredLocalVerification !== undefined)
+    fail("declares requiredLocalVerification, the gate's former name; rename it requiredLandingVerification");
+  return gateChecks(parsed.requiredLandingVerification);
 }
 
 /** Declared gate checks (landing's in exactly the shape the verification digest has always covered). */

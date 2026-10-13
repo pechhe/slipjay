@@ -159,10 +159,8 @@ turns in the same queue (see [Release](#release)).
 
 - **Gate.** `requiredLandingVerification` in `slipjay.json`, an array of commands
   (`{ "executable", "args"?, "cwd"? }`), run in the runner's checkout.
-  `requiredLocalVerification` is still read as its old name for this release only
-  (a runner from before it reads only the old name, so rename the key in a repository
-  only once its runner runs this release);
-  declaring both is refused. A policy declaring `postLandVerification` (no longer run)
+  A policy declaring its former name, `requiredLocalVerification`, is refused.
+  A policy declaring `postLandVerification` (no longer run)
   is refused; move its checks into the gate or remove it.
 - **Location.** One value: `SLIPJAY_RUNNER`, or `"runner"` in `~/.slipjay/config.json`.
   On the runner's host it is `http://127.0.0.1:7787`. Elsewhere it is

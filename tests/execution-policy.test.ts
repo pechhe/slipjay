@@ -97,11 +97,8 @@ test("a YardSmith-shaped policy keeps every declaration it makes", () => {
   assert.equal(parsed.migrationFinalization?.verify.cwd, null);
 });
 
-test("the gate's former name is read for one release, but never beside the new one", () => {
-  assert.deepEqual(parseExecutionPolicy(policy({ requiredLocalVerification: [check("bun")] })).requiredLandingVerification, [check("bun")]);
-  assert.throws(() => parseExecutionPolicy(policy({ requiredLocalVerification: [check("bun")], requiredLandingVerification: [check("bun")] })),
-    /Declare requiredLandingVerification only/);
-  assert.throws(() => parseExecutionPolicy(policy({ requiredLocalVerification: [check("bash")] })), /requiredLocalVerification\[0\]\.executable is unsafe/);
+test("a policy declaring the gate's former name is refused, never read as an empty gate", () => {
+  assert.throws(() => parseExecutionPolicy(policy({ requiredLocalVerification: [check("bun")] })), /requiredLocalVerification, the gate's former name; rename it requiredLandingVerification/);
 });
 
 test("a policy still declaring postLandVerification is refused, not silently ignored", () => {
