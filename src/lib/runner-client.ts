@@ -214,7 +214,9 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       } catch {
         await jj(cwd, ["git", "push", "--remote", remote, "--named", `${bookmark}=${target.commitId}`]);
       }
-      await jj(cwd, ["bookmark", "forget", bookmark]);
+      // Keeping the untracked remote ref would make the candidate immutable, so the next jj
+      // command would stack a new working-copy commit on it and a reland would carry both.
+      await jj(cwd, ["bookmark", "forget", "--include-remotes", bookmark]);
       const response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
         headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, changeId: target.changeId, commitId: target.commitId, bookmark,
           submittedBy: `${hostname()}:${context.current.name}` }) });

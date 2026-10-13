@@ -96,8 +96,8 @@ test("failed gates print the command, output verbatim and run log URL", async ()
     assert.ok(f.lines.includes("bun run check"));
     assert.ok(f.lines.includes(result.logUrl));
     assert.ok(f.lines.some((line) => line.includes("failed at verifying")));
-    assert.equal(jj(f.cwd, ["log", "-r", op.commitId, "--no-graph", "-T", "commit_id"]), f.commit);
-    assert.equal(jj(f.cwd, ["diff", "--from", op.commitId, "--to", "@", "--summary"]), "");
+    // The candidate stays the editable working copy, so a fix amends it rather than stacking on it.
+    assert.equal(jj(f.cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]), f.commit);
   } finally { await f.dispose(); }
 });
 
