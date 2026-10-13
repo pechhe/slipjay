@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.3.0
 
 - **Releases on the runner:** `slipjay release --confirm <commit>` submits the
   approved candidate to the runner, which verifies it with
