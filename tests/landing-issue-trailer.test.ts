@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/peach-workspace.mjs";
+import { createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
 import { referencesIssue, withIssueTrailer } from "../src/lib/post-land-issue.mjs";
 import { metadataHome } from "../src/lib/workspace-paths.mjs";
 import { jj, project } from "./support/workspace-project.ts";

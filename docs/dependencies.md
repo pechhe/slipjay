@@ -5,7 +5,7 @@ Short map for dependency updates. The repository is authoritative; fix this file
 ## Surfaces
 
 - `package.json` (dependencies, devDependencies, `packageManager`) and `bun.lock`. No workspaces, catalogs, overrides or patches.
-- `slipway.json` landing verification runs `bun install --frozen-lockfile`.
+- `slipjay.json` landing verification runs `bun install --frozen-lockfile`.
 
 ## Clusters
 

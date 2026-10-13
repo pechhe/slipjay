@@ -5,13 +5,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/peach-workspace.mjs";
+import { createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
 import { readLandingState } from "../src/lib/workspace-state.mjs";
 
 const land = (cwd: string) => landWorkspace(cwd, { onProgress: () => {}, sweepOtherWorkspaces: false, releaseLandedWorkspace: false });
 
 async function divergedLanding(changePolicy = false, failRecoveryVerification = false) {
-  const external = await mkdtemp(join(tmpdir(), "slipway-publication-recovery-"));
+  const external = await mkdtemp(join(tmpdir(), "slipjay-publication-recovery-"));
   const marker = join(external, "failed-once");
   const failedCheck = join(external, "verification-failed-once");
   const f = await project({ verify: (verified) => `${recordCheckout(verified)};const cp=require("node:child_process");const revision=(r)=>cp.execFileSync("jj",["--ignore-working-copy","log","-r",r,"--no-graph","-T","commit_id"],{encoding:"utf8"}).trim();if(revision("parents(@)")!==revision("main"))process.exit(8);${failRecoveryVerification ? `const fs=require("node:fs");if(fs.readFileSync(${JSON.stringify(verified)},"utf8").trim().split("\\n").length===2&&!fs.existsSync(${JSON.stringify(failedCheck)})){fs.writeFileSync(${JSON.stringify(failedCheck)},"");process.exit(9)}` : ""}`, postIntegration: {
@@ -31,9 +31,9 @@ async function divergedLanding(changePolicy = false, failRecoveryVerification = 
   git(["config", "user.email", "publisher@example.com"]);
   await writeFile(join(clone, "published.txt"), "published\n");
   if (changePolicy) {
-    const policy = JSON.parse(await readFile(join(clone, "slipway.json"), "utf8"));
+    const policy = JSON.parse(await readFile(join(clone, "slipjay.json"), "utf8"));
     policy.requiredLocalVerification = [];
-    await writeFile(join(clone, "slipway.json"), JSON.stringify(policy));
+    await writeFile(join(clone, "slipjay.json"), JSON.stringify(policy));
   }
   git(["add", "."]);
   git(["commit", "-qm", "Concurrent published source"]);

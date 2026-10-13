@@ -101,7 +101,7 @@ export async function landWorkspace(cwd = process.cwd(), options = {}) {
 }
 
 /**
- * Remove the workspace this landing delivered, as `slipway cleanup` would. Anything
+ * Remove the workspace this landing delivered, as `slipjay cleanup` would. Anything
  * else working inside it keeps it, and is named so its owner can stop it.
  */
 async function releaseLandedWorkspace(context) {

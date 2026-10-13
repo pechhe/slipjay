@@ -1,22 +1,23 @@
 {
-  "name": "@pechhe/slipway",
-  "version": "1.17.1",
+  "name": "@pechhe/slipjay",
+  "version": "2.0.0",
   "private": true,
-  "description": "Harness-neutral JJ workspace and landing tool: one CLI (slipway) and one library.",
+  "description": "Harness-neutral JJ workspace and landing tool: one CLI (slipjay) and one library.",
   "type": "module",
   "license": "UNLICENSED",
-  "repository": "github:pechhe/slipway",
+  "repository": "github:pechhe/slipjay",
   "bin": {
-    "slipway": "src/launcher/workspace.mjs"
+    "slipjay": "src/launcher/workspace.mjs",
+    "slipway": "src/launcher/retired-slipway.mjs"
   },
   "exports": {
     ".": {
-      "types": "./src/lib/peach-workspace.d.mts",
-      "default": "./src/lib/peach-workspace.mjs"
+      "types": "./src/lib/slipjay.d.mts",
+      "default": "./src/lib/slipjay.mjs"
     },
     "./delivery": {
-      "types": "./src/lib/peach-workspace.d.mts",
-      "default": "./src/lib/peach-workspace.mjs"
+      "types": "./src/lib/slipjay.d.mts",
+      "default": "./src/lib/slipjay.mjs"
     },
     "./package.json": "./package.json"
   },

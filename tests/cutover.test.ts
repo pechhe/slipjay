@@ -5,13 +5,13 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, utimes, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 import { beforeEach, test } from "vite-plus/test";
 import { assertHermeticHome } from "../scripts/hermetic-home-guard.mjs";
-import { CLI_STUB, LIBRARY_STUB, cutover } from "../src/lib/cutover.mjs";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace, readWorkspaceMode } from "../src/lib/peach-workspace.mjs";
-import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyEntryPoints, legacyModePath, legacyStateHome, legacyWorkspaceHome, slipwayHome } from "../src/lib/workspace-paths.mjs";
+import { cutover } from "../src/lib/cutover.mjs";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace, readWorkspaceMode } from "../src/lib/slipjay.mjs";
+import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, legacyWorkspaceHome, slipjayHome } from "../src/lib/workspace-paths.mjs";
 
 // Every case builds pre-v1.0.0 state in this file's disposable HOME and cuts it
 // over; the guard below makes sure that HOME is never the developer's own.
@@ -24,7 +24,7 @@ const run = (executable: string, args: string[], cwd = homedir()) => new Promise
     resolveRun({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr });
   });
 });
-const slipway = (args: string[], cwd?: string) => run(process.execPath, [cli, ...args], cwd);
+const slipjay = (args: string[], cwd?: string) => run(process.execPath, [cli, ...args], cwd);
 
 const legacy = (...parts: string[]) => join(legacyStateHome(), ...parts);
 const writeJson = async (file: string, value: unknown) => {
@@ -32,34 +32,29 @@ const writeJson = async (file: string, value: unknown) => {
   await writeFile(file, JSON.stringify(value));
 };
 
-/** A machine as v0.2.x left it: state and mode file under ~/.pi plus the installed peach-pi shims. */
+/** A machine as Slipway left it: state and mode file under ~/.slipway. */
 async function legacyMachine() {
   await writeJson(legacyModePath(), { version: 1, mode: "direct" });
   await writeJson(legacy("workspaces", "spare.json"), { version: 1, workspaceName: "spare" });
   await writeJson(legacy("post-land", "abc.json"), { version: 1, commit: "abc", status: "passed", log: legacy("post-land", "abc.log"), finishedAt: "2026-10-01T00:00:00.000Z" });
   await writeFile(legacy("post-land", "abc.log"), "ok\n");
-  const { cli: bin, library } = legacyEntryPoints();
-  await mkdir(join(bin, ".."), { recursive: true });
-  await mkdir(join(library, ".."), { recursive: true });
-  await writeFile(bin, '#!/bin/sh\nexec slipway "$@"\n', { mode: 0o755 });
-  await writeFile(library, 'export * from "file:///nowhere/slipway.mjs";\n');
 }
 
 beforeEach(async () => {
-  await rm(join(homedir(), ".pi"), { recursive: true, force: true });
-  await rm(slipwayHome(), { recursive: true, force: true });
+  await rm(join(homedir(), ".slipway"), { recursive: true, force: true });
+  await rm(slipjayHome(), { recursive: true, force: true });
 });
 
 test("before the cutover only status and cutover run, and the library refuses", async () => {
   await legacyMachine();
-  const start = await slipway(["start", "task"]);
+  const start = await slipjay(["start", "task"]);
   assert.equal(start.code, 1);
-  assert.match(start.stderr, /slipway start refused: .*workspace-state.*Run `slipway cutover`/);
-  const status = await slipway(["status"]);
+  assert.match(start.stderr, /slipjay start refused: .*slipjay state.*Run `slipjay cutover`/);
+  const status = await slipjay(["status"]);
   assert.equal(status.code, 0, status.stderr);
-  assert.deepEqual(JSON.parse(status.stdout).cutover, { required: true, legacyState: legacyStateHome(), command: "slipway cutover" });
-  await assert.rejects(readWorkspaceMode(), (error: NodeJS.ErrnoException) => error.code === CUTOVER_REQUIRED_CODE && /slipway cutover/.test(error.message));
-  assert.equal(existsSync(slipwayHome()), false, "nothing was written to the new store");
+  assert.deepEqual(JSON.parse(status.stdout).cutover, { required: true, legacyState: legacyStateHome(), command: "slipjay cutover" });
+  await assert.rejects(readWorkspaceMode(), (error: NodeJS.ErrnoException) => error.code === CUTOVER_REQUIRED_CODE && /slipjay cutover/.test(error.message));
+  assert.equal(existsSync(slipjayHome()), false, "nothing was written to the new store");
 });
 
 test("the cutover refuses, naming each holder, while locks, slots, writers or runs are live", async () => {
@@ -80,7 +75,7 @@ test("the cutover refuses, naming each holder, while locks, slots, writers or ru
   await utimes(`${dead}.lock`, old, old);
   await writeJson(legacy("locks", "default@dead.json"), { version: 1, pid: 2_147_483_646 });
   try {
-    const refused = await slipway(["cutover"]);
+    const refused = await slipjay(["cutover"]);
     assert.equal(refused.code, 1);
     const result = JSON.parse(refused.stdout);
     assert.equal(result.status, "refused");
@@ -101,11 +96,11 @@ test("the cutover refuses, naming each holder, while locks, slots, writers or ru
   }
 });
 
-test("the cutover moves state, keeps an existing workspace usable through landing, installs refusing stubs and is idempotent", async () => {
+test("the cutover moves state, keeps an existing workspace usable through landing, and is idempotent", async () => {
   const f = await project();
   try {
     await legacyMachine();
-    // A workspace created before v1.0.0 at its recorded path under ~/.pi/workspaces, bound to Issue 41.
+    // A workspace created before v1.0.0 at its recorded path under ~/.slipway/workspaces, bound to Issue 41.
     const name = "repo-41";
     const workspacePath = join(legacyWorkspaceHome(), name);
     await mkdir(legacyWorkspaceHome(), { recursive: true });
@@ -114,34 +109,24 @@ test("the cutover moves state, keeps an existing workspace usable through landin
       version: 1, workspaceName: name, workspacePath, integrationRoot: f.repo, issueNumber: 41, task: "Issue #41",
     });
 
-    const check = await slipway(["cutover", "--check"]);
+    const check = await slipjay(["cutover", "--check"]);
     assert.equal(check.code, 0, check.stderr);
     assert.equal(JSON.parse(check.stdout).status, "ready");
     assert.equal(existsSync(legacyStateHome()), true, "--check changes nothing");
 
-    const moved = await slipway(["cutover"]);
+    const moved = await slipjay(["cutover"]);
     assert.equal(moved.code, 0, moved.stderr);
     const result = JSON.parse(moved.stdout);
     assert.equal(result.status, "cut-over");
     assert.equal(result.state, "rename");
-    const state = join(slipwayHome(), "state");
+    const state = join(slipjayHome(), "state");
     assert.equal(existsSync(legacyStateHome()), false);
     assert.equal(existsSync(legacyModePath()), false);
-    assert.deepEqual(JSON.parse(await readFile(join(slipwayHome(), "mode.json"), "utf8")), { version: 1, mode: "direct" });
+    assert.deepEqual(JSON.parse(await readFile(join(slipjayHome(), "mode.json"), "utf8")), { version: 1, mode: "direct" });
     assert.equal(JSON.parse(await readFile(join(state, "post-land", "abc.json"), "utf8")).log, join(state, "post-land", "abc.log"));
-    const { cli: bin, library } = legacyEntryPoints();
-    assert.deepEqual(result.stubs, [bin, library]);
-    assert.equal(await readFile(bin, "utf8"), CLI_STUB);
-    assert.equal(await readFile(library, "utf8"), LIBRARY_STUB);
-
-    // The stubs refuse and name what to run instead.
-    const stubbed = await run(bin, ["land", "--direct"]);
-    assert.equal(stubbed.code, 1);
-    assert.match(stubbed.stderr, /peach-workspace is retired\. Run instead:\n {2}slipway land --direct\n/);
-    await assert.rejects(import(pathToFileURL(library).href), /retired\. Import the slipway library instead .*@pechhe\/slipway/);
 
     // The Issue's existing workspace resumes at its recorded path, lands and is cleaned up.
-    const resumed = await slipway(["start", "--integration", "--issue", "41", "--json"], f.repo);
+    const resumed = await slipjay(["start", "--integration", "--issue", "41", "--json"], f.repo);
     assert.equal(resumed.code, 0, resumed.stderr);
     assert.deepEqual({ path: JSON.parse(resumed.stdout).workspacePath, reused: JSON.parse(resumed.stdout).reused }, { path: workspacePath, reused: true });
     await writeFile(join(workspacePath, "legacy.txt"), "landed after cutover\n");
@@ -154,24 +139,23 @@ test("the cutover moves state, keeps an existing workspace usable through landin
     assert.equal(cleaned.cleaned, true, JSON.stringify(cleaned));
     assert.equal(existsSync(workspacePath), false);
 
-    // New workspaces go under ~/.slipway/workspaces.
+    // New workspaces go under ~/.slipjay/workspaces.
     const fresh = await createWorkspace("after cutover", f.repo);
-    assert.ok(fresh.workspacePath.startsWith(join(slipwayHome(), "workspaces") + "/"), fresh.workspacePath);
+    assert.ok(fresh.workspacePath.startsWith(join(slipjayHome(), "workspaces") + "/"), fresh.workspacePath);
 
     // Running it again changes nothing.
     const marker = await readFile(cutoverMarkerPath(), "utf8");
-    const again = await slipway(["cutover"]);
+    const again = await slipjay(["cutover"]);
     assert.equal(again.code, 0, again.stderr);
     assert.equal(JSON.parse(again.stdout).status, "already-cut-over");
     assert.equal(await readFile(cutoverMarkerPath(), "utf8"), marker);
-    assert.equal(await readFile(bin, "utf8"), CLI_STUB);
     assert.equal(existsSync(legacyStateHome()), false);
   } finally {
     await f.dispose();
   }
 }, 180_000);
 
-test("across devices the cutover copies, verifies, then deletes the old state", async () => {
+test("across devices the cutover copies, verifies, then deletes the Slipway state", async () => {
   await legacyMachine();
   const legacyRoot = legacyStateHome();
   const result = await cutover({
@@ -185,7 +169,7 @@ test("across devices the cutover copies, verifies, then deletes the old state", 
   assert.equal(result.status, "cut-over");
   assert.deepEqual(result.status === "cut-over" && [result.state, result.mode], ["copy", "copy"]);
   assert.equal(existsSync(legacyRoot), false);
-  const state = join(slipwayHome(), "state");
+  const state = join(slipjayHome(), "state");
   assert.deepEqual(JSON.parse(await readFile(join(state, "workspaces", "spare.json"), "utf8")), { version: 1, workspaceName: "spare" });
   assert.equal(await readFile(join(state, "post-land", "abc.log"), "utf8"), "ok\n");
   assert.equal(existsSync(cutoverMarkerPath()), true);
@@ -193,14 +177,14 @@ test("across devices the cutover copies, verifies, then deletes the old state", 
 
 test("an interrupted copy that left identical state at both locations finishes; differing state refuses", async () => {
   await legacyMachine();
-  const state = join(slipwayHome(), "state");
-  await mkdir(slipwayHome(), { recursive: true });
+  const state = join(slipjayHome(), "state");
+  await mkdir(slipjayHome(), { recursive: true });
   await run("cp", ["-Rp", legacyStateHome(), state]);
   assert.equal((await cutover()).status, "cut-over");
   assert.equal(existsSync(legacyStateHome()), false);
 
-  await rm(join(homedir(), ".pi"), { recursive: true, force: true });
-  await rm(slipwayHome(), { recursive: true, force: true });
+  await rm(join(homedir(), ".slipway"), { recursive: true, force: true });
+  await rm(slipjayHome(), { recursive: true, force: true });
   await legacyMachine();
   await mkdir(state, { recursive: true });
   await writeJson(join(state, "workspaces", "other.json"), { version: 1 });

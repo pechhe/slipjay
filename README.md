@@ -1,74 +1,58 @@
-# slipway
+# slipjay
 
 Harness-neutral JJ workspace and landing tool. One tagged artifact is both the
-`slipway` CLI and a library.
+`slipjay` CLI and a library.
 
-slipway was extracted from `pechhe/peach-pi` at `37a32367` (the landing closure in
-`packages/pi-client/src/lib`, its CLI and its tests), with that history preserved.
-It behaves like the `peach-workspace` it came from, under neutral names: since
-v1.0.0 it keeps its state under `~/.slipway` and retires `peach-workspace` (see
-[State and cutover](#state-and-cutover)), and since v1.1.0 only `slipway.json` and
-the `SLIPWAY_*` environment names exist. See [CHANGELOG.md](CHANGELOG.md).
+slipjay was extracted from `pechhe/peach-pi` at `37a32367` as `peach-workspace`,
+became Slipway in v1.0.0, and is renamed to Slipjay in v2.0.0. It uses the
+`slipjay` CLI, `slipjay.json` config, `SLIPJAY_*` environment names, and state
+under `~/.slipjay`. See [CHANGELOG.md](CHANGELOG.md) and [State and cutover](#state-and-cutover).
 
 ## State and cutover
 
 | What | Location |
 | --- | --- |
-| Landing state, locks, verification slots, post-land and post-integration records | `~/.slipway/state` |
-| Checkout mode (`slipway mode`) | `~/.slipway/mode.json` |
-| New isolated workspaces | `~/.slipway/workspaces` |
-| Cutover record | `~/.slipway/cutover.json` |
+| Landing state, locks, verification slots, post-land and post-integration records | `~/.slipjay/state` |
+| Checkout mode (`slipjay mode`) | `~/.slipjay/mode.json` |
+| New isolated workspaces | `~/.slipjay/workspaces` |
+| Cutover record | `~/.slipjay/cutover.json` |
 
-Before v1.0.0 these lived in `~/.pi/agent/workspace-state`,
-`~/.pi/agent/workspace-mode.json` and `~/.pi/workspaces`. On a machine that still
-has that state, every command except `status` and `cutover` refuses, and so does
-the library's state access, until `slipway cutover` has run once. Old and new code
-therefore never write separate lock stores.
+In v2.0.0, `slipjay cutover` moves state from `~/.slipway` to `~/.slipjay` once. The
+package also ships a `slipway` bin that only refuses: it prints "slipway is now
+slipjay. Run instead: slipjay <args>" and exits 1. On a machine that still has `~/.slipway/state`,
+every command except `status` and `cutover` refuses until the cutover has run.
 
-`slipway cutover`:
+`slipjay cutover`:
 
 1. Refuses, naming each holder, while any landing transaction, verification slot
    (or a landing waiting for one), Direct primary-checkout writer, post-land run or
    post-integration run is held or live. Nothing changes.
-2. Moves `~/.pi/agent/workspace-state` to `~/.slipway/state` and the mode file to
-   `~/.slipway/mode.json`, by rename, or across devices by copy, verify, then delete.
-   Workspaces stay where they are: those under `~/.pi/workspaces` keep working at
-   their recorded paths, through landing and cleanup.
-3. Replaces `~/.pi/agent/bin/peach-workspace` and `~/.pi/agent/lib/peach-workspace.mjs`,
-   where they exist, with stubs. The CLI stub prints the `slipway` command to run and
-   exits 1. The library stub throws on import, naming `@pechhe/slipway`.
-4. Writes `~/.slipway/cutover.json`. Running `slipway cutover` again is a no-op.
+2. Moves `~/.slipway/state` and `~/.slipway/mode.json` to `~/.slipjay`, by rename,
+   or across devices by copy, verify, then delete. Existing workspaces stay at
+   `~/.slipway/workspaces/...` and keep working through landing and cleanup; new
+   workspaces go to `~/.slipjay/workspaces`.
+3. Writes `~/.slipjay/cutover.json`. Running `slipjay cutover` again is a no-op.
 
-`slipway cutover --check` reports what would block or move without changing
-anything.
+`slipjay cutover --check` reports what would block or move without changing anything.
 
-The library stub stops anything that still imports
-`~/.pi/agent/lib/peach-workspace.mjs`: today that is Pi's installed `pi` launcher
-and its `jj-workspace` extension, which fail at startup with the stub's message.
-Re-running peach-pi's `bun run install:vanilla-pi` rewrites the stubs as shims that
-delegate to the globally installed slipway. That is safe once the global install
-is v1.0.0 or later, because the shims then share `~/.slipway`. peach-pi stops
-writing the shims once Pi imports slipway directly. Cut over every machine that
-runs workspaces, and never sync `~/.slipway/state` or `~/.slipway/workspaces`
-between machines: they are per-machine lock stores.
+Never sync `~/.slipjay/state` or `~/.slipjay/workspaces` between machines: they
+are per-machine lock stores.
 
 ## Repository config
 
-A repository's landing policy is `slipway.json` at its root. The pre-v1.1.0 path
-`.peach/execution.json` is no longer read: a repository (or a commit being landed
-or finalized) that has only that file is refused with a message naming
-`slipway.json`. Rename it. Once `slipway.json` exists, a leftover old file is
-ignored. The landing guard keeps guarding a repository that has only the old file
-(its declared branch, `main` and `master`), and its denial names `slipway.json`.
+A repository's landing policy is `slipjay.json` at its root. A repository with
+only `slipway.json` is refused with a message to rename it; the landing guard still
+guards it (fail closed). Once `slipjay.json` exists, a leftover `slipway.json` is
+ignored. The earlier retired path `.peach/execution.json` is no longer read.
 
-Workspaces are named by a project code: `projectCode` in `slipway.json` (2-8
+Workspaces are named by a project code: `projectCode` in `slipjay.json` (2-8
 lowercase letters or digits) when declared, else two letters derived from the
-checkout folder (`peach-pi` → `pp`, `slipway` → `sl`). Declare it when the folder
+checkout folder (`peach-pi` → `pp`, `slipjay` → `sl`). Declare it when the folder
 name may change, so existing `ys-412`-style names stay stable.
 
 ### Workspace teardown
 
-A repository can declare a command that runs in a workspace just before slipway
+A repository can declare a command that runs in a workspace just before slipjay
 deletes it, for example to stop a dev server started from that checkout:
 
 ```json
@@ -76,9 +60,9 @@ deletes it, for example to stop a dev server started from that checkout:
 ```
 
 `executable` is a bare name resolved on `PATH`; `args` is optional. It runs with
-the workspace as its working directory and `SLIPWAY_WORKSPACE_NAME` and
-`SLIPWAY_WORKSPACE_PATH` set, under a 30 second timeout, read from the primary
-checkout's `slipway.json`. It runs on every path that deletes a checkout:
+the workspace as its working directory and `SLIPJAY_WORKSPACE_NAME` and
+`SLIPJAY_WORKSPACE_PATH` set, under a 30 second timeout, read from the primary
+checkout's `slipjay.json`. It runs on every path that deletes a checkout:
 `cleanup`, `remove`, `prune --empty`, and the sweeps after landing and at start,
 all through `retireWorkspace`. It is best effort: a missing executable, a
 non-zero exit, a timeout or an unreadable policy is logged to stderr
@@ -89,15 +73,15 @@ place and does not run one.
 
 ### Workspace options
 
-Optional `slipway.json` fields for the workspace pool and shared output:
+Optional `slipjay.json` fields for the workspace pool and shared output:
 
 | Field | Meaning |
 | --- | --- |
 | `spares` | Integer 0-8, default 1. How many prepared spare workspaces the pool keeps; 0 disables the pool. A refill tops the pool up one spare at a time, counting spares still being prepared, and holds the pool lock only to count and register a name, never during the dependency install, so a claim always takes any ready spare even while another is installing. Every claim by `start` also starts a background refill, so a burst of starts finds the pool replenished. An idle spare costs nothing at landing. |
-| `sharedPaths` | Array of repository-relative directories (at most 20; literal paths, no globs, none inside another, none in `.jj`/`.git`). Each workspace gets a symlink at that path to the same path in the primary (integration) checkout, which is created when missing. The link is made when a workspace is started, resumed or claimed and when a spare is provisioned. An existing real directory is replaced only when empty; with content it is left alone with a warning. Cleanup ignores a link into the primary checkout, so git-ignored output such as `artifacts/` no longer keeps a landed workspace. List the path in `.gitignore`, or jj snapshots the link as source (slipway warns). |
+| `sharedPaths` | Array of repository-relative directories (at most 20; literal paths, no globs, none inside another, none in `.jj`/`.git`). Each workspace gets a symlink at that path to the same path in the primary (integration) checkout, which is created when missing. The link is made when a workspace is started, resumed or claimed and when a spare is provisioned. An existing real directory is replaced only when empty; with content it is left alone with a warning. Cleanup ignores a link into the primary checkout, so git-ignored output such as `artifacts/` no longer keeps a landed workspace. List the path in `.gitignore`, or jj snapshots the link as source (slipjay warns). |
 
 When a new workspace has no spare to claim, or a spare is provisioned, and it has
-no `node_modules`, slipway first clones the `node_modules` trees of a prepared
+no `node_modules`, slipjay first clones the `node_modules` trees of a prepared
 spare (or of the primary checkout) whose install-input fingerprint is identical,
 with copy-on-write clones (`cp -c` on macOS, `--reflink=auto` on Linux; bun links
 with relative symlinks, which are copied verbatim, so the copy resolves inside its
@@ -115,33 +99,30 @@ landing.
 
 | Name | Set for |
 | --- | --- |
-| `SLIPWAY_POST_LAND_BASE`, `SLIPWAY_POST_LAND_COMMIT` | Post-land verification commands. |
-| `SLIPWAY_WORKSPACE_NAME`, `SLIPWAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
-| `SLIPWAY_VERIFICATION_SLOT` | Commands running inside the held verification slot. Set to `held`, it lets a nested landing pass through. |
-| `SLIPWAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPWAY_FINALIZATION_`. |
+| `SLIPJAY_POST_LAND_BASE`, `SLIPJAY_POST_LAND_COMMIT` | Post-land verification commands. |
+| `SLIPJAY_WORKSPACE_NAME`, `SLIPJAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
+| `SLIPJAY_VERIFICATION_SLOT` | Commands running inside the held verification slot. Set to `held`, it lets a nested landing pass through. |
+| `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 
-slipway reads `SLIPWAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
+slipjay reads `SLIPJAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
 and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
 
 ## Install
 
-Releases are git tags. Nothing is published to npm. The unscoped `slipway` name
-there belongs to an unrelated package.
+Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipway#v1.17.1
-slipway status
+bun remove -g @pechhe/slipway && bun add -g github:pechhe/slipjay#v2.0.0
+slipjay cutover
+slipjay status
 ```
 
 The repository is public, so the `github:` tag form needs no authentication.
 
-Installing leaves `~/.pi/agent` alone. Only `slipway cutover` replaces the old
-`peach-workspace` entry points there.
-
 ## CLI
 
-`slipway <command>` offers every `peach-workspace` command with the same behaviour,
-plus `cutover` and what a Claude Code `WorktreeCreate`/`WorktreeRemove` hook needs without library
+`slipjay <command>` offers the same commands and behaviour as the earlier `slipway`
+tool, plus `cutover` and what a Claude Code `WorktreeCreate`/`WorktreeRemove` hook needs without library
 imports (`start --integration --issue <n> --json`, `remove <path>`):
 
 | Command | Effect |
@@ -159,13 +140,13 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or verify and publish the confirmed candidate (see [Release](#release)). |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
-| `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a Slipway workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
-| `cutover [--check]` | Move pre-v1.0.0 state to `~/.slipway` once and retire `peach-workspace` (see [State and cutover](#state-and-cutover)). |
+| `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a Slipjay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
+| `cutover [--check]` | Move state from `~/.slipway` to `~/.slipjay` once and retire the `slipway` CLI (see [State and cutover](#state-and-cutover)). |
 
 ## Release
 
-A repository that declares a `releaseBranch` in `slipway.json` promotes its
-integration branch to it only through `slipway release`:
+A repository that declares a `releaseBranch` in `slipjay.json` promotes its
+integration branch to it only through `slipjay release`:
 
 ```json
 { "integrationBranch": "develop", "releaseBranch": "master",
@@ -177,7 +158,7 @@ integration branch to it only through `slipway release`:
 to release without checks. The policy that applies is the one committed in the
 candidate.
 
-1. `slipway release` fetches and plans: the candidate (the integration branch on
+1. `slipjay release` fetches and plans: the candidate (the integration branch on
    the remote), the base (the release branch on the remote), the commits between
    them, the declared checks, and any files under
    `migrationFinalization.artifactPaths` in that range. It publishes nothing.
@@ -187,9 +168,9 @@ candidate.
    It only warns. Without a GitHub remote, or when `gh` cannot answer, it reads
    `{ "checked": false, "reason": … }` and the release goes ahead; `--confirm`
    checks again.
-2. After explicit human approval of that candidate, `slipway release --confirm
+2. After explicit human approval of that candidate, `slipjay release --confirm
    <commit>` checks the exact commit out on its own under
-   `~/.slipway/state/releases/checkouts`, prepares its dependencies and runs the
+   `~/.slipjay/state/releases/checkouts`, prepares its dependencies and runs the
    checks inside the repository's release slot, which it holds until it has
    published. Landing continues while a release verifies. The candidate must
    already be published on the integration branch.
@@ -217,7 +198,7 @@ candidate.
    conflict-free and its tree is the candidate's, so a release branch with changes
    the integration branch lacks is refused rather than merged.
 4. It pushes the release branch, refusing if the remote moved since the plan, and
-   records the release in `~/.slipway/state/releases`.
+   records the release in `~/.slipjay/state/releases`.
 
 5. When the candidate's policy declares `postRelease`, it then runs that step
    against an external target, for example resetting a development database from
@@ -236,11 +217,11 @@ candidate.
    newest commit a landing has finalized against the target), not of the
    candidate. The view has no dependencies installed (the command bootstraps what
    it needs). The step gets the sanitized environment plus `environmentKeys`,
-   `SLIPWAY_RELEASE_CANDIDATE`, `SLIPWAY_RELEASE_MERGE`, `SLIPWAY_RELEASE_SOURCE`
-   (that integration commit) and `SLIPWAY_RELEASE_TARGET`. Its output goes to an
-   owner-only log under `~/.slipway/state/post-release`, never into the result,
+   `SLIPJAY_RELEASE_CANDIDATE`, `SLIPJAY_RELEASE_MERGE`, `SLIPJAY_RELEASE_SOURCE`
+   (that integration commit) and `SLIPJAY_RELEASE_TARGET`. Its output goes to an
+   owner-only log under `~/.slipjay/state/post-release`, never into the result,
    because it may echo the secrets it was given. To say why it failed, the step
-   may write one short line to the file `SLIPWAY_RELEASE_REASON_FILE` names; the
+   may write one short line to the file `SLIPJAY_RELEASE_REASON_FILE` names; the
    result's `reason` carries that line (first line only, control characters
    removed, at most 300 characters), so it must hold no secret. Its `targetProbe` must print `{"target": …}` equal to
    the declared `target` first. It holds the same target lease as landing's
@@ -249,43 +230,43 @@ candidate.
    be up to 15 minutes. It runs only after the release has published, never on a
    refused or failed release, and its failure never undoes the release: the result
    is still `"released"` with `postRelease: { "ok": false, "reason": …, "retry":
-   "slipway release --confirm <candidate>" }`, and the command exits 2. A plan
+   "slipjay release --confirm <candidate>" }`, and the command exits 2. A plan
    reports a step that did not complete as `pendingPostRelease`, and a later
    `--confirm` of an already released candidate reruns it instead of skipping it.
 
 `land` and `release --confirm` each append one line to
-`~/.slipway/state/metrics/landings.jsonl` or `releases.jsonl`: stage durations in
+`~/.slipjay/state/metrics/landings.jsonl` or `releases.jsonl`: stage durations in
 milliseconds (`queued` is time waiting for another landing's slot), the outcome,
 and for a release its verification time.
 
 A release whose range carries migration artifacts also needs `--migrations-ready`:
-apply those migrations where the release branch deploys first. slipway never
+apply those migrations where the release branch deploys first. slipjay never
 migrates a release environment itself.
 
 ## Library
 
 ```js
-import { createWorkspace, landWorkspace, workspaceContext } from "@pechhe/slipway";
+import { createWorkspace, landWorkspace, workspaceContext } from "@pechhe/slipjay";
 ```
 
-`@pechhe/slipway` and `@pechhe/slipway/delivery` export the same public entry,
-`src/lib/peach-workspace.mjs`, typed by `peach-workspace.d.mts`. It covers
+`@pechhe/slipjay` and `@pechhe/slipjay/delivery` export the same public entry,
+`src/lib/slipjay.mjs`, typed by `slipjay.d.mts`. It covers
 workspaces, landing and its verification, repository policy and post-integration
 finalization, plus the process and text utilities that hosts share. Other
 modules under `src/lib` are internal, and `bun run check` enforces that the
 `src/` closure imports only itself, Node built-ins, `effect` and `proper-lockfile`,
 with no cycles. A host that brokers child processes injects its broker with
 `setProcessBroker`. Before the cutover, any library call that reads or writes
-state rejects with an error whose `code` is `SLIPWAY_CUTOVER_REQUIRED`;
+state rejects with an error whose `code` is `SLIPJAY_CUTOVER_REQUIRED`;
 `cutoverPending()` reports that state and `cutover()` runs the cutover.
 
 ## Development and landing
 
-slipway lands its own changes through `slipway land` from an isolated JJ workspace, under its own
-`slipway.json`.
+slipjay lands its own changes through `slipjay land` from an isolated JJ workspace, under its own
+`slipjay.json`.
 
 If a concurrent publisher leaves the integration bookmark conflicted after an
-isolated landing, rerun `slipway land` from that preserved workspace. Recovery
+isolated landing, rerun `slipjay land` from that preserved workspace. Recovery
 accepts only its exact recorded artifact and the declared remote's published tip,
 with matching committed policies and an unchanged workspace. It retains the
 earlier receipt, takes the published tip as the base, and rebases and verifies the
@@ -304,6 +285,6 @@ including retries that started on an empty continuation child.
 
 Every Vitest file runs under its own disposable `HOME`
 (`scripts/vitest-hermetic-env.mjs`). `scripts/hermetic-home-guard.mjs` fails a test
-that would otherwise write the real `~/.slipway` or `~/.pi`. The cutover tests build
+that would otherwise write the real `~/.slipjay` or `~/.pi`. The cutover tests build
 pre-v1.0.0 state in that disposable `HOME` and never touch the real one. Run a single file with
 `bunx vp test tests/<file>.test.ts`.

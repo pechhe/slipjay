@@ -38,7 +38,7 @@ test("a release plans, then verifies the exact candidate and publishes a merge w
     const verified = (await readFile(f.verifiedRelease, "utf8")).trim().split("\n");
     assert.equal(verified.length, 1);
     assert.match(verified[0]!, /releases\/checkouts\//);
-    assert.ok(!jj(f.repo, ["workspace", "list"]).includes("slipway-release-"));
+    assert.ok(!jj(f.repo, ["workspace", "list"]).includes("slipjay-release-"));
     // The release adds only the merge on the candidate: not even its checkout's empty working copy.
     assert.deepEqual(children(), [...childrenBefore, released.merge].sort());
 

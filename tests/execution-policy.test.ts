@@ -12,7 +12,7 @@ import {
   parseExecutionPolicy, readExecutionPolicy, readExecutionPolicyAtCommit, readIntegrationPolicy, resolveIntegrationBranch,
 } from "../src/lib/execution-policy.mjs";
 import { readExactExecutionPolicy } from "../src/lib/post-integration-source.mjs";
-import { landWorkspace, workspaceContext } from "../src/lib/peach-workspace.mjs";
+import { landWorkspace, workspaceContext } from "../src/lib/slipjay.mjs";
 
 // peach-pi's policy as extracted (pechhe/peach-pi 37a32367): its landing records
 // carry this declaration's digest, so the parser must keep reproducing it.
@@ -32,7 +32,7 @@ const peachPolicy = JSON.stringify({
   unattendedMergeToIntegration: true,
   parallelExecution: true,
 });
-const slipwayPolicy = readFileSync(fileURLToPath(new URL("../slipway.json", import.meta.url)), "utf8");
+const slipjayPolicy = readFileSync(fileURLToPath(new URL("../slipjay.json", import.meta.url)), "utf8");
 // The shape of YardSmith's policy: a develop integration branch, the older
 // sourcePublication remote, `cwd: null`, migrations and a development database step.
 const yardsmithPolicy = {
@@ -76,8 +76,8 @@ test("peach-pi's policy parses with its landing shape and verification digest un
   assert.equal(digest(parsed.requiredLocalVerification), "25effc2d61517a47e37578dae699fe59599f9b43732013020df26aab978316b8");
 });
 
-test("slipway's own policy gates a landing on fast static checks only", () => {
-  const parsed = parseExecutionPolicy(slipwayPolicy);
+test("slipjay's own policy gates a landing on fast static checks only", () => {
+  const parsed = parseExecutionPolicy(slipjayPolicy);
   assert.equal(parsed.integrationBranch, "main");
   assert.equal(parsed.remote, "origin");
   // The complete suite runs at release (`bun run verify:release`), never per landing.
@@ -152,9 +152,9 @@ test("integration branches resolve declared, then origin/HEAD, then main, then m
   await assert.rejects(resolveIntegrationBranch({ declared: "a..b", exists: exists([]) }), /unsafe integrationBranch/);
 });
 
-type PolicyPath = "slipway.json" | ".peach/execution.json";
+type PolicyPath = "slipjay.json" | "slipway.json";
 
-async function gitRepository(branches: Record<string, string | null>, originHead: string, policyPaths: PolicyPath[] = ["slipway.json"]) {
+async function gitRepository(branches: Record<string, string | null>, originHead: string, policyPaths: PolicyPath[] = ["slipjay.json"]) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "peach-policy-")));
   const repo = join(root, "repo");
   const remote = join(root, "remote.git");
@@ -167,10 +167,9 @@ async function gitRepository(branches: Record<string, string | null>, originHead
   git(["remote", "add", "origin", remote]);
   for (const [branch, declared] of Object.entries(branches)) {
     git(["checkout", "-q", "-B", branch]);
-    await mkdir(join(repo, ".peach"), { recursive: true });
     // With both names committed, the retired file declares a decoy so precedence is observable.
     for (const policyPath of policyPaths) {
-      const decoy = policyPaths.length > 1 && policyPath === ".peach/execution.json";
+      const decoy = policyPaths.length > 1 && policyPath === "slipway.json";
       await writeFile(join(repo, policyPath), policy(decoy ? { integrationBranch: "legacy-decoy" } : declared ? { integrationBranch: declared } : {}));
     }
     await writeFile(join(repo, `${branch}.txt`), branch);
@@ -191,7 +190,7 @@ test("a checkout with main and master follows origin/HEAD=master and reads that 
     assert.equal(resolved.integrationBranch, "master");
     assert.equal(resolved.commitId, jj(f.repo, ["log", "--no-graph", "-r", "master", "-T", "commit_id"]));
     // An uncommitted working-file edit is not the committed policy.
-    await writeFile(join(f.repo, "slipway.json"), "not json");
+    await writeFile(join(f.repo, "slipjay.json"), "not json");
     assert.equal((await readExecutionPolicyAtCommit(f.repo, "master")).policy?.integrationBranch, undefined);
   } finally {
     await f.dispose();
@@ -217,7 +216,7 @@ test("landing verifies with the integration bookmark's policy and ignores an unc
   const f = await project();
   try {
     // A Direct landing of the primary checkout, whose candidate edits the policy.
-    const primaryPolicy = join(f.repo, "slipway.json");
+    const primaryPolicy = join(f.repo, "slipjay.json");
     const committed = JSON.parse(await readFile(primaryPolicy, "utf8"));
     await writeFile(primaryPolicy, JSON.stringify({ ...committed,
       requiredLocalVerification: [{ executable: "node", args: ["-e", "process.exit(9)"] }] }));
@@ -229,7 +228,7 @@ test("landing verifies with the integration bookmark's policy and ignores an unc
     assert.equal(landed.ok, true);
     // The committed check ran, not the edited one; the edit itself is now integrated.
     assert.deepEqual((await readFile(f.verified, "utf8")).trim().split("\n"), [f.repo]);
-    assert.match(f.remoteFile("slipway.json"), /process\.exit\(9\)/);
+    assert.match(f.remoteFile("slipjay.json"), /process\.exit\(9\)/);
   } finally {
     await f.dispose();
   }
@@ -245,33 +244,32 @@ async function stderrOf<T>(operation: () => Promise<T>) {
     spy.mockRestore();
   }
 }
-const refusal = /\.peach\/execution\.json is no longer read .* rename it to slipway\.json/;
+const refusal = /slipway\.json is no longer read .* rename it to slipjay\.json/;
 
-test("working files: slipway.json governs, and the retired path alone is refused, not read", async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), "slipway-policy-files-")));
+test("working files: slipjay.json governs, and the retired path alone is refused, not read", async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "slipjay-policy-files-")));
   try {
     assert.equal(await readExecutionPolicy(root), null);
 
-    await mkdir(join(root, ".peach"));
-    await writeFile(join(root, ".peach", "execution.json"), policy({ integrationBranch: "retired" }));
+    await writeFile(join(root, "slipway.json"), policy({ integrationBranch: "retired" }));
     await assert.rejects(readExecutionPolicy(root), (error: Error & { code?: string }) =>
-      refusal.test(error.message) && error.code === "SLIPWAY_RETIRED_POLICY_PATH");
+      refusal.test(error.message) && error.code === "SLIPJAY_RETIRED_POLICY_PATH");
 
-    await writeFile(join(root, "slipway.json"), policy({ integrationBranch: "neutral" }));
+    await writeFile(join(root, "slipjay.json"), policy({ integrationBranch: "neutral" }));
     const both = await stderrOf(() => readExecutionPolicy(root));
     assert.equal(both.value?.integrationBranch, "neutral");
-    assert.equal(both.stderr, "", "no warning: the retired file is simply ignored once slipway.json exists");
+    assert.equal(both.stderr, "", "no warning: the retired file is simply ignored once slipjay.json exists");
 
-    await writeFile(join(root, "slipway.json"), "{");
-    await assert.rejects(readExecutionPolicy(root), /^Error: slipway\.json is not valid JSON/);
+    await writeFile(join(root, "slipjay.json"), "{");
+    await assert.rejects(readExecutionPolicy(root), /^Error: slipjay\.json is not valid JSON/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 for (const [label, policyPaths] of [
-  ["slipway.json", ["slipway.json"]],
-  ["both, preferring slipway.json", ["slipway.json", ".peach/execution.json"]],
+  ["slipjay.json", ["slipjay.json"]],
+  ["both, preferring slipjay.json", ["slipjay.json", "slipway.json"]],
 ] as const) {
   test(`at-commit reads (jj and exact git object) find a policy committed as ${label}`, async () => {
     const f = await gitRepository({ main: "main" }, "main", [...policyPaths]);
@@ -288,7 +286,7 @@ for (const [label, policyPaths] of [
 }
 
 test("at-commit reads (jj, integration and exact git object) refuse a commit whose tree has only the retired path", async () => {
-  const f = await gitRepository({ main: "main" }, "main", [".peach/execution.json"]);
+  const f = await gitRepository({ main: "main" }, "main", ["slipway.json"]);
   try {
     const commit = jj(f.repo, ["log", "--no-graph", "-r", "main", "-T", "commit_id"]);
     await assert.rejects(readExecutionPolicyAtCommit(f.repo, "main"), refusal);

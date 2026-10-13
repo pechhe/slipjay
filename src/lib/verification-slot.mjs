@@ -8,7 +8,7 @@ import { stateHome } from "./workspace-paths.mjs";
 
 /** Set on verification commands so a landing started inside one (a test
  * fixture, a nested tool) never waits for the slot its parent holds. */
-export const VERIFICATION_SLOT_ENV = "SLIPWAY_VERIFICATION_SLOT";
+export const VERIFICATION_SLOT_ENV = "SLIPJAY_VERIFICATION_SLOT";
 
 /** Environment for a command running inside the held slot. */
 export function verificationSlotEnvironment(environment = process.env) {

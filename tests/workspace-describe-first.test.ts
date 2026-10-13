@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace, provisionSpare } from "../src/lib/peach-workspace.mjs";
+import { createWorkspace, landWorkspace, provisionSpare } from "../src/lib/slipjay.mjs";
 import { landingGuardDecision } from "../src/lib/landing-guard.mjs";
 
 const description = (cwd: string) => jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "description"]);
@@ -111,7 +111,7 @@ test("the guard refuses to move off undescribed work, and allows it once describ
     await writeFile(join(cwd, "a.txt"), "a\n");
     for (const command of moving) assert.match(reason(await guard(cwd, command)), /jj describe/, `${command} on work described only wip:`);
     assert.match(reason(await guard(f.repo, `jj -R ${cwd} new main`)), /jj describe/, "-R is judged by the repository it targets");
-    for (const command of ["jj new --no-edit main", "jj status", "jj log -r @", "jj workspace forget some-other-workspace", "jj describe -m 'Add a'", "jj abandon", "slipway land"]) {
+    for (const command of ["jj new --no-edit main", "jj status", "jj log -r @", "jj workspace forget some-other-workspace", "jj describe -m 'Add a'", "jj abandon", "slipjay land"]) {
       assert.equal(await guard(cwd, command), null, command);
     }
 

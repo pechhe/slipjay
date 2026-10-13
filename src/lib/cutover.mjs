@@ -1,41 +1,20 @@
 /**
- * `slipway cutover`: move this machine's pre-v1.0.0 state from `~/.pi` to
- * `~/.slipway` once, and retire the old `peach-workspace` entry points, so old
- * and new code can never write separate lock stores.
+ * `slipjay cutover`: move this machine's Slipway state from `~/.slipway` to
+ * `~/.slipjay` once, so old and new code can never write separate lock stores.
  *
  * Order: refuse while anything holds or is about to hold the old state; move the
  * state directory and mode file (rename, or copy-verify-delete across devices);
- * replace the installed `peach-workspace` CLI and library with refusing stubs;
- * write the marker last. Until the marker exists every slipway state accessor
- * refuses (`workspace-paths.mjs`), so no slipway process starts on the new store
- * mid-move. Existing workspaces stay where they are (`~/.pi/workspaces`); their
- * metadata records their absolute paths, and new ones go to `~/.slipway/workspaces`.
+ * write the marker last. Until the marker exists every slipjay state accessor
+ * refuses (`workspace-paths.mjs`), so no slipjay process starts on the new store
+ * mid-move. Existing workspaces stay where they are (`~/.slipway/workspaces`); their
+ * metadata records their absolute paths, and new ones go to `~/.slipjay/workspaces`.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, cp, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import lockfile from "proper-lockfile";
-import {
-  cutoverMarkerPath, legacyEntryPoints, legacyModePath, legacyStateHome, slipwayHome,
-} from "./workspace-paths.mjs";
-
-const STUB_MARK = "Retired by `slipway cutover`";
-
-/** The refusing CLI stub: it prints the same command for slipway and exits 1. */
-export const CLI_STUB = `#!/bin/sh
-# ${STUB_MARK}: slipway owns JJ workspaces and landing now.
-printf 'peach-workspace is retired. Run instead:\\n  slipway' >&2
-for argument in "$@"; do printf ' %s' "$argument" >&2; done
-printf '\\n' >&2
-exit 1
-`;
-
-/** The refusing library stub: importing it throws, naming slipway's library and CLI. */
-export const LIBRARY_STUB = `// ${STUB_MARK}: slipway owns JJ workspaces and landing now.
-throw new Error("~/.pi/agent/lib/peach-workspace.mjs is retired. Import the slipway library instead "
-  + "(import { ... } from \\"@pechhe/slipway\\"; bun add -g github:pechhe/slipway#<tag>), or run the slipway CLI.");
-`;
+import { cutoverMarkerPath, legacyModePath, legacyStateHome, slipjayHome } from "./workspace-paths.mjs";
 
 const alive = (pid) => {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -73,7 +52,7 @@ async function slotHolders(root, directory, kind) {
 
 /**
  * Everything that holds, or is about to take, a lock or run in `root` (a
- * slipway state directory), described one per line. Empty when it is quiescent.
+ * slipjay state directory), described one per line. Empty when it is quiescent.
  */
 export async function cutoverHolders(root = legacyStateHome()) {
   if (!existsSync(root)) return [];
@@ -158,7 +137,7 @@ async function moveVerified(from, to, io) {
   if (existsSync(to)) {
     if (!await sameTree(from, to)) {
       throw new Error(`Both ${from} and ${to} exist and differ, so an earlier cutover was interrupted after other writes. `
-        + "Reconcile them by hand (keep the newer state), remove the other, then rerun `slipway cutover`.");
+        + "Reconcile them by hand (keep the newer state), remove the other, then rerun `slipjay cutover`.");
     }
     await rm(from, { recursive: true, force: true });
     return { moved: true, method: "verified-existing" };
@@ -204,19 +183,6 @@ async function writeAtomic(file, content, mode) {
   }
 }
 
-/** Replace each installed `peach-workspace` entry point that exists with its refusing stub. */
-async function installStubs() {
-  const { cli, library } = legacyEntryPoints();
-  const replaced = [];
-  for (const [file, content, mode] of [[cli, CLI_STUB, 0o755], [library, LIBRARY_STUB, 0o644]]) {
-    const current = await readFile(file, "utf8").catch(() => null);
-    if (current === null || current === content) continue;
-    await writeAtomic(file, content, mode);
-    replaced.push(file);
-  }
-  return replaced;
-}
-
 /**
  * Run (or, with `check`, only plan) the cutover. Returns
  * `{ status: "cut-over" | "already-cut-over" | "ready" | "refused", holders, ... }`;
@@ -226,7 +192,7 @@ async function installStubs() {
 export async function cutover(options = {}) {
   const io = { rename, ...options.io };
   const from = { state: legacyStateHome(), mode: legacyModePath() };
-  const to = { state: join(slipwayHome(), "state"), mode: join(slipwayHome(), "mode.json") };
+  const to = { state: join(slipjayHome(), "state"), mode: join(slipjayHome(), "mode.json") };
   const marker = cutoverMarkerPath();
   if (existsSync(marker)) {
     // Nothing to do. Old state appearing again means old code is still running somewhere.
@@ -236,8 +202,7 @@ export async function cutover(options = {}) {
   // A crashed earlier attempt may have left state at both locations.
   const holders = [...await cutoverHolders(from.state), ...await cutoverHolders(to.state)];
   if (holders.length) return { status: "refused", holders };
-  const entryPoints = Object.values(legacyEntryPoints()).filter((file) => existsSync(file));
-  if (options.check) return { status: "ready", holders, from, to, stubs: entryPoints };
+  if (options.check) return { status: "ready", holders, from, to };
 
   const state = await moveVerified(from.state, to.state, io);
   if (state.moved) await repointPostLandLogs(from.state, to.state);
@@ -246,17 +211,16 @@ export async function cutover(options = {}) {
   // wrote the old state while it moved: stop before settling the cutover.
   const late = await cutoverHolders(to.state);
   if (late.length) {
-    throw new Error(`A holder appeared during the cutover (${late.join("; ")}); a process running pre-v1.0.0 code is still active. `
-      + "Stop it, then rerun `slipway cutover`.");
+    throw new Error(`A holder appeared during the cutover (${late.join("; ")}); a process running Slipway is still active. `
+      + "Stop it, then rerun `slipjay cutover`.");
   }
   const reappeared = Object.values(from).filter((path) => existsSync(path));
   if (reappeared.length) {
-    throw new Error(`Old-location state reappeared during the cutover (${reappeared.join(", ")}); a process running pre-v1.0.0 code is still active. `
-      + "Stop it, then rerun `slipway cutover`.");
+    throw new Error(`Old-location state reappeared during the cutover (${reappeared.join(", ")}); a process running Slipway is still active. `
+      + "Stop it, then rerun `slipjay cutover`.");
   }
-  const stubs = await installStubs();
-  const record = { version: 1, cutoverAt: new Date().toISOString(), from, to, state: state.method, mode: mode.method, stubs };
-  await mkdir(slipwayHome(), { recursive: true, mode: 0o700 });
+  const record = { version: 1, cutoverAt: new Date().toISOString(), from, to, state: state.method, mode: mode.method };
+  await mkdir(slipjayHome(), { recursive: true, mode: 0o700 });
   await writeAtomic(marker, `${JSON.stringify(record, null, 2)}\n`, 0o600);
   return { status: "cut-over", marker, holders, ...record };
 }

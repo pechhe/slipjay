@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createWorkspace, landWorkspace } from "../../src/lib/peach-workspace.mjs";
+import { createWorkspace, landWorkspace } from "../../src/lib/slipjay.mjs";
 
 /**
  * A project whose `main` is promoted to `release`, which starts at the initial
@@ -27,7 +27,7 @@ export async function releaseProject(options: {
     },
   });
   const verifiedRelease = join(f.root, "release-verified.log");
-  const policyPath = join(f.repo, "slipway.json");
+  const policyPath = join(f.repo, "slipjay.json");
   const policy = JSON.parse(await readFile(policyPath, "utf8"));
   policy.requiredReleaseVerification = options.checks?.(verifiedRelease)
     ?? [{ executable: "node", args: ["-e", recordCheckout(verifiedRelease)] }];

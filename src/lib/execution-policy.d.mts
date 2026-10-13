@@ -17,7 +17,7 @@ export type ExecutionPolicy = {
   remote: string | null;
   parallelExecution: boolean;
   requiredLocalVerification: VerificationDeclaration[];
-  /** The branch `slipway release` promotes the integration branch to. */
+  /** The branch `slipjay release` promotes the integration branch to. */
   releaseBranch?: string;
   /** Checks the exact release candidate must pass; undefined when undeclared. */
   requiredReleaseVerification?: VerificationDeclaration[];
@@ -38,10 +38,10 @@ export type IntegrationBranchProbes = {
   exists: (branch: string) => Promise<boolean>;
 };
 
-export const EXECUTION_POLICY_PATH: "slipway.json";
-export const RETIRED_EXECUTION_POLICY_PATH: ".peach/execution.json";
-export const EXECUTION_POLICY_PROBE_PATHS: readonly ["slipway.json", ".peach/execution.json"];
-export function retiredExecutionPolicyError(location: string): Error & { code: "SLIPWAY_RETIRED_POLICY_PATH" };
+export const EXECUTION_POLICY_PATH: "slipjay.json";
+export const RETIRED_EXECUTION_POLICY_PATH: "slipway.json";
+export const EXECUTION_POLICY_PROBE_PATHS: readonly ["slipjay.json", "slipway.json"];
+export function retiredExecutionPolicyError(location: string): Error & { code: "SLIPJAY_RETIRED_POLICY_PATH" };
 export function selectExecutionPolicyPath(exists: (path: string) => Promise<boolean>, location: string): Promise<string | null>;
 export const SAFE_BRANCH: RegExp;
 export const UNDECLARED_POLICY: Readonly<Pick<ExecutionPolicy, "requiredLocalVerification" | "postLandVerification" | "remote" | "parallelExecution" | "migrationFinalization">>;

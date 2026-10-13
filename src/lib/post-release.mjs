@@ -1,5 +1,5 @@
 /**
- * A repository's declared `postRelease` step. Once `slipway release` has published,
+ * A repository's declared `postRelease` step. Once `slipjay release` has published,
  * it runs the step the released candidate declares, after its target probe,
  * holding the same external-target lease as landing's `postIntegration` step, so
  * no landing finalizes against that target meanwhile. The target follows the
@@ -8,7 +8,7 @@
  * that lease, not of the candidate: the newest commit any landing has finalized.
  *
  * Its failure never undoes the release. The target's latest outcome is kept, a
- * plan reports a failed one, and a later `slipway release --confirm` reruns it
+ * plan reports a failed one, and a later `slipjay release --confirm` reruns it
  * (on its own when the candidate is already released) instead of skipping it.
  */
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -29,7 +29,7 @@ const outputPath = (targetKey) => path.join(stateHome(), "post-release", `${targ
 // The step may write one short line here naming why it failed; it is data, bounded to one line, never its raw output.
 const reasonPath = (targetKey) => path.join(stateHome(), "post-release", `${targetKey}.reason`);
 const MAX_REASON_CHARACTERS = 300;
-export const postReleaseRetry = (candidate) => `slipway release --confirm ${candidate.slice(0, 12)}`;
+export const postReleaseRetry = (candidate) => `slipjay release --confirm ${candidate.slice(0, 12)}`;
 
 /** The first line the step wrote to its reason file, stripped of control characters and bounded; null when none. */
 async function readStepReason(file) {
@@ -108,9 +108,9 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
           if (process.env[key] !== undefined) environment[key] = process.env[key];
         }
         await rm(reasonPath(targetKey), { force: true });
-        Object.assign(environment, { SLIPWAY_RELEASE_CANDIDATE: candidate, SLIPWAY_RELEASE_MERGE: merge,
-          SLIPWAY_RELEASE_SOURCE: source, SLIPWAY_RELEASE_TARGET: policy.target,
-          SLIPWAY_RELEASE_REASON_FILE: reasonPath(targetKey) });
+        Object.assign(environment, { SLIPJAY_RELEASE_CANDIDATE: candidate, SLIPJAY_RELEASE_MERGE: merge,
+          SLIPJAY_RELEASE_SOURCE: source, SLIPJAY_RELEASE_TARGET: policy.target,
+          SLIPJAY_RELEASE_REASON_FILE: reasonPath(targetKey) });
         reason = "External target could not be verified";
         const probe = await runBoundedProcess({
           executable: policy.targetProbe.executable, args: policy.targetProbe.args,

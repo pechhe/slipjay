@@ -9,7 +9,7 @@ import { legacyIssueWorkspaceName, projectCode, repositoryProjectCode, taskWorks
 test("project codes are two letters from the folder name", () => {
   assert.equal(projectCode("peach-pi"), "pp");
   assert.equal(projectCode("YardSmith"), "ys");
-  assert.equal(projectCode("slipway"), "sl");
+  assert.equal(projectCode("slipjay"), "sl");
   assert.equal(projectCode("my_cool.app"), "mc");
 });
 
@@ -27,12 +27,12 @@ test("task workspaces are named by project code and a short task slug", () => {
 });
 
 test("a declared projectCode names workspaces regardless of the folder", async () => {
-  const parent = await realpath(await mkdtemp(join(tmpdir(), "slipway-code-")));
+  const parent = await realpath(await mkdtemp(join(tmpdir(), "slipjay-code-")));
   try {
     const root = join(parent, "yardsmith");
     await mkdir(root);
     assert.equal(await repositoryProjectCode(root), "ya");
-    await writeFile(join(root, "slipway.json"), JSON.stringify({ version: 1, projectCode: "ys" }));
+    await writeFile(join(root, "slipjay.json"), JSON.stringify({ version: 1, projectCode: "ys" }));
     assert.equal(await repositoryProjectCode(root), "ys");
   } finally {
     await rm(parent, { recursive: true, force: true });

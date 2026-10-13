@@ -6,33 +6,27 @@ import { join } from "node:path";
  * Every filesystem location the landing tool owns, defined once. Each is read
  * from `HOME` at call time, so a hermetic test home applies to all of them.
  *
- * slipway keeps its state, mode file and new workspaces under `~/.slipway`. A
- * machine that still holds pre-v1.0.0 state under `~/.pi` must run
- * `slipway cutover` first: until then every state, mode and workspace accessor
+ * slipjay keeps its state, mode file and new workspaces under `~/.slipjay`. A
+ * machine that still holds Slipway's state under `~/.slipway` must run
+ * `slipjay cutover` first: until then every state, mode and workspace accessor
  * refuses, so this release never writes a second lock store beside the old one.
  */
 
-/** slipway's home: `~/.slipway`. */
-export const slipwayHome = () => join(homedir(), ".slipway");
+/** slipjay's home: `~/.slipjay`. */
+export const slipjayHome = () => join(homedir(), ".slipjay");
 
-/** Written as the last step of `slipway cutover`; its presence settles the cutover. */
-export const cutoverMarkerPath = () => join(slipwayHome(), "cutover.json");
+/** Written as the last step of `slipjay cutover`; its presence settles the cutover. */
+export const cutoverMarkerPath = () => join(slipjayHome(), "cutover.json");
 
-/** Pre-v1.0.0 locations, read only by the cutover (and kept usable for existing workspaces). */
-export const legacyAgentHome = () => join(homedir(), ".pi", "agent");
-export const legacyStateHome = () => join(legacyAgentHome(), "workspace-state");
-export const legacyModePath = () => join(legacyAgentHome(), "workspace-mode.json");
-export const legacyWorkspaceHome = () => join(homedir(), ".pi", "workspaces");
+/** Slipway's locations, read only by the cutover (and kept usable for existing workspaces). */
+export const legacyHome = () => join(homedir(), ".slipway");
+export const legacyStateHome = () => join(legacyHome(), "state");
+export const legacyModePath = () => join(legacyHome(), "mode.json");
+export const legacyWorkspaceHome = () => join(legacyHome(), "workspaces");
 
-/** The retired `peach-workspace` CLI and library that `slipway cutover` replaces with refusing stubs. */
-export const legacyEntryPoints = () => ({
-  cli: join(legacyAgentHome(), "bin", "peach-workspace"),
-  library: join(legacyAgentHome(), "lib", "peach-workspace.mjs"),
-});
+export const CUTOVER_REQUIRED_CODE = "SLIPJAY_CUTOVER_REQUIRED";
 
-export const CUTOVER_REQUIRED_CODE = "SLIPWAY_CUTOVER_REQUIRED";
-
-/** Pre-v1.0.0 state exists on this machine and `slipway cutover` has not run. */
+/** Slipway state exists on this machine and `slipjay cutover` has not run. */
 export function cutoverPending() {
   return !existsSync(cutoverMarkerPath()) && (existsSync(legacyStateHome()) || existsSync(legacyModePath()));
 }
@@ -40,28 +34,28 @@ export function cutoverPending() {
 /** Refuses while the cutover is pending, naming the command that settles it. */
 export function assertCutoverSettled() {
   if (!cutoverPending()) return;
-  const error = new Error(`slipway state still lives under ${legacyStateHome()} (pre-v1.0.0). `
-    + "Run `slipway cutover` once while nothing is landing, then retry.");
+  const error = new Error(`slipjay state still lives under ${legacyStateHome()} (Slipway's). `
+    + "Run `slipjay cutover` once while nothing is landing, then retry.");
   error.code = CUTOVER_REQUIRED_CODE;
   throw error;
 }
 
 const settled = (path) => { assertCutoverSettled(); return path; };
 
-/** Where new isolated JJ workspaces are created: `~/.slipway/workspaces`. */
-export const workspaceHome = () => settled(join(slipwayHome(), "workspaces"));
+/** Where new isolated JJ workspaces are created: `~/.slipjay/workspaces`. */
+export const workspaceHome = () => settled(join(slipjayHome(), "workspaces"));
 
 /**
- * Every directory slipway created workspaces in: the current home, then the
- * pre-v1.0.0 one, whose existing workspaces stay usable at their recorded paths.
+ * Every directory workspaces were created in: the current home, then Slipway's,
+ * whose existing workspaces stay usable at their recorded paths.
  */
 export const workspaceStorageHomes = () => [workspaceHome(), legacyWorkspaceHome()];
 
-/** Checkout mode (`isolated`/`direct`) chosen through `slipway mode`. */
-export const modePath = () => settled(join(slipwayHome(), "mode.json"));
+/** Checkout mode (`isolated`/`direct`) chosen through `slipjay mode`. */
+export const modePath = () => settled(join(slipjayHome(), "mode.json"));
 
 /** Machine-local landing state: top-level landing sidecars and verification slots. */
-export const stateHome = () => settled(join(slipwayHome(), "state"));
+export const stateHome = () => settled(join(slipjayHome(), "state"));
 
 /** When `start` last refreshed each integration branch from its remote. */
 export const startFetchHome = () => join(stateHome(), "start-fetches");

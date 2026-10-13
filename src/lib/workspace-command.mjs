@@ -18,7 +18,7 @@ export function landingCommandEnvironment(source = process.env) {
 
 /** A hung command (an unreachable remote, a stuck lock) must not hold the landing slot. */
 function commandTimeoutMs(options) {
-  return options.timeoutMs ?? (Number(process.env.SLIPWAY_COMMAND_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
+  return options.timeoutMs ?? (Number(process.env.SLIPJAY_COMMAND_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS);
 }
 
 /**

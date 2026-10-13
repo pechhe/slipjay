@@ -104,17 +104,17 @@ test("a landing started inside a held slot does not wait for its parent", () =>
     assert.equal(nested, "nested ran");
   }));
 
-test("verification commands see the held slot as SLIPWAY_VERIFICATION_SLOT, which alone passes through", () =>
+test("verification commands see the held slot as SLIPJAY_VERIFICATION_SLOT, which alone passes through", () =>
   withSlotFixture("names", async ({ root, env, track, hold }) => {
     const held = verificationSlotEnvironment(env);
-    assert.equal(held.SLIPWAY_VERIFICATION_SLOT, "held");
+    assert.equal(held.SLIPJAY_VERIFICATION_SLOT, "held");
     assert.equal("PEACH_VERIFICATION_SLOT" in held, false, "the retired name is not set");
     const holderHeld = hold();
     const holding = signal();
     track(withVerificationSlot(async () => { holding.resolve(); await holderHeld.promise; }, { root, env, pollMs: 10 }));
     await holding.promise;
     // The slot is held by another landing, so only the env pass-through lets these run.
-    assert.equal(await withVerificationSlot(async () => "passed", { root, env: { ...env, SLIPWAY_VERIFICATION_SLOT: "held" }, pollMs: 10 }), "passed");
+    assert.equal(await withVerificationSlot(async () => "passed", { root, env: { ...env, SLIPJAY_VERIFICATION_SLOT: "held" }, pollMs: 10 }), "passed");
     // The retired name no longer passes through: this landing waits for the held slot.
     let retiredRan = false;
     const retired = track(withVerificationSlot(async () => { retiredRan = true; }, { root, env: { ...env, PEACH_VERIFICATION_SLOT: "held" }, pollMs: 10 }));

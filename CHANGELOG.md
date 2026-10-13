@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.0.0
+
+- **Slipway is now Slipjay:** the package is `@pechhe/slipjay`, the CLI is `slipjay`,
+  the repository config is `slipjay.json`, environment variables are `SLIPJAY_*`, and
+  state lives under `~/.slipjay`. `slipjay cutover` moves state from `~/.slipway` to
+  `~/.slipjay` once and records it in `~/.slipjay/cutover.json`; existing workspaces
+  stay at their `~/.slipway/workspaces` paths. The package also ships a `slipway` bin
+  that only refuses, naming the `slipjay` command to run. The old cutover from `~/.pi`
+  and its stubs are removed. A
+  repository with only `slipway.json` is refused with a message to rename it; once
+  `slipjay.json` exists, the old file is ignored.
+
 ## v1.17.1
 
 - **Landing installs what the rebase brought in:** after rebasing onto the

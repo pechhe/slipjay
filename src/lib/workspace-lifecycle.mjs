@@ -37,7 +37,7 @@ export async function retainedWorkspaceMaterial(root, integrationRoot, limit = 5
 export function describeRetention(result) {
   if (result?.reason !== "unique-files") return String(result?.reason ?? "cleanup did not complete");
   return `holds files cleanup will not delete: ${(result.paths ?? []).join(", ")}`
-    + " (remove them, or declare generated output in slipway.json generatedPaths)";
+    + " (remove them, or declare generated output in slipjay.json generatedPaths)";
 }
 
 /** Cleanup judges files on disk, so it reads the primary checkout's working policy (strictly). */
@@ -146,7 +146,7 @@ async function cleanupLandedWorkspaceUnlocked(cwd, hooks) {
   const superseded = !external.ok && external.status === "failed" && published && publicationRemote(context, state.localOnly) !== null;
   if (!external.ok && !superseded) return { cleaned: false, reason: `post-integration-${external.status}` };
   if (!published) return { cleaned: false, reason: "not-published" };
-  // Cleanup deletes only checkouts beneath slipway workspace storage.
+  // Cleanup deletes only checkouts beneath slipjay workspace storage.
   if (!await withinWorkspaceStorage(context.current.root)) return { cleaned: false, reason: "outside-workspace-storage" };
   await archiveIntegratedWorkspaceEvidence(gitDirectory, state);
   await hooks.afterChecks?.();
@@ -172,7 +172,7 @@ export async function removeWorkspace(cwd, workspaceName, options = {}) {
     const target = (await listWorkspaces(cwd)).find((workspace) => workspace.name === workspaceName);
     if (!target?.root) throw new Error(`Unknown or unavailable JJ workspace: ${workspaceName}`);
     if (!await withinWorkspaceStorage(target.root))
-      throw new Error("Refusing to remove a workspace outside ~/.slipway/workspaces and ~/.pi/workspaces");
+      throw new Error("Refusing to remove a workspace outside ~/.slipjay/workspaces and ~/.slipway/workspaces");
     const metadata = await workspaceMetadata(workspaceName);
     // Snapshot once; retirement then refuses a working copy that moved since.
     const judged = await workingCopyCommit(target.root).catch(() => null);
@@ -194,8 +194,8 @@ export async function removeWorkspace(cwd, workspaceName, options = {}) {
 }
 
 /**
- * Whether a checkout lives beneath slipway workspace storage (`~/.slipway/workspaces`,
- * or `~/.pi/workspaces` for one created before the cutover), the only places cleanup deletes.
+ * Whether a checkout lives beneath slipjay workspace storage (`~/.slipjay/workspaces`,
+ * or `~/.slipway/workspaces` for one created before the cutover), the only places cleanup deletes.
  */
 export async function withinWorkspaceStorage(root) {
   const canonical = (path) => realpath(path).catch(() => resolve(path));

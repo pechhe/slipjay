@@ -1,4 +1,4 @@
-export const VERIFICATION_SLOT_ENV: "SLIPWAY_VERIFICATION_SLOT";
+export const VERIFICATION_SLOT_ENV: "SLIPJAY_VERIFICATION_SLOT";
 export function verificationSlotEnvironment(environment?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 /** A live contender's record: the holder's, or a waiter's (one its waiter still touches). */
 export type VerificationSlotRecord = {

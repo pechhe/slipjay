@@ -7,7 +7,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { Schedule } from "effect";
 import { test } from "vite-plus/test";
 import { assertHermeticHome } from "../scripts/hermetic-home-guard.mjs";
-import { landWorkspace } from "../src/lib/peach-workspace.mjs";
+import { landWorkspace } from "../src/lib/slipjay.mjs";
 import { githubRepository, MAX_ISSUE_ATTEMPTS, originatingIssue, pendingIssueRetry, postLandIssueBody, postLandIssueTitle } from "../src/lib/post-land-issue.mjs";
 import { describePostLandFailure, latestPostLandResult, postLandRoot, retryPostLandIssues, runPostLandVerification, startPostLandVerification, type PostLandRecord } from "../src/lib/post-land-verification.mjs";
 
@@ -23,7 +23,7 @@ const jj = (cwd: string, args: string[]) =>
 const CHECK = [
   "const fs = require('node:fs');",
   "const value = fs.readFileSync('value.txt', 'utf8');",
-"const both = (name) => process.env['PEACH_POST_LAND_' + name] === undefined ? process.env['SLIPWAY_POST_LAND_' + name] : 'retired-name-set';",
+"const both = (name) => process.env['PEACH_POST_LAND_' + name] === undefined ? process.env['SLIPJAY_POST_LAND_' + name] : 'retired-name-set';",
   "fs.writeFileSync(process.env.EVIDENCE, JSON.stringify({ value, base: both('BASE'), commit: both('COMMIT') }));",
   "process.exit(value === 'broken' ? 3 : 0);",
 ].join("\n");
@@ -40,7 +40,7 @@ async function fixture() {
   git(["config", "user.name", "Fixture"]);
   git(["config", "user.email", "fixture@example.com"]);
   await writeFile(path.join(repo, "value.txt"), "initial");
-  await writeFile(path.join(repo, "slipway.json"), JSON.stringify({
+  await writeFile(path.join(repo, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: "main", requiredLocalVerification: [],
     postLandVerification: [{ executable: process.execPath, args: ["-e", CHECK] }],
   }));

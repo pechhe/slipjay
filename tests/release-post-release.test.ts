@@ -16,7 +16,7 @@ const TARGET = "fixture-db:development";
 /**
  * A post-release step that records the release it ran for and what the remote
  * release branch held at that moment. It holds while `<root>/hold` exists, after
- * writing `<root>/started`, and fails while `<root>/fail` exists, handing Slipway
+ * writing `<root>/started`, and fails while `<root>/fail` exists, handing Slipjay
  * a reason line with a control character and a trailing second line.
  */
 const recordingStep = (root: string, remote: string) => {
@@ -32,9 +32,9 @@ const recordingStep = (root: string, remote: string) => {
       `while (fs.existsSync(${at("hold")})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`,
       `const published = execFileSync("git", ["--git-dir", ${JSON.stringify(remote)}, "rev-parse", "refs/heads/release"], { encoding: "utf8" }).trim();`,
       `const source = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();`,
-      `fs.appendFileSync(${at("post-release.log")}, JSON.stringify({ merge: process.env.SLIPWAY_RELEASE_MERGE, published, source }) + "\\n");`,
+      `fs.appendFileSync(${at("post-release.log")}, JSON.stringify({ merge: process.env.SLIPJAY_RELEASE_MERGE, published, source }) + "\\n");`,
       `if (fs.existsSync(${at("fail")})) {`,
-      `  fs.writeFileSync(process.env.SLIPWAY_RELEASE_REASON_FILE, "Scrub refused:\\u0007 a real-customer tenant\\nsecond line");`,
+      `  fs.writeFileSync(process.env.SLIPJAY_RELEASE_REASON_FILE, "Scrub refused:\\u0007 a real-customer tenant\\nsecond line");`,
       `  console.error("reset failed"); process.exit(3);`,
       `}`,
     ].join("\n")] },
@@ -74,7 +74,7 @@ test("a failed post-release step keeps the release, is reported and is retried b
     assert.match(released.postRelease?.reason ?? "", /^Post-release command failed: Scrub refused: {2}a real-customer tenant; its output is in /,
       "the step's reason line, one line and without control characters, names why it failed");
     assert.doesNotMatch(released.postRelease?.reason ?? "", /reset failed|second line/, "the step's output stays out of the result");
-    assert.equal(released.postRelease?.retry, `slipway release --confirm ${candidate.slice(0, 12)}`);
+    assert.equal(released.postRelease?.retry, `slipjay release --confirm ${candidate.slice(0, 12)}`);
 
     const plan = await releaseIntegration(f.repo);
     assert.ok(plan.ok && plan.status === "up_to_date");

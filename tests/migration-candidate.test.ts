@@ -139,7 +139,7 @@ test("migration failure and progress redact the exact injected command environme
     const { migrationCandidate } = await import("../src/lib/migration-candidate.mjs");
     const { revisionFacts } = await import("../src/lib/workspace-jj.mjs");
     const secret = "injected-fixture-credential";
-    const policy = JSON.parse(await readFile(join(f.workspace, "slipway.json"), "utf8"));
+    const policy = JSON.parse(await readFile(join(f.workspace, "slipjay.json"), "utf8"));
     policy.migrationFinalization.generate.args.push(secret, "postgres://fixture:password@invalid/db");
     const progress: string[] = [];
     const migration = await migrationCandidate(f.workspace, {

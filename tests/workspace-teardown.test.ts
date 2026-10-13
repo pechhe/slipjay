@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "./support/workspace-project.ts";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace, pruneEmptyWorkspaces, removeWorkspace, sweepDisposableWorkspaces } from "../src/lib/peach-workspace.mjs";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace, pruneEmptyWorkspaces, removeWorkspace, sweepDisposableWorkspaces } from "../src/lib/slipjay.mjs";
 import { parseExecutionPolicy } from "../src/lib/execution-policy.mjs";
 import { runWorkspaceTeardown } from "../src/lib/workspace-teardown.mjs";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.mjs";
@@ -27,7 +27,7 @@ test("cleanup runs the declared teardown in the workspace before deleting it", a
   const f = await project();
   const log = join(f.root, "teardown.log");
   try {
-    await writeFile(join(f.repo, "slipway.json"), JSON.stringify({ ...JSON.parse(await readFile(join(f.repo, "slipway.json"), "utf8")), ...recording(log) }));
+    await writeFile(join(f.repo, "slipjay.json"), JSON.stringify({ ...JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8")), ...recording(log) }));
     const ws = await createWorkspace("landed", f.repo);
     await landed(ws.workspacePath, "landed.txt");
     const result = await cleanupLandedWorkspace(ws.workspacePath);
@@ -43,7 +43,7 @@ test("remove, prune and sweep each run the teardown; a failing or missing one ne
   const f = await project();
   const log = join(f.root, "teardown.log");
   const policy = async (workspaceTeardown: unknown) =>
-    writeFile(join(f.repo, "slipway.json"), JSON.stringify({ ...JSON.parse(await readFile(join(f.repo, "slipway.json"), "utf8")), workspaceTeardown }));
+    writeFile(join(f.repo, "slipjay.json"), JSON.stringify({ ...JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8")), workspaceTeardown }));
   try {
     await policy(recording(log).workspaceTeardown);
     const removed = await createWorkspace("removed", f.repo);
@@ -60,7 +60,7 @@ test("remove, prune and sweep each run the teardown; a failing or missing one ne
     await removeWorkspace(f.repo, failing.current.name);
     assert.equal(existsSync(failing.workspacePath), false, "a non-zero exit does not block removal");
 
-    await policy({ executable: "slipway-no-such-teardown", args: [] });
+    await policy({ executable: "slipjay-no-such-teardown", args: [] });
     const missing = await createWorkspace("missing", f.repo);
     await removeWorkspace(f.repo, missing.current.name);
     assert.equal(existsSync(missing.workspacePath), false, "a missing executable does not block removal");
@@ -82,7 +82,7 @@ test("a teardown that hangs is killed at its timeout and reported as failed", as
   }
 });
 
-test("workspaceTeardown is validated with the other slipway.json keys", () => {
+test("workspaceTeardown is validated with the other slipjay.json keys", () => {
   const parse = (workspaceTeardown: unknown) => parseExecutionPolicy(JSON.stringify({ version: 1, workspaceTeardown }));
   assert.equal(parseExecutionPolicy(JSON.stringify({ version: 1 })).workspaceTeardown, undefined);
   assert.deepEqual(parse({ executable: "ys-preview", args: ["stop"] }).workspaceTeardown, { executable: "ys-preview", args: ["stop"] });

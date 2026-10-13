@@ -54,7 +54,7 @@ export async function processWorkingDirectories() {
 /**
  * This process, its ancestors and its process group: the session that ran the
  * command is the caller, not a bystander, and so is the rest of its shell job
- * (`slipway land | tail` puts `tail` beside slipway in its group, not above it).
+ * (`slipjay land | tail` puts `tail` beside slipjay in its group, not above it).
  */
 export async function callerPids(pid = process.pid) {
   const pids = new Set([pid]);

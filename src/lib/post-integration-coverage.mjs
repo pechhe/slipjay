@@ -35,7 +35,7 @@ export async function isAncestor(gitDirectory, ancestorCommit, descendantCommit,
 
 /**
  * Prove `other` has the same migration inputs as `exact`, judged by `exact`'s
- * policy: the policy file (`slipway.json`), the declared trigger and artifact paths, and
+ * policy: the policy file (`slipjay.json`), the declared trigger and artifact paths, and
  * the finalization command and probe packages and script directories.
  */
 export async function verifyUnchangedMigrationInputs(gitDirectory, exactCommit, otherCommit, policyDigest, environmentFactory, abortSignal) {

@@ -71,7 +71,7 @@ async function coveredByCompletedDescendant(input, gitDirectory, commit, policy,
       || descendant === commit || !await isAncestor(gitDirectory, descendant, tip, environmentFactory, abortSignal)) continue;
     // A receipt whose commit still carries the retired policy path cannot cover.
     const candidate = await readPostIntegrationPolicy(gitDirectory, descendant, environmentFactory)
-      .catch((error) => { if (error?.code === "SLIPWAY_RETIRED_POLICY_PATH") return null; throw error; });
+      .catch((error) => { if (error?.code === "SLIPJAY_RETIRED_POLICY_PATH") return null; throw error; });
     if (!candidate?.policy || postIntegrationPolicyDigest(candidate.policy) !== policyDigest
       || !(receipt.policyDigest === policyDigest
         && receipt.idempotencyKey === artifactKey(gitDirectory, descendant, policyDigest, policy.target)
@@ -165,7 +165,7 @@ export async function finalizePostIntegration(input) {
             environment[key] = process.env[key];
         }
         Object.assign(environment, {
-          SLIPWAY_FINALIZATION_COMMIT: commit, SLIPWAY_FINALIZATION_KEY: identity, SLIPWAY_FINALIZATION_TARGET: policy.target,
+          SLIPJAY_FINALIZATION_COMMIT: commit, SLIPJAY_FINALIZATION_KEY: identity, SLIPJAY_FINALIZATION_TARGET: policy.target,
         });
         reason = "External target could not be verified";
         const probe = await runBoundedProcess({

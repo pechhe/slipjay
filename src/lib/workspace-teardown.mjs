@@ -6,7 +6,7 @@ import { runWorkspaceCommand } from "./workspace-command.mjs";
 export const TEARDOWN_TIMEOUT_MS = 30_000;
 
 /**
- * Run the repository's declared `workspaceTeardown` (`slipway.json`) in a workspace
+ * Run the repository's declared `workspaceTeardown` (`slipjay.json`) in a workspace
  * before it is removed. Best effort: a missing policy, checkout, executable, a
  * non-zero exit, a timeout or an unreadable policy is logged and never throws, so
  * it can never block the removal. `integrationRoot` supplies the policy (its working
@@ -21,7 +21,7 @@ export async function runWorkspaceTeardown(integrationRoot, workspace, options =
     const result = await runWorkspaceCommand(teardown.executable, teardown.args, {
       cwd: workspace.root,
       timeoutMs: options.timeoutMs ?? TEARDOWN_TIMEOUT_MS,
-      env: { ...process.env, SLIPWAY_WORKSPACE_NAME: workspace.name, SLIPWAY_WORKSPACE_PATH: workspace.root },
+      env: { ...process.env, SLIPJAY_WORKSPACE_NAME: workspace.name, SLIPJAY_WORKSPACE_PATH: workspace.root },
     });
     if (result.code !== 0) {
       const detail = (result.stderr || result.stdout).trim().split("\n").slice(-3).join(" | ");

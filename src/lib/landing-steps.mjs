@@ -178,7 +178,7 @@ export async function completeLanding(cwd, context, commitId, options = {}) {
       && await revisionExists(cwd, `${commitId} & ::${context.integrationBranch}@${remote}`);
     return { ok: false, postIntegration, timings: { ...timings, finishedAt: timings.publishingStartedAt }, publication: { ok: false, status: "blocked", commitId,
       reason: published
-        ? `${failure} A later landing already published ${commitId.slice(0, 9)} to ${context.integrationBranch}@${remote} after its own post-integration step, so nothing remains to land; run \`slipway cleanup\` to release this workspace.`
+        ? `${failure} A later landing already published ${commitId.slice(0, 9)} to ${context.integrationBranch}@${remote} after its own post-integration step, so nothing remains to land; run \`slipjay cleanup\` to release this workspace.`
         : `${failure} The local integration is kept; resolve it and rerun land.` } };
   }
   const publication = remote

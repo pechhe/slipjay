@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import { finalizePostIntegration } from "../src/lib/post-integration-finalization.mjs";
 import { postIntegrationPolicyDigest } from "../src/lib/post-integration-policy.mjs";
 import { readPostIntegrationPolicy } from "../src/lib/post-integration-source.mjs";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/peach-workspace.mjs";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
 
 // An Isolated landing that leaves a dirty primary checkout in place still exports
 // its integration and finalizes from a shallow primary `.git` before it publishes.
@@ -23,8 +23,8 @@ function finalization(ledger: string, failFirst = false) {
   const source = `const fs=require("node:fs");
 if (${failFirst} && !fs.existsSync(${JSON.stringify(marker)})) { fs.writeFileSync(${JSON.stringify(marker)}, ""); process.exit(9); }
 const e = process.env;
-// Only the slipway names are set; the retired PEACH_FINALIZATION_* names are not.
-const both = (name) => e["PEACH_FINALIZATION_" + name] === undefined ? e["SLIPWAY_FINALIZATION_" + name] : "retired-name-set";
+// Only the slipjay names are set; the retired PEACH_FINALIZATION_* names are not.
+const both = (name) => e["PEACH_FINALIZATION_" + name] === undefined ? e["SLIPJAY_FINALIZATION_" + name] : "retired-name-set";
 if (!both("KEY") || both("TARGET") !== "fixture-development-db") process.exit(8);
 fs.appendFileSync(${JSON.stringify(ledger)}, JSON.stringify({ commit: both("COMMIT"), landed: fs.existsSync("landed.txt") }) + "\\n");`;
   return {
@@ -91,14 +91,14 @@ test("rerunning an integrated but unpublished landing finalizes and publishes wi
   }
 }, 240_000);
 
-test("a repository governed only by the retired .peach/execution.json is refused, naming slipway.json", async () => {
-  const f = await project({ policyPath: ".peach/execution.json" });
+test("a repository governed only by the retired slipway.json is refused, naming slipjay.json", async () => {
+  const f = await project({ policyPath: "slipway.json" });
   try {
     const workspace = await createWorkspace("retired policy", f.repo).catch((error: Error) => error);
     const outcome = workspace instanceof Error ? workspace
       : await writeFile(join(workspace.workspacePath, "task.txt"), "task\n").then(() => land(workspace.workspacePath)).catch((error: Error) => error);
     assert.ok(outcome instanceof Error, JSON.stringify(outcome));
-    assert.match(outcome.message, /\.peach\/execution\.json is no longer read .* rename it to slipway\.json/);
+    assert.match(outcome.message, /slipway\.json is no longer read .* rename it to slipjay\.json/);
     assert.equal(jj(f.repo, ["log", "--no-graph", "-r", "main", "-T", "description"]), "Initial", "nothing was integrated");
   } finally {
     await f.dispose();
@@ -123,7 +123,7 @@ test("cleanup releases a failed landing only once a later landing has published 
     const retry = await land(workspace.workspacePath);
     assert.equal(retry.ok, false);
     assert.equal(retry.postIntegration.reason, "Historical migration policy changed or is not recoverable");
-    assert.match(retry.publication.reason ?? "", /already published .* run `slipway cleanup`/);
+    assert.match(retry.publication.reason ?? "", /already published .* run `slipjay cleanup`/);
 
     assert.deepEqual(await cleanupLandedWorkspace(workspace.workspacePath), { cleaned: true,
       supersededPostIntegration: { status: "failed", attempt: 2, reason: "Historical migration policy changed or is not recoverable" } });
@@ -135,15 +135,14 @@ test("cleanup releases a failed landing only once a later landing has published 
 }, 300_000);
 
 // YardSmith ys-skip-optimiser / ys-1269: a completed receipt whose commit still carries the
-// retired .peach/execution.json cannot cover an older artifact, and must not crash the scan.
+// retired slipway.json cannot cover an older artifact, and must not crash the scan.
 test("a completed receipt on a retired-policy commit is skipped, not thrown, by descendant recovery", async () => {
   const external = await mkdtemp(join(tmpdir(), "peach-finalization-target-"));
   const f = await project({ postIntegration: finalization(join(external, "ledger.jsonl")) });
   try {
     const git = (...args: string[]) => execFileSync("git", args, { cwd: f.repo, encoding: "utf8" }).trim();
     const older = git("rev-parse", "HEAD");
-    await mkdir(join(f.repo, ".peach"));
-    git("mv", "slipway.json", ".peach/execution.json");
+    git("mv", "slipjay.json", "slipway.json");
     git("commit", "-qm", "Retired policy path");
     const newer = git("rev-parse", "HEAD");
     const gitDirectory = join(f.repo, ".git");

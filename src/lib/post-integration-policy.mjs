@@ -15,10 +15,10 @@ function command(value, step = "Post-integration") {
     throw new Error(`${step} cwd must stay within the exact source view`);
   return { executable: row.executable, args: [...row.args], cwd };
 }
-/** Variables a step passes through from Slipway's environment; Slipway's own and loader controls stay out. */
+/** Variables a step passes through from Slipjay's environment; Slipjay's own and loader controls stay out. */
 function environmentKeys(row, step) {
   const keys = row.environmentKeys ?? [];
-  if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(key) || key.startsWith("SLIPWAY_FINALIZATION_") || key.startsWith("SLIPWAY_RELEASE_") || ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "NODE_OPTIONS", "BUN_OPTIONS"].includes(key))) {
+  if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(key) || key.startsWith("SLIPJAY_FINALIZATION_") || key.startsWith("SLIPJAY_RELEASE_") || ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "NODE_OPTIONS", "BUN_OPTIONS"].includes(key))) {
     throw new Error(`Invalid ${step.toLowerCase()} environment declaration`);
   }
   return [...new Set(keys)];
@@ -48,7 +48,7 @@ export function postIntegrationPolicy(value) {
   };
 }
 /**
- * `postRelease`: a step `slipway release` runs against an external target once a
+ * `postRelease`: a step `slipjay release` runs against an external target once a
  * release has published, in the integration branch's exact source (the target
  * follows it), under the same target lease as `postIntegration`. The human's release confirmation is its
  * approval, and it reruns until it succeeds, so it declares no approval mode or

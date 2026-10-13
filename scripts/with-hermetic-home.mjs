@@ -15,7 +15,7 @@ if (!command) {
 const home = realpathSync(mkdtempSync(join(tmpdir(), "peach-test-home-")));
 const env = { ...process.env, HOME: home };
 for (const key of Object.keys(env)) {
-  if (/^(CMUX_|SLIPWAY_COMMAND_|XDG_(CONFIG|STATE|DATA)_HOME$)/.test(key) || key === "PI_CODING_AGENT_DIR") delete env[key];
+  if (/^(CMUX_|SLIPJAY_COMMAND_|XDG_(CONFIG|STATE|DATA)_HOME$)/.test(key) || key === "PI_CODING_AGENT_DIR") delete env[key];
 }
 try {
   const result = spawnSync(command, args, { stdio: "inherit", env });

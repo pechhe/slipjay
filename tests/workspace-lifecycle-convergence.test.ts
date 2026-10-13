@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, landWorkspace, renameWorkspace } from "../src/lib/peach-workspace.mjs";
+import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, landWorkspace, renameWorkspace } from "../src/lib/slipjay.mjs";
 import { statePath, workspaceMetadata } from "../src/lib/workspace-state.mjs";
 import { withinWorkspaceStorage } from "../src/lib/workspace-lifecycle.mjs";
 import { landedHome, metadataHome } from "../src/lib/workspace-paths.mjs";
@@ -112,11 +112,11 @@ test("cleanup retries pending housekeeping before releasing a landed workspace",
 }, 120_000);
 
 test("a landing and a cleanup of the same workspace serialize on one key", async () => {
-  const f = await project({ verify: (verified) => `const fs = require("node:fs"); const gate = process.env.SLIPWAY_TEST_GATE;
+  const f = await project({ verify: (verified) => `const fs = require("node:fs"); const gate = process.env.SLIPJAY_TEST_GATE;
     fs.writeFileSync(gate + ".started", "");
     const timer = setInterval(() => { if (fs.existsSync(gate)) { clearInterval(timer); ${recordCheckout(verified)}; } }, 50);` });
   const gate = join(f.root, "gate");
-  process.env.SLIPWAY_TEST_GATE = gate;
+  process.env.SLIPJAY_TEST_GATE = gate;
   try {
     const workspace = await createWorkspace("serialized", f.repo);
     await writeFile(join(workspace.workspacePath, "serialized.txt"), "serialized\n");
@@ -128,7 +128,7 @@ test("a landing and a cleanup of the same workspace serialize on one key", async
     // Run during verification, cleanup would have found no landing; it waited for the integration instead.
     assert.deepEqual(await cleanup, { cleaned: true });
   } finally {
-    delete process.env.SLIPWAY_TEST_GATE;
+    delete process.env.SLIPJAY_TEST_GATE;
     await f.dispose();
   }
 }, 120_000);
@@ -156,7 +156,7 @@ test("a hung jj fetch times out instead of holding the landing", async () => {
   jj(f.repo, ["git", "remote", "set-url", "origin", "ssh://hang.invalid/remote.git"]);
   // GIT_SSH_COMMAND reaches git as a credential key of the landing command environment.
   process.env.GIT_SSH_COMMAND = hang;
-  process.env.SLIPWAY_COMMAND_TIMEOUT_MS = "1500";
+  process.env.SLIPJAY_COMMAND_TIMEOUT_MS = "1500";
   try {
     const workspace = await createWorkspace("hung remote", f.repo);
     await writeFile(join(workspace.workspacePath, "hung.txt"), "hung\n");
@@ -167,7 +167,7 @@ test("a hung jj fetch times out instead of holding the landing", async () => {
     assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), result.artifact.commitId, "the local integration is kept");
   } finally {
     delete process.env.GIT_SSH_COMMAND;
-    delete process.env.SLIPWAY_COMMAND_TIMEOUT_MS;
+    delete process.env.SLIPJAY_COMMAND_TIMEOUT_MS;
     await f.dispose();
   }
 }, 120_000);

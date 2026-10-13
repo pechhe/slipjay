@@ -17,7 +17,7 @@ import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transa
 
 /**
  * A pool of prepared, unassigned JJ workspaces per Project (`spares` in
- * `slipway.json`, one by default). Assignment renames one to the task's name
+ * `slipjay.json`, one by default). Assignment renames one to the task's name
  * (its directory is stable), moves it to the current integration head and
  * reconciles dependencies there. A spare holds no work, so it is freely
  * replaceable; only spares are ever created or claimed here.

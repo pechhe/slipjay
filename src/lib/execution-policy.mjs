@@ -1,6 +1,6 @@
 /**
- * The one reader of a repository's policy, `slipway.json` at its root (a repository
- * governed only by the retired `.peach/execution.json` is refused): strict parsing, reading
+ * The one reader of a repository's policy, `slipjay.json` at its root (a repository
+ * governed only by Slipway's retired `slipway.json` is refused): strict parsing, reading
  * from a checkout or an exact revision, and integration-branch resolution
  * (declared → origin/HEAD → main → master). Landing reads the policy committed on
  * the integration bookmark, never the primary checkout's working files.
@@ -12,10 +12,10 @@ import { declaredPublicationRemote } from "./source-publication-policy.mjs";
 import { normalizeVerificationDeclaration } from "./verification-policy.mjs";
 import { runWorkspaceCommand } from "./workspace-command.mjs";
 
-export const EXECUTION_POLICY_PATH = "slipway.json";
-/** The pre-v1.1.0 policy path. Never read: a repository governed only by it is refused. */
-export const RETIRED_EXECUTION_POLICY_PATH = ".peach/execution.json";
-/** Paths to probe for a policy: `slipway.json` governs; the retired path alone is refused. */
+export const EXECUTION_POLICY_PATH = "slipjay.json";
+/** Slipway's policy path. Never read: a repository governed only by it is refused. */
+export const RETIRED_EXECUTION_POLICY_PATH = "slipway.json";
+/** Paths to probe for a policy: `slipjay.json` governs; the retired path alone is refused. */
 export const EXECUTION_POLICY_PROBE_PATHS = Object.freeze([EXECUTION_POLICY_PATH, RETIRED_EXECUTION_POLICY_PATH]);
 const POLICY_BYTES = 64 * 1024;
 const MAX_CHECKS = 20;
@@ -35,13 +35,13 @@ const fail = (message) => { throw new Error(`${policyLabel} ${message}`); };
 /** The refusal for a repository (`location`: a checkout or its `.git` directory) governed only by the retired path. */
 export function retiredExecutionPolicyError(location) {
   const where = String(location).replace(/\/\.git\/?$/, "");
-  const error = new Error(`${RETIRED_EXECUTION_POLICY_PATH} is no longer read (since slipway v1.1.0); rename it to ${EXECUTION_POLICY_PATH} at the repository root (${where})`);
-  error.code = "SLIPWAY_RETIRED_POLICY_PATH";
+  const error = new Error(`${RETIRED_EXECUTION_POLICY_PATH} is no longer read (since Slipjay v2.0.0); rename it to ${EXECUTION_POLICY_PATH} at the repository root (${where})`);
+  error.code = "SLIPJAY_RETIRED_POLICY_PATH";
   return error;
 }
 
 /**
- * The policy path that governs, given a probe of which paths exist: `slipway.json`,
+ * The policy path that governs, given a probe of which paths exist: `slipjay.json`,
  * else null. A repository with only the retired path is refused.
  */
 export async function selectExecutionPolicyPath(exists, location) {
@@ -182,7 +182,7 @@ export function spareCount(declared) {
 }
 
 /**
- * `slipway release`'s declaration: the branch the integration branch is promoted to
+ * `slipjay release`'s declaration: the branch the integration branch is promoted to
  * and the checks the exact candidate commit must pass first. A release branch with
  * no declared checks is refused at release time, so an empty list must be explicit.
  */

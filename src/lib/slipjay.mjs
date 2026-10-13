@@ -1,4 +1,10 @@
-/** Declarations of the landing tool's public entry; see peach-workspace.mjs. */
+/**
+ * The landing tool's one public entry (`@pechhe/slipjay`). Every consumer
+ * outside this directory imports only from here: the desktop through its pinned
+ * tag, and the Pi launcher and jj-workspace extension. The closure behind it
+ * is self-contained and acyclic; `bun run check` enforces both, and that nothing
+ * else imports a module here directly.
+ */
 
 // Workspaces: context, assignment, state and housekeeping (launcher, extension, CLI, hooks, desktop).
 export { explicitIssueNumber, projectPrefix, revisionFacts, taskWorkspaceName, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.mjs";
@@ -17,7 +23,7 @@ export { acquirePrimaryWriter, activePrimaryWriter, releasePrimaryWriter } from 
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.mjs";
 export { assertCompletedIssueDelivered, selectImplementationIssue } from "./issue-eligibility.mjs";
 
-// The one-time move of pre-v1.0.0 state from ~/.pi to ~/.slipway (CLI, hosts that report it).
+// The one-time move of Slipway's state from ~/.slipway to ~/.slipjay (CLI, hosts that report it).
 export { cutover } from "./cutover.mjs";
 export { cutoverPending } from "./workspace-paths.mjs";
 
@@ -25,7 +31,6 @@ export { cutoverPending } from "./workspace-paths.mjs";
 export { assertWorkspaceDelivered, landWorkspace, prepareWorkspaceContinuation } from "./workspace-landing.mjs";
 export { landingPreview } from "./landing-steps.mjs";
 export { planRelease, releaseIntegration } from "./release.mjs";
-export type { ReleasePlan, ReleaseResult, ReleaseSummary } from "./release.mjs";
 export { RequiredVerificationError, runRequiredVerification } from "./required-verification.mjs";
 export { classifyCapabilityProbe, normalizeDeclaredVerification, normalizeVerificationDeclaration } from "./verification-policy.mjs";
 export { redactVerificationOutput } from "./verification-failure.mjs";
@@ -42,15 +47,3 @@ export { finalizePostIntegration } from "./post-integration-finalization.mjs";
 export { landingCommandEnvironment } from "./workspace-command.mjs";
 export { redactAndBoundProcessOutput, runBoundedProcess, sanitizedProcessEnv, setProcessBroker } from "./bounded-process.mjs";
 export { truncateUtf8 } from "./utf8.mjs";
-
-// Types of the entries above.
-export type { RevisionFacts, WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.mjs";
-export type { CreatedWorkspace, WorkspaceCreationHooks } from "./workspace-create.mjs";
-export type { RetirementHooks } from "./workspace-lifecycle.mjs";
-export type { WorkspaceContinuationDisposition } from "./workspace-delivery-lifecycle.mjs";
-export type { LandingAdapter, LandingPublication, LandingRevision, LandingTail, LandingTailOptions } from "./landing-steps.mjs";
-export type { RequiredVerificationFailureEvidence } from "./required-verification.mjs";
-export type { VerificationEvidence } from "./verification-policy.mjs";
-export type { ExecutionPolicy } from "./execution-policy.mjs";
-export type { PostIntegrationInput, PostIntegrationResult } from "./post-integration-finalization.mjs";
-export type { BoundedProcessRequest, BoundedProcessResult, ProcessBroker } from "./bounded-process.mjs";

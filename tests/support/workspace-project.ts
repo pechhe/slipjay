@@ -20,11 +20,11 @@ export const recordCheckout = (verified: string) => `require("node:fs").appendFi
 /**
  * `shallow` makes the colocated primary `.git` a depth-1 clone of `origin` (as
  * YardSmith's is); `postIntegration` declares that external-state step; `policyPath`
- * is where the policy is committed (`slipway.json` by default; the retired path builds a refused fixture);
+ * is where the policy is committed (`slipjay.json` by default; the retired path builds a refused fixture);
  * `policy` adds further declarations.
  */
 export async function project(options: { ignore?: string; generatedPaths?: unknown; verify?: (verified: string) => string;
-  shallow?: boolean; postIntegration?: Record<string, unknown>; policyPath?: "slipway.json" | ".peach/execution.json";
+  shallow?: boolean; postIntegration?: Record<string, unknown>; policyPath?: "slipjay.json" | "slipway.json";
   policy?: Record<string, unknown> } = {}) {
   process.env.JJ_USER ??= "Fixture";
   process.env.JJ_EMAIL ??= "fixture@example.com";
@@ -32,7 +32,7 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   const repo = join(root, "repo");
   const remote = join(root, "remote.git");
   const verified = join(root, "verified.log");
-  await mkdir(join(repo, dirname(options.policyPath ?? "slipway.json")), { recursive: true });
+  await mkdir(join(repo, dirname(options.policyPath ?? "slipjay.json")), { recursive: true });
   const git = (args: string[], cwd = repo) => execFileSync("git", args, { cwd, stdio: "pipe" });
   git(["init", "-q", "--bare", "-b", "main", remote], root);
   git(["init", "-q", "-b", "main"]);
@@ -42,7 +42,7 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   if (options.shallow) git(["commit", "-q", "--allow-empty", "-m", "Before the shallow boundary"]);
   await writeFile(join(repo, "README.md"), "fixture\n");
   if (options.ignore) await writeFile(join(repo, ".gitignore"), options.ignore);
-  await writeFile(join(repo, options.policyPath ?? "slipway.json"), JSON.stringify({
+  await writeFile(join(repo, options.policyPath ?? "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: "main",
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
     requiredLocalVerification: [{ executable: "node", args: ["-e", options.verify?.(verified) ?? recordCheckout(verified)] }],

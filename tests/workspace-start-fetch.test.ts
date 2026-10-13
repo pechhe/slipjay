@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, provisionSpare } from "../src/lib/peach-workspace.mjs";
+import { createWorkspace, provisionSpare } from "../src/lib/slipjay.mjs";
 import { startFetchHome } from "../src/lib/workspace-paths.mjs";
 
 /** Land a commit on `origin/main` from another clone, as another machine would. */

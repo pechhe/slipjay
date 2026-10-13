@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 
-// Concurrent `slipway release --confirm` runs, each in its own process as agent
+// Concurrent `slipjay release --confirm` runs, each in its own process as agent
 // sessions run them, against a release check held shut until the test opens it.
 // Every candidate is published before the first release starts.
 const launcher = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));

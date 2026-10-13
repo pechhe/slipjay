@@ -58,7 +58,7 @@ export type ReleaseResult =
    * The release branch already contains the candidate: a release this one waited
    * for shipped it, so it verified nothing. `merge` is the release merge that
    * first contained it and `releasedBy` that merge's candidate. Without such a
-   * merge (the branch was moved outside `slipway release`), `merge` is the
+   * merge (the branch was moved outside `slipjay release`), `merge` is the
    * release branch head and `releasedBy` null. The summary describes the plan
    * against that head, so `commits` is 0.
    */

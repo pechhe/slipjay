@@ -76,7 +76,7 @@ export function postLandIssueBody(record) {
     "",
     ...failure,
     "",
-    `Rerun with \`SLIPWAY_POST_LAND_BASE=${record.base} SLIPWAY_POST_LAND_COMMIT=${record.commit}\` against the landed source.`,
+    `Rerun with \`SLIPJAY_POST_LAND_BASE=${record.base} SLIPJAY_POST_LAND_COMMIT=${record.commit}\` against the landed source.`,
   ].join("\n");
 }
 

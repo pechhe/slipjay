@@ -6,7 +6,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { attachWorkspaceIssue, createWorkspace, landWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../src/lib/peach-workspace.mjs";
+import { attachWorkspaceIssue, createWorkspace, landWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../src/lib/slipjay.mjs";
 import { lockPath } from "../src/lib/workspace-state.mjs";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.mjs";
 
@@ -147,7 +147,7 @@ test("start with a flag prints usage and creates no workspace", async () => {
           resolveExit({ code: error ? Number((error as { code?: number }).code ?? 1) : 0, stderr }));
       });
       assert.equal(exit.code, 2);
-      assert.match(exit.stderr, /Usage: slipway start/);
+      assert.match(exit.stderr, /Usage: slipjay start/);
     }
     assert.deepEqual(names(f.repo), ["default"]);
     assert.equal(await readFile(join(f.repo, "README.md"), "utf8"), "fixture\n");

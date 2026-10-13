@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The slipway closure boundary (carried over from peach-pi's check:architecture):
+// The slipjay closure boundary (carried over from peach-pi's check:architecture):
 // every module under src/ imports only other src/ modules, Node built-ins and the
 // declared runtime dependencies, and the module graph is acyclic.
 import { readdirSync, readFileSync } from "node:fs";

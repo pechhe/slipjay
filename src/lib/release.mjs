@@ -1,5 +1,5 @@
 /**
- * `slipway release`: promote the published integration branch to the release
+ * `slipjay release`: promote the published integration branch to the release
  * branch its committed policy declares. Without a confirmation it only plans: it
  * names the candidate (the integration branch on the remote), the base (the
  * release branch on the remote), the commits between them, any migration
@@ -69,7 +69,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned } = {
   const root = context.current.root;
   const integrationBranch = context.integrationBranch;
   const remote = context.configuration.remote;
-  if (!remote) refuse("slipway.json declares no publication remote; a release publishes the release branch to it");
+  if (!remote) refuse("slipjay.json declares no publication remote; a release publishes the release branch to it");
 
   const fetched = await fetch(root, remote, integrationBranch);
   if (fetched.code !== 0) refuse(`Could not fetch ${integrationBranch} from ${remote}: ${fetched.stderr.trim()}`);
@@ -82,9 +82,9 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned } = {
   // The candidate's own committed policy decides what a release of it requires.
   const { policy } = await readExecutionPolicyAtCommit(root, candidate);
   const releaseBranch = policy?.releaseBranch;
-  if (!releaseBranch) refuse(`slipway.json at ${candidate.slice(0, 12)} declares no releaseBranch`);
+  if (!releaseBranch) refuse(`slipjay.json at ${candidate.slice(0, 12)} declares no releaseBranch`);
   const checks = policy.requiredReleaseVerification;
-  if (!checks) refuse(`slipway.json at ${candidate.slice(0, 12)} declares no requiredReleaseVerification (declare [] to release without checks)`);
+  if (!checks) refuse(`slipjay.json at ${candidate.slice(0, 12)} declares no requiredReleaseVerification (declare [] to release without checks)`);
 
   const fetchedRelease = await fetch(root, remote, releaseBranch);
   if (fetchedRelease.code !== 0) refuse(`Could not fetch ${releaseBranch} from ${remote}: ${fetchedRelease.stderr.trim()}`);
@@ -107,7 +107,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned } = {
 /** Check the candidate out on its own, prepare its dependencies and run the declared checks. */
 async function verifyCandidate(plan, onProgress) {
   const short = plan.candidate.slice(0, 12);
-  const name = `slipway-release-${short}`;
+  const name = `slipjay-release-${short}`;
   const checkout = join(releaseHome(), "checkouts", short);
   await rm(checkout, { recursive: true, force: true });
   await mkdir(join(releaseHome(), "checkouts"), { recursive: true });
@@ -317,7 +317,7 @@ async function releaseIntegrationUnmeasured(cwd, { confirm, migrationsReady = fa
     const summary = await describePlan(plan, graphql);
     if (confirm === undefined) {
       return { ok: true, status: "planned", ...summary, ...await pendingPostReleaseField(plan), subjects: plan.commits.map((commit) => commit.subject),
-        next: `After explicit human approval: slipway release --confirm ${plan.candidate.slice(0, 12)}`
+        next: `After explicit human approval: slipjay release --confirm ${plan.candidate.slice(0, 12)}`
           + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "") };
     }
     const requireMigrationsReady = (current) => {

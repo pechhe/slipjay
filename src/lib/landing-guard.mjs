@@ -1,7 +1,7 @@
 /**
- * A Claude Code PreToolUse guard: in a repository governed by `slipway.json`, the
- * integration branch moves and is published only through `slipway land`, and a
- * declared release branch only through `slipway release`.
+ * A Claude Code PreToolUse guard: in a repository governed by `slipjay.json`, the
+ * integration branch moves and is published only through `slipjay land`, and a
+ * declared release branch only through `slipjay release`.
  * Pushing feature bookmarks for a pull request stays allowed.
  *
  * It also keeps work from being orphaned: in a secondary workspace of such a
@@ -17,8 +17,8 @@ import { jjWorkspaceRoot, parseWorkspaceList, run } from "./workspace-jj.mjs";
 import { workspaceMetadata } from "./workspace-state.mjs";
 import { EXECUTION_POLICY_PROBE_PATHS, parseExecutionPolicy, selectExecutionPolicyPath } from "./execution-policy.mjs";
 
-const LAND = "Use `slipway land` (or `--direct` in a Direct checkout): it verifies, integrates and pushes.";
-const RELEASE = "Use `slipway release`: it verifies the exact candidate and publishes the release after human approval.";
+const LAND = "Use `slipjay land` (or `--direct` in a Direct checkout): it verifies, integrates and pushes.";
+const RELEASE = "Use `slipjay release`: it verifies the exact candidate and publishes the release after human approval.";
 
 /** The raw `integrationBranch` of an unparseable or refused policy text, if it names one. */
 const rawBranch = (raw) => {
@@ -27,7 +27,7 @@ const rawBranch = (raw) => {
 
 /**
  * Nearest policy above `cwd` and the branches it guards, or null when ungoverned.
- * A directory with only the retired `.peach/execution.json` is refused, not read,
+ * A directory with only Slipway's retired `slipway.json` is refused, not read,
  * but still guarded (fail closed): `retired` carries the refusal for the deny reason.
  */
 async function governance(cwd) {
@@ -59,7 +59,7 @@ async function governance(cwd) {
   }
 }
 
-/** Nearest policy above `cwd` (`slipway.json`), with its guarded branches; null when ungoverned. */
+/** Nearest policy above `cwd` (`slipjay.json`), with its guarded branches; null when ungoverned. */
 export async function governedBranches(cwd) {
   return (await governance(cwd))?.branches ?? null;
 }
@@ -218,7 +218,7 @@ function targetDirectory(name, args, cwd, line) {
 
 const expandHome = (target) => (target === "~" ? homedir() : target.startsWith("~/") ? join(homedir(), target.slice(2)) : target);
 
-const ORPHAN_REMEDY = "Run `jj describe -m \"<what this change does>\"` to keep it, `jj abandon` to discard it, or `slipway land` to ship it.";
+const ORPHAN_REMEDY = "Run `jj describe -m \"<what this change does>\"` to keep it, `jj abandon` to discard it, or `slipjay land` to ship it.";
 
 /** The verbs that move `@` off its commit, in one place. */
 const MOVING_VERBS = ["new", "edit", "checkout", "co", "next", "prev"];
@@ -237,7 +237,7 @@ function abandonedWorkspaces(args) {
 }
 
 /**
- * A deny reason when this jj command would abandon unfinished work in a Slipway
+ * A deny reason when this jj command would abandon unfinished work in a Slipjay
  * workspace: `dir` is in a governed repository (a secondary workspace, unless the
  * command forgets named workspaces, which is judged from any checkout) and a workspace
  * the command leaves (or forgets) has a non-empty, unintegrated `@` that is undescribed

@@ -5,7 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/peach-workspace.mjs";
+import { createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
 
 // An Isolated landing integrates and pushes whatever the primary checkout holds,
 // and moves that checkout only when it is an empty `@` on integrated ancestry.

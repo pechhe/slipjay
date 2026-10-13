@@ -31,7 +31,7 @@ export function explicitIssueNumber(value) {
 /**
  * Two-letter project code used in workspace names: the initials of the first two
  * words of the folder name (`peach-pi` → `pp`, `YardSmith` → `ys`), else its
- * first two letters (`slipway` → `sl`).
+ * first two letters (`slipjay` → `sl`).
  */
 export function projectCode(folderName) {
   const words = folderName

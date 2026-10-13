@@ -6,7 +6,7 @@ import { chmod, mkdir, readdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/peach-workspace.mjs";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
 import { pruneWorkspaceState } from "../src/lib/workspace-state-prune.mjs";
 import { landedHome, lockHome, metadataHome, stateHome, workspaceHome } from "../src/lib/workspace-paths.mjs";
 import { EMPTY_IDLE_MS, sweepDisposableWorkspaces } from "../src/lib/workspace-sweep.mjs";
@@ -74,14 +74,14 @@ test("landing removes its own workspace, naming any other process that holds it"
     assert.match(kept.released?.reason ?? "", new RegExp(`pid ${holder.pid} \\(sleep\\)`));
     assert.ok(existsSync(held.workspacePath));
     holder.dispose();
-    assert.equal((await cleanupLandedWorkspace(held.workspacePath)).cleaned, true, "slipway cleanup still works as before");
+    assert.equal((await cleanupLandedWorkspace(held.workspacePath)).cleaned, true, "slipjay cleanup still works as before");
   } finally {
     holder.dispose();
     await f.dispose();
   }
 }, 180_000);
 
-test("the CLI's own working directory inside the workspace does not keep it after `slipway land`, nor does its post-land run", async () => {
+test("the CLI's own working directory inside the workspace does not keep it after `slipjay land`, nor does its post-land run", async () => {
   // A declared post-land check starts a detached run during the landing; it must not hold the workspace.
   const f = await project({ policy: { postLandVerification: [{ executable: "node", args: ["-e", "setTimeout(() => {}, 20000)"] }] } });
   try {

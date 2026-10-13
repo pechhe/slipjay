@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { architectureViolations, importSpecifiers } from "./check-architecture.mjs";
 
 function fixture(files) {
-  const root = mkdtempSync(path.join(tmpdir(), "slipway-architecture-"));
+  const root = mkdtempSync(path.join(tmpdir(), "slipjay-architecture-"));
   for (const [file, code] of Object.entries(files)) {
     mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
     writeFileSync(path.join(root, file), code);
@@ -14,7 +14,7 @@ function fixture(files) {
   return root;
 }
 
-test("slipway's own closure is self-contained and acyclic", () => {
+test("slipjay's own closure is self-contained and acyclic", () => {
   assert.deepEqual(architectureViolations(), []);
 });
 
