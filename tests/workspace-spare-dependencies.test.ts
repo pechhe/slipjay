@@ -2,7 +2,7 @@ import { jj, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readlinkSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
 import { createWorkspace, provisionSpare, readySpares, startSpareRefill } from "../src/lib/slipjay.ts";
@@ -195,8 +195,17 @@ test("the install-input fingerprint is computable on a host without Node", async
       const real = execFileSync("which", [tool], { encoding: "utf8" }).trim();
       await writeFile(join(bin, tool), `#!/bin/sh\nexec "${real}" "$@"\n`, { mode: 0o755 });
     }
-    // System directories stay, for tool wrappers' own shell needs, unless they hold a Node.
-    process.env.PATH = [bin, ...["/usr/bin", "/bin"].filter((dir) => !existsSync(join(dir, "node")))].join(":");
+    // The system tools stay, for tool wrappers' own shell needs (vite-plus's `bun` runs sed,
+    // dirname and uname), but not a Node among them: on Linux it sits in /usr/bin beside them.
+    const linked = new Set(await readdir(bin));
+    for (const dir of ["/usr/bin", "/bin"]) {
+      for (const tool of await readdir(dir)) {
+        if (/^node(js)?$/.test(tool) || linked.has(tool)) continue;
+        linked.add(tool);
+        await symlink(join(dir, tool), join(bin, tool));
+      }
+    }
+    process.env.PATH = bin;
     const withoutNode = await installInputFingerprint(f.repo);
     assert.match(withoutNode ?? "", /^sha256:[0-9a-f]{64}$/);
     process.env.PATH = path;

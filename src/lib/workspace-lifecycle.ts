@@ -232,6 +232,10 @@ export async function forgetWorkspace(integrationRoot: string, workspaceName: st
   if (hooks.forget) return hooks.forget(integrationRoot, workspaceName, workspacePath);
   await jj(integrationRoot, ["--ignore-working-copy", "workspace", "forget", workspaceName]);
   await rm(workspacePath, { recursive: true, force: true });
+  // JJ 0.46+ backs a colocated workspace with a Git worktree and leaves its registration behind
+  // when the checkout was already gone, which blocks a new workspace at the same path. Not a
+  // worktree (older JJ, non-colocated repository) is the usual case and fails harmlessly.
+  await run("git", ["worktree", "remove", "--force", workspacePath], { cwd: integrationRoot, timeoutMs: 10_000 });
 }
 
 /**
