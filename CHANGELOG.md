@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Migrations on the runner:** the runner no longer declines changes touching
+  migration trigger paths. It generates the migration on the rebased candidate, runs
+  the gate, integrates, finalizes the external target (`postIntegration`) and
+  publishes, all in the change's serial turn, so concurrent migration changes land with
+  consecutive numbers (#5). An integration whose finalization or publication fails is
+  held and retried before the next landing instead of being dropped and regenerated
+  (#3). A failed `postIntegration` probe or command now reports its redacted output
+  instead of withholding it. Operations report a `finalizing` stage.
+
 ## v3.1.2
 
 - **Runner restarts:** `slipjay land` keeps following through a runner restart, printing

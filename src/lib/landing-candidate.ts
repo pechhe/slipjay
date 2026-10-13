@@ -25,6 +25,8 @@ export type CandidateOptions = {
   localOnly?: boolean;
   operationId?: string;
   environment?: () => NodeJS.ProcessEnv;
+  /** Runs migration generation and verification commands (default: a bounded local process). */
+  runCommand?: (request: import("./bounded-process.ts").BoundedProcessRequest) => Promise<import("./bounded-process.ts").BoundedProcessResult>;
   onProgress?: (line: string) => void;
   onStage?: (stage: "rebasing" | "verifying" | "integrating" | "cleaning") => void;
 };

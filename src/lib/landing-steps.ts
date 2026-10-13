@@ -18,6 +18,8 @@ export type LandingTailOptions = {
   /** Human approval for an `explicit-human` post-integration step; see post-integration-policy. */
   postIntegrationApproval?: unknown;
   environment?: () => NodeJS.ProcessEnv;
+  /** Called once finalization has succeeded, just before the push. */
+  onPublishing?: () => void;
 };
 /** Finalization, publication and timing outcome of a landing. */
 export type LandingTail = {
@@ -222,6 +224,7 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
         ? `${failure} A later landing already published ${commitId.slice(0, 9)} to ${context.integrationBranch}@${remote} after its own post-integration step, so nothing remains to land; run \`slipjay cleanup\` to release this workspace.`
         : `${failure} The local integration is kept; resolve it and rerun land.` } };
   }
+  options.onPublishing?.();
   const publication: LandingPublication = remote
     ? await publishIntegration(cwd, remote, context.integrationBranch, commitId)
     : { ok: true, status: options.localOnly === true ? "local_only" : "not_declared", commitId };

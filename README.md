@@ -175,14 +175,30 @@ publishes. The authoring machine runs none of the gate.
 - **Transport.** The client publishes the change as the bookmark
   `slipjay/changes/<changeId>` and submits it by jj change ID. The runner fetches it
   on its turn and deletes it when the operation closes.
-- **Migrations.** Until the runner generates migrations (pechhe/slipjay#11), it
-  declines a change touching `migrationFinalization` paths. `land` then lands it
-  through the local path in the same call. The runner does not run `postIntegration`.
-- **State.** Everything lives in `~/.slipjay/runner`:
+- **Migrations and finalization.** Within a change's turn, the runner generates its
+  `migrationFinalization` artifacts on the rebased candidate (generation and its
+  verification are recorded runs, like the gate), runs the gate, integrates, runs the
+  repository's `postIntegration` step (YardSmith: migrate Development), then publishes.
+  Because the queue is serial, concurrent migration changes get consecutive numbers.
+  The runner host therefore needs whatever that step needs (YardSmith: a logged-in
+  `vercel` CLI on the unit's `PATH`).
+- **Held integrations.** If finalization or publication fails, the external target
+  may already reflect the integration, so the runner keeps it on its local
+  integration branch instead of dropping it, and the failure says so. Every later
+  turn first retries finalizing and publishing it (with the same artifact key, so
+  the migration is never regenerated), and nothing else lands until that succeeds.
+  Relanding the same commit reports it landed once it is published. A deterministic
+  failure needs a person: reconcile the target, then on the runner host move the
+  checkout's integration bookmark back to the remote
+  (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
+- **State.** The runner's own state lives in `~/.slipjay/runner`:
   - `config.json`: the name, the listen port and the repositories, keyed `owner/name` with their git URL.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs.
   - `repos/<owner>/<name>`: the warm checkouts.
+  - Finalization receipts, target outcomes and the target lease stay in
+    `~/.slipjay/state/post-integration`, shared with local landings on the same host so
+    the lease covers both. Held-integration retries rely on them; move them with the runner.
 
   On restart, queued operations resume. An operation that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")

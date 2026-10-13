@@ -5,20 +5,25 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoundedProcess } from "./bounded-process.ts";
 import { integrateLandingCandidate } from "./landing-candidate.ts";
-import { fetchIntegration, landingIO, publishIntegration } from "./landing-steps.ts";
-import { migrationPaths } from "./migration-candidate.ts";
+import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { repositoryKey } from "./runner-contract.ts";
+import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { Executor, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, StoredEvent } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 
-const DECLINED_REASON = "Changes migration trigger paths; land it through the local path until the runner generates migrations (pechhe/slipjay#11)";
-
-class MigrationDeclined extends Error {
-  constructor(readonly paths: string[]) { super(DECLINED_REASON); }
+/**
+ * An integration the runner could not finalize or publish. It stays on the runner's
+ * integration branch, because the external target may already reflect it, and every
+ * later turn retries it first; nothing else lands until it is published.
+ */
+class HeldIntegration extends Error {
+  constructor(readonly commitId: string, readonly stage: "finalizing" | "publishing", reason: string, readonly output?: string) {
+    super(`${reason}\nThe runner holds ${commitId.slice(0, 12)}, integrated but not published, and retries it before the next landing.`);
+  }
 }
 
 export function localExecutor(host = hostname()): Executor {
@@ -44,6 +49,16 @@ export function createRunnerQueue(input: {
     appendFileSync(logPath(id), `${JSON.stringify(stored)}\n`);
   }
   const checkoutPath = (operation: Operation) => join(home, "repos", operation.repo);
+  /** The published integration of an earlier submission of this exact commit, if any. */
+  async function publishedIntegration(checkout: string, operation: Operation, branch: string, remote: string): Promise<{ base: string; commitId: string } | null> {
+    for (const earlier of log.operationsForChange(operation.repo, operation.changeId)) {
+      if (earlier.id === operation.id || earlier.commitId !== operation.commitId) continue;
+      const integrated = log.events({ operationId: earlier.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
+      if (integrated && await revisionExists(checkout, `${integrated.commitId} & ::${branch}@${remote}`))
+        return { base: integrated.base, commitId: integrated.commitId };
+    }
+    return null;
+  }
   async function cleanup(operation: Operation, checkout: string, remote: string): Promise<void> {
     try {
       await jj(checkout, ["bookmark", "delete", operation.bookmark]);
@@ -57,6 +72,26 @@ export function createRunnerQueue(input: {
     const checkout = checkoutPath(operation);
     let remote: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
+    // Gate and migration commands both go through the executor, so each run records where it ran.
+    async function run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+      const runId = randomUUID();
+      const started = Date.now();
+      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host });
+      const result = await executor.run(request).catch((error: unknown) => {
+        append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
+        throw error;
+      });
+      append(operation.id, { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, durationMs: Date.now() - started });
+      return result;
+    }
+    // Finalization, then publication, of an integrated commit (completeLanding).
+    async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string): Promise<void> {
+      setStage("finalizing");
+      const tail = await completeLanding(checkout, context, commitId, { ...(environment ? { environment } : {}), onPublishing: () => setStage("publishing") });
+      if (!tail.postIntegration.ok)
+        throw new HeldIntegration(commitId, "finalizing", `Post-integration ${tail.postIntegration.status}: ${tail.postIntegration.reason ?? "no reason recorded"}`, tail.postIntegration.output);
+      if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed");
+    }
     const setStage = (next: RunnerStage) => {
       stage = next;
       append(operation.id, { type: "stage", stage });
@@ -77,10 +112,26 @@ export function createRunnerQueue(input: {
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, "--branch", operation.bookmark]);
+      // A commit integrated by an earlier turn but never published (a failed push, or
+      // a restart after finalization) may already be applied to the external target.
+      // Finish it before anything moves the bookmark: dropping it would orphan that state.
+      if (await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
+        const held = (await revisionFacts(checkout, branch)).commitId;
+        progress(`Finishing ${held.slice(0, 12)}, integrated by an earlier landing but not yet published`);
+        await finishIntegration(context, held);
+        setStage("fetching");
+      }
       await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
+      // A reland of a submission whose integration has since been published (by the
+      // step above, or before a restart) is already landed: never integrate it twice.
+      const published = await publishedIntegration(checkout, operation, branch, remote);
+      if (published) {
+        append(operation.id, { type: "landed", ...published, branch, remote });
+        return;
+      }
       await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
       await jj(checkout, ["abandon", "-r", `mutable() ~ ::${operation.bookmark}`]);
       const commits = await jj(checkout, ["log", "-r", operation.bookmark, "--no-graph", "-T", 'commit_id ++ "\\n"']);
@@ -93,26 +144,11 @@ export function createRunnerQueue(input: {
       const integrated = await integrateLandingCandidate(checkout, {
         environment, onProgress: progress,
         onStage: (next) => { if (next !== "cleaning") setStage(next); },
+        runCommand: run,
         adapter: {
-          async finalizeCandidate(candidate, base) {
-            const paths = (await migrationPaths(checkout, candidateContext.configuration.migrationFinalization, base.commitId, candidate.commitId, jj)).owned;
-            if (paths.length) throw new MigrationDeclined(paths);
-            return candidate;
-          },
           verify: () => runRequiredVerification({
             root: checkout, checks: candidateContext.configuration.requiredLocalVerification,
-            slot: false, environment, onProgress: progress,
-            async run(request) {
-              const runId = randomUUID();
-              const started = Date.now();
-              append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host });
-              const result = await executor.run(request).catch((error: unknown) => {
-                append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
-                throw error;
-              });
-              append(operation.id, { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, durationMs: Date.now() - started });
-              return result;
-            },
+            slot: false, environment, onProgress: progress, run,
           }),
         },
       }, {
@@ -127,17 +163,12 @@ export function createRunnerQueue(input: {
       });
       const { base, artifact } = integrated;
       append(operation.id, { type: "integrated", base, commitId: artifact.commitId });
-      setStage("publishing");
-      const publication = await publishIntegration(checkout, remote, branch, artifact.commitId);
-      if (publication.ok) append(operation.id, { type: "landed", base, commitId: artifact.commitId, branch, remote });
-      else {
-        append(operation.id, { type: "failed", stage, reason: publication.reason ?? "Integration publication failed" });
-        await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
-      }
+      await finishIntegration(candidateContext, artifact.commitId);
+      append(operation.id, { type: "landed", base, commitId: artifact.commitId, branch, remote });
     } catch (error) {
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
-      else if (error instanceof MigrationDeclined) append(operation.id, { type: "declined", reason: DECLINED_REASON, paths: error.paths });
+      else if (error instanceof HeldIntegration) append(operation.id, { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) });
       else if (error instanceof RequiredVerificationError) append(operation.id, {
         type: "failed", stage: "verifying", reason: error.message,
         command: error.evidence.command, output: error.evidence.stdoutTail + error.evidence.stderrTail,
@@ -160,10 +191,24 @@ export function createRunnerQueue(input: {
       let remote: string | undefined;
       let verdict: OperationEvent = { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; land again` };
       try {
-        const integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
+        let integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
         if (configuredRepository(config, operation.repo)) {
           const context = await workspaceContext(checkout);
           if (context) remote = context.configuration.remote ?? "origin";
+          // Stopped after integrating but before recording it: record the held commit,
+          // so a reland recognises it once the next turn publishes it.
+          if (!integrated && context && remote) {
+            const branch = context.integrationBranch;
+            const held = await jj(checkout, ["log", "-r", `${branch} & change_id(${operation.changeId}) ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
+            // Another operation's integration of the same change (an earlier submission) is not this one's.
+            const claimed = log.operationsForChange(operation.repo, operation.changeId).some((other) =>
+              log.events({ operationId: other.id }).some((stored) => stored.event.type === "integrated" && stored.event.commitId === held));
+            if (held && !claimed) {
+              const [base = ""] = (await jj(checkout, ["log", "-r", `${held}-`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n");
+              integrated = { type: "integrated", base, commitId: held };
+              append(operation.id, integrated);
+            }
+          }
           if (integrated) {
             if (!context || !remote) throw new Error("Runner checkout context is unavailable");
             const branch = context.integrationBranch;

@@ -19,7 +19,7 @@ export const RUNNER_DEFAULT_PORT = 7787;
 export const candidateBookmark = (changeId: string): string => `slipjay/changes/${changeId}`;
 
 /** Stages of one operation, in order; `queued` until the queue reaches it. */
-export type RunnerStage = "queued" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "publishing";
+export type RunnerStage = "queued" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing";
 
 /** Terminal and live states of an operation, derived from its events. */
 export type OperationStatus = "queued" | "running" | "landed" | "failed" | "declined" | "superseded" | "cancelled";

@@ -15,6 +15,8 @@ export type PostIntegrationResult = {
   coveredByCommitSha?: string;
   coveredByPolicyDigest?: string;
   priorFailure?: { attempt: number; reason: string };
+  /** The failing probe's or command's output, redacted, when a step failed. */
+  output?: string;
   reason?: string;
 };
 
@@ -40,6 +42,7 @@ import { writeWorkspaceJson } from "./workspace-transaction.ts";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { exactPostIntegrationApproval, postIntegrationPolicyDigest } from "./post-integration-policy.ts";
 import { checkoutCwd } from "./checkout-cwd.ts";
+import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { postIntegrationHome } from "./workspace-paths.ts";
 import { SourcePreparationFailure, readPostIntegrationPolicy, withFinalizationSource } from "./post-integration-source.ts";
 import { HistoricalMigrationFailure, artifactKey, coveredByCompletedAncestor, historicalMigrationTip, isAncestor, readState, receiptPath,
@@ -188,6 +191,11 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
     await writeTargetOutcome(stateDirectory, targetKey, { ...outcome, status: "running" });
     await writeWorkspaceJson(statePath, { ...accepted, ok: false, status: "running", attempt });
     let reason = "Integration tip changed before finalization";
+    let output: string | undefined;
+    // Redacted before clipping; a truncated stream may still split a credential, so it is withheld.
+    const failureOutput = (result: { stdout: string; stderr: string; stdoutTruncated?: boolean; stderrTruncated?: boolean; error?: string }) =>
+      [result.stdoutTruncated ? "[truncated output withheld]" : result.stdout, result.stderrTruncated ? "[truncated output withheld]" : result.stderr, result.error]
+        .filter(Boolean).join("\n").trim().slice(-8192) || undefined;
     try {
       await historicalMigrationTip(input, gitDirectory, commit, policyDigest, environmentFactory, abortSignal);
       reason = "Exact source preparation failed";
@@ -209,11 +217,18 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
           timeoutMs: 30000,
           maxOutputBytes: 16 * 1024
         });
-        if (probe.exitCode !== 0 || probe.timedOut || probe.error || probe.signal || probe.stdoutTruncated || probe.stderrTruncated)
+        // Parsed raw; only the recorded copy is redacted.
+        const probeOutput = () => failureOutput({ ...probe, stdout: redactMigrationOutput(probe.stdout, root, { ...process.env, ...environment }), stderr: redactMigrationOutput(probe.stderr, root, { ...process.env, ...environment }) });
+        if (probe.exitCode !== 0 || probe.timedOut || probe.error || probe.signal || probe.stdoutTruncated || probe.stderrTruncated) {
+          output = probeOutput();
           throw new Error(reason);
-        const target = JSON.parse(probe.stdout) as { target?: unknown } | null;
-        if (!target || target.target !== policy.target)
+        }
+        let target: { target?: unknown } | null = null;
+        try { target = JSON.parse(probe.stdout) as { target?: unknown } | null; } catch { /* reported below */ }
+        if (!target || target.target !== policy.target) {
+          output = probeOutput();
           throw new Error(reason);
+        }
         reason = "Integration tip changed before external-state finalization";
         await historicalMigrationTip(input, gitDirectory, commit, policyDigest, environmentFactory, abortSignal);
         reason = "Finalization command failed or its outcome is unknown; retry with the same artifact key";
@@ -224,10 +239,12 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
           env: environment, abortSignal,
           timeoutMs: policy.timeoutMs,
           maxOutputBytes: 16 * 1024,
-          redactOutput: () => "[post-integration command output withheld]"
+          redactOutput: (value) => redactMigrationOutput(value, root, { ...process.env, ...environment })
         });
-        if (result.exitCode !== 0 || result.timedOut || result.error || result.signal)
+        if (result.exitCode !== 0 || result.timedOut || result.error || result.signal) {
+          output = failureOutput(result);
           throw new Error(reason);
+        }
         reason = "Integration tip changed during finalization; external outcome requires reconciliation";
         await historicalMigrationTip(input, gitDirectory, commit, policyDigest, environmentFactory, abortSignal);
         return { ...accepted, ok: true, status: "complete", attempt };
@@ -241,7 +258,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
     } catch (error) {
       if (error instanceof HistoricalMigrationFailure) reason = error.message;
       else if (error instanceof SourcePreparationFailure) reason = `Exact source preparation failed: ${error.message}`;
-      const failed: PostIntegrationResult = { ...accepted, ok: false, status: "failed", attempt, reason };
+      const failed: PostIntegrationResult = { ...accepted, ok: false, status: "failed", attempt, reason, ...(output ? { output } : {}) };
       await writeTargetOutcome(stateDirectory, targetKey, { ...outcome, status: "failed" });
       await writeWorkspaceJson(statePath, failed);
       return failed;

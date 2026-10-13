@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
@@ -12,6 +12,12 @@ import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
 const gate = 'if (require("node:fs").existsSync("fail")) { process.stderr.write("boom\\n"); process.exit(3); }';
 const command = `node -e ${gate}`;
+// Late-bound migrations: each generation writes the next numbered file; finalization
+// records which migrations the integrated commit carries, unless `fail-finalize` exists.
+const generate = 'const fs=require("node:fs");fs.mkdirSync("migrations",{recursive:true});const n=fs.readdirSync("migrations").length+1;fs.writeFileSync("migrations/"+String(n).padStart(4,"0")+".sql","-- "+n+"\\n");';
+const finalize = (root: string) => `const fs=require("node:fs");
+if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
+fs.appendFileSync(${JSON.stringify(join(root, "development.jsonl"))}, JSON.stringify({ commit: process.env.SLIPJAY_FINALIZATION_COMMIT, migrations: fs.existsSync("migrations") ? fs.readdirSync("migrations").sort() : [] }) + "\\n");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 async function fixture(migrations = false) {
@@ -32,16 +38,26 @@ async function fixture(migrations = false) {
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
     requiredLocalVerification: [{ executable: "node", args: ["-e", gate] }],
     unattendedMergeToIntegration: true,
-    ...(migrations ? { migrationFinalization: {
-      mode: "late_bound_serialized", triggerPaths: ["schema"], artifactPaths: ["migrations"],
-      generate: { executable: "sh", args: ["-c", "exit 99"] },
-      verify: { executable: "sh", args: ["-c", "exit 99"] },
-    } } : {}),
+    ...(migrations ? {
+      migrationFinalization: {
+        mode: "late_bound_serialized", triggerPaths: ["schema"], artifactPaths: ["migrations"],
+        generate: { executable: "node", args: ["-e", generate] },
+        verify: { executable: "node", args: ["-e", ""] },
+      },
+      postIntegration: {
+        version: 1, target: "fixture-development-db", idempotency: "artifact-key", approvalMode: "automatic-development", timeoutMs: 30_000,
+        command: { executable: "node", args: ["-e", finalize(root)] },
+        targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
+      },
+    } : {}),
   }));
   jj(seed, ["describe", "-m", "Seed policy"]);
   jj(seed, ["git", "remote", "add", "origin", origin]);
   jj(seed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
   jj(root, ["git", "clone", origin, author]);
+  // While `reject-push` exists the remote refuses every push, as an outage would.
+  await writeFile(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -e ${JSON.stringify(join(root, "reject-push"))} ]; then echo "remote unavailable" >&2; exit 1; fi\n`);
+  await chmod(join(origin, "hooks", "pre-receive"), 0o755);
   const log = openOperationLog(":memory:");
   const published: StoredEvent[] = [];
   const executor = localExecutor();
@@ -74,7 +90,9 @@ async function fixture(migrations = false) {
     return id;
   }
   const result = (id: string) => log.operation(id)!.result;
-  return { root, origin, author, home, log, queue, executor, published, main, remoteFile, push, candidate, submit, result,
+  const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
+  const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
+  return { root, development, land, origin, author, home, log, queue, executor, published, main, remoteFile, push, candidate, submit, result,
     async dispose() { await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -104,7 +122,7 @@ test("queued candidates land in arrival order on the previous candidate, with ru
       assert.equal(operation.runs[0]!.host, f.executor.host);
       assert.equal(operation.runs[0]!.command, command);
       assert.equal(operation.runs[0]!.exitCode, 0);
-      assert.deepEqual(f.log.events({ operationId: id }).filter((stored) => stored.event.type === "stage").map((stored) => stored.event.type === "stage" && stored.event.stage), ["fetching", "rebasing", "installing", "verifying", "integrating", "publishing"]);
+      assert.deepEqual(f.log.events({ operationId: id }).filter((stored) => stored.event.type === "stage").map((stored) => stored.event.type === "stage" && stored.event.stage), ["fetching", "rebasing", "installing", "verifying", "integrating", "finalizing", "publishing"]);
       assert.equal(f.queue.logPath(id), join(f.home, "logs", `${id}.log`));
       const lines = (await f.queue.readLog(id))!.trim().split("\n").map((line) => JSON.parse(line) as StoredEvent);
       assert.deepEqual(lines, f.published.filter((stored) => stored.operationId === id));
@@ -140,19 +158,110 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("migration trigger and artifact changes are declined before gates or publication", async () => {
+const generations = (f: Awaited<ReturnType<typeof fixture>>, ids: string[]) =>
+  ids.flatMap((id) => f.log.operation(id)!.runs).filter((run) => run.command.startsWith("node -e const fs=require(\"node:fs\");fs.mkdirSync")).length;
+
+test("a migration-bearing change lands with one generated migration, finalized before publication", async () => {
+  const f = await fixture(true);
+  try {
+    const id = f.submit(await f.candidate("schema/table.ts"));
+    const landed = await f.land(id);
+    assert.equal(landed?.type, "landed", JSON.stringify(landed));
+    if (landed?.type !== "landed") throw new Error("Expected landing");
+    assert.equal(f.main(), landed.commitId);
+    assert.equal(f.remoteFile("migrations/0001.sql"), "-- 1");
+    assert.deepEqual(await f.development(), [{ commit: landed.commitId, migrations: ["0001.sql"] }]);
+    assert.deepEqual(f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []), ["fetching", "rebasing", "installing", "verifying", "integrating", "finalizing", "publishing"]);
+    // Generation, its verification and the gate are all runner runs.
+    assert.equal(f.log.operation(id)!.runs.length, 3);
+    assert.ok(f.log.operation(id)!.runs.every((run) => run.host === f.executor.host && run.exitCode === 0));
+    // A committed artifact is refused: landing generates them.
+    const before = f.main();
+    const committed = f.submit(await f.candidate("migrations/9999.sql"));
+    const refused = await f.land(committed);
+    assert.equal(refused?.type, "failed", JSON.stringify(refused));
+    assert.match(refused?.type === "failed" ? refused.reason : "", /must be generated during landing/);
+    assert.equal(f.main(), before);
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("migration-bearing changes submitted together land one after the other with consecutive migrations", async () => {
+  const f = await fixture(true);
+  try {
+    const a = f.submit(await f.candidate("schema/a.ts"));
+    const b = f.submit(await f.candidate("schema/b.ts"));
+    await f.land(b);
+    const first = f.result(a), second = f.result(b);
+    if (first?.type !== "landed" || second?.type !== "landed") throw new Error(JSON.stringify({ first, second }));
+    assert.equal(second.base, first.commitId);
+    assert.equal(f.remoteFile("migrations/0001.sql"), "-- 1");
+    assert.equal(f.remoteFile("migrations/0002.sql"), "-- 2");
+    assert.deepEqual(await f.development(), [
+      { commit: first.commitId, migrations: ["0001.sql"] },
+      { commit: second.commitId, migrations: ["0001.sql", "0002.sql"] },
+    ]);
+    assert.equal(generations(f, [a, b]), 2);
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("a failed publication holds the finalized integration; relanding publishes it without regenerating, before other changes", async () => {
   const f = await fixture(true);
   try {
     const before = f.main();
-    for (const path of ["schema/table.ts", "migrations/001.sql"]) {
-      const id = f.submit(await f.candidate(path));
-      f.queue.wake(); await f.queue.idle();
-      assert.deepEqual(f.result(id), { type: "declined", reason: "Changes migration trigger paths; land it through the local path until the runner generates migrations (pechhe/slipjay#11)", paths: [path] });
-      assert.equal(f.log.operation(id)!.runs.length, 0);
-      assert.equal(f.main(), before);
-    }
+    const request = await f.candidate("schema/held.ts");
+    const other = await f.candidate("other.txt");
+    await writeFile(join(f.root, "reject-push"), "");
+    const held = f.submit(request);
+    const failure = await f.land(held);
+    assert.equal(failure?.type, "failed", JSON.stringify(failure));
+    if (failure?.type !== "failed") throw new Error("Expected publication failure");
+    assert.equal(failure.stage, "publishing");
+    assert.match(failure.reason, /remote unavailable/);
+    assert.match(failure.reason, /The runner holds [0-9a-f]{12}, integrated but not published/);
+    assert.equal(f.main(), before);
+    const [finalized] = await f.development();
+    assert.deepEqual(finalized?.migrations, ["0001.sql"]);
+    // Another change cannot land past the held integration, and does not discard it.
+    const blocked = f.submit(other);
+    const refusal = await f.land(blocked);
+    assert.equal(refusal?.type, "failed", JSON.stringify(refusal));
+    assert.equal(refusal?.type === "failed" && refusal.stage, "publishing");
+    await rm(join(f.root, "reject-push"));
+    const reland = f.submit(request);
+    const landed = await f.land(reland);
+    assert.deepEqual(landed, { type: "landed", base: before, commitId: finalized!.commit, branch: "main", remote: "origin" });
+    assert.equal(f.main(), finalized!.commit);
+    assert.equal(generations(f, [held, blocked, reland]), 1);
+    assert.equal((await f.development()).length, 1);
+    const after = f.submit(other);
+    const second = await f.land(after);
+    assert.equal(second?.type, "landed", JSON.stringify(second));
+    assert.equal(second?.type === "landed" && second.base, finalized!.commit);
   } finally { await f.dispose(); }
-}, 120_000);
+}, 240_000);
+
+test("a failed finalization reports its output, holds the integration and retries it before the next landing", async () => {
+  const f = await fixture(true);
+  try {
+    const before = f.main();
+    await writeFile(join(f.root, "fail-finalize"), "");
+    const id = f.submit(await f.candidate("schema/retry.ts"));
+    const failure = await f.land(id);
+    assert.equal(failure?.type, "failed", JSON.stringify(failure));
+    if (failure?.type !== "failed") throw new Error("Expected finalization failure");
+    assert.equal(failure.stage, "finalizing");
+    assert.match(failure.output ?? "", /development migrate failed/);
+    assert.equal(f.main(), before);
+    await rm(join(f.root, "fail-finalize"));
+    const next = f.submit(await f.candidate("next.txt"));
+    const landed = await f.land(next);
+    if (landed?.type !== "landed") throw new Error(JSON.stringify(landed));
+    const [finalized] = await f.development();
+    assert.deepEqual(finalized?.migrations, ["0001.sql"]);
+    assert.equal(landed.base, finalized!.commit);
+    assert.equal(f.remoteFile("migrations/0001.sql"), "-- 1");
+  } finally { await f.dispose(); }
+}, 240_000);
 
 test("recovery fails interrupted verification and leaves queued operations for wake", async () => {
   const f = await fixture();
