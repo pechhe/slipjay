@@ -230,6 +230,15 @@ turns in the same queue (see [Release](#release)).
   landed if its commit already reached the remote, and as failed ("land again")
   otherwise. A release that was running is recorded as failed with the
   `slipjay release --confirm` command that reruns it.
+- **Moving the runner to another host.** Run Setup on the new host with the same
+  repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
+  stop its unit. On the old host, `slipjay runner pause`, wait until no operation is
+  running and none is held (the last one landed or failed before integrating), then
+  stop its unit. Copy `operations.sqlite`, `logs/` and `~/.slipjay/state/post-integration`
+  to the new host (warm checkouts are cloned again on first use), start its unit,
+  point each machine's location at it (`"runner": "ssh://<new host>"`, or
+  `http://127.0.0.1:7787` on the host itself), and `slipjay runner resume`: the pause
+  moved with the log.
 - **Setup.** On the runner host, with `slipjay`, `jj` and `bws` installed and the
   Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved:
   `scripts/setup-runner.sh pechhe/YardSmith=git@github.com:pechhe/YardSmith.git`.

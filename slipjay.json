@@ -2,7 +2,7 @@
   "version": 1,
   "integrationBranch": "main",
   "remote": "origin",
-  "requiredLocalVerification": [
+  "requiredLandingVerification": [
     { "executable": "bun", "args": ["install", "--frozen-lockfile"] },
     { "executable": "bun", "args": ["run", "check"], "concurrent": true },
     { "executable": "bun", "args": ["run", "typecheck"], "concurrent": true }
