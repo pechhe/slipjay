@@ -27,13 +27,13 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const log = openOperationLog(join(home, "operations.sqlite"));
   const listeners = new Set<(event: StoredEvent) => void>();
   const queue = createRunnerQueue({
-    log, home, config, executor: localExecutor(config.name ?? hostname()),
+    log, home, config, executor: localExecutor(config.name ?? hostname(), env),
     publish: (event) => { for (const listener of listeners) listener(event); },
     environment: () => env,
   });
   await queue.recover();
   const server = await serveRunner(createRunnerHandler({
-    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake,
+    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill,
     subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   // Queued operations from before a restart resume here.

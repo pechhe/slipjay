@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { candidateBookmark, repositoryKey, RUNNER_API, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { OperationLog, ReleaseRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import type { Operation, OperationLog, ReleaseRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -8,7 +8,9 @@ export function createRunnerHandler(input: {
   token: string;
   runnerName: string;
   readLog(operationId: string): Promise<string | null>;
+  /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
+  kill(): { operation: Operation; killed: boolean } | null;
   subscribe(listener: (event: StoredEvent) => void): () => void;
 }): RunnerHandler {
   const credential = Buffer.from(`Bearer ${input.token}`);
@@ -19,7 +21,30 @@ export function createRunnerHandler(input: {
     const url = new URL(request.url);
     const path = url.pathname;
     if (request.method === "GET" && path === `${RUNNER_API}/health`)
-      return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length });
+      return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null });
+    const control = path.match(new RegExp(`^${RUNNER_API}/runner/(kill|pause|resume)$`));
+    if (request.method === "POST" && control) {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!validControl(body))
+        return json({ error: "Invalid control request" }, 400);
+      if (control[1] === "kill") {
+        const outcome = input.kill();
+        if (outcome && !outcome.killed)
+          return json({ operation: outcome.operation, reason: `${outcome.operation.stage} is past verification and cannot be killed; it finishes on its own` }, 409);
+        return json({ operation: outcome?.operation ?? null });
+      }
+      const pausing = control[1] === "pause";
+      if (pausing !== (input.log.paused() !== null))
+        input.log.append(RUNNER_CONTROL_ID, pausing ? { type: "paused", by: body.by } : { type: "resumed", by: body.by });
+      if (!pausing)
+        input.onSubmitted();
+      return json({ paused: pausing });
+    }
     if (request.method === "POST" && path === `${RUNNER_API}/operations`) {
       let body: unknown;
       try {
@@ -104,6 +129,10 @@ function validSubmission(body: unknown): body is SubmitRequest {
   if (!["repo", "changeId", "commitId", "bookmark", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0))
     return false;
   return /^[k-z]{12,64}$/.test(value.changeId as string) && value.bookmark === candidateBookmark(value.changeId as string);
+}
+
+function validControl(body: unknown): body is RunnerControlRequest {
+  return typeof body === "object" && body !== null && typeof (body as Record<string, unknown>).by === "string" && ((body as Record<string, unknown>).by as string).trim().length > 0;
 }
 
 function validRelease(body: unknown): body is ReleaseRequest {

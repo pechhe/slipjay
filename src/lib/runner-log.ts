@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { LandingOperation, Operation, OperationEvent, OperationLog, RunRecord, StoredEvent } from "./runner-contract.ts";
 
 export function newOperationId(): string {
@@ -36,15 +36,25 @@ export function openOperationLog(path: string): OperationLog {
     AND operation_id NOT IN (SELECT operation_id FROM events WHERE type IN ${terminalTypes}) ORDER BY seq`);
   const changeIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
     AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.changeId') = ? ORDER BY seq DESC`);
+  const control = db.prepare(`SELECT seq, operation_id, at, data FROM events
+    WHERE operation_id = ? AND type IN ('paused', 'resumed') ORDER BY seq DESC LIMIT 1`);
+  function paused(): { by: string; at: string } | null {
+    const row = control.get(RUNNER_CONTROL_ID) as EventRow | undefined;
+    const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
+    return row && event?.type === "paused" ? { by: event.by, at: row.at } : null;
+  }
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
   // One serial queue across repositories, in submission order.
   function queue(): Operation[] {
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
     const running = open.find((operation) => operation.status === "running");
+    const held = paused() !== null;
     open.forEach((operation, index) => {
       operation.position = index + 1;
-      if (running && operation.status === "queued") operation.waitingFor = label(running);
+      if (operation.status !== "queued") return;
+      if (held) operation.stage = "paused";
+      if (running) operation.waitingFor = label(running);
     });
     return open;
   }
@@ -71,6 +81,7 @@ export function openOperationLog(path: string): OperationLog {
         .map((entry) => placed(entry, open));
     },
     openOperations: (repo) => queue().filter((entry) => repo === undefined || entry.repo === repo),
+    paused,
     close: () => db.close(),
   };
 }

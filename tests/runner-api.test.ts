@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
-import { candidateBookmark, RUNNER_API } from "../src/lib/runner-contract.ts";
+import { candidateBookmark, RUNNER_API, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
 import type { Operation, OperationEvent, ReleaseResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
@@ -18,10 +18,12 @@ async function fixture() {
   const listeners = new Set<(event: StoredEvent) => void>();
   let submissions = 0;
   let onSubscribe: (() => void) | undefined;
+  let killOutcome: ReturnType<Parameters<typeof createRunnerHandler>[0]["kill"]> = null;
   const handler = createRunnerHandler({
     log, token, runnerName: "test-runner",
     readLog: (id) => Promise.resolve(id === "missing-log" ? null : "command output\n"),
     onSubmitted: () => { submissions++; },
+    kill: () => killOutcome,
     subscribe(listener) {
       listeners.add(listener);
       onSubscribe?.();
@@ -43,6 +45,7 @@ async function fixture() {
     log, server, request, submit, append, listeners,
     get submissions() { return submissions; },
     set onSubscribe(callback: (() => void) | undefined) { onSubscribe = callback; },
+    set killOutcome(outcome: typeof killOutcome) { killOutcome = outcome; },
     async close() { await server.close(); log.close(); },
   };
 }
@@ -73,7 +76,7 @@ test("HTTP runner refuses missing and wrong credentials, reports health and reje
       assert.equal(response.status, 401);
       assert.equal(typeof (await response.json() as { error: string }).error, "string");
     }
-    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 0 });
+    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 0, paused: false });
     for (const field of ["repo", "changeId", "commitId", "bookmark", "submittedBy"]) {
       const response = await f.submit({ ...submission(), [field]: " " });
       assert.equal(response.status, 400);
@@ -128,7 +131,7 @@ test("submissions create, reattach, supersede queued work and conflict with runn
     const changes = await (await f.request(`/changes/${changeId}?repo=Owner/Repo`)).json() as { operations: Operation[] };
     assert.deepEqual(changes.operations.map((op) => op.id), [replacement.operation.id, first.operation.id]);
     assert.equal((await f.request(`/changes/${changeId}`)).status, 400);
-    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 1 });
+    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 1, paused: false });
   } finally {
     await f.close();
   }
@@ -225,6 +228,33 @@ test("cancel closes only queued work and closed changes can be submitted again",
   } finally {
     await f.close();
   }
+});
+
+test("owner controls kill the running operation until verification ends, and pause and resume the queue", async () => {
+  const f = await fixture();
+  try {
+    const control = (action: string, body: unknown = { by: "owner-mac" }) => f.request(`/runner/${action}`, { method: "POST", body: JSON.stringify(body) });
+    assert.equal((await control("kill", {})).status, 400);
+    assert.deepEqual(await (await control("kill")).json(), { operation: null });
+    const { operation } = await submitted(await f.submit());
+    f.killOutcome = { operation, killed: true };
+    assert.equal((await (await control("kill")).json() as { operation: { id: string } }).operation.id, operation.id);
+    f.killOutcome = { operation: { ...operation, stage: "publishing" }, killed: false };
+    const refused = await control("kill");
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json() as { reason: string }).reason, /publishing is past verification/);
+
+    const before = f.submissions;
+    assert.deepEqual(await (await control("pause")).json(), { paused: true });
+    assert.deepEqual(await (await control("pause")).json(), { paused: true });
+    assert.equal((await (await f.request("/health")).json() as { paused: boolean }).paused, true);
+    assert.equal((await (await f.request(`/operations/${operation.id}`)).json() as { operation: { stage: string } }).operation.stage, "paused");
+    assert.deepEqual(await (await control("resume")).json(), { paused: false });
+    assert.equal(f.submissions, before + 1, "resuming wakes the queue");
+    assert.equal((await (await f.request(`/operations/${operation.id}`)).json() as { operation: { stage: string } }).operation.stage, "queued");
+    assert.deepEqual(f.log.events({ operationId: RUNNER_CONTROL_ID }).map((stored) => stored.event), [
+      { type: "paused", by: "owner-mac" }, { type: "resumed", by: "owner-mac" }]);
+  } finally { await f.close(); }
 });
 
 test("runner HTTP adapter rejects public listen hosts", async () => {

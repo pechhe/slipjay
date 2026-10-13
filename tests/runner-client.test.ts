@@ -4,10 +4,10 @@ import { access, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
-import { landThroughRunner, releaseThroughRunner } from "../src/lib/runner-client.ts";
+import { controlRunner, landThroughRunner, releaseThroughRunner } from "../src/lib/runner-client.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
-import type { OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
+import type { Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { jj, project } from "./support/workspace-project.ts";
@@ -31,8 +31,9 @@ async function fixture(dropStream = false) {
     const stored = log.append(id, event);
     for (const listener of listeners) listener(stored);
   };
+  let killed: { operation: Operation; killed: boolean } | null = null;
   const handler = createRunnerHandler({ log, token: "test-token", runnerName: "test-runner",
-    readLog: async () => "test log", onSubmitted: () => {},
+    readLog: async () => "test log", onSubmitted: () => {}, kill: () => killed,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
   });
   const streamRequests: number[] = [];
@@ -60,10 +61,30 @@ async function fixture(dropStream = false) {
   const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
     onLine: (line: string) => { lines.push(line); }, fallback: async () => { throw new Error("unexpected fallback"); } };
   return { ...f, remote, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
+    setKill: (outcome: { operation: Operation; killed: boolean } | null) => { killed = outcome; },
     dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
 }
 
 const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 20 });
+
+test("owner controls say what they did", async () => {
+  const f = await fixture();
+  try {
+    const control = (action: "kill" | "pause" | "resume") => controlRunner(f.server.url, action, f.options.env);
+    assert.deepEqual(await control("kill"), { ok: true, line: "[runner test-runner] nothing running" });
+    assert.deepEqual(await control("pause"), { ok: true, line: "[runner test-runner] paused: queued changes wait until resumed" });
+    assert.deepEqual(await control("resume"), { ok: true, line: "[runner test-runner] resumed" });
+    const operation: Operation = { kind: "landing", id: "op", repo: "fixture/project", changeId: f.change, commitId: f.commit, bookmark: candidateBookmark(f.change),
+      submittedBy: "test", status: "running", stage: "verifying", submittedAt: "", runs: [], lastSeq: 1 };
+    const subject = `landing ${f.change.slice(0, 12)}`;
+    f.setKill({ operation, killed: true });
+    assert.deepEqual(await control("kill"), { ok: true, line: `[runner test-runner] killed ${subject}` });
+    f.setKill({ operation: { ...operation, stage: "installing" as const }, killed: true });
+    assert.deepEqual(await control("kill"), { ok: true, line: `[runner test-runner] killing ${subject}: it stops when installing finishes, before verification` });
+    f.setKill({ operation: { ...operation, stage: "publishing" as const }, killed: false });
+    assert.deepEqual(await control("kill"), { ok: false, line: `[runner test-runner] not killed: ${subject} publishing is past verification and cannot be killed; it finishes on its own` });
+  } finally { await f.dispose(); }
+}, 60_000);
 
 test("interrupting and reattaching submits once and publishes the exact candidate bookmark", async () => {
   const f = await fixture();

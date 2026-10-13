@@ -4,24 +4,33 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { candidateBookmark } from "../src/lib/runner-contract.ts";
+import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
 import type { StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
-const gate = 'if (require("node:fs").existsSync("fail")) { process.stderr.write("boom\\n"); process.exit(3); }';
+// A committed `hang` file names where to record the pids of the gate, of a child in its
+// process group, and of a tool it starts in its own group (as YardSmith's task runners
+// do); then it never ends.
+const gate = 'const fs=require("node:fs");if (fs.existsSync("fail")) { process.stderr.write("boom\\n"); process.exit(3); }'
+  + 'if (fs.existsSync("hang")) { const spawn=(detached)=>require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached,stdio:"ignore"});'
+  + 'const child=spawn(false), tool=spawn(true);'
+  + 'fs.writeFileSync(fs.readFileSync("hang","utf8").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }';
 const command = `node -e ${gate}`;
 // Late-bound migrations: each generation writes the next numbered file; finalization
-// records which migrations the integrated commit carries, unless `fail-finalize` exists.
+// records which migrations the integrated commit carries, unless `fail-finalize` exists;
+// it waits while `hold-finalize` exists.
 const generate = 'const fs=require("node:fs");fs.mkdirSync("migrations",{recursive:true});const n=fs.readdirSync("migrations").length+1;fs.writeFileSync("migrations/"+String(n).padStart(4,"0")+".sql","-- "+n+"\\n");';
 const finalize = (root: string) => `const fs=require("node:fs");
+while (fs.existsSync(${JSON.stringify(join(root, "hold-finalize"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
 if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
 fs.appendFileSync(${JSON.stringify(join(root, "development.jsonl"))}, JSON.stringify({ commit: process.env.SLIPJAY_FINALIZATION_COMMIT, migrations: fs.existsSync("migrations") ? fs.readdirSync("migrations").sort() : [] }) + "\\n");`;
 // The release check records where it ran and fails while `fail-release` exists; the
 // post-release step records the release it ran for and the key the runner gave it.
 const releaseCheck = (root: string) => `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(join(root, "release-verified.log"))}, process.cwd() + "\\n");
-if (fs.existsSync(${JSON.stringify(join(root, "fail-release"))})) { process.stderr.write("release boom\\n"); process.exit(4); }`;
+if (fs.existsSync(${JSON.stringify(join(root, "fail-release"))})) { process.stderr.write("release boom\\n"); process.exit(4); }
+if (fs.existsSync(${JSON.stringify(join(root, "hang-release"))})) { fs.writeFileSync(${JSON.stringify(join(root, "release-started"))}, ""); setInterval(()=>{},1000); }`;
 const postReleaseStep = (root: string) => `require("node:fs").appendFileSync(${JSON.stringify(join(root, "post-release.jsonl"))}, JSON.stringify({ merge: process.env.SLIPJAY_RELEASE_MERGE, key: process.env.FIXTURE_KEY ?? null }) + "\\n");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
@@ -179,6 +188,101 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
     f.queue.wake(); await f.queue.idle();
     assert.equal(f.result(retry)?.type, "landed", JSON.stringify(f.result(retry)));
     assert.equal(f.remoteFile("fixed.txt"), "fixed");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+/** Resolves once `check` holds, polling; fails after `timeoutMs`. */
+async function until<T>(check: () => Promise<T | undefined> | T | undefined, timeoutMs = 60_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await check();
+    if (value !== undefined) return value;
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+test("the owner's kill stops a running gate: cancelled, never passed, main unchanged, and the queue moves on", async () => {
+  const f = await fixture();
+  try {
+    const before = f.main();
+    const pids = join(f.root, "gate-pids.json");
+    await f.candidate("hang");
+    await writeFile(join(f.author, "hang"), `${pids}\n`);
+    const killed = f.submit(await f.push());
+    const next = f.submit(await f.candidate("next.txt"));
+    assert.equal(f.queue.kill(), null, "an idle runner has nothing to kill");
+    f.queue.wake();
+    const [gatePid, childPid, toolPid] = await until(async () => {
+      const text = await readFile(pids, "utf8").catch(() => "");
+      return text ? JSON.parse(text) as [number, number, number] : undefined;
+    });
+    const outcome = f.queue.kill();
+    assert.equal(outcome?.killed, true);
+    assert.equal(outcome?.operation.id, killed);
+    await f.queue.idle();
+    assert.deepEqual(f.result(killed), { type: "cancelled", reason: OWNER_KILL_REASON });
+    const landed = f.result(next);
+    assert.ok(landed?.type === "landed", JSON.stringify(landed));
+    assert.equal(landed.base, before, "the killed change never integrated");
+    assert.equal(alive(gatePid), false, "the gate process is gone");
+    await until(() => alive(childPid) ? undefined : true, 5_000);
+    // A systemd scope reaches the tool's own process group; a bare process group cannot.
+    if (process.platform === "linux" && process.env.XDG_RUNTIME_DIR) assert.equal(alive(toolPid), false, "the gate's detached tool is gone");
+    else process.kill(toolPid, "SIGKILL");
+    assert.equal(f.queue.kill(), null);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a kill past verification is refused and the landing completes", async () => {
+  const f = await fixture(true);
+  try {
+    await writeFile(join(f.root, "hold-finalize"), "");
+    const id = f.submit(await f.candidate("schema/a.ts"));
+    f.queue.wake();
+    await until(() => f.log.operation(id)!.stage === "finalizing" ? true : undefined);
+    const outcome = f.queue.kill();
+    assert.equal(outcome?.killed, false);
+    assert.equal(outcome?.operation.stage, "finalizing");
+    await rm(join(f.root, "hold-finalize"));
+    await f.queue.idle();
+    assert.equal(f.result(id)?.type, "landed", JSON.stringify(f.result(id)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("the owner's kill stops a release's verification and publishes nothing", async () => {
+  const f = await fixture(false, true);
+  try {
+    const base = f.releaseRef();
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    await writeFile(join(f.root, "hang-release"), "");
+    const release = f.submitRelease(f.main());
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    assert.equal(f.queue.kill()?.killed, true);
+    await f.queue.idle();
+    assert.deepEqual(f.result(release), { type: "cancelled", reason: OWNER_KILL_REASON });
+    assert.equal(f.releaseRef(), base);
+    assert.deepEqual(await f.lines("post-release.jsonl"), []);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("while paused, queued changes wait and show paused; resumed, they land in order", async () => {
+  const f = await fixture();
+  try {
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake(); await f.queue.idle();
+    assert.deepEqual([f.log.operation(a)!.stage, f.log.operation(b)!.stage], ["paused", "paused"]);
+    assert.deepEqual([f.log.operation(a)!.status, f.log.operation(b)!.position], ["queued", 2]);
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "owner" });
+    f.queue.wake(); await f.queue.idle();
+    const first = f.result(a);
+    const second = f.result(b);
+    assert.ok(first?.type === "landed" && second?.type === "landed", JSON.stringify([first, second]));
+    assert.equal(second.base, first.commitId);
   } finally { await f.dispose(); }
 }, 120_000);
 

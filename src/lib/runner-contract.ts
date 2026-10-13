@@ -19,8 +19,24 @@ export const RUNNER_DEFAULT_PORT = 7787;
 /** The candidate bookmark a client pushes for the runner to fetch: `slipjay/changes/<changeId>`. */
 export const candidateBookmark = (changeId: string): string => `slipjay/changes/${changeId}`;
 
-/** Stages of one operation, in order; `queued` until the queue reaches it. */
-export type RunnerStage = "queued" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing";
+/**
+ * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
+ * never recorded: a queued operation shows it while the owner has paused the runner.
+ */
+export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing";
+
+/**
+ * Stages the owner's kill may stop. Up to the end of verification nothing has moved
+ * the integration or release branch; from `integrating` on, a kill could leave the
+ * external target ahead of the remote, so it is refused. Verification's commands are
+ * killed at once; an earlier stage finishes its step (a fetch, an install) and the
+ * operation stops before verification starts.
+ */
+export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying"];
+/** The reason a killed operation carries; it is never reported as a pass. */
+export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
+/** The log's operation id for runner-wide control events (pause, resume). */
+export const RUNNER_CONTROL_ID = "runner";
 
 /** Terminal and live states of an operation, derived from its events. */
 export type OperationStatus = "queued" | "running" | "landed" | "released" | "failed" | "declined" | "superseded" | "cancelled";
@@ -51,7 +67,10 @@ export type OperationEvent =
   | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string }
   /** A queued operation replaced by a newer submission of the same change. */
   | { type: "superseded"; by: string }
-  | { type: "cancelled"; reason: string };
+  | { type: "cancelled"; reason: string }
+  /** Runner-wide, under RUNNER_CONTROL_ID: the queue takes no next operation until resumed. */
+  | { type: "paused"; by: string }
+  | { type: "resumed"; by: string };
 
 /** A stored event: `seq` is global and strictly increasing across operations. */
 export type StoredEvent = { seq: number; operationId: string; at: string; event: OperationEvent };
@@ -99,6 +118,8 @@ export interface OperationLog {
   operationsForChange(repo: string, changeId: string): LandingOperation[];
   /** Open (queued or running) operations of a repository, oldest first: the queue. */
   openOperations(repo?: string): Operation[];
+  /** The owner's pause, while it holds. */
+  paused(): { by: string; at: string } | null;
   close(): void;
 }
 
@@ -133,7 +154,12 @@ export type SubmitResponse = { operation: Operation; reattached: boolean; supers
  * - GET  /v1/operations/:id/log                 → `text/plain` full run log
  * - POST /v1/operations/:id/cancel              → `{ operation }`; only a queued operation can be cancelled (else 409)
  * - GET  /v1/changes/:changeId?repo=<owner/name> → `{ operations: Operation[] }` newest first
- * - GET  /v1/health                             → `{ ok: true, runner: <name>, queued: number }`
+ * - POST /v1/runner/kill                         `{ by }` → `{ operation }`: the running operation as the kill
+ *                                                 found it, or `null` when idle; its `cancelled` verdict
+ *                                                 (OWNER_KILL_REASON) follows in its events once it stops;
+ *                                                 409 `{ operation, reason }` once it is past KILLABLE_STAGES
+ * - POST /v1/runner/pause, /v1/runner/resume     `{ by }` → `{ paused: boolean }`; the running operation finishes
+ * - GET  /v1/health                             → `{ ok: true, runner: <name>, queued: number, paused: boolean }`
  */
 export type RunnerHandler = (request: Request) => Promise<Response>;
 
@@ -145,6 +171,8 @@ export interface Executor {
 }
 
 /** Runner-side configuration: `~/.slipjay/runner/config.json`. The token comes from `SLIPJAY_RUNNER_TOKEN`. */
+export type RunnerControlRequest = { by: string };
+
 export type RunnerConfig = {
   /** Shown in every client progress line; defaults to the host name. */
   name?: string;

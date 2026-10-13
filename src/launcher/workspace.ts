@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { landThroughRunner, readRunLog, releaseThroughRunner, runnerLocation } from "../lib/runner-client.ts";
+import { controlRunner, landThroughRunner, readRunLog, releaseThroughRunner, runnerLocation } from "../lib/runner-client.ts";
 import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
@@ -173,7 +173,7 @@ async function runRelease(args: string[]): Promise<number> {
     if (outcome.command) console.error(outcome.command);
     if (outcome.output !== undefined) console.error(outcome.output);
     printed = { ok: false, status: "failed", stage: outcome.stage, reason: outcome.reason, log: logUrl };
-  } else printed = { ok: false, status: operation.status, log: logUrl };
+  } else printed = { ok: false, status: operation.status, ...outcome?.type === "cancelled" ? { reason: outcome.reason } : {}, log: logUrl };
   console.log(JSON.stringify(printed, null, 2));
   await appendMetric("releases", { status: printed.status, candidate: confirmable.candidate,
     commits: outcome?.type === "released" ? outcome.result.commits : null, totalMs: Date.now() - startedAt });
@@ -341,13 +341,19 @@ try {
       const location = runnerLocation();
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
       process.stdout.write(await readRunLog(location, rest[1]!));
+    } else if (rest.length === 1 && (rest[0] === "kill" || rest[0] === "pause" || rest[0] === "resume")) {
+      const location = runnerLocation();
+      if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+      const outcome = await controlRunner(location, rest[0]);
+      console.log(outcome.line);
+      if (!outcome.ok) process.exitCode = 1;
     } else if (rest.join(" ") === "serve") {
       const runner = await startRunner();
       console.error(`SlipJay runner listening on ${runner.url}`);
       // systemd stops the unit with SIGTERM; a running gate is left to restart recovery.
       await new Promise<void>((resolve) => process.once("SIGTERM", () => resolve()));
       process.exit(0);
-    } else throw new Error("Usage: slipjay runner <serve|log <operation>>");
+    } else throw new Error("Usage: slipjay runner <serve|log <operation>|kill|pause|resume>");
   } else if (command === "post-land-run") {
     // Internal: the detached process a landing starts for its background
     // verification. Landings take priority over it for the machine.
@@ -369,7 +375,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>>>");
+    console.error("Usage: slipjay <status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

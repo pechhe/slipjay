@@ -199,6 +199,27 @@ export async function readRunLog(location: string, operationId: string, env: Nod
   } finally { connection.close(); }
 }
 
+/**
+ * The owner's controls: kill the running operation (until it passes verification),
+ * or pause and resume the queue. Returns the line to print and whether it took effect.
+ */
+export async function controlRunner(location: string, action: "kill" | "pause" | "resume", env: NodeJS.ProcessEnv = process.env): Promise<{ ok: boolean; line: string }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/runner/${action}`, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ by: hostname() }) });
+    const body = await response.json() as { operation?: Operation | null; reason?: string; paused?: boolean };
+    const prefix = `[runner ${connection.name}]`;
+    if (action !== "kill") return { ok: true, line: `${prefix} ${body.paused ? "paused: queued changes wait until resumed" : "resumed"}` };
+    if (!body.operation) return { ok: true, line: `${prefix} nothing running` };
+    const subject = body.operation.kind === "release" ? `release ${body.operation.commitId.slice(0, 12)}` : `landing ${body.operation.changeId.slice(0, 12)}`;
+    if (response.status === 409) return { ok: false, line: `${prefix} not killed: ${subject} ${body.reason}` };
+    return { ok: true, line: body.operation.stage === "verifying" ? `${prefix} killed ${subject}`
+      : `${prefix} killing ${subject}: it stops when ${body.operation.stage} finishes, before verification` };
+  } finally { connection.close(); }
+}
+
 export async function landThroughRunner(cwd: string, options: { direct?: boolean; location: string; env?: NodeJS.ProcessEnv;
   onLine?(line: string): void; signal?: AbortSignal; fallback(): Promise<unknown> }): Promise<{ ok: boolean; operation: Operation; logUrl: string; fallback?: unknown }> {
   const env = options.env ?? process.env;

@@ -1,14 +1,15 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { readFile, stat, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
-import { runBoundedProcess } from "./bounded-process.ts";
+import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { integrateLandingCandidate } from "./landing-candidate.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
 import { confirmRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { repositoryKey } from "./runner-contract.ts";
+import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey } from "./runner-contract.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { Executor, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 
@@ -27,8 +28,41 @@ class HeldIntegration extends Error {
   }
 }
 
-export function localExecutor(host = hostname()): Executor {
-  return { host, run: runBoundedProcess };
+/** The owner's kill reached the operation; it ends cancelled, never passed. */
+class OwnerKill extends Error {
+  constructor() { super(OWNER_KILL_REASON); }
+}
+
+/**
+ * Runs commands on this host. Each run's process group is killed on abort or
+ * timeout, but a gate's own tools may start further groups (setsid) that a group
+ * signal never reaches. Under a systemd user manager each run therefore gets its
+ * own transient scope, and stopping the scope kills everything left in it, on
+ * abort and after every run. Elsewhere only the run's process group is killed.
+ */
+export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = process.env): Executor {
+  const runtimeDir = process.platform === "linux" ? env.XDG_RUNTIME_DIR : undefined;
+  if (!runtimeDir) return { host, run: runBoundedProcess };
+  const kill = (unit: string) => new Promise<void>((resolve) =>
+    execFile("systemctl", ["--user", "kill", "--signal=SIGKILL", unit], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir } }, () => resolve()));
+  return {
+    host,
+    async run(request) {
+      const unit = `slipjay-run-${randomUUID()}.scope`;
+      const stop = () => { void kill(unit); };
+      request.abortSignal?.addEventListener("abort", stop, { once: true });
+      try {
+        return await runBoundedProcess({
+          ...request, executable: "systemd-run",
+          args: ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, "--", request.executable, ...request.args],
+          env: { ...request.env ?? sanitizedProcessEnv(), XDG_RUNTIME_DIR: runtimeDir },
+        });
+      } finally {
+        request.abortSignal?.removeEventListener("abort", stop);
+        await kill(unit);
+      }
+    },
+  };
 }
 
 /**
@@ -41,10 +75,13 @@ export function createRunnerQueue(input: {
   environment?: () => NodeJS.ProcessEnv;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
+  /** Kill the running operation if it has not passed verification: `null` when idle. */
+  kill(): { operation: Operation; killed: boolean } | null;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
   const { log, executor, home, config, publish, environment } = input;
   let active: Promise<void> | undefined;
+  let current: { operation: Operation; stage: RunnerStage; controller: AbortController } | undefined;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
   function append(id: string, event: OperationEvent): void {
     const stored = log.append(id, event);
@@ -73,6 +110,8 @@ export function createRunnerQueue(input: {
   }
   async function processOperation(operation: Operation): Promise<void> {
     let stage: RunnerStage = "queued";
+    const controller = new AbortController();
+    current = { operation, stage, controller };
     const checkout = checkoutPath(operation);
     let remote: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
@@ -81,7 +120,8 @@ export function createRunnerQueue(input: {
       const runId = randomUUID();
       const started = Date.now();
       append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host });
-      const result = await executor.run(request).catch((error: unknown) => {
+      const abortSignal = request.abortSignal ? AbortSignal.any([request.abortSignal, controller.signal]) : controller.signal;
+      const result = await executor.run({ ...request, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
         throw error;
       });
@@ -97,7 +137,10 @@ export function createRunnerQueue(input: {
       if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed");
     }
     const setStage = (next: RunnerStage) => {
+      // A kill that landed between runs stops the operation before it moves a branch.
+      if (controller.signal.aborted) throw new OwnerKill();
       stage = next;
+      current = { operation, stage, controller };
       append(operation.id, { type: "stage", stage });
     };
     try {
@@ -177,6 +220,7 @@ export function createRunnerQueue(input: {
     } catch (error) {
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
+      else if (controller.signal.aborted) append(operation.id, { type: "cancelled", reason: OWNER_KILL_REASON });
       else if (error instanceof HeldIntegration) append(operation.id, { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) });
       else if (error instanceof RequiredVerificationError) append(operation.id, {
         type: "failed", stage: "verifying", reason: error.message,
@@ -184,11 +228,13 @@ export function createRunnerQueue(input: {
       });
       else append(operation.id, { type: "failed", stage, reason: message(error) });
     } finally {
+      current = undefined;
       if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
     }
     async function release(operation: ReleaseOperation): Promise<void> {
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
+      if (controller.signal.aborted) throw new OwnerKill();
       if (result.status === "released" || result.status === "released_by") append(operation.id, { type: "released", result });
       else if (result.status === "verification_failed") append(operation.id, {
         type: "failed", stage: "verifying", reason: result.reason,
@@ -200,6 +246,7 @@ export function createRunnerQueue(input: {
   }
   async function loop(): Promise<void> {
     for (;;) {
+      if (log.paused()) return;
       const operation = log.openOperations().find((entry) => entry.status === "queued");
       if (!operation) return;
       await processOperation(operation);
@@ -267,6 +314,13 @@ export function createRunnerQueue(input: {
       await start(recoverRunning, active);
     },
     async idle() { while (active) await active; },
+    kill() {
+      if (!current) return null;
+      const operation = log.operation(current.operation.id) ?? current.operation;
+      if (!KILLABLE_STAGES.includes(current.stage)) return { operation, killed: false };
+      current.controller.abort();
+      return { operation, killed: true };
+    },
     logPath,
     async readLog(id) {
       try { return await readFile(logPath(id), "utf8"); }

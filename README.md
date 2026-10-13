@@ -148,7 +148,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
 | `cutover [--check]` | Move state from `~/.slipway` to `~/.slipjay` once and retire the `slipway` CLI (see [State and cutover](#state-and-cutover)). |
-| `runner <serve\|log <operation>>` | Run the landing runner on this host, or print one operation's run log (see [Runner](#runner)). |
+| `runner <serve\|log <operation>\|kill\|pause\|resume>` | Run the landing runner on this host, print one operation's run log, or use the owner's controls (see [Runner](#runner)). |
 
 ## Runner
 
@@ -192,6 +192,23 @@ turns in the same queue (see [Release](#release)).
   failure needs a person: reconcile the target, then on the runner host move the
   checkout's integration bookmark back to the remote
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
+- **Owner controls.** From any machine with the location, `slipjay runner kill` stops
+  the running landing or release while it is still fetching, rebasing, installing or
+  verifying: verification's commands are killed at once (an earlier stage finishes its
+  current step, such as an install, then stops before verification), it ends
+  `cancelled` with "killed by the owner, not run to completion" (never a pass),
+  nothing moves, and the queue goes on. From
+  `integrating` on (a release: `publishing`) the kill is refused with exit 1, because
+  stopping there could leave the integration target ahead of the remote; it finishes
+  on its own. Killing an idle runner does nothing. `slipjay runner pause` makes the
+  runner take no next operation: the running one finishes, and queued ones show
+  `paused` as their stage until `slipjay runner resume`, then proceed in order. The
+  pause is recorded in the operation log, so it survives a restart. Each run's
+  commands go in their own systemd user scope when the runner has a user manager
+  (`XDG_RUNTIME_DIR` set, as under the setup's unit), so a kill also reaches
+  processes a gate tool started in a separate process group; the scope is cleared
+  after every run, so a gate cannot leave processes behind. Elsewhere, such as macOS,
+  only the run's process group is killed.
 - **State.** The runner's own state lives in `~/.slipjay/runner`:
   - `config.json`: the name, the listen port and the repositories, keyed `owner/name` with their git URL.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
