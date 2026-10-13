@@ -9,7 +9,7 @@ import { integrateLandingCandidate } from "./landing-candidate.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
 import { confirmRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey } from "./runner-contract.ts";
+import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey, RUNNER_JJ_DEFAULTS } from "./runner-contract.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { Executor, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 
@@ -165,6 +165,7 @@ export function createRunnerQueue(input: {
       }
       let context = await workspaceContext(checkout);
       if (!context || context.current.name !== "default") throw new Error("Runner checkout must be the default jj workspace");
+      for (const [key, value] of Object.entries({ ...RUNNER_JJ_DEFAULTS, ...config.jj })) await jj(checkout, ["config", "set", "--repo", key, value]);
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);

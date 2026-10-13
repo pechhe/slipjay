@@ -87,7 +87,8 @@ async function fixture(migrations = false, release = false) {
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
   const executor = localExecutor();
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } } }, publish: (event) => {
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } },
+    jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } }, publish: (event) => {
     published.push(event);
     const operation = log.operation(event.operationId);
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
@@ -168,6 +169,10 @@ test("queued candidates land in arrival order on the previous candidate, with ru
       assert.deepEqual(lines, f.published.filter((stored) => stored.operationId === id));
     }
     assert.equal(execFileSync("git", ["--git-dir", f.origin, "for-each-ref", "refs/heads/slipjay/changes"], { encoding: "utf8" }), "");
+    // The runner's jj settings come from its config and defaults, set in the warm checkout, not from the host.
+    const repoConfig = jj(join(f.home, "repos", "fixture/repo"), ["config", "list", "--repo"]);
+    for (const setting of ['user.name = "Runner Identity"', 'user.email = "runner@example.com"', 'snapshot.max-new-file-size = "64MiB"'])
+      assert.ok(repoConfig.includes(setting), repoConfig);
   } finally { await f.dispose(); }
 }, 120_000);
 

@@ -226,7 +226,10 @@ turns in the same queue (see [Release](#release)).
   previous tag there (`bun add -g github:pechhe/slipjay#v<previous>`), restart the
   runner unit, then land the fix.
 - **State.** The runner's own state lives in `~/.slipjay/runner`:
-  - `config.json`: the name, the listen port and the repositories, keyed `owner/name` with their git URL.
+  - `config.json`: the name, the listen port, the repositories, keyed `owner/name` with their git URL,
+    and `jj`: settings set as repository config in every warm checkout. It must name `user.name` and
+    `user.email`, the identity the runner commits as (use an email GitHub links to the owner);
+    the runner also sets `snapshot.max-new-file-size` to 64MiB unless `jj` overrides it, so none of these depend on the host's jj config.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs.
   - `repos/<owner>/<name>`: the warm checkouts.
@@ -253,7 +256,8 @@ turns in the same queue (see [Release](#release)).
 - **Setup.** On the runner host, with `slipjay`, `jj` and `bws` installed and the
   Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved:
   `scripts/setup-runner.sh pechhe/YardSmith=git@github.com:pechhe/YardSmith.git`.
-  It writes the config and a systemd user unit that runs `bws run -- slipjay runner
+  The commit identity comes from `SLIPJAY_RUNNER_USER_NAME` and `SLIPJAY_RUNNER_USER_EMAIL`,
+  else git's global user. It writes the config and a systemd user unit that runs `bws run -- slipjay runner
   serve` with `Restart=always`, and enables lingering so the unit survives logout and
   reboot. Logs: `journalctl --user -u slipjay-runner`.
 - **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),

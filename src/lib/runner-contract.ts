@@ -180,6 +180,21 @@ export type RunnerConfig = {
   listen?: { host?: "127.0.0.1"; port?: number };
   /** Repositories this runner lands, keyed `owner/name`, with the git URL its warm checkout clones. */
   repos: Record<string, { url: string }>;
+  /**
+   * jj settings the runner sets as repository config in every warm checkout before it
+   * touches one, over RUNNER_JJ_DEFAULTS, so nothing depends on the host's own jj config. The runner commits as
+   * `user.name` and `user.email`, which it requires at startup.
+   */
+  jj?: Record<string, string>;
+};
+
+/** jj settings the runner sets unless its config overrides them: YardSmith checks in files over jj's 1MiB default. */
+export const RUNNER_JJ_DEFAULTS: Readonly<Record<string, string>> = { "snapshot.max-new-file-size": "64MiB" };
+
+/** Why the runner refuses to start with `config`; null when it can. */
+export const runnerConfigProblem = (config: RunnerConfig): string | null => {
+  const missing = ["user.name", "user.email"].filter((key) => !config.jj?.[key]?.trim());
+  return missing.length ? `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity` : null;
 };
 
 /** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */

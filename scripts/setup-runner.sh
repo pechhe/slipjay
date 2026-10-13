@@ -8,7 +8,7 @@
 set -euo pipefail
 
 [ $# -ge 1 ] || { echo "usage: $0 <owner/name>=<git url> ..." >&2; exit 2; }
-for tool in slipjay jj bws loginctl systemctl; do
+for tool in slipjay jj bws bun loginctl systemctl; do
   command -v "$tool" >/dev/null || { echo "missing $tool on PATH" >&2; exit 1; }
 done
 
@@ -16,12 +16,18 @@ home="$HOME/.slipjay/runner"
 mkdir -p "$home" "$HOME/.config/systemd/user"
 chmod 700 "$home"
 
-repos=""
-for pair in "$@"; do
-  name="${pair%%=*}" url="${pair#*=}"
-  repos="$repos${repos:+,}\"$name\":{\"url\":\"$url\"}"
-done
-printf '{"name":"%s","listen":{"host":"127.0.0.1","port":7787},"repos":{%s}}\n' "$(hostname -s)" "$repos" > "$home/config.json"
+# The runner commits as this identity (GitHub must link its email to the owner) and
+# sets its jj settings in each warm checkout, so it needs nothing from the host's jj config.
+name="${SLIPJAY_RUNNER_USER_NAME:-$(git config --global user.name)}"
+email="${SLIPJAY_RUNNER_USER_EMAIL:-$(git config --global user.email)}"
+[ -n "$name" ] && [ -n "$email" ] || { echo "set SLIPJAY_RUNNER_USER_NAME and SLIPJAY_RUNNER_USER_EMAIL (or git's global user)" >&2; exit 1; }
+# Serialized by bun, so names with quotes or backslashes stay valid JSON.
+bun -e '
+const [host, name, email, ...pairs] = process.argv.slice(1);
+const repos = Object.fromEntries(pairs.map((pair) => { const at = pair.indexOf("="); return [pair.slice(0, at), { url: pair.slice(at + 1) }]; }));
+console.log(JSON.stringify({ name: host, listen: { host: "127.0.0.1", port: 7787 }, repos, jj: { "user.name": name, "user.email": email } }));
+' "$(hostname -s)" "$name" "$email" "$@" > "$home/config.json.tmp"
+mv "$home/config.json.tmp" "$home/config.json"
 
 # PATH as this login shell sees it, so gate commands find bun, jj and node.
 cat > "$HOME/.config/systemd/user/slipjay-runner.service" <<UNIT
