@@ -350,14 +350,16 @@ async function ownChangeId(context: WorkspaceContext): Promise<string | null> {
 }
 
 /**
- * Abandon the submitted commit the runner rewrote onto the integration branch. If that fails and
+ * Abandon the submitted stack the runner rewrote onto the integration branch: the candidate and
+ * every unintegrated ancestor, since the runner rebases and lands them together. If that fails and
  * nothing sits on top of it, move the working copy onto the landed commit so cleanup sees no
  * unlanded work; follow-up work stays in the working copy, and cleanup keeps the workspace for it.
  */
 async function dropSupersededCandidate(cwd: string, root: string, candidate: RevisionFacts, landedCommitId: string, onLine: (line: string) => void): Promise<void> {
-  try { await jj(cwd, ["abandon", candidate.commitId]); } catch (error) {
-    onLine(`Could not abandon the submitted commit ${candidate.commitId}, which landed as ${landedCommitId}: ${String(error).trim()}`);
-    onLine(`Abandon it with \`jj abandon ${candidate.commitId}\` in ${root} once the cause is fixed, or it shows as divergent.`);
+  const stack = `::${candidate.commitId} ~ ::${landedCommitId}`;
+  try { await jj(cwd, ["abandon", stack]); } catch (error) {
+    onLine(`Could not abandon the submitted stack ending at ${candidate.commitId}, which landed as ${landedCommitId}: ${String(error).trim()}`);
+    onLine(`Abandon it with \`jj abandon '${stack}'\` in ${root} once the cause is fixed, or it shows as divergent.`);
     if (await revisionExists(cwd, `${candidate.commitId} & ::@`) && !await revisionExists(cwd, `(${candidate.commitId}..@) & ~empty()`))
       await jj(cwd, ["new", landedCommitId]);
   }
