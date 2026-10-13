@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.1.2
+
+- **Runner restarts:** `slipjay land` keeps following through a runner restart, printing
+  `connection lost; reconnecting`, and after about a minute without the runner it stops
+  with "rerun slipjay land to reattach" instead of a raw socket error.
+
 ## v3.1.1
 
 - **Runner fixes:** after pushing a candidate, `slipjay land` also forgets its remote
