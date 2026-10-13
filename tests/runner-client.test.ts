@@ -289,6 +289,37 @@ test("a full fetch while the candidate is queued does not leave the landed commi
   } finally { await f.dispose(); }
 });
 
+test("after a runner rebase conflict, fetching and rebasing keeps the change visible and editable at @", async () => {
+  const f = await fixture();
+  try {
+    // Another landing changes the same file first, so the runner's rebase conflicts.
+    const other = join(f.root, "other");
+    const git = (args: string[]) => execFileSync("git", ["-C", other, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", ...args]);
+    execFileSync("git", ["clone", "-q", f.remote, other]);
+    await writeFile(join(other, "change.txt"), "upstream\n");
+    git(["add", "change.txt"]);
+    git(["commit", "-qm", "Land upstream"]);
+    git(["push", "-q", "origin", "main"]);
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    jj(f.repo, ["git", "fetch"]);
+    execFileSync("git", ["--git-dir", f.remote, "update-ref", "-d", `refs/heads/${candidateBookmark(f.change)}`]);
+    f.append(op.id, { type: "failed", stage: "rebasing", reason: "Rebase produced conflicts; resolve them in this workspace and retry:\nchange.txt" });
+    assert.equal((await running).ok, false);
+    jj(f.cwd, ["git", "fetch"]);
+    jj(f.cwd, ["rebase", "-b", "@", "-d", "main@origin"]);
+    await writeFile(join(f.cwd, "change.txt"), "upstream\ncandidate\n");
+    jj(f.cwd, ["describe", "-m", "Implement candidate, rebased"]);
+    const at = (template: string) => jj(f.cwd, ["log", "-r", "@", "--no-graph", "-T", template]);
+    assert.equal(at("change_id"), f.change);
+    assert.equal(at("conflict"), "false");
+    assert.match(at("description"), /rebased/);
+    assert.equal(jj(f.cwd, ["log", "-r", "@-", "--no-graph", "-T", "description.first_line()"]), "Land upstream");
+  } finally { await f.dispose(); }
+});
+
 test("a failed landing leaves the author's commit editable after a full fetch imported its candidate", async () => {
   const f = await fixture();
   try {
