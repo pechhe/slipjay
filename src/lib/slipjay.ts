@@ -60,3 +60,5 @@ export type { VerificationEvidence } from "./verification-policy.ts";
 export type { ExecutionPolicy } from "./execution-policy.ts";
 export type { PostIntegrationInput, PostIntegrationResult } from "./post-integration-finalization.ts";
 export type { BoundedProcessRequest, BoundedProcessResult, ProcessBroker } from "./bounded-process.ts";
+
+export { landThroughRunner, runnerLocation } from "./runner-client.ts";

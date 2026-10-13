@@ -6,7 +6,7 @@ import { truncateUtf8 } from "./utf8.ts";
 import { redactVerificationOutput, summarizeVerificationFailure } from "./verification-failure.ts";
 import { verificationSlotEnvironment, withVerificationSlot } from "./verification-slot.ts";
 import { classifyCapabilityProbe, normalizeVerificationDeclaration, runVerificationStages, verificationEvidence, verificationGap } from "./verification-policy.ts";
-import type { BoundedProcessResult } from "./bounded-process.ts";
+import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { VerificationDeclaration, VerificationEvidence } from "./verification-policy.ts";
 
 const CHECK_TIMEOUT_MS = 60 * 60_000;
@@ -89,15 +89,18 @@ export async function runRequiredVerification(input: {
   environment?: () => NodeJS.ProcessEnv;
   onProgress?: (line: string) => void;
   acceptFailure?: (check: VerificationDeclaration, failure: BoundedProcessResult, environment: NodeJS.ProcessEnv) => Promise<string | null>;
-  slot?: { label?: string; onWait?: (state: { ahead: number; holder: string | null }) => void };
+  /** `false` for a caller that already serializes verification (the runner's queue). */
+  slot?: { label?: string; onWait?: (state: { ahead: number; holder: string | null }) => void } | false;
+  /** Where each command runs; defaults to a local bounded process. */
+  run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
 }): Promise<VerificationEvidence> {
-  const { checks, onProgress = () => {}, acceptFailure, slot } = input;
+  const { checks, onProgress = () => {}, acceptFailure, slot, run = runBoundedProcess } = input;
   // The real root: commands run at real paths, so redaction must match them.
   const root = await realpath(input.root);
   const base = (input.environment ?? (() => process.env))();
   // Commands see the slot as held, so a nested landing-aware tool does not queue behind it.
   const environment = verificationSlotEnvironment(base);
-  return await withVerificationSlot(async () => {
+  const verify = async () => {
     const outcomes = await runVerificationStages(checks as readonly ({ concurrent?: unknown } | null)[], async (declared, index) => {
       if (!declared || typeof declared !== "object") throw new Error("The repository policy contains malformed requiredLocalVerification");
       const check: VerificationDeclaration = normalizeVerificationDeclaration(declared, "requiredLocalVerification");
@@ -109,7 +112,7 @@ export async function runRequiredVerification(input: {
       if (check.capability) {
         const { probe } = check.capability;
         const probeCwd = await checkoutCwd(root, probe.cwd, `${subject} capability probe ${check.capability.id}`);
-        const probeResult = await runBoundedProcess({ executable: probe.executable, args: probe.args, cwd: probeCwd,
+        const probeResult = await run({ executable: probe.executable, args: probe.args, cwd: probeCwd,
           timeoutMs: 30_000, maxOutputBytes: OUTPUT_BYTES, env: environment });
         const probed = { ...probeResult, code: probeResult.exitCode ?? undefined };
         const availability = classifyCapabilityProbe(check.capability, probed);
@@ -121,7 +124,7 @@ export async function runRequiredVerification(input: {
       }
       onProgress(`[verify ${index + 1}/${checks.length}] ${command}`);
       const started = Date.now();
-      const result = await runBoundedProcess({ executable: check.executable, args, cwd: checkCwd,
+      const result = await run({ executable: check.executable, args, cwd: checkCwd,
         timeoutMs: CHECK_TIMEOUT_MS, maxOutputBytes: OUTPUT_BYTES, env: environment });
       if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error) {
         const accepted = await acceptFailure?.({ ...check, args }, result, environment);
@@ -136,5 +139,6 @@ export async function runRequiredVerification(input: {
     const passed = outcomes.flatMap((item) => item.passed ? [item.passed] : []);
     const gaps = outcomes.flatMap((item) => item.gap ? [item.gap] : []);
     return verificationEvidence(passed, gaps, checks);
-  }, { env: base, ...slot });
+  };
+  return slot === false ? await verify() : await withVerificationSlot(verify, { env: base, ...slot });
 }

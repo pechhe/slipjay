@@ -146,7 +146,7 @@ export async function landWorkspace(cwd: string = process.cwd(), options: LandWo
  * Remove the workspace this landing delivered, as `slipjay cleanup` would. Anything
  * else working inside it keeps it, and is named so its owner can stop it.
  */
-async function releaseLandedWorkspace(context: WorkspaceContext) {
+export async function releaseLandedWorkspace(context: WorkspaceContext) {
   const holders = await workspaceHolders(context.current.root, { ignore: await callerPids() });
   if (!holders) return { cleaned: false, reason: "process working directories unavailable" };
   if (holders.length) return { cleaned: false, reason: `in use by a live process: ${describeHolders(holders)}`, holders };

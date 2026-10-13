@@ -159,15 +159,16 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
   }
   // A pending or failed external step keeps the workspace for its land retry.
   const gitDirectory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
-  const external = await finalizePostIntegration({ gitDirectory, integratedCommitSha: state.artifactCommitId, inspectOnly: true,
+  // The runner owns external steps; publication is still checked below.
+  const external = state.runner ? null : await finalizePostIntegration({ gitDirectory, integratedCommitSha: state.artifactCommitId, inspectOnly: true,
     readIntegrationTip: () => jj(context.integration.root, ["--ignore-working-copy", "log", "--no-graph", "-r", state.integrationBranch, "-T", "commit_id"]),
     ...(hooks.environment ? { environment: hooks.environment } : {}) });
   const published = await artifactPublished(cwd, context, state);
   // A failed step never pushes, so a declared remote holding the artifact means a
   // later landing published it after its own step: the failed record is superseded,
   // not retried. Without a remote, "published" proves nothing about that step.
-  const superseded = !external.ok && external.status === "failed" && published && publicationRemote(context, state.localOnly === true) !== null;
-  if (!external.ok && !superseded) return { cleaned: false, reason: `post-integration-${external.status}` };
+  const superseded = external?.status === "failed" && !external.ok && published && publicationRemote(context, state.localOnly === true) !== null;
+  if (external && !external.ok && !superseded) return { cleaned: false, reason: `post-integration-${external.status}` };
   if (!published) return { cleaned: false, reason: "not-published" };
   // Cleanup deletes only checkouts beneath slipjay workspace storage.
   if (!await withinWorkspaceStorage(context.current.root)) return { cleaned: false, reason: "outside-workspace-storage" };
@@ -179,7 +180,7 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
     if (error instanceof WorkingCopyChangedError) return { cleaned: false, reason: "working-copy-changed" };
     throw error;
   }
-  return superseded
+  return superseded && external
     ? { cleaned: true, supersededPostIntegration: { status: external.status, attempt: external.attempt!, reason: external.reason } }
     : { cleaned: true };
 }

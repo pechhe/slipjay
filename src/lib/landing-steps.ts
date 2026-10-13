@@ -171,7 +171,7 @@ export function publicationRemote(context: { configuration: { remote?: string | 
 export const fetchIntegration = (cwd: string, remote: string, branch: string, options: { timeoutMs?: number } = {}): ReturnType<typeof import("./workspace-command.ts").runWorkspaceCommand> => run("jj", ["--color=never", "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
 
 /** Push the integration bookmark and confirm the remote-tracking bookmark contains the artifact. */
-async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string): Promise<LandingPublication> {
+export async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string): Promise<LandingPublication> {
   // A colocated import can leave the remote bookmark untracked; jj refuses to push it then.
   await run("jj", ["--color=never", "bookmark", "track", `${branch}@${remote}`], { cwd });
   const pushed = await run("jj", ["--color=never", "git", "push", "--remote", remote, "--bookmark", branch], { cwd });

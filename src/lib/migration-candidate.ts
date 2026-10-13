@@ -11,6 +11,14 @@ import { verificationSlotEnvironment } from "./verification-slot.ts";
 const matches = (roots: string[], file: string): boolean => roots.some(root => file === root || file.startsWith(root + "/"));
 const changedPaths = (summary: string): string[] => summary.split(/\r?\n/).filter(Boolean).map(line => line.replace(/^[A-Z?]\s+/, ""));
 
+/** The paths between two commits that the late-bound migration step owns (trigger or artifact paths), and every changed path (none without a policy). */
+export async function migrationPaths(cwd: string, policy: MigrationFinalizationPolicy | null, base: string, candidate: string,
+  jj: (cwd: string, args: string[]) => Promise<string>): Promise<{ owned: string[]; changed: string[] }> {
+  if (!policy) return { owned: [], changed: [] };
+  const changed = changedPaths(await jj(cwd, ["diff", "--from", base, "--to", candidate, "--summary"]));
+  return { owned: changed.filter(file => matches([...policy.triggerPaths, ...policy.artifactPaths], file)), changed };
+}
+
 /** Called inside the shared verification slot, before the final rebase and held
  * through generation, verification and integration by the caller. No second lease. */
 export async function migrationCandidate(cwd: string, context: {
@@ -33,8 +41,8 @@ export async function migrationCandidate(cwd: string, context: {
   return {
     async finalize(candidate: LandingRevision, base: LandingRevision): Promise<LandingRevision> {
       if (!policy) return candidate;
-      const semanticPaths = changedPaths(await io.jj(cwd, ["diff", "--from", base.commitId, "--to", candidate.commitId, "--summary"]));
-      if (!semanticPaths.some(file => matches([...policy.triggerPaths, ...policy.artifactPaths], file))) return candidate;
+      const { owned, changed: semanticPaths } = await migrationPaths(cwd, policy, base.commitId, candidate.commitId, io.jj);
+      if (!owned.length) return candidate;
       if (semanticPaths.some(file => matches(policy.artifactPaths, file))) throw new Error("Late-bound migration artifacts must be generated during landing, not committed in the semantic candidate");
       // The candidate may be @- below an empty child; generation must edit it.
       const originalWorkingCopy = await io.revisionFacts(cwd, "@");

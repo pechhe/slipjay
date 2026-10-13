@@ -145,6 +145,53 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
 | `cutover [--check]` | Move state from `~/.slipway` to `~/.slipjay` once and retire the `slipway` CLI (see [State and cutover](#state-and-cutover)). |
+| `runner <serve\|log <operation>>` | Run the landing runner on this host, or print one operation's run log (see [Runner](#runner)). |
+
+## Runner
+
+When a runner location is configured, `slipjay land` sends the change to one
+long-lived runner instead of verifying locally. The runner queues landings and takes
+them one at a time in arrival order. For each one it rebases onto the integration tip,
+runs the repository's declared gate in its own warm checkout, then integrates and
+publishes. The authoring machine runs none of the gate.
+
+- **Location.** One value: `SLIPJAY_RUNNER`, or `"runner"` in `~/.slipjay/config.json`.
+  On the runner's host it is `http://127.0.0.1:7787`. Elsewhere it is
+  `ssh://<host>`, and `land` opens an SSH port forward for the duration of the call
+  (the host must be reachable with key auth). Without a location, `land` runs locally
+  as before. `--local-only` always runs locally.
+- **Credential.** A bearer token: `SLIPJAY_RUNNER_TOKEN` in the environment, or else
+  the Bitwarden Secrets Manager key of that name, read through `bws`. A request
+  without it is refused. The runner binds loopback only.
+- **What `land` prints.** One line per stage, naming the runner and the queue
+  position. Then a summary: the verdict, the failing command's output verbatim on
+  failure, and `slipjay runner log <operation>`, which prints the full run log from any machine with the location. Interrupting `land` stops following but
+  not the landing. Running `land` again in the same workspace reattaches to the same
+  operation (or, if it landed meanwhile, finishes the workspace housekeeping); it never submits twice. While an older commit of the change is running, `land` follows it instead of moving its bookmark, then asks you to land again. Set `SLIPJAY_RUNNER_VERBOSE=1` to see every
+  progress line.
+- **Transport.** The client publishes the change as the bookmark
+  `slipjay/changes/<changeId>` and submits it by jj change ID. The runner fetches it
+  on its turn and deletes it when the operation closes.
+- **Migrations.** Until the runner generates migrations (pechhe/slipjay#11), it
+  declines a change touching `migrationFinalization` paths. `land` then lands it
+  through the local path in the same call. The runner does not run `postIntegration`.
+- **State.** Everything lives in `~/.slipjay/runner`:
+  - `config.json`: the name, the listen port and the repositories, keyed `owner/name` with their git URL.
+  - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
+  - `logs/<operation>.log`: the run logs.
+  - `repos/<owner>/<name>`: the warm checkouts.
+
+  On restart, queued operations resume. An operation that was running is recorded as
+  landed if its commit already reached the remote, and as failed ("land again")
+  otherwise.
+- **Setup.** On the runner host, with `slipjay`, `jj` and `bws` installed and the
+  Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved:
+  `scripts/setup-runner.sh pechhe/YardSmith=git@github.com:pechhe/YardSmith.git`.
+  It writes the config and a systemd user unit that runs `bws run -- slipjay runner
+  serve` with `Restart=always`, and enables lingering so the unit survives logout and
+  reboot. Logs: `journalctl --user -u slipjay-runner`.
+- **API.** Under `/v1`: operations (submit, read, cancel, event stream, log) and
+  changes by jj change ID. The contract is `src/lib/runner-contract.ts`.
 
 ## Release
 
