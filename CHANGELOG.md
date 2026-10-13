@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.6.1
+
+- **A landing is recorded even when abandoning the submitted commit fails:** when the
+  runner lands a rewritten commit, `slipjay land` writes the workspace's landing record
+  before abandoning the commit it submitted, and a failed abandon (such as a stale working
+  copy) now prints the recovery commands instead of leaving the delivered workspace
+  labelled not-landed.
+
 ## v3.6.0
 
 - **Gate key's former name refused:** a policy declaring `requiredLocalVerification`
