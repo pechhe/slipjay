@@ -33,7 +33,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   });
   await queue.recover();
   const server = await serveRunner(createRunnerHandler({
-    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill,
+    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
     subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   // Queued operations from before a restart resume here.

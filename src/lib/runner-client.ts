@@ -259,7 +259,9 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       }
       // Keeping the untracked remote ref would make the candidate immutable, so the next jj
       // command would stack a new working-copy commit on it and a reland would carry both.
-      await jj(cwd, ["bookmark", "forget", "--include-remotes", bookmark]);
+      // Forgotten through the colocated integration checkout, which also drops the Git ref:
+      // forgotten from a secondary workspace, the next command there would re-import it.
+      await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", bookmark]);
       const response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
         headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, changeId: target.changeId, commitId: target.commitId, bookmark,
           submittedBy: `${hostname()}:${context.current.name}` }) });
@@ -267,6 +269,11 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       older = response.status === 409;
     }
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
+    // A fetch of every bookmark while the candidate was on the remote imports it untracked,
+    // which makes the submitted commit immutable: the author could neither fix a failure
+    // nor abandon a landed commit, and the landed rewrite would show as divergent.
+    if (operation.result)
+      await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", candidateBookmark(target.changeId)]).catch(() => {});
     // The forward and its port end with this call, so the log is named by a command, not a URL.
     const logUrl = runLogCommand(operation.id);
     const result = operation.result;
@@ -291,7 +298,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
         try { await jj(cwd, ["abandon", target.commitId]); }
         catch (error) {
           onLine(`Could not abandon the submitted commit ${target.commitId}, which landed as ${result.commitId}: ${String(error).trim()}`);
-          onLine(`Run \`jj workspace update-stale\` and \`jj abandon ${target.commitId}\` in ${context.current.root}.`);
+          onLine(`Abandon it with \`jj abandon ${target.commitId}\` in ${context.current.root} once the cause is fixed, or it shows as divergent.`);
         }
       }
       await finishLanding(context, state, landingIO);

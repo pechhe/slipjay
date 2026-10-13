@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
+import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../src/lib/runner-contract.ts";
 import type { StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
@@ -84,8 +84,15 @@ async function fixture(migrations = false, release = false) {
   await chmod(join(origin, "hooks", "pre-receive"), 0o755);
   const log = openOperationLog(":memory:");
   const published: StoredEvent[] = [];
+  // Whether each landing's candidate bookmark was still on origin when its verdict was published.
+  const candidateAtVerdict = new Map<string, boolean>();
   const executor = localExecutor();
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } } }, publish: (event) => { published.push(event); },
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } } }, publish: (event) => {
+    published.push(event);
+    const operation = log.operation(event.operationId);
+    if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
+      candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
+  },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
@@ -125,7 +132,7 @@ async function fixture(migrations = false, release = false) {
   const result = (id: string) => log.operation(id)!.result;
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
-  return { root, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, lines, result,
+  return { root, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, lines, result,
     async dispose() { await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -424,6 +431,27 @@ test("recovery recognizes an integrated commit published before the runner stopp
     f.log.append(unpublished, { type: "integrated", base: landed.base, commitId: "f".repeat(40) });
     await f.queue.recover();
     assert.deepEqual(f.result(unpublished), { type: "failed", stage: "publishing", reason: "runner restarted during publishing; land again" });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("the candidate bookmark is gone from origin before any landing verdict, including after a restart or a queued cancel", async () => {
+  const f = await fixture();
+  try {
+    const landed = f.submit(await f.candidate("landed.txt"));
+    assert.equal((await f.land(landed))?.type, "landed");
+    const failed = f.submit(await f.candidate("fail"));
+    assert.equal((await f.land(failed))?.type, "failed");
+    const interrupted = f.submit(await f.candidate("interrupted.txt"));
+    f.log.append(interrupted, { type: "stage", stage: "verifying" });
+    await f.queue.recover();
+    assert.equal(f.result(interrupted)?.type, "failed");
+    assert.deepEqual([landed, failed, interrupted].map((id) => f.candidateAtVerdict.get(id)), [false, false, false]);
+    const request = await f.candidate("cancelled.txt");
+    const cancelled = f.submit(request);
+    f.log.append(cancelled, { type: "cancelled", reason: "cancelled by the author" });
+    f.queue.cancelled(f.log.operation(cancelled)!);
+    await f.queue.idle();
+    assert.equal(execFileSync("git", ["--git-dir", f.origin, "for-each-ref", `refs/heads/${request.bookmark}`], { encoding: "utf8" }), "");
   } finally { await f.dispose(); }
 }, 120_000);
 

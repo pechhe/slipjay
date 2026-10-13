@@ -266,7 +266,45 @@ test("a landing is recorded even when abandoning the rewritten submitted commit 
     const state = await readLandingState(name, { readOnly: true });
     assert.equal(state?.phase, "landed");
     assert.equal(state?.artifactCommitId, landed);
-    assert.ok(f.lines.some((line) => line.includes("jj workspace update-stale")), f.lines.join("\n"));
+    assert.ok(f.lines.some((line) => line.includes(`jj abandon ${op.commitId}`)), f.lines.join("\n"));
+  } finally { await f.dispose(); }
+});
+
+test("a full fetch while the candidate is queued does not leave the landed commit divergent or the author's commit immutable", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    // Another session fetches every remote bookmark, importing the candidate bookmark while it exists on origin.
+    jj(f.repo, ["git", "fetch"]);
+    const git = (...args: string[]) => execFileSync("git", ["--git-dir", f.remote, ...args], { encoding: "utf8" }).trim();
+    const landed = git("commit-tree", `${op.commitId}^{tree}`, "-p", "main", "-m", "Implement candidate (rewritten)");
+    git("update-ref", "refs/heads/main", landed);
+    git("update-ref", "-d", `refs/heads/${candidateBookmark(f.change)}`);
+    f.append(op.id, { type: "landed", base: "fixture-base", commitId: landed, branch: "main", remote: "origin" });
+    const result = await running;
+    assert.equal(result.ok, true, f.lines.join("\n"));
+    assert.ok(!f.lines.some((line) => line.includes("Could not abandon")), f.lines.join("\n"));
+    assert.equal(jj(f.repo, ["log", "-r", "divergent()", "--no-graph", "-T", 'change_id ++ "\\n"']), "");
+    assert.equal(jj(f.repo, ["log", "-r", `visible_heads() & ${f.commit}`, "--no-graph", "-T", "commit_id"]), "");
+  } finally { await f.dispose(); }
+});
+
+test("a failed landing leaves the author's commit editable after a full fetch imported its candidate", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    jj(f.repo, ["git", "fetch"]);
+    execFileSync("git", ["--git-dir", f.remote, "update-ref", "-d", `refs/heads/${candidateBookmark(f.change)}`]);
+    f.append(op.id, { type: "failed", stage: "verifying", reason: "gate failed" });
+    assert.equal((await running).ok, false);
+    jj(f.cwd, ["describe", "-m", "Implement candidate, fixed"]);
+    assert.match(jj(f.cwd, ["log", "-r", "@", "--no-graph", "-T", "description"]), /fixed/);
   } finally { await f.dispose(); }
 });
 

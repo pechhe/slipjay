@@ -75,6 +75,8 @@ export function createRunnerQueue(input: {
   environment?: () => NodeJS.ProcessEnv;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
+  /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
+  cancelled(operation: Operation): void;
   /** Kill the running operation if it has not passed verification: `null` when idle. */
   kill(): { operation: Operation; killed: boolean } | null;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
@@ -102,9 +104,15 @@ export function createRunnerQueue(input: {
   }
   async function cleanup(operation: LandingOperation, checkout: string, remote: string): Promise<void> {
     try {
+      // A candidate this checkout never fetched (cancelled while queued, or interrupted by a
+      // restart) has no local bookmark to delete until it is fetched.
+      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", operation.bookmark]).catch(() => {});
+      await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]).catch(() => {});
       await jj(checkout, ["bookmark", "delete", operation.bookmark]);
       await jj(checkout, ["git", "push", "--remote", remote, "--bookmark", operation.bookmark]);
     } catch (error) {
+      // Leave no half-deleted bookmark behind: a resubmission fetches the candidate afresh.
+      await jj(checkout, ["bookmark", "forget", "--include-remotes", operation.bookmark]).catch(() => {});
       append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${message(error)}` });
     }
   }
@@ -112,6 +120,7 @@ export function createRunnerQueue(input: {
     let stage: RunnerStage = "queued";
     const controller = new AbortController();
     current = { operation, stage, controller };
+    let verdict: OperationEvent | undefined;
     const checkout = checkoutPath(operation);
     let remote: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
@@ -181,7 +190,7 @@ export function createRunnerQueue(input: {
       // step above, or before a restart) is already landed: never integrate it twice.
       const published = await publishedIntegration(checkout, operation, branch, remote);
       if (published) {
-        append(operation.id, { type: "landed", ...published, branch, remote });
+        verdict = { type: "landed", ...published, branch, remote };
         return;
       }
       await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
@@ -215,20 +224,23 @@ export function createRunnerQueue(input: {
       const { base, artifact } = integrated;
       append(operation.id, { type: "integrated", base, commitId: artifact.commitId });
       await finishIntegration(candidateContext, artifact.commitId);
-      append(operation.id, { type: "landed", base, commitId: artifact.commitId, branch, remote });
+      verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
     } catch (error) {
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
-      else if (controller.signal.aborted) append(operation.id, { type: "cancelled", reason: OWNER_KILL_REASON });
-      else if (error instanceof HeldIntegration) append(operation.id, { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) });
-      else if (error instanceof RequiredVerificationError) append(operation.id, {
+      else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
+      else if (error instanceof HeldIntegration) verdict = { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) };
+      else if (error instanceof RequiredVerificationError) verdict = {
         type: "failed", stage: "verifying", reason: error.message,
         command: error.evidence.command, output: error.evidence.stdoutTail + error.evidence.stderrTail,
-      });
-      else append(operation.id, { type: "failed", stage, reason: message(error) });
+      };
+      else verdict = { type: "failed", stage, reason: message(error) };
     } finally {
       current = undefined;
+      // Delete the candidate bookmark before the verdict: an author's repository that fetches
+      // every bookmark after that would otherwise import it and pin the submitted commit.
       if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+      if (verdict) append(operation.id, verdict);
     }
     async function release(operation: ReleaseOperation): Promise<void> {
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
@@ -294,8 +306,8 @@ export function createRunnerQueue(input: {
       } catch (error) {
         append(operation.id, { type: "progress", line: `Recovery could not confirm publication: ${message(error)}` });
       }
-      append(operation.id, verdict);
       if (remote) await cleanup(operation, checkout, remote);
+      append(operation.id, verdict);
     }
   }
   function start(work: () => Promise<void>, previous?: Promise<void>): Promise<void> {
@@ -311,6 +323,16 @@ export function createRunnerQueue(input: {
     },
     async recover() {
       await start(recoverRunning, active);
+    },
+    cancelled(operation) {
+      if (operation.kind !== "landing") return;
+      void start(async () => {
+        const checkout = checkoutPath(operation);
+        const context = await workspaceContext(checkout).catch(() => null);
+        if (context) await cleanup(operation, checkout, context.configuration.remote ?? "origin");
+        // A submission that woke the queue while this cleanup held it waits for this pass.
+        await loop();
+      }, active);
     },
     async idle() { while (active) await active; },
     kill() {

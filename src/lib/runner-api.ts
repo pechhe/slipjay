@@ -11,6 +11,8 @@ export function createRunnerHandler(input: {
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
   kill(): { operation: Operation; killed: boolean } | null;
+  /** A queued operation was cancelled: its candidate bookmark is the queue's to delete. */
+  onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
 }): RunnerHandler {
   const credential = Buffer.from(`Bearer ${input.token}`);
@@ -105,6 +107,8 @@ export function createRunnerHandler(input: {
         if (operation.status !== "queued")
           return json({ operation }, 409);
         input.log.append(id, { type: "cancelled", reason: "cancelled by the author" });
+        // Appended first, so the queue never starts it; nobody follows a cancel they asked for.
+        input.onCancelled?.(operation);
         return json({ operation: input.log.operation(id) });
       case "log": {
         const log = await input.readLog(id);
