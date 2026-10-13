@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import { candidateBookmark, RUNNER_API } from "./runner-contract.ts";
+import { candidateBookmark, repositoryKey, RUNNER_API } from "./runner-contract.ts";
 import type { OperationLog, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
@@ -29,7 +29,8 @@ export function createRunnerHandler(input: {
       }
       if (!validSubmission(body))
         return json({ error: "Invalid submission" }, 400);
-      const existing = input.log.operationsForChange(body.repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
+      const repo = repositoryKey(body.repo);
+      const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
       if (existing?.commitId === body.commitId)
         return json({ operation: existing, reattached: true });
       if (existing?.status === "running")
@@ -37,7 +38,7 @@ export function createRunnerHandler(input: {
       const id = newOperationId();
       if (existing)
         input.log.append(existing.id, { type: "superseded", by: id });
-      input.log.append(id, { type: "submitted", repo: body.repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
+      input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
       input.onSubmitted();
       return json({ operation: input.log.operation(id), reattached: false, ...existing ? { superseded: existing.id } : {} });
     }
@@ -46,7 +47,7 @@ export function createRunnerHandler(input: {
       const repo = url.searchParams.get("repo");
       if (!repo)
         return json({ error: "repo is required" }, 400);
-      return json({ operations: input.log.operationsForChange(repo, decodeURIComponent(change[1]!)) });
+      return json({ operations: input.log.operationsForChange(repositoryKey(repo), decodeURIComponent(change[1]!)) });
     }
     const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|cancel))?$`));
     if (!route || (route[2] === "cancel" ? request.method !== "POST" : request.method !== "GET"))

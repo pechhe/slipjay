@@ -102,6 +102,8 @@ test("submissions create, reattach, supersede queued work and conflict with runn
     const again = await submitted(await f.submit());
     assert.equal(again.reattached, true);
     assert.equal(again.operation.id, first.operation.id);
+    const recased = await submitted(await f.submit({ ...submission(), repo: "Owner/Repo" }));
+    assert.equal(recased.operation.id, first.operation.id);
     assert.equal(f.log.operationsForChange("owner/repo", changeId).length, 1);
     assert.equal(f.submissions, 1);
     const replacement = await submitted(await f.submit(submission("commit-2")));
@@ -123,7 +125,7 @@ test("submissions create, reattach, supersede queued work and conflict with runn
     assert.equal(f.log.operationsForChange("owner/repo", changeId).length, 2);
     assert.equal(f.submissions, 2);
     assert.equal((await submitted(await f.submit(submission("commit-2")))).reattached, true);
-    const changes = await (await f.request(`/changes/${changeId}?repo=owner/repo`)).json() as { operations: Operation[] };
+    const changes = await (await f.request(`/changes/${changeId}?repo=Owner/Repo`)).json() as { operations: Operation[] };
     assert.deepEqual(changes.operations.map((op) => op.id), [replacement.operation.id, first.operation.id]);
     assert.equal((await f.request(`/changes/${changeId}`)).status, 400);
     assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 1 });

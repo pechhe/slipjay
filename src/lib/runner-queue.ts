@@ -8,7 +8,11 @@ import { integrateLandingCandidate } from "./landing-candidate.ts";
 import { fetchIntegration, landingIO, publishIntegration } from "./landing-steps.ts";
 import { migrationPaths } from "./migration-candidate.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
+import { repositoryKey } from "./runner-contract.ts";
 import type { Executor, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, StoredEvent } from "./runner-contract.ts";
+
+const configuredRepository = (config: RunnerConfig, repo: string) =>
+  Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 
 const DECLINED_REASON = "Changes migration trigger paths; land it through the local path until the runner generates migrations (pechhe/slipjay#11)";
@@ -58,7 +62,7 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "stage", stage });
     };
     try {
-      const repository = Object.hasOwn(config.repos, operation.repo) ? config.repos[operation.repo] : undefined;
+      const repository = configuredRepository(config, operation.repo);
       if (!repository) throw new Error(`Repository ${operation.repo} is not configured on this runner`);
       setStage("fetching");
       if (!await stat(checkout).then(() => true, (error: NodeJS.ErrnoException) => {
@@ -157,7 +161,7 @@ export function createRunnerQueue(input: {
       let verdict: OperationEvent = { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; land again` };
       try {
         const integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
-        if (Object.hasOwn(config.repos, operation.repo)) {
+        if (configuredRepository(config, operation.repo)) {
           const context = await workspaceContext(checkout);
           if (context) remote = context.configuration.remote ?? "origin";
           if (integrated) {

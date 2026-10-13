@@ -125,3 +125,8 @@ export type RunnerConfig = {
   /** Repositories this runner lands, keyed `owner/name`, with the git URL its warm checkout clones. */
   repos: Record<string, { url: string }>;
 };
+
+/** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */
+export const repositoryKey = (name: string): string => name.toLowerCase();
+
+export const gateFailureProbe: number = "acceptance";

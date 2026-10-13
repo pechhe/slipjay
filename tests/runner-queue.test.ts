@@ -45,7 +45,7 @@ async function fixture(migrations = false) {
   const log = openOperationLog(":memory:");
   const published: StoredEvent[] = [];
   const executor = localExecutor();
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "fixture/repo": { url: origin } } }, publish: (event) => { published.push(event); } });
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } } }, publish: (event) => { published.push(event); } });
   const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
   const remoteFile = (file: string) => git(["--git-dir", origin, "show", `main:${file}`]);
   async function push(): Promise<SubmitRequest> {
