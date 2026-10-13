@@ -37,7 +37,7 @@ async function fixture(dropStream = false) {
   });
   const streamRequests: number[] = [];
   let droppedSeq = 0;
-  const server = await serveRunner(async (request) => {
+  const route = async (request: Request) => {
     if (new URL(request.url).pathname.endsWith("/events")) {
       streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
       if (dropStream && streamRequests.length === 1) {
@@ -48,11 +48,18 @@ async function fixture(dropStream = false) {
       }
     }
     return handler(request);
-  }, { host: "127.0.0.1", port: 0 });
+  };
+  let server = await serveRunner(route, { host: "127.0.0.1", port: 0 });
+  // The runner is unreachable until `back()`, as during a service restart.
+  const goDown = async () => {
+    const { port } = server;
+    await server.close();
+    return async () => { server = await serveRunner(route, { host: "127.0.0.1", port }); };
+  };
   const lines: string[] = [];
   const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
     onLine: (line: string) => { lines.push(line); }, fallback: async () => { throw new Error("unexpected fallback"); } };
-  return { ...f, remote, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq,
+  return { ...f, remote, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
     dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
 }
 
@@ -174,6 +181,23 @@ test("a dropped stream reconnects from the last event without repeating progress
     f.append(op.id, { type: "cancelled", reason: "fixture done" });
     await running;
     assert.equal(f.lines.filter((line) => line === "before reconnect").length, 1);
+  } finally { await f.dispose(); }
+});
+
+test("a runner restart mid-follow reconnects and reports the verdict", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    const back = await f.goDown();
+    await waitFor(() => f.lines.some((line) => line.includes("connection lost; reconnecting")));
+    f.append(op.id, { type: "cancelled", reason: "fixture done" });
+    await back();
+    const result = await running;
+    assert.equal(result.operation.id, op.id);
+    assert.equal(result.operation.status, "cancelled");
   } finally { await f.dispose(); }
 });
 

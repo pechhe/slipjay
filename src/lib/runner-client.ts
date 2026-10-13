@@ -95,6 +95,9 @@ export async function connectRunner(location: string, env: NodeJS.ProcessEnv = p
   } catch (error) { close(); throw error; }
 }
 
+const RECONNECT_ATTEMPTS = 30;
+const RECONNECT_DELAY_MS = 2000;
+
 async function follow(baseUrl: string, token: string, initial: Operation, name: string, onLine: (line: string) => void,
   env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<Operation> {
   const controller = new AbortController();
@@ -112,11 +115,24 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
     operation = (await (await request(baseUrl, token, `/v1/operations/${initial.id}`, { signal: controller.signal })).json() as { operation: Operation }).operation;
     show();
   };
+  // A restarting runner refuses connections for a few seconds: keep asking, then hand back.
+  const reconnect = async () => {
+    for (let attempt = 1; ; attempt++) {
+      try { return await refresh(); } catch (error) {
+        controller.signal.throwIfAborted();
+        if (error instanceof Error && /credential|HTTP/.test(error.message)) throw error;
+        if (attempt === 1) onLine(`[runner ${name}] connection lost; reconnecting`);
+        if (attempt === RECONNECT_ATTEMPTS) throw new Error("Lost the runner connection; rerun slipjay land to reattach", { cause: error });
+        await delay(RECONNECT_DELAY_MS, undefined, { signal: controller.signal });
+      }
+    }
+  };
   show();
   const polling = (async () => {
     while (!controller.signal.aborted) {
       await delay(3000, undefined, { signal: controller.signal });
-      if (operation.status === "queued") await refresh();
+      // Queue positions are cosmetic; the event loop below reports a lost connection.
+      if (operation.status === "queued") await refresh().catch(() => {});
     }
   })().catch((error: unknown) => { if (!controller.signal.aborted) { controller.abort(error); } });
   try {
@@ -157,7 +173,7 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
       }
       if (operation.status === "queued" || operation.status === "running") {
         await delay(250, undefined, { signal: controller.signal });
-        await refresh();
+        await reconnect();
       }
     }
     return operation;
