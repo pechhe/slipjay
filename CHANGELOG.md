@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.2.0
 
 - **Migrations on the runner:** the runner no longer declines changes touching
   migration trigger paths. It generates the migration on the rebased candidate, runs
