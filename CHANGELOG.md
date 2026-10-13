@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.1.0
+
+- **Runner:** `slipjay runner serve` runs a landing queue on a server, and `slipjay land`
+  sends ordinary changes to it when `SLIPJAY_RUNNER` or `runner` in
+  `~/.slipjay/config.json` names one (`http://host:port`, or `ssh://host` through an
+  SSH forward). Changes travel as the bookmark `slipjay/changes/<changeId>`; the
+  runner lands them one at a time in a warm clone, records each run, and recovers
+  after a restart. Rerunning `land` reattaches to the same operation, and
+  `slipjay runner log <op>` prints its log. Changes with migrations, and any change
+  the runner declines, land locally as before. `scripts/setup-runner.sh` installs the
+  runner as a systemd user service.
+
 ## v3.0.0
 
 - **TypeScript on Bun:** the CLI and library are TypeScript, run by Bun 1.4 or later
