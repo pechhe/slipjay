@@ -115,8 +115,18 @@ bun add -g github:pechhe/slipjay#v3.6.1
 slipjay status
 ```
 
-To upgrade, run `bun remove -g @pechhe/slipjay && bun pm cache rm` first: Bun keeps
-the installed tag otherwise.
+To upgrade, remove the installed tag first, since `bun add -g` (even with `--force`)
+keeps it otherwise, and check the version:
+
+```sh
+bun remove -g @pechhe/slipjay && bun add -g github:pechhe/slipjay#<tag>
+slipjay --version
+```
+
+Never clear Bun's package cache (`bun pm cache rm`) to upgrade: projects that set
+`globalStore = true` link every checkout's packages into it, so clearing it breaks
+their dependencies. When a workspace's dependencies are damaged that way, `slipjay start`
+and landing say how to repair them.
 
 From Slipway, remove it first (`bun remove -g @pechhe/slipway`) and run
 `slipjay cutover` once after installing.

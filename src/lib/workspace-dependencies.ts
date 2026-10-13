@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { migrationCommandFailure } from "./migration-command-evidence.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
@@ -33,6 +34,58 @@ async function workspaceDependencyCommand(workspacePath: string): Promise<{ comm
   throw new Error(`Workspace dependency provisioning does not support package manager '${packageManager}'.`);
 }
 
+/** The workspace's tracked `package.json` paths, relative to its root, or null when JJ cannot list them. */
+async function trackedManifests(workspacePath: string): Promise<string[] | null> {
+  const listed = await run("jj", ["--color=never", "--ignore-working-copy", "file", "list", 'root-glob:"**/package.json"'], { cwd: workspacePath });
+  return listed.code === 0 ? listed.stdout.split("\n").filter(Boolean) : null;
+}
+
+/**
+ * Damage to Bun's global store that a frozen install can leave behind, as a repair hint, or
+ * null. With `globalStore = true` every checkout's packages are symlinks into
+ * `<cache>/links`, so emptying that cache (for example with `bun pm cache rm`) leaves them
+ * dangling. The walk follows only what this checkout uses, from each manifest's declared
+ * packages through their dependencies' links: entries Bun never prunes for packages no
+ * manifest declares any more are stale, not damage. Half-linked `links/*.tmp-*` entries,
+ * which a cold cache can leave, are named as a likely cause but are never damage alone,
+ * since they may belong to another project or a running install.
+ */
+export async function bunStoreDamage(workspacePath: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  const dangling: string[] = [];
+  const visited = new Set<string>();
+  const follow = async (link: string): Promise<void> => {
+    if (!(await lstat(link).catch(() => null))?.isSymbolicLink()) return;
+    const target = await realpath(link).catch(() => null);
+    if (!target) { dangling.push(link); return; }
+    // An isolated package sits at <entry>/node_modules/<name>; its dependencies are the other links there.
+    const modules = target.slice(0, target.lastIndexOf("/node_modules/") + "/node_modules".length);
+    if (!target.includes("/node_modules/") || visited.has(modules)) return;
+    visited.add(modules);
+    for (const name of await readdir(modules).catch(() => [])) {
+      const path = join(modules, name);
+      if (name.startsWith("@")) for (const scoped of await readdir(path).catch(() => [])) await follow(join(path, scoped));
+      else await follow(path);
+    }
+  };
+  for (const manifest of await trackedManifests(workspacePath) ?? []) {
+    const modules = join(workspacePath, dirname(manifest), "node_modules");
+    if (!existsSync(modules)) continue;
+    const declared = JSON.parse(await readFile(join(workspacePath, manifest), "utf8").catch(() => "{}"));
+    for (const name of Object.keys({ ...declared.dependencies, ...declared.devDependencies })) await follow(join(modules, name));
+  }
+  if (!dangling.length) return null;
+  const links = join(env.BUN_INSTALL_CACHE_DIR ?? join(env.BUN_INSTALL ?? join(homedir(), ".bun"), "install", "cache"), "links");
+  const partial = (await readdir(links).catch(() => [])).filter((entry) => entry.includes(".tmp-")).map((entry) => join(links, entry));
+  const list = (paths: string[]) => paths.slice(0, 10).map((path) => `  ${path}`).join("\n") + (paths.length > 10 ? `\n  … and ${paths.length - 10} more` : "");
+  const lines = ["Bun's global package store is damaged, so this checkout's dependencies do not resolve.",
+    `Package links that dangle:\n${list(dangling)}`,
+    `Repair: \`rm -rf node_modules\` (and each workspace package's) in ${workspacePath}, then \`bun install --frozen-lockfile\`.`];
+  if (partial.length) lines.push(`Half-linked store entries, a likely cause:\n${list(partial)}`,
+    "Delete them before reinstalling. If a package with platform-specific optional dependencies stays unlinked, `bun add <package>@<version>` in a scratch directory first, to fetch its binary into the cache.");
+  lines.push("Upgrading SlipJay never needs `bun pm cache rm`: see its README.");
+  return lines.join("\n");
+}
+
 /**
  * Copy every `node_modules` tree of `source` into the same places in `workspacePath` with
  * copy-on-write file clones (APFS `clonefile`; reflinks on Linux), so the copy costs no
@@ -43,10 +96,10 @@ async function workspaceDependencyCommand(workspacePath: string): Promise<{ comm
 async function cloneNodeModules(source: string, workspacePath: string): Promise<string[] | null> {
   const clone = process.platform === "darwin" ? ["cp", "-cRP"] : process.platform === "linux" ? ["cp", "-RP", "--reflink=auto"] : null;
   if (!clone) return null;
-  const listed = await run("jj", ["--color=never", "--ignore-working-copy", "file", "list", 'root-glob:"**/package.json"'], { cwd: workspacePath });
-  if (listed.code !== 0) return null;
+  const manifests = await trackedManifests(workspacePath);
+  if (!manifests) return null;
   const created: string[] = [];
-  for (const manifest of listed.stdout.split("\n").filter(Boolean)) {
+  for (const manifest of manifests) {
     const from = join(source, dirname(manifest), "node_modules");
     const to = join(workspacePath, dirname(manifest), "node_modules");
     if (!existsSync(from) || existsSync(to)) continue;
@@ -98,9 +151,14 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
     await Promise.all(seeded.map((path) => rm(path, { recursive: true, force: true })));
     result = await install();
   }
+  const damage = dependencyCommand.command === "bun" ? await bunStoreDamage(workspacePath, options.env ?? process.env) : null;
   if (result.code !== 0) {
-    throw migrationCommandFailure([dependencyCommand.command, ...dependencyCommand.args].join(" "), result, workspacePath, options.env ?? process.env, "Dependency");
+    const failure = migrationCommandFailure([dependencyCommand.command, ...dependencyCommand.args].join(" "), result, workspacePath, options.env ?? process.env, "Dependency");
+    if (damage) failure.message += `\n${damage}`;
+    throw failure;
   }
+  // A frozen install can report success over a store it did not repair.
+  if (damage) throw new Error(damage);
   const installed = options.recordInputs && inputs && await installInputFingerprint(workspacePath);
   return { state: "ready", packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true } : {}) };
 }

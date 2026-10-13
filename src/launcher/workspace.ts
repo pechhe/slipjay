@@ -29,7 +29,7 @@ import { landingGuardDecision } from "../lib/landing-guard.ts";
 import { landingTimingLine, landingTimingRecord } from "../lib/landing-timing.ts";
 import { appendMetric } from "../lib/metrics.ts";
 import { execFileSync, spawn } from "node:child_process";
-import { writeSync } from "node:fs";
+import { readFileSync, writeSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -196,11 +196,13 @@ async function runCutover(args: string[]): Promise<number> {
 const [command, ...rest] = process.argv.slice(2);
 
 try {
-  if (command !== "status" && command !== "cutover" && cutoverPending()) {
+  if (command !== "status" && command !== "cutover" && command !== "--version" && cutoverPending()) {
     // Before the cutover, only `status` and `cutover` run: anything else would start a second lock store.
     console.error(`slipjay ${command ?? ""}`.trim() + ` refused: this machine's slipjay state still lives under ${legacyStateHome()}. `
       + "Run `slipjay cutover` once while nothing is landing (`slipjay cutover --check` reports what holds it), then retry.");
     process.exitCode = 1;
+  } else if (command === "--version") {
+    console.log(JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
   } else if (command === "cutover") {
     process.exitCode = await runCutover(rest);
   } else if (command === "status" && cutoverPending()) {
@@ -335,7 +337,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
