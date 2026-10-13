@@ -290,7 +290,9 @@ candidate.
    16bea7013436)`, and so does a release behind a landing. In its turn the runner
    checks the exact candidate out in its warm checkout, prepares its dependencies
    and runs the checks; their failure publishes nothing and prints the failing
-   command and its output verbatim. The terminal follows the stages (`verifying`,
+   command and its output verbatim. If the install or a check changed tracked
+   source, the verified tree is not the candidate's: the release publishes nothing,
+   lists the changed paths and restores the candidate. The terminal follows the stages (`verifying`,
    `publishing`, `finalizing`); Ctrl-C stops following, and rerunning the same
    confirm follows the open release of that candidate instead of submitting a
    second.

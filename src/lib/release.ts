@@ -301,6 +301,18 @@ export async function confirmableCandidate(cwd: string, confirm: string, migrati
 }
 
 /**
+ * Refuse unless `checkout` still holds exactly the candidate's tree: the release
+ * publishes the candidate, so checks that passed against edited source verified
+ * something else. The edits are undone so the next confirm starts clean.
+ */
+async function requireCandidateTree(checkout: string, candidate: string): Promise<void> {
+  const drift = await jj(checkout, ["diff", "--from", candidate, "--to", "@", "--summary"]);
+  if (!drift) return;
+  await jj(checkout, ["restore", "--from", candidate, "--into", "@"]);
+  refuse(`Dependency preparation or release verification changed the candidate's source, so the verified tree is not the one a release would publish; nothing was published. Fix what edits it and confirm again:\n${drift}`);
+}
+
+/**
  * Verify and publish the approved `candidate` from `checkout`, which this call owns
  * for its duration (the runner's warm checkout: it checks the candidate out there).
  * A candidate the release branch already holds verifies nothing and only reruns a
@@ -328,6 +340,7 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
       ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,
         ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
       : { passed: [], gaps: [] };
+    await requireCandidateTree(checkout, plan.candidate);
     onStage("publishing");
     // The base must still be what was planned: a moved release branch needs a new plan.
     await fetch(plan.root, plan.remote, plan.releaseBranch);
