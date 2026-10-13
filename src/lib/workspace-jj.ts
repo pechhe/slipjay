@@ -214,8 +214,9 @@ export async function revisionExists(cwd: string, revision: string): Promise<boo
   return result.code === 0 && result.stdout.includes("ok");
 }
 
-export async function revisionFacts(cwd: string, revision: string): Promise<RevisionFacts> {
-  const output = await jj(cwd, ["log", "-r", revision, "--no-graph", "-T",
+/** Snapshots the working copy first unless `ignoreWorkingCopy`, which also reads a stale one. */
+export async function revisionFacts(cwd: string, revision: string, { ignoreWorkingCopy = false }: { ignoreWorkingCopy?: boolean } = {}): Promise<RevisionFacts> {
+  const output = await jj(cwd, [...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "log", "-r", revision, "--no-graph", "-T",
     'change_id ++ "\\t" ++ commit_id ++ "\\t" ++ empty ++ "\\t" ++ conflict ++ "\\t" ++ description.first_line() ++ "\\n"']);
   const [changeId, commitId, empty, conflict, description = ""] = output.split("\t");
   return {

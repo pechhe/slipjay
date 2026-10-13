@@ -277,15 +277,22 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       return { ok: false, operation, logUrl };
     }
     if (result?.type === "landed") {
-      await fetchIntegration(cwd, remote, result.branch);
-      if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`))
-        await jj(cwd, ["abandon", target.commitId]);
-      const facts = await revisionFacts(cwd, result.commitId);
+      // Record the landing before anything that snapshots the working copy: a stale one must
+      // not leave a published change looking undelivered to cleanup.
+      await fetchIntegration(cwd, remote, result.branch, { ignoreWorkingCopy: true });
+      const facts = await revisionFacts(cwd, result.commitId, { ignoreWorkingCopy: true });
       let state: Record<string, unknown> = { artifactCommitId: result.commitId };
       if (context.current.name !== "default") {
         await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
         state = { ...await readLandingState(context.current.name), runner: { location: options.location, operationId: operation.id } };
         await writeWorkspaceJson(statePath(context.current.name), state);
+      }
+      if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`)) {
+        try { await jj(cwd, ["abandon", target.commitId]); }
+        catch (error) {
+          onLine(`Could not abandon the submitted commit ${target.commitId}, which landed as ${result.commitId}: ${String(error).trim()}`);
+          onLine(`Run \`jj workspace update-stale\` and \`jj abandon ${target.commitId}\` in ${context.current.root}.`);
+        }
       }
       await finishLanding(context, state, landingIO);
       // Release other delivered or idle checkouts; the sweep never fails the landing.

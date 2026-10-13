@@ -9,6 +9,7 @@ import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
+import { readLandingState } from "../src/lib/workspace-state.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { jj, project } from "./support/workspace-project.ts";
 
@@ -242,6 +243,30 @@ test("a runner restart mid-follow reconnects and reports the verdict", async () 
     const result = await running;
     assert.equal(result.operation.id, op.id);
     assert.equal(result.operation.status, "cancelled");
+  } finally { await f.dispose(); }
+});
+
+test("a landing is recorded even when abandoning the rewritten submitted commit fails", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    // The runner rewrote the candidate onto main, so the submitted commit must be abandoned locally.
+    const git = (...args: string[]) => execFileSync("git", ["--git-dir", f.remote, ...args], { encoding: "utf8" }).trim();
+    const landed = git("commit-tree", `${op.commitId}^{tree}`, "-p", "main", "-m", "Implement candidate (rewritten)");
+    git("update-ref", "refs/heads/main", landed);
+    // Anything that stops the abandon, as a stale working copy does in the field.
+    jj(f.repo, ["config", "set", "--repo", 'revset-aliases."immutable_heads()"', `builtin_immutable_heads() | ${op.commitId}`]);
+    f.append(op.id, { type: "landed", base: "fixture-base", commitId: landed, branch: "main", remote: "origin" });
+    const result = await running;
+    assert.equal(result.ok, true);
+    const name = f.cwd.split("/").at(-1)!;
+    const state = await readLandingState(name, { readOnly: true });
+    assert.equal(state?.phase, "landed");
+    assert.equal(state?.artifactCommitId, landed);
+    assert.ok(f.lines.some((line) => line.includes("jj workspace update-stale")), f.lines.join("\n"));
   } finally { await f.dispose(); }
 });
 

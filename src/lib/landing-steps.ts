@@ -149,7 +149,8 @@ export function publicationRemote(context: { configuration: { remote?: string | 
   return context.configuration.remote ?? null;
 }
 
-export const fetchIntegration = (cwd: string, remote: string, branch: string, options: { timeoutMs?: number } = {}): ReturnType<typeof import("./workspace-command.ts").runWorkspaceCommand> => run("jj", ["--color=never", "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
+export const fetchIntegration = (cwd: string, remote: string, branch: string, { ignoreWorkingCopy = false, ...options }: { timeoutMs?: number; ignoreWorkingCopy?: boolean } = {}): ReturnType<typeof import("./workspace-command.ts").runWorkspaceCommand> =>
+  run("jj", ["--color=never", ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
 
 /** Push the integration bookmark and confirm the remote-tracking bookmark contains the artifact. */
 export async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string): Promise<LandingPublication> {
