@@ -9,6 +9,10 @@
   the gate because the integration branch has since added a dependency or workspace
   package. An install that edits tracked source is undone and fails the landing. This
   replaces the install that only migration landings ran.
+- **The guard sees another workspace's unsaved edits:** `jj workspace forget <name>`
+  run from a different checkout now reads that workspace's `@` from its own
+  checkout, so edits made there since its last snapshot count. Before, they were
+  invisible and the forget was allowed.
 
 ## v1.17.0
 

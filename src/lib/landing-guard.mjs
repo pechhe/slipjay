@@ -9,10 +9,11 @@
  * without a real description (`jj new`, `jj edit`, `jj workspace forget`, ...) is
  * refused until the work is described, abandoned or landed.
  */
+import { existsSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { jjWorkspaceRoot, run } from "./workspace-jj.mjs";
+import { jjWorkspaceRoot, parseWorkspaceList, run } from "./workspace-jj.mjs";
 import { workspaceMetadata } from "./workspace-state.mjs";
 import { EXECUTION_POLICY_PROBE_PATHS, parseExecutionPolicy, selectExecutionPolicyPath } from "./execution-policy.mjs";
 
@@ -240,8 +241,9 @@ function abandonedWorkspaces(args) {
  * workspace: `dir` is in a governed repository (a secondary workspace, unless the
  * command forgets named workspaces, which is judged from any checkout) and a workspace
  * the command leaves (or forgets) has a non-empty, unintegrated `@` that is undescribed
- * or still carries the description `start` generated. One jj query, which snapshots as
- * the command itself would; fails open when jj cannot be queried.
+ * or still carries the description `start` generated. One jj query per workspace left,
+ * run in that workspace's checkout so it snapshots its edits; fails open when jj cannot
+ * be queried.
  */
 async function orphanedWork(args, dir, governed) {
   const leaves = abandonedWorkspaces(args);
@@ -252,23 +254,50 @@ async function orphanedWork(args, dir, governed) {
     if (!root) return null;
     if (!leaves.length && !(await stat(join(root, ".jj", "repo"))).isFile()) return null;
     const integrated = governed.branches.map((branch) => `bookmarks(exact:${JSON.stringify(branch)})`).join(" | ");
-    const targets = leaves.length ? leaves.map((name) => `${JSON.stringify(name)}@`).join(" | ") : "@";
-    const queried = await run("jj", ["--color=never", "log", "-r", `(${targets}) ~ ::(${integrated})`, "--no-graph", "-T",
-      'working_copies ++ "\t" ++ empty ++ "\t" ++ description.first_line() ++ "\n"'], { cwd: root, timeoutMs: 15_000 });
-    if (queried.code !== 0) return null;
-    for (const row of queried.stdout.split("\n").filter(Boolean)) {
-      const [copies, empty, description = ""] = row.split("\t");
-      if (empty === "true") continue;
-      const names = copies.trim().split(/\s+/).filter((name) => name.endsWith("@")).map((name) => name.slice(0, -1));
-      const generated = (await Promise.all(names.map(async (name) => (await workspaceMetadata(name))?.generatedDescription))).filter(Boolean);
-      const placeholder = description.trim() !== "" && generated.includes(description.trim());
-      if (description.trim() && !placeholder) continue;
-      return `Workspace ${names.join(", ") || "here"} has a working-copy commit with changes that are not integrated and ${placeholder ? "only the generated `wip:` description" : "no description"}, and this command would leave them behind as an orphan. ${ORPHAN_REMEDY}`;
+    for (const { cwd, target, byName } of leaves.length ? await namedCheckouts(root, leaves) : [{ cwd: root, target: "@" }]) {
+      let reason = await undescribedWork(cwd, target, integrated);
+      // A checkout jj cannot read there (a stale working copy) is still judged by its last snapshot.
+      if (reason === undefined && byName) reason = await undescribedWork(root, byName, integrated);
+      if (reason) return reason;
     }
     return null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Where to look at each named workspace's `@`: its own checkout, because edits made
+ * there since its last snapshot are visible only to a jj command run inside it (which
+ * snapshots it, as any jj command there would). A workspace without a checkout on
+ * disk is read from `root` by name.
+ */
+async function namedCheckouts(root, names) {
+  const listed = await run("jj", ["--color=never", "--ignore-working-copy", "workspace", "list", "-T",
+    'name ++ "\t" ++ root ++ "\t" ++ target.change_id() ++ "\t" ++ target.commit_id() ++ "\n"'], { cwd: root, timeoutMs: 15_000 });
+  const workspaces = listed.code === 0 ? parseWorkspaceList(listed.stdout) : [];
+  return names.map((name) => {
+    const checkout = workspaces.find((entry) => entry.name === name)?.root;
+    const byName = `${JSON.stringify(name)}@`;
+    return checkout && existsSync(checkout) ? { cwd: checkout, target: "@", byName } : { cwd: root, target: byName };
+  });
+}
+
+/** The deny reason when `target`, read from `cwd`, is unintegrated, non-empty and undescribed; null otherwise, undefined when jj fails. */
+async function undescribedWork(cwd, target, integrated) {
+  const queried = await run("jj", ["--color=never", "log", "-r", `(${target}) ~ ::(${integrated})`, "--no-graph", "-T",
+    'working_copies ++ "\t" ++ empty ++ "\t" ++ description.first_line() ++ "\n"'], { cwd, timeoutMs: 15_000 });
+  if (queried.code !== 0) return undefined;
+  for (const row of queried.stdout.split("\n").filter(Boolean)) {
+    const [copies, empty, description = ""] = row.split("\t");
+    if (empty === "true") continue;
+    const names = copies.trim().split(/\s+/).filter((name) => name.endsWith("@")).map((name) => name.slice(0, -1));
+    const generated = (await Promise.all(names.map(async (name) => (await workspaceMetadata(name))?.generatedDescription))).filter(Boolean);
+    const placeholder = description.trim() !== "" && generated.includes(description.trim());
+    if (description.trim() && !placeholder) continue;
+    return `Workspace ${names.join(", ") || "here"} has a working-copy commit with changes that are not integrated and ${placeholder ? "only the generated `wip:` description" : "no description"}, and this command would leave them behind as an orphan. ${ORPHAN_REMEDY}`;
+  }
+  return null;
 }
 
 /**

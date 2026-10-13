@@ -92,7 +92,9 @@ test("a failed post-release step keeps the release, is reported and is retried b
     assert.equal((await runs(f.root)).at(-1)?.source, later);
     assert.equal(remoteRef(f, "release"), released.merge);
     const settled = await releaseIntegration(f.repo);
-    assert.ok(settled.ok && settled.status === "up_to_date");
+    // later.txt is still unreleased, so the plan proposes it; only the report is gone.
+    assert.ok(settled.ok && settled.status === "planned", JSON.stringify(settled));
+    assert.equal(settled.candidate, later);
     assert.equal(settled.pendingPostRelease, undefined, "a completed retry clears the report");
   } finally {
     await f.dispose();

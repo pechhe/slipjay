@@ -19,7 +19,8 @@ const recording = (log: string) => ({
 
 async function landed(cwd: string, file: string) {
   await writeFile(join(cwd, file), `${file}\n`);
-  assert.equal((await landWorkspace(cwd, { onProgress: () => {} })).ok, true);
+  // Kept after landing, so the cleanup under test is what removes it.
+  assert.equal((await landWorkspace(cwd, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
 }
 
 test("cleanup runs the declared teardown in the workspace before deleting it", async () => {

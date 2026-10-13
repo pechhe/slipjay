@@ -16,7 +16,8 @@ const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
 const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
 
 function occupy(cwd: string) {
-  const child = spawn("sleep", ["60"], { cwd, stdio: "ignore" });
+  // Its own process group, like a process another session or terminal started: the caller's group counts as the caller.
+  const child = spawn("sleep", ["60"], { cwd, stdio: "ignore", detached: true });
   return { pid: child.pid, dispose: () => child.kill() };
 }
 
