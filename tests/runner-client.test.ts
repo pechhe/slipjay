@@ -9,7 +9,6 @@ import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
-import { readLandingState } from "../src/lib/workspace-state.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { jj, project } from "./support/workspace-project.ts";
 
@@ -246,7 +245,7 @@ test("a runner restart mid-follow reconnects and reports the verdict", async () 
   } finally { await f.dispose(); }
 });
 
-test("a landing is recorded even when abandoning the rewritten submitted commit fails", async () => {
+test("a landing finishes housekeeping even when abandoning the rewritten submitted commit fails", async () => {
   const f = await fixture();
   try {
     const running = landThroughRunner(f.cwd, f.options);
@@ -262,10 +261,8 @@ test("a landing is recorded even when abandoning the rewritten submitted commit 
     f.append(op.id, { type: "landed", base: "fixture-base", commitId: landed, branch: "main", remote: "origin" });
     const result = await running;
     assert.equal(result.ok, true);
-    const name = f.cwd.split("/").at(-1)!;
-    const state = await readLandingState(name, { readOnly: true });
-    assert.equal(state?.phase, "landed");
-    assert.equal(state?.artifactCommitId, landed);
+    // The working copy moved onto the landed commit, so housekeeping released the workspace.
+    await assert.rejects(access(f.cwd), { code: "ENOENT" });
     assert.ok(f.lines.some((line) => line.includes(`jj abandon ${op.commitId}`)), f.lines.join("\n"));
   } finally { await f.dispose(); }
 });
@@ -322,6 +319,52 @@ test("rerunning after an unfollowed landing reattaches to it and finishes housek
     assert.equal(result.ok, true);
     assert.equal(result.operation.id, "op_landed");
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+  } finally { await f.dispose(); }
+});
+
+test("a reland after the change landed, with an empty working copy on an immutable integrated parent, submits nothing", async () => {
+  const f = await fixture();
+  try {
+    const base = jj(f.cwd, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
+    const baseChange = jj(f.cwd, ["log", "-r", "@-", "--no-graph", "-T", "change_id"]);
+    f.append("op_landed", { type: "submitted", repo: "fixture/project", changeId: f.change, commitId: f.commit, bookmark: candidateBookmark(f.change), submittedBy: "earlier" });
+    jj(f.cwd, ["git", "push", "--remote", "origin", "--named", `${candidateBookmark(f.change)}=${f.commit}`]);
+    jj(f.cwd, ["bookmark", "forget", "--include-remotes", candidateBookmark(f.change)]);
+    // The runner rebased the candidate, so main holds a different commit of the same change.
+    const landed = execFileSync("git", ["--git-dir", f.remote, "commit-tree", `${f.commit}^{tree}`, "-p", base, "-m", "Implement candidate (landed)"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["--git-dir", f.remote, "update-ref", "refs/heads/main", landed]);
+    f.append("op_landed", { type: "landed", base, commitId: landed, branch: "main", remote: "origin" });
+    // As after a concurrent fetch hid the candidate: an empty working copy on the old base, now immutable.
+    jj(f.cwd, ["abandon", f.commit]);
+    jj(f.cwd, ["git", "fetch", "--remote", "origin", "--branch", "main"]);
+    assert.equal(jj(f.cwd, ["log", "-r", "@", "--no-graph", "-T", "empty"]), "true");
+    assert.equal(jj(f.cwd, ["log", "-r", "@-", "--no-graph", "-T", "immutable"]), "true");
+    const result = await landThroughRunner(f.cwd, f.options);
+    assert.equal(result.ok, true);
+    assert.equal(result.operation.id, "op_landed");
+    assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+    assert.throws(() => execFileSync("git", ["--git-dir", f.remote, "rev-parse", "--verify", `refs/heads/${candidateBookmark(baseChange)}`], { stdio: "ignore" }));
+    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+  } finally { await f.dispose(); }
+});
+
+test("a landed candidate made immutable by a re-imported remote bookmark is still dropped", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    // The runner rebased the candidate, and a fetch elsewhere re-imported its remote bookmark untracked.
+    const base = jj(f.cwd, ["log", "-r", `${f.commit}-`, "--no-graph", "-T", "commit_id"]);
+    const landed = execFileSync("git", ["--git-dir", f.remote, "commit-tree", `${f.commit}^{tree}`, "-p", base, "-m", "Implement candidate (landed)"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["--git-dir", f.remote, "update-ref", "refs/heads/main", landed]);
+    jj(f.cwd, ["git", "fetch", "--remote", "origin", "--branch", candidateBookmark(f.change)]);
+    assert.equal(jj(f.cwd, ["log", "-r", f.commit, "--no-graph", "-T", "immutable"]), "true");
+    f.append(op.id, { type: "landed", base, commitId: landed, branch: "main", remote: "origin" });
+    const result = await running;
+    assert.equal(result.ok, true);
     await assert.rejects(access(f.cwd), { code: "ENOENT" });
   } finally { await f.dispose(); }
 });

@@ -11,8 +11,9 @@ import { githubRepository } from "./issue-references.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts } from "./workspace-jj.ts";
+import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
-import { readLandingState, statePath } from "./workspace-state.ts";
+import { readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 import type { SweepResult } from "./workspace-sweep.ts";
 import { writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -229,23 +230,38 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
   const { context, target: preview } = await landingPreview(cwd, { allowDefaultWorkspace: options.direct });
-  const target = await landingIO.ensureLandingDescription(cwd, context, preview);
   const remote = publicationRemote(context);
   if (!remote) throw new Error("Runner landing requires a publication remote");
   const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), remote);
   if (!repo) throw new Error("Runner landing requires a GitHub repository on the publication remote");
+  // An integrated target is never submitted: a rerun after this workspace's change landed
+  // can find only integrated history (someone else's commit) under an empty working copy.
+  await fetchIntegration(cwd, remote, context.integrationBranch);
+  const landedChange = await revisionExists(cwd, `${preview.commitId} & ::${context.integrationBranch}`) ? await ownChangeId(context) : undefined;
+  const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview) : preview;
   const token = await runnerToken(env);
   const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
   const { baseUrl, name } = connection;
+  const operationsFor = async (changeId: string) => (await (await request(baseUrl, token, `/v1/changes/${changeId}?repo=${encodeURIComponent(repo)}`,
+    { signal: options.signal })).json() as { operations: Operation[] }).operations;
   try {
-    const existing = await (await request(baseUrl, token, `/v1/changes/${target.changeId}?repo=${encodeURIComponent(repo)}`, { signal: options.signal })).json() as { operations: Operation[] };
-    // Reattach to this commit's open operation, or to one that landed while nobody followed it.
-    let operation = existing.operations.find((op) => (op.status === "queued" || op.status === "running") && op.commitId === target.commitId)
-      ?? existing.operations.find((op) => op.status === "landed" && op.commitId === target.commitId);
-    // A running older commit already fetched its bookmark state; follow it instead of moving the bookmark under it.
-    const running = operation ? undefined : existing.operations.find((op) => op.status === "running");
-    let older = running !== undefined;
-    if (running) operation = running;
+    let operation: Operation | undefined;
+    let older = false;
+    if (landedChange !== undefined) {
+      // Only this workspace's own landed change finishes housekeeping here.
+      // Operations come newest first.
+      operation = landedChange ? (await operationsFor(landedChange)).find((op) => op.status === "landed") : undefined;
+      if (!operation) throw new Error(`Nothing to land: ${preview.commitId.slice(0, 12)} is already on ${context.integrationBranch}`);
+    } else {
+      const existing = await operationsFor(target.changeId);
+      // Reattach to this commit's open operation, or to one that landed while nobody followed it.
+      operation = existing.find((op) => (op.status === "queued" || op.status === "running") && op.commitId === target.commitId)
+        ?? existing.find((op) => op.status === "landed" && op.commitId === target.commitId);
+      // A running older commit already fetched its bookmark state; follow it instead of moving the bookmark under it.
+      const running = operation ? undefined : existing.find((op) => op.status === "running");
+      older = running !== undefined;
+      if (running) operation = running;
+    }
     if (!operation) {
       const bookmark = candidateBookmark(target.changeId);
       try { await jj(cwd, ["git", "fetch", "--remote", remote, "--branch", bookmark]); }
@@ -294,13 +310,10 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
         state = { ...await readLandingState(context.current.name), runner: { location: options.location, operationId: operation.id } };
         await writeWorkspaceJson(statePath(context.current.name), state);
       }
-      if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`)) {
-        try { await jj(cwd, ["abandon", target.commitId]); }
-        catch (error) {
-          onLine(`Could not abandon the submitted commit ${target.commitId}, which landed as ${result.commitId}: ${String(error).trim()}`);
-          onLine(`Abandon it with \`jj abandon ${target.commitId}\` in ${context.current.root} once the cause is fixed, or it shows as divergent.`);
-        }
-      }
+      // A concurrent jj command elsewhere in the repository can leave this working copy stale.
+      await jj(cwd, ["workspace", "update-stale"]);
+      if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`))
+        await dropSupersededCandidate(cwd, context.current.root, target, result.commitId, onLine);
       await finishLanding(context, state, landingIO);
       // Release other delivered or idle checkouts; the sweep never fails the landing.
       sweep = await sweepDisposableWorkspaces(context.integration.root, { protectedRoots: [cwd, context.current.root] }).catch(() => undefined);
@@ -325,6 +338,29 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     if (older) onLine(`[runner ${name}] followed an older commit; land again to submit your current commit`);
     return { ok: !older && result?.type === "landed", operation, logUrl, ...(sweep ? { sweep } : {}) };
   } finally { connection.close(); }
+}
+
+/** The change this workspace landed or was created for; null when nothing records one. */
+async function ownChangeId(context: WorkspaceContext): Promise<string | null> {
+  if (context.current.name === "default") return null;
+  const state = await readLandingState(context.current.name, { readOnly: true });
+  if (state?.phase === "landed" && typeof state.artifactChangeId === "string") return state.artifactChangeId;
+  const metadata = await workspaceMetadata(context.current.name);
+  return typeof metadata?.implementationChangeId === "string" ? metadata.implementationChangeId : null;
+}
+
+/**
+ * Abandon the submitted commit the runner rewrote onto the integration branch. If that fails and
+ * nothing sits on top of it, move the working copy onto the landed commit so cleanup sees no
+ * unlanded work; follow-up work stays in the working copy, and cleanup keeps the workspace for it.
+ */
+async function dropSupersededCandidate(cwd: string, root: string, candidate: RevisionFacts, landedCommitId: string, onLine: (line: string) => void): Promise<void> {
+  try { await jj(cwd, ["abandon", candidate.commitId]); } catch (error) {
+    onLine(`Could not abandon the submitted commit ${candidate.commitId}, which landed as ${landedCommitId}: ${String(error).trim()}`);
+    onLine(`Abandon it with \`jj abandon ${candidate.commitId}\` in ${root} once the cause is fixed, or it shows as divergent.`);
+    if (await revisionExists(cwd, `${candidate.commitId} & ::@`) && !await revisionExists(cwd, `(${candidate.commitId}..@) & ~empty()`))
+      await jj(cwd, ["new", landedCommitId]);
+  }
 }
 
 /**

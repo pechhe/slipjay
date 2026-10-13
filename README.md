@@ -183,7 +183,7 @@ turns in the same queue (see [Release](#release)).
   position. Then a summary: the verdict, the failing command's output verbatim on
   failure, and `slipjay runner log <operation>`, which prints the full run log from any machine with the location. Interrupting `land` stops following but
   not the landing. Running `land` again in the same workspace reattaches to the same
-  operation (or, if it landed meanwhile, finishes the workspace housekeeping); it never submits twice. While an older commit of the change is running, `land` follows it instead of moving its bookmark, then asks you to land again. Set `SLIPJAY_RUNNER_VERBOSE=1` to see every
+  operation (or, if it landed meanwhile, finishes the workspace housekeeping, even when the working copy is left empty on integrated history); it never submits twice, and never submits a commit already on the integration branch. While an older commit of the change is running, `land` follows it instead of moving its bookmark, then asks you to land again. Set `SLIPJAY_RUNNER_VERBOSE=1` to see every
   progress line.
 - **Transport.** The client publishes the change as the bookmark
   `slipjay/changes/<changeId>` and submits it by jj change ID. The runner fetches it
