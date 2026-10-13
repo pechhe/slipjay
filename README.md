@@ -113,9 +113,12 @@ and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.1.0
+bun add -g github:pechhe/slipjay#v3.1.1
 slipjay status
 ```
+
+To upgrade, run `bun remove -g @pechhe/slipjay && bun pm cache rm` first: Bun keeps
+the installed tag otherwise.
 
 From Slipway, remove it first (`bun remove -g @pechhe/slipway`) and run
 `slipjay cutover` once after installing.

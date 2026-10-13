@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.1.1
+
+- **Runner fixes:** after pushing a candidate, `slipjay land` also forgets its remote
+  bookmark, so a failed land leaves the candidate editable instead of stacking the fix
+  on top of it (and relanding both). The runner matches repository names
+  case-insensitively, as GitHub does.
+
 ## v3.1.0
 
 - **Runner:** `slipjay runner serve` runs a landing queue on a server, and `slipjay land`
