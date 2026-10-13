@@ -129,7 +129,7 @@ Releases are git tags. Nothing is published to npm. The unscoped `slipway` name
 there belongs to an unrelated package.
 
 ```sh
-bun add -g github:pechhe/slipway#v1.17.0
+bun add -g github:pechhe/slipway#v1.17.1
 slipway status
 ```
 
