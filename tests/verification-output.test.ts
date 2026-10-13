@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { summarizeVerificationFailure } from "../src/lib/verification-failure.mjs";
+import { summarizeVerificationFailure } from "../src/lib/verification-failure.ts";
 
 const section = (summary: string, heading: string) => {
   const lines = summary.split("\n");

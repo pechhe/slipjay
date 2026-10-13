@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.0.0
+
+- **TypeScript on Bun:** the CLI and library are TypeScript, run by Bun 1.4 or later
+  with no build step, and Bun is the only runtime: the `slipjay` bin starts under
+  `bun`, and the library entry `@pechhe/slipjay` is `src/lib/slipjay.ts`, so a Node
+  host can no longer import it. The hand-written `.d.mts` declarations are gone;
+  types live in the modules. Behaviour is unchanged. `check:architecture` now reads
+  runtime imports through Bun's scanner, so type-only imports no longer count as
+  cycles. Development tooling (Vite+, Vitest, Oxlint) is unchanged.
+
 ## v2.0.0
 
 - **Slipway is now SlipJay:** the package is `@pechhe/slipjay`, the CLI is `slipjay`,

@@ -1,0 +1,306 @@
+#!/usr/bin/env bun
+
+import {
+  attachWorkspaceIssue,
+  cleanupLandedWorkspace,
+  createWorkspace,
+  landWorkspace,
+  inspectWorkspaces,
+  landingPreview,
+  releaseIntegration,
+  pruneEmptyWorkspaces,
+  readWorkspaceMode,
+  workspaceContext,
+  writeWorkspaceMode,
+  provisionSpare,
+  readySpares,
+  describeRetention,
+  retainedWorkspaceMaterial,
+  latestPostLandResult,
+  readLandingState,
+  runPostLandVerification,
+  removeWorkspace,
+  startSpareRefill,
+  cutover,
+  cutoverPending,
+} from "../lib/slipjay.ts";
+import { legacyStateHome } from "../lib/workspace-paths.ts";
+import { landingGuardDecision } from "../lib/landing-guard.ts";
+import { landingTimingLine, landingTimingRecord } from "../lib/landing-timing.ts";
+import { appendMetric } from "../lib/metrics.ts";
+import { execFileSync, spawn } from "node:child_process";
+import { writeSync } from "node:fs";
+import { setPriority } from "node:os";
+import { basename, resolve } from "node:path";
+import type { Readable } from "node:stream";
+
+/** Disk use of a checkout, for spotting retained workspaces worth reclaiming. */
+function diskUsage(root: string): string {
+  try { return execFileSync("du", ["-sh", root], { encoding: "utf8", timeout: 60_000 }).split("\t")[0] ?? "?"; }
+  catch { return "?"; }
+}
+
+/** The repository's integration checkout, even when `cwd` is inside one of its workspaces. */
+async function integrationRoot(cwd: string): Promise<string> {
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  return context.integration.root;
+}
+
+type StartOptions = { integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; resultFd: number | undefined; task: string };
+
+/**
+ * `start` flags, which precede the task: `--integration` allocates from the
+ * integration checkout even inside a workspace; `--issue <n>` creates or resumes
+ * that Issue's workspace; `--refill` then starts a background spare refill;
+ * `--json` prints one JSON result object. Null when the arguments are invalid.
+ */
+function startOptions(args: string[]): StartOptions | null {
+  const options: StartOptions = { integration: false, json: false, refill: false, issueNumber: undefined, resultFd: undefined, task: "" };
+  let index = 0;
+  for (; index < args.length; index += 1) {
+    const flag = args[index];
+    if (flag === "--integration") options.integration = true;
+    else if (flag === "--json") options.json = true;
+    else if (flag === "--refill") options.refill = true;
+    else if (flag === "--issue" || flag === "--result-fd") {
+      const value = Number(args[index + 1]);
+      if (!Number.isSafeInteger(value) || value <= 0) return null;
+      if (flag === "--issue") options.issueNumber = value;
+      else options.resultFd = value;
+      index += 1;
+    } else break;
+  }
+  options.task = args.slice(index).join(" ").trim();
+  // A flag is a request for help or a typo, never a task to start a workspace for.
+  if (options.task.startsWith("-") || (!options.task && !options.issueNumber)) return null;
+  return options;
+}
+
+/**
+ * `start --json`: run the start in a child whose stdout is this process's stderr,
+ * so dependency-install output can never corrupt the JSON this process prints.
+ */
+async function startForJson(args: string[]): Promise<number> {
+  const child = spawn(process.execPath, [...process.execArgv, process.argv[1]!, "start", "--result-fd", "3", ...args], {
+    stdio: ["inherit", 2, "inherit", "pipe"],
+  });
+  let result = "";
+  (child.stdio[3] as Readable).setEncoding("utf8").on("data", (chunk: string) => { result += chunk; });
+  const code = await new Promise<number>((resolveExit) => {
+    child.once("error", (error) => { console.error(error.message); resolveExit(1); });
+    child.once("close", (exit) => resolveExit(exit ?? 1));
+  });
+  if (code === 0 && result.trim()) process.stdout.write(result);
+  return code === 0 && !result.trim() ? 1 : code;
+}
+
+/**
+ * Remove the workspace at `path` if it has landed or is untouched; unfinished
+ * work stays in place and reports failure, so a caller (such as Claude Code's
+ * WorktreeRemove hook) never treats a kept workspace as removed.
+ */
+async function removeWorkspaceAt(path: string): Promise<number> {
+  const context = await workspaceContext(path).catch(() => null);
+  if (!context || context.current.name === "default") {
+    console.log(`No isolated workspace at ${path}; nothing to remove.`);
+    return 0;
+  }
+  const name = context.current.name;
+  const result = await cleanupLandedWorkspace(path);
+  if (result.cleaned) {
+    console.log(`Removed landed workspace jj:${name}`);
+    return 0;
+  }
+  if (result.reason === "not-landed") {
+    try {
+      await removeWorkspace(context.integration.root, name);
+      console.log(`Removed untouched workspace jj:${name}`);
+      return 0;
+    } catch (error) {
+      console.error(`Kept jj:${name}: ${error instanceof Error ? error.message : String(error)}`);
+      return 1;
+    }
+  }
+  console.error(`Kept jj:${name}: ${describeRetention(result)}`);
+  return 1;
+}
+
+/**
+ * `release [--confirm <commit>] [--migrations-ready]`: plan a release, or, with the
+ * candidate commit a human approved, verify and publish it. Progress goes to
+ * stderr; stdout is one JSON result.
+ */
+async function runRelease(args: string[]): Promise<number> {
+  const options: { migrationsReady: boolean; confirm?: string } = { migrationsReady: false };
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--migrations-ready") options.migrationsReady = true;
+    else if (args[index] === "--confirm" && args[index + 1] && !args[index + 1]!.startsWith("-")) options.confirm = args[++index];
+    else throw new Error("Usage: slipjay release [--confirm <commit>] [--migrations-ready]");
+  }
+  const result = await releaseIntegration(process.cwd(), { ...options, onProgress: (line) => console.error(line) });
+  console.log(JSON.stringify(result, null, 2));
+  // A published release whose post-release step failed still stands; 2 tells the caller to retry the step.
+  if (result.ok && "postRelease" in result && result.postRelease && !result.postRelease.ok) return 2;
+  return result.ok ? 0 : 1;
+}
+
+/** `cutover [--check]`: move Slipway's state from ~/.slipway to ~/.slipjay once, or only report whether it would. */
+async function runCutover(args: string[]): Promise<number> {
+  if (args.some((flag) => flag !== "--check")) throw new Error("Usage: slipjay cutover [--check]");
+  const result = await cutover({ check: args.includes("--check") });
+  if (result.status === "refused") {
+    console.error(`Refusing the cutover while ${result.holders.length === 1 ? "this holds" : "these hold"} slipjay state; wait for ${result.holders.length === 1 ? "it" : "them"} to finish, then rerun:`);
+    for (const holder of result.holders) console.error(`  - ${holder}`);
+  }
+  if (result.status === "already-cut-over" && result.reappeared) {
+    console.error(`Old-location state exists again (${result.reappeared.join(", ")}): something still running Slipway wrote it after the cutover. slipjay ignores it; stop that process.`);
+  }
+  console.log(JSON.stringify(result, null, 2));
+  return result.status === "refused" ? 1 : 0;
+}
+
+const [command, ...rest] = process.argv.slice(2);
+
+try {
+  if (command !== "status" && command !== "cutover" && cutoverPending()) {
+    // Before the cutover, only `status` and `cutover` run: anything else would start a second lock store.
+    console.error(`slipjay ${command ?? ""}`.trim() + ` refused: this machine's slipjay state still lives under ${legacyStateHome()}. `
+      + "Run `slipjay cutover` once while nothing is landing (`slipjay cutover --check` reports what holds it), then retry.");
+    process.exitCode = 1;
+  } else if (command === "cutover") {
+    process.exitCode = await runCutover(rest);
+  } else if (command === "status" && cutoverPending()) {
+    const context = await workspaceContext();
+    console.log(JSON.stringify({
+      cutover: { required: true, legacyState: legacyStateHome(), command: "slipjay cutover" },
+      ...(context ? { workspace: context.current, integration: context.integration, integrationBranch: context.integrationBranch } : {}),
+    }, null, 2));
+  } else if (command === "status") {
+    const context = await workspaceContext();
+    const postLand = context ? await latestPostLandResult(context.integration.root) : null;
+    const landing = context && context.current.name !== "default" ? await readLandingState(context.current.name, { readOnly: true }) : null;
+    console.log(context
+      ? JSON.stringify({ mode: await readWorkspaceMode(), workspace: context.current, integration: context.integration, integrationBranch: context.integrationBranch,
+        ...(landing ? { landing: { phase: landing.phase, artifactCommitId: landing.artifactCommitId, ...(landing.primaryCheckout ? { primaryCheckout: landing.primaryCheckout } : {}) } } : {}),
+        ...(postLand ? { postLand: { commit: postLand.commit, status: postLand.status, finishedAt: postLand.finishedAt, log: postLand.log, ...(postLand.failed ? { failed: postLand.failed.command } : {}) } } : {}) }, null, 2)
+      : "Not inside a Jujutsu repository");
+  } else if (command === "mode") {
+    const requested = rest[0];
+    console.log(requested ? await writeWorkspaceMode(requested) : await readWorkspaceMode());
+  } else if (command === "list") {
+    const context = await workspaceContext();
+    for (const workspace of await inspectWorkspaces()) {
+      const issue = workspace.metadata?.issueNumber ? ` · issue #${workspace.metadata.issueNumber}` : "";
+      const state = workspace.name === "default" ? "integration" : workspace.metadata?.spare ? "spare"
+        : workspace.hasWork ? "unlanded" : workspace.landed ? "landed" : "empty";
+      // Landed checkouts should be gone; say why one is still here and what it costs.
+      const paths = state === "landed" && workspace.root && context
+        ? await retainedWorkspaceMaterial(workspace.root, context.integration.root).catch(() => [])
+        : [];
+      const kept = paths.length ? ` · ${diskUsage(workspace.root)} kept: ${describeRetention({ reason: "unique-files", paths })}` : "";
+      console.log(`${workspace.name}\t${workspace.root}\t${state}${issue}${kept}`);
+    }
+  } else if (command === "prune") {
+    if (rest[0] !== "--empty") throw new Error("Usage: slipjay prune --empty");
+    const result = await pruneEmptyWorkspaces();
+    for (const name of result.removed) console.log(`Removed empty workspace: ${name}`);
+    for (const path of result.pruned) console.log(`Pruned state: ${path}`);
+    for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);
+    if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0) console.log("No empty workspaces to prune.");
+  } else if (command === "pool") {
+    if (rest[0] === "refill") console.log(JSON.stringify(await provisionSpare(), null, 2));
+    else if (rest.length === 0) {
+      const spares = await readySpares(process.cwd());
+      console.log(spares.length ? spares.map((spare) => `ready\t${spare.name}\t${spare.root}`).join("\n") : "No ready spare workspace.");
+    } else throw new Error("Usage: slipjay pool [refill]");
+  } else if (command === "attach-issue") {
+    const issueNumber = Number(rest[0]);
+    const result = await attachWorkspaceIssue(process.cwd(), issueNumber);
+    console.log(`Attached Issue #${result.issueNumber} to jj:${result.workspaceName}.`);
+  } else if (command === "start") {
+    const options = startOptions(rest);
+    if (!options) {
+      console.error('Usage: slipjay start [--integration] [--issue <n>] [--refill] [--json] ["task"]');
+      process.exitCode = 2;
+    } else if (options.json && options.resultFd === undefined) {
+      process.exitCode = await startForJson(rest);
+    } else {
+      const root = options.integration ? await integrationRoot(process.cwd()) : process.cwd();
+      const task = options.task || `Issue #${options.issueNumber}`;
+      const result = await createWorkspace(task, root, options.issueNumber ? { issueNumber: options.issueNumber } : {});
+      // Prepare the next session's spare in the background, so its start can claim it.
+      // A claimed spare is replaced in the background too, so a burst of starts finds the pool refilled.
+      const refill = options.refill || result.pooled ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
+      if (refill && !refill.started) console.error(`Spare refill not started: ${refill.reason}`);
+      if (options.resultFd === undefined) console.log(result.workspacePath);
+      else {
+        writeSync(options.resultFd, `${JSON.stringify({
+          workspacePath: result.workspacePath, workspaceName: result.current.name, integrationRoot: result.integration.root,
+          issueNumber: options.issueNumber ?? null, created: result.created ?? false, reused: result.reused ?? false, pooled: Boolean(result.pooled),
+          ...(refill ? { refill } : {}),
+        })}\n`);
+      }
+    }
+  } else if (command === "preview") {
+    const preview = await landingPreview();
+    console.log(preview.stat || "(no changed files)");
+  } else if (command === "land") {
+    if (rest.some((flag) => flag !== "--local-only" && flag !== "--direct")) throw new Error("Usage: slipjay land [--local-only] [--direct]");
+    // --direct lands the primary checkout itself, for a session explicitly working Direct.
+    const timing: { startedAt: number; stages: [string, number][] } = { startedAt: Date.now(), stages: [] };
+    // The landing may remove this very directory, after which process.cwd() throws.
+    const landedFrom = basename(process.cwd());
+    const result = await landWorkspace(process.cwd(), {
+      onStage: (stage) => timing.stages.push([stage, Date.now()]),
+      localOnly: rest.includes("--local-only") ? true : undefined,
+      allowDefaultWorkspace: rest.includes("--direct"),
+      // This CLI, bundled or not, is its own background verification runner.
+      postLandRunner: [process.execPath, process.argv[1]!, "post-land-run"],
+    });
+    // stderr, so stdout stays the JSON result.
+    const finished = { ...timing, finishedAt: Date.now() };
+    console.error(landingTimingLine(finished, result));
+    for (const name of result.sweep?.removed ?? []) console.error(`Removed workspace: ${name}`);
+    // An undelivered checkout kept by its session is the normal case; a delivered one is a leftover.
+    for (const skipped of result.sweep?.skipped ?? []) if (skipped.landed) console.error(`Kept landed workspace ${skipped.name}: ${skipped.reason}`);
+    await appendMetric("landings", { workspace: landedFrom, ...landingTimingRecord(finished, result) });
+    console.log(JSON.stringify({ artifact: result.artifact, publication: result.publication, postIntegration: result.postIntegration,
+      ...(result.primaryCheckout ? { primaryCheckout: result.primaryCheckout } : {}),
+      ...(result.postLand ? { postLand: result.postLand } : {}), ...(result.postLandWarning ? { postLandWarning: result.postLandWarning } : {}),
+      ...(result.sweep ? { sweep: result.sweep } : {}), ...(result.released ? { released: result.released } : {}) }, null, 2));
+    if (!result.ok) process.exitCode = 1;
+    // After the result, because this directory may be gone: it was the landed workspace.
+    const own = result.context?.current.name ?? landedFrom;
+    if (result.released?.cleaned) console.error(`Removed landed workspace ${own}; this shell's directory no longer exists, so cd to the primary checkout.`);
+    else if (result.released) console.error(`Kept landed workspace ${own}: ${result.released.reason}`);
+  } else if (command === "release") {
+    process.exitCode = await runRelease(rest);
+  } else if (command === "post-land-run") {
+    // Internal: the detached process a landing starts for its background
+    // verification. Landings take priority over it for the machine.
+    try { setPriority(10); } catch { /* unsupported */ }
+    await runPostLandVerification(rest[0] ?? "");
+  } else if (command === "guard") {
+    // Claude Code PreToolUse hook: reads the tool call on stdin, prints a deny decision.
+    let input = "";
+    for await (const chunk of process.stdin) input += chunk;
+    const decision = await landingGuardDecision(input.trim() ? JSON.parse(input) : {});
+    if (decision) console.log(JSON.stringify(decision));
+  } else if (command === "cleanup") {
+    if (rest.length > 1 || rest[0]?.startsWith("-")) throw new Error("Usage: slipjay cleanup [path]");
+    const result = await cleanupLandedWorkspace(rest[0] ? resolve(rest[0]) : process.cwd());
+    console.log(result.cleaned ? "Workspace removed." : `Workspace retained: ${describeRetention(result)}.`);
+    const superseded = result.supersededPostIntegration;
+    if (superseded) console.log(`Superseded post-integration record (${superseded.status}, attempt ${superseded.attempt}${superseded.reason ? `: ${superseded.reason}` : ""}): a later landing published this artifact.`);
+  } else if (command === "remove") {
+    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
+    process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
+  } else {
+    console.error("Usage: slipjay <status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|cleanup [path]|remove <path>|cutover [--check]>");
+    process.exitCode = 2;
+  }
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+}

@@ -11,7 +11,8 @@ Short map for dependency updates. The repository is authoritative; fix this file
 
 - Vite+: `vite-plus` and `vite` (`npm:@voidzero-dev/vite-plus-core`) move together at the same version.
 - `effect` is an exact pin; move it deliberately (host code uses its vocabulary).
-- `typescript`, `@types/node`, `proper-lockfile`: independent.
+- `@types/bun` tracks the `packageManager` Bun pin; `@types/proper-lockfile` tracks `proper-lockfile`.
+- `typescript`, `@types/node`: independent.
 
 ## Constraints
 

@@ -8,14 +8,14 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 
-const cli = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 const BUN_VERSION = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
 
 type Run = { code: number; stdout: string; stderr: string };
 
 function slipjay(cwd: string, args: string[]): Promise<Run> {
   return new Promise((resolveRun) => {
-    execFile(process.execPath, [cli, ...args], { cwd, env: process.env, timeout: 120_000 }, (error, stdout, stderr) => {
+    execFile("bun", [cli, ...args], { cwd, env: process.env, timeout: 120_000 }, (error, stdout, stderr) => {
       const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
       resolveRun({ code, stdout, stderr });
     });

@@ -10,14 +10,14 @@ import { test } from "vite-plus/test";
 // Concurrent `slipjay release --confirm` runs, each in its own process as agent
 // sessions run them, against a release check held shut until the test opens it.
 // Every candidate is published before the first release starts.
-const launcher = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const launcher = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 // Several processes, each polling the release slot every two seconds, on a machine that may be busy.
 const TIMEOUT_MS = 480_000;
 
 type Release = { ok: boolean; status: string; candidate?: string; merge?: string; releasedBy?: string | null; base?: string };
 
 function confirm(f: ReleaseFixture, candidate: string) {
-  const child = spawn(process.execPath, [launcher, "release", "--confirm", candidate], {
+  const child = spawn("bun", [launcher, "release", "--confirm", candidate], {
     cwd: f.repo, env: process.env, stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";

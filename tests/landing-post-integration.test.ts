@@ -7,10 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { createHash } from "node:crypto";
-import { finalizePostIntegration } from "../src/lib/post-integration-finalization.mjs";
-import { postIntegrationPolicyDigest } from "../src/lib/post-integration-policy.mjs";
-import { readPostIntegrationPolicy } from "../src/lib/post-integration-source.mjs";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
+import { finalizePostIntegration } from "../src/lib/post-integration-finalization.ts";
+import { postIntegrationPolicyDigest } from "../src/lib/post-integration-policy.ts";
+import { readPostIntegrationPolicy } from "../src/lib/post-integration-source.ts";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
 
 // An Isolated landing that leaves a dirty primary checkout in place still exports
 // its integration and finalizes from a shallow primary `.git` before it publishes.

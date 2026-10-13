@@ -5,11 +5,11 @@ import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, provisionSpare, readySpares, startSpareRefill } from "../src/lib/slipjay.mjs";
-import { listWorkspaces } from "../src/lib/workspace-state.mjs";
-import { metadataPath, workspaceMetadata } from "../src/lib/workspace-state.mjs";
-import { installInputFingerprint } from "../src/lib/install-inputs.mjs";
-import { withWorkspaceTransaction } from "../src/lib/workspace-transaction.mjs";
+import { createWorkspace, provisionSpare, readySpares, startSpareRefill } from "../src/lib/slipjay.ts";
+import { listWorkspaces } from "../src/lib/workspace-state.ts";
+import { metadataPath, workspaceMetadata } from "../src/lib/workspace-state.ts";
+import { installInputFingerprint } from "../src/lib/install-inputs.ts";
+import { withWorkspaceTransaction } from "../src/lib/workspace-transaction.ts";
 
 const BUN_VERSION = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
 
@@ -179,6 +179,30 @@ test("the install-input fingerprint covers lockfiles, manifests, package-manager
     }
     assert.equal(await installInputFingerprint(join(f.root, "not-a-repo")), null);
   } finally {
+    await f.dispose();
+  }
+}, 120_000);
+
+test("the install-input fingerprint is computable on a host without Node", async () => {
+  const f = await bunProject();
+  const path = process.env.PATH;
+  try {
+    // Only the tools SlipJay itself runs: no `node` on PATH.
+    const bin = join(f.root, "bin-without-node");
+    await mkdir(bin);
+    for (const tool of ["bun", "jj", "git"]) {
+      // An exec shim, not a symlink: a tool may be a wrapper that finds its binary beside itself.
+      const real = execFileSync("which", [tool], { encoding: "utf8" }).trim();
+      await writeFile(join(bin, tool), `#!/bin/sh\nexec "${real}" "$@"\n`, { mode: 0o755 });
+    }
+    // System directories stay, for tool wrappers' own shell needs, unless they hold a Node.
+    process.env.PATH = [bin, ...["/usr/bin", "/bin"].filter((dir) => !existsSync(join(dir, "node")))].join(":");
+    const withoutNode = await installInputFingerprint(f.repo);
+    assert.match(withoutNode ?? "", /^sha256:[0-9a-f]{64}$/);
+    process.env.PATH = path;
+    assert.notEqual(await installInputFingerprint(f.repo), withoutNode, "the Node version is an install input when Node is present");
+  } finally {
+    process.env.PATH = path;
     await f.dispose();
   }
 }, 120_000);

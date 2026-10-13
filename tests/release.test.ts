@@ -7,7 +7,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { releaseIntegration } from "../src/lib/release.mjs";
+import { releaseIntegration } from "../src/lib/release.ts";
 
 test("a release plans, then verifies the exact candidate and publishes a merge with its tree", async () => {
   // A shallow primary, as YardSmith's is: the base exists only as fetched history.

@@ -6,11 +6,11 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { attachWorkspaceIssue, createWorkspace, landWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../src/lib/slipjay.mjs";
-import { lockPath } from "../src/lib/workspace-state.mjs";
-import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.mjs";
+import { attachWorkspaceIssue, createWorkspace, landWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
+import { lockPath } from "../src/lib/workspace-state.ts";
+import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
 
-const cli = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
 const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
 
@@ -143,7 +143,7 @@ test("start with a flag prints usage and creates no workspace", async () => {
   try {
     for (const flag of ["--help", "-h"]) {
       const exit = await new Promise<{ code: number; stderr: string }>((resolveExit) => {
-        execFile(process.execPath, [cli, "start", flag], { cwd: f.repo }, (error, _stdout, stderr) =>
+        execFile("bun", [cli, "start", flag], { cwd: f.repo }, (error, _stdout, stderr) =>
           resolveExit({ code: error ? Number((error as { code?: number }).code ?? 1) : 0, stderr }));
       });
       assert.equal(exit.code, 2);

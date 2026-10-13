@@ -6,8 +6,8 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "./support/workspace-project.ts";
 
-const cli = resolve("src/launcher/workspace.mjs");
-const native = (cwd: string, args: string[]) => execFileSync("node", [cli, ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+const cli = resolve("src/launcher/workspace.ts");
+const native = (cwd: string, args: string[]) => execFileSync("bun", [cli, ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 const advance = (cwd: string, title: string) => { jj(cwd, ["commit", "-m", title]); jj(cwd, ["bookmark", "set", "main", "-r", "@-"]); };
 async function write(root: string, path: string, value: string) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), value); }
 
@@ -29,7 +29,7 @@ test("landing installs a workspace package the rebase brought in before verifica
     advance(f.repo, "Dependency introduced after allocation");
     assert.equal(existsSync(join(workspace, "node_modules/fixture-dependency")), false);
 
-    const result = spawnSync("node", [cli, "land", "--local-only"], { cwd: workspace, encoding: "utf8" });
+    const result = spawnSync("bun", [cli, "land", "--local-only"], { cwd: workspace, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout + result.stderr, /preparing frozen candidate dependencies/);
     assert.equal(jj(f.repo, ["file", "show", "-r", "main", "notes.md"]), "change");

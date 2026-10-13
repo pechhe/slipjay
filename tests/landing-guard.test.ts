@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "vite-plus/test";
-import { landingBypass, landingGuardDecision } from "../src/lib/landing-guard.mjs";
+import { landingBypass, landingGuardDecision } from "../src/lib/landing-guard.ts";
 
 const branches = ["master"];
 

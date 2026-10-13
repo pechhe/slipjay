@@ -5,11 +5,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "./support/workspace-project.ts";
-import { migrationCommandFailure } from "../src/lib/migration-command-evidence.mjs";
-import { runBoundedProcess } from "../src/lib/bounded-process.mjs";
+import { migrationCommandFailure } from "../src/lib/migration-command-evidence.ts";
+import { runBoundedProcess } from "../src/lib/bounded-process.ts";
 
-const cli = resolve("src/launcher/workspace.mjs");
-const native = (cwd: string, args: string[]) => execFileSync("node", [cli, ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
+const cli = resolve("src/launcher/workspace.ts");
+const native = (cwd: string, args: string[]) => execFileSync("bun", [cli, ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 const advance = (cwd: string, title: string) => { jj(cwd, ["commit", "-m", title]); jj(cwd, ["bookmark", "set", "main", "-r", "@-"]); };
 async function write(root: string, path: string, value: string) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), value); }
 
@@ -57,7 +57,7 @@ test("actual CLI frozen preparation failure prevents generation and integration 
     await write(f.repo, "package.json", JSON.stringify({ name: "fixture", packageManager: "bun@1.4.2", dependencies: { missing: "file:./does-not-exist" } }));
     advance(f.repo, "Uninstallable final graph");
     const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const result = spawnSync("node", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
+    const result = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
     assert.notEqual(result.status, 0);
     assert.match(result.stderr + result.stdout, /Dependency command failed.*bun install/);
     assert.doesNotMatch(result.stderr, /rollback requires reconciliation/);
@@ -76,7 +76,7 @@ for (const [name, source, pass] of [
   const f = await fixture(source);
   try {
     const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const out = spawnSync("node", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
+    const out = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
     assert.equal(out.status === 0, pass, out.stderr);
     if (!pass) {
       assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
@@ -106,7 +106,7 @@ test("actual CLI failed verification reports evidence and rolls generated artifa
     await write(f.repo, "verify.mjs", 'console.error("verification evidence");process.exit(6);');
     advance(f.repo, "Fail configured verifier");
     const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const out = spawnSync("node", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
+    const out = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
     assert.notEqual(out.status, 0);
     assert.doesNotMatch(out.stderr, /rollback requires reconciliation/);
     assert.match(out.stderr, /verification evidence/);
@@ -124,7 +124,7 @@ test("installation source drift is fenced before generation and restored without
     await write(f.repo, "schema/source", "old");
     advance(f.repo, "Install script changes source");
     const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const out = spawnSync("node", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
+    const out = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
     assert.notEqual(out.status, 0);
     assert.match(out.stderr, /Dependency preparation changed the landing candidate's source/);
     assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
@@ -136,8 +136,8 @@ test("installation source drift is fenced before generation and restored without
 test("migration failure and progress redact the exact injected command environment", async () => {
   const f = await fixture('process.stdout.write(process.env.API_TOKEN);process.stderr.write("custom failure");process.exit(8);');
   try {
-    const { migrationCandidate } = await import("../src/lib/migration-candidate.mjs");
-    const { revisionFacts } = await import("../src/lib/workspace-jj.mjs");
+    const { migrationCandidate } = await import("../src/lib/migration-candidate.ts");
+    const { revisionFacts } = await import("../src/lib/workspace-jj.ts");
     const secret = "injected-fixture-credential";
     const policy = JSON.parse(await readFile(join(f.workspace, "slipjay.json"), "utf8"));
     policy.migrationFinalization.generate.args.push(secret, "postgres://fixture:password@invalid/db");

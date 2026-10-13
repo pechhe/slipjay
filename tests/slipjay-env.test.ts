@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { postIntegrationPolicy } from "../src/lib/post-integration-policy.mjs";
-import { runWorkspaceCommand } from "../src/lib/workspace-command.mjs";
+import { postIntegrationPolicy } from "../src/lib/post-integration-policy.ts";
+import { runWorkspaceCommand } from "../src/lib/workspace-command.ts";
 
 const declaring = (environmentKeys: string[]) => ({
   version: 1, target: "fixture-db", idempotency: "artifact-key", timeoutMs: 1000,

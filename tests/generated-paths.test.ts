@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { generatedPathMatchers } from "../src/lib/execution-policy.mjs";
+import { generatedPathMatchers } from "../src/lib/execution-policy.ts";
 
 const covers = (declared: string[], path: string) => generatedPathMatchers(declared).some((matcher) => matcher.test(`${path}/`));
 
@@ -22,7 +22,7 @@ test("invalid generated path declarations fail closed", () => {
 });
 
 test("a retained workspace explains which files keep it and how to release it", async () => {
-  const { describeRetention } = await import("../src/lib/workspace-lifecycle.mjs");
+  const { describeRetention } = await import("../src/lib/workspace-lifecycle.ts");
   const text = describeRetention({ reason: "unique-files", paths: ["secret.env", "gen/a.js"] });
   assert.match(text, /secret\.env, gen\/a\.js/);
   assert.match(text, /generatedPaths/);

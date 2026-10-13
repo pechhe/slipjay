@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { assertIssueEligible, selectImplementationIssue } from "../src/lib/issue-eligibility.mjs";
+import { assertIssueEligible, selectImplementationIssue } from "../src/lib/issue-eligibility.ts";
 
 test("Epic selection refreshes child readiness and dependency state on every transition", async () => {
   let landed = false;

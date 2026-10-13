@@ -5,9 +5,9 @@ import { dirname, join } from "node:path";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
 // HOME they leak into ~/.pi and race live sessions, so a runner that skipped the
-// hermetic setup (scripts/vitest-hermetic-env.mjs) fails here before any test runs.
+// hermetic setup (scripts/vitest-hermetic-env.ts) fails here before any test runs.
 if (homedir() === userInfo().homedir) {
-  throw new Error("Workspace fixtures need a disposable HOME; run them through `vp test` or scripts/with-hermetic-home.mjs");
+  throw new Error("Workspace fixtures need a disposable HOME; run them through `vp test` or scripts/with-hermetic-home.ts");
 }
 
 export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8" }).trim();

@@ -6,10 +6,10 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { Schedule } from "effect";
 import { test } from "vite-plus/test";
-import { assertHermeticHome } from "../scripts/hermetic-home-guard.mjs";
-import { landWorkspace } from "../src/lib/slipjay.mjs";
-import { githubRepository, MAX_ISSUE_ATTEMPTS, originatingIssue, pendingIssueRetry, postLandIssueBody, postLandIssueTitle } from "../src/lib/post-land-issue.mjs";
-import { describePostLandFailure, latestPostLandResult, postLandRoot, retryPostLandIssues, runPostLandVerification, startPostLandVerification, type PostLandRecord } from "../src/lib/post-land-verification.mjs";
+import { assertHermeticHome } from "../scripts/hermetic-home-guard.ts";
+import { landWorkspace } from "../src/lib/slipjay.ts";
+import { githubRepository, MAX_ISSUE_ATTEMPTS, originatingIssue, pendingIssueRetry, postLandIssueBody, postLandIssueTitle } from "../src/lib/post-land-issue.ts";
+import { describePostLandFailure, latestPostLandResult, postLandRoot, retryPostLandIssues, runPostLandVerification, startPostLandVerification, type PostLandRecord } from "../src/lib/post-land-verification.ts";
 
 // These tests write post-land records; outside the hermetic setup they would
 // land in the developer's real ~/.pi/agent/workspace-state (#991).

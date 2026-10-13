@@ -5,11 +5,11 @@ import { existsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { targetKeyOf } from "../src/lib/post-integration-coverage.mjs";
-import { withTargetLease } from "../src/lib/post-integration-finalization.mjs";
-import { readExactExecutionPolicy } from "../src/lib/post-integration-source.mjs";
-import { releaseIntegration } from "../src/lib/release.mjs";
-import { postIntegrationHome } from "../src/lib/workspace-paths.mjs";
+import { targetKeyOf } from "../src/lib/post-integration-coverage.ts";
+import { withTargetLease } from "../src/lib/post-integration-finalization.ts";
+import { readExactExecutionPolicy } from "../src/lib/post-integration-source.ts";
+import { releaseIntegration } from "../src/lib/release.ts";
+import { postIntegrationHome } from "../src/lib/workspace-paths.ts";
 
 const TARGET = "fixture-db:development";
 

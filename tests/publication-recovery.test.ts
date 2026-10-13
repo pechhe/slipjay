@@ -5,8 +5,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
-import { readLandingState } from "../src/lib/workspace-state.mjs";
+import { createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
+import { readLandingState } from "../src/lib/workspace-state.ts";
 
 const land = (cwd: string) => landWorkspace(cwd, { onProgress: () => {}, sweepOtherWorkspaces: false, releaseLandedWorkspace: false });
 

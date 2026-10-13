@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { runVerificationStages } from "../src/lib/verification-policy.mjs";
+import { runVerificationStages } from "../src/lib/verification-policy.ts";
 
 function signal() {
   let resolve!: () => void;

@@ -6,12 +6,12 @@ import { chmod, mkdir, readdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
-import { pruneWorkspaceState } from "../src/lib/workspace-state-prune.mjs";
-import { landedHome, lockHome, metadataHome, stateHome, workspaceHome } from "../src/lib/workspace-paths.mjs";
-import { EMPTY_IDLE_MS, sweepDisposableWorkspaces } from "../src/lib/workspace-sweep.mjs";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
+import { pruneWorkspaceState } from "../src/lib/workspace-state-prune.ts";
+import { landedHome, lockHome, metadataHome, stateHome, workspaceHome } from "../src/lib/workspace-paths.ts";
+import { EMPTY_IDLE_MS, sweepDisposableWorkspaces } from "../src/lib/workspace-sweep.ts";
 
-const cli = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
 const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
 
@@ -89,7 +89,7 @@ test("the CLI's own working directory inside the workspace does not keep it afte
     await writeFile(join(workspace.workspacePath, "cli.txt"), "cli\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add cli"]);
     const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
-      execFile(process.execPath, [cli, "land"], { cwd: workspace.workspacePath }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
+      execFile("bun", [cli, "land"], { cwd: workspace.workspacePath }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
     });
     assert.deepEqual(JSON.parse(stdout.slice(stdout.lastIndexOf("\n{\n") + 1)).released, { cleaned: true }, "the JSON result follows the verification progress");
     assert.match(stderr, /Removed landed workspace/);
@@ -203,7 +203,7 @@ test("shared paths are linked once, replace an empty directory and never clobber
     const workspace = await createWorkspace("links", f.repo);
     for (const path of ["artifacts", "out/reports", "cache"]) assert.equal(readlinkSync(join(workspace.workspacePath, path)), join(f.repo, path), path);
     assert.ok(existsSync(join(f.repo, "out", "reports")), "the target directory is created in the primary");
-    const { linkSharedPaths } = await import("../src/lib/workspace-shared-paths.mjs");
+    const { linkSharedPaths } = await import("../src/lib/workspace-shared-paths.ts");
     assert.deepEqual((await linkSharedPaths(f.repo, workspace.workspacePath)).map(({ status }) => status), ["linked", "linked", "linked"], "idempotent");
     // A real directory: empty is replaced, with content it is left alone.
     const other = join(f.root, "other");

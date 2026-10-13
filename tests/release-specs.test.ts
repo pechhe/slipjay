@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { commitIssue, halfBuiltSpecs } from "../src/lib/release-specs.mjs";
+import { commitIssue, halfBuiltSpecs } from "../src/lib/release-specs.ts";
 
 const REPO = "owner/app";
 

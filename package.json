@@ -1,23 +1,21 @@
 {
   "name": "@pechhe/slipjay",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "description": "Harness-neutral JJ workspace and landing tool: one CLI (slipjay) and one library.",
   "type": "module",
   "license": "UNLICENSED",
   "repository": "github:pechhe/slipjay",
   "bin": {
-    "slipjay": "src/launcher/workspace.mjs",
-    "slipway": "src/launcher/retired-slipway.mjs"
+    "slipjay": "src/launcher/workspace.ts",
+    "slipway": "src/launcher/retired-slipway.ts"
   },
   "exports": {
     ".": {
-      "types": "./src/lib/slipjay.d.mts",
-      "default": "./src/lib/slipjay.mjs"
+      "default": "./src/lib/slipjay.ts"
     },
     "./delivery": {
-      "types": "./src/lib/slipjay.d.mts",
-      "default": "./src/lib/slipjay.mjs"
+      "default": "./src/lib/slipjay.ts"
     },
     "./package.json": "./package.json"
   },
@@ -25,21 +23,23 @@
     "src"
   ],
   "engines": {
-    "node": ">=22"
+    "bun": ">=1.4"
   },
   "scripts": {
-    "check": "vp lint --quiet && node scripts/check-architecture.mjs",
+    "check": "vp lint --quiet && bun scripts/check-architecture.ts",
     "typecheck": "tsc --noEmit",
     "test": "vp test && bun run test:runtimes",
-    "test:runtimes": "node --test scripts/check-architecture.test.mjs && bun test scripts/with-hermetic-home.test.mjs",
-    "verify:release": "node scripts/verify-release.mjs"
+    "test:runtimes": "bun test scripts/check-architecture.test.ts scripts/with-hermetic-home.test.ts",
+    "verify:release": "bun scripts/verify-release.ts"
   },
   "dependencies": {
     "effect": "4.0.3",
     "proper-lockfile": "4.1.2"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.3",
     "@types/node": "^26.6.5",
+    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^7.0.2",
     "vite": "npm:@voidzero-dev/vite-plus-core@1.1.0",
     "vite-plus": "1.1.0"

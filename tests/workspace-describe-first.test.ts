@@ -4,8 +4,8 @@ import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace, provisionSpare } from "../src/lib/slipjay.mjs";
-import { landingGuardDecision } from "../src/lib/landing-guard.mjs";
+import { createWorkspace, landWorkspace, provisionSpare } from "../src/lib/slipjay.ts";
+import { landingGuardDecision } from "../src/lib/landing-guard.ts";
 
 const description = (cwd: string) => jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "description"]);
 const remoteMessage = (remote: string) => execFileSync("git", ["--git-dir", remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();

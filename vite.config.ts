@@ -1,9 +1,9 @@
 import { defineConfig } from "vite-plus";
 import { fileURLToPath } from "node:url";
 
-// Every test file gets a disposable HOME before its imports run (scripts/vitest-hermetic-env.mjs):
+// Every test file gets a disposable HOME before its imports run (scripts/vitest-hermetic-env.ts):
 // slipjay derives all workspace, lock and landing state from homedir().
-const hermeticEnvironment = fileURLToPath(new URL("./scripts/vitest-hermetic-env.mjs", import.meta.url));
+const hermeticEnvironment = fileURLToPath(new URL("./scripts/vitest-hermetic-env.ts", import.meta.url));
 
 export default defineConfig({
   check: { fmt: false },

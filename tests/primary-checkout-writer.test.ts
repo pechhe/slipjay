@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { acquirePrimaryWriter, activePrimaryWriter, assertNoForeignPrimaryWriter, primaryWriterName, releasePrimaryWriter } from "../src/lib/primary-checkout-writer.mjs";
-import { lockHome } from "../src/lib/workspace-paths.mjs";
+import { acquirePrimaryWriter, activePrimaryWriter, assertNoForeignPrimaryWriter, primaryWriterName, releasePrimaryWriter } from "../src/lib/primary-checkout-writer.ts";
+import { lockHome } from "../src/lib/workspace-paths.ts";
 
 test("Direct checkout protection still admits one writer and serialises with integration", async () => {
   const root = await mkdtemp(join(tmpdir(), "peach-primary-writer-"));

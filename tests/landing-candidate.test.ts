@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test, vi } from "vite-plus/test";
 
-vi.mock("../src/lib/workspace-transaction.mjs", () => ({
+vi.mock("../src/lib/workspace-transaction.ts", () => ({
   withWorkspaceTransaction: async (_key: string, run: () => Promise<unknown>) => run(),
   writeWorkspaceJson: async () => {},
 }));
-import { integrateLandingCandidate } from "../src/lib/landing-candidate.mjs";
+import { integrateLandingCandidate } from "../src/lib/landing-candidate.ts";
 
 function fixture(direct = false, emptyChild = false) {
   const context = {

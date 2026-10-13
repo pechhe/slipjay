@@ -10,9 +10,9 @@ import { fileURLToPath } from "node:url";
 import { test, vi } from "vite-plus/test";
 import {
   parseExecutionPolicy, readExecutionPolicy, readExecutionPolicyAtCommit, readIntegrationPolicy, resolveIntegrationBranch,
-} from "../src/lib/execution-policy.mjs";
-import { readExactExecutionPolicy } from "../src/lib/post-integration-source.mjs";
-import { landWorkspace, workspaceContext } from "../src/lib/slipjay.mjs";
+} from "../src/lib/execution-policy.ts";
+import { readExactExecutionPolicy } from "../src/lib/post-integration-source.ts";
+import { landWorkspace, workspaceContext } from "../src/lib/slipjay.ts";
 
 // peach-pi's policy as extracted (pechhe/peach-pi 37a32367): its landing records
 // carry this declaration's digest, so the parser must keep reproducing it.

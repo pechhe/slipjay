@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createWorkspace, landWorkspace } from "../../src/lib/slipjay.mjs";
+import { createWorkspace, landWorkspace } from "../../src/lib/slipjay.ts";
 
 /**
  * A project whose `main` is promoted to `release`, which starts at the initial

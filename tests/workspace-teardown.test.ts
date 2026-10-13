@@ -4,10 +4,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "./support/workspace-project.ts";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace, pruneEmptyWorkspaces, removeWorkspace, sweepDisposableWorkspaces } from "../src/lib/slipjay.mjs";
-import { parseExecutionPolicy } from "../src/lib/execution-policy.mjs";
-import { runWorkspaceTeardown } from "../src/lib/workspace-teardown.mjs";
-import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.mjs";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace, pruneEmptyWorkspaces, removeWorkspace, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
+import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
+import { runWorkspaceTeardown } from "../src/lib/workspace-teardown.ts";
+import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
 
 /** A teardown that records the cwd it ran in and whether the checkout still had its files. */
 const recording = (log: string) => ({

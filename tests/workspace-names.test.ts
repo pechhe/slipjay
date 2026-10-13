@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { parseExecutionPolicy } from "../src/lib/execution-policy.mjs";
-import { legacyIssueWorkspaceName, projectCode, repositoryProjectCode, taskWorkspaceName } from "../src/lib/workspace-jj.mjs";
+import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
+import { legacyIssueWorkspaceName, projectCode, repositoryProjectCode, taskWorkspaceName } from "../src/lib/workspace-jj.ts";
 
 test("project codes are two letters from the folder name", () => {
   assert.equal(projectCode("peach-pi"), "pp");

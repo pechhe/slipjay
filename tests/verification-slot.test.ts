@@ -7,7 +7,7 @@ import {
   VERIFICATION_SLOT_ENV,
   verificationSlotEnvironment,
   withVerificationSlot,
-} from "../src/lib/verification-slot.mjs";
+} from "../src/lib/verification-slot.ts";
 
 type WaitStatus = { ahead: number; holder: string | null };
 

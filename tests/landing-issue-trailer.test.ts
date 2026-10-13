@@ -3,9 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
-import { referencesIssue, withIssueTrailer } from "../src/lib/post-land-issue.mjs";
-import { metadataHome } from "../src/lib/workspace-paths.mjs";
+import { createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
+import { referencesIssue, withIssueTrailer } from "../src/lib/post-land-issue.ts";
+import { metadataHome } from "../src/lib/workspace-paths.ts";
 import { jj, project } from "./support/workspace-project.ts";
 
 const remoteMessage = (remote: string) => execFileSync("git", ["--git-dir", remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();

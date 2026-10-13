@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { landingTimingLine, landingTimingRecord } from "../src/lib/landing-timing.mjs";
+import { landingTimingLine, landingTimingRecord } from "../src/lib/landing-timing.ts";
 
 test("landing timing reports each stage, finalization coverage and the total", () => {
   const line = landingTimingLine({ startedAt: 0, finishedAt: 9_000, stages: [["preparing", 0], ["verifying", 1_000], ["cleaning", 5_000]] }, {

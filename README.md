@@ -1,7 +1,8 @@
 # slipjay
 
 Harness-neutral JJ workspace and landing tool. One tagged artifact is both the
-`slipjay` CLI and a library.
+`slipjay` CLI and a library, written in TypeScript and run by Bun (1.4 or later),
+its only runtime.
 
 slipjay was extracted from `pechhe/peach-pi` at `37a32367` as `peach-workspace`,
 became Slipway in v1.0.0, and is renamed to SlipJay in v2.0.0. It uses the
@@ -112,10 +113,12 @@ and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun remove -g @pechhe/slipway && bun add -g github:pechhe/slipjay#v2.0.0
-slipjay cutover
+bun add -g github:pechhe/slipjay#v3.0.0
 slipjay status
 ```
+
+From Slipway, remove it first (`bun remove -g @pechhe/slipway`) and run
+`slipjay cutover` once after installing.
 
 The repository is public, so the `github:` tag form needs no authentication.
 
@@ -250,12 +253,12 @@ import { createWorkspace, landWorkspace, workspaceContext } from "@pechhe/slipja
 ```
 
 `@pechhe/slipjay` and `@pechhe/slipjay/delivery` export the same public entry,
-`src/lib/slipjay.mjs`, typed by `slipjay.d.mts`. It covers
+`src/lib/slipjay.ts`, which Bun imports directly (there is no build step). It covers
 workspaces, landing and its verification, repository policy and post-integration
 finalization, plus the process and text utilities that hosts share. Other
 modules under `src/lib` are internal, and `bun run check` enforces that the
 `src/` closure imports only itself, Node built-ins, `effect` and `proper-lockfile`,
-with no cycles. A host that brokers child processes injects its broker with
+with no runtime cycles (type-only imports are not edges). A host that brokers child processes injects its broker with
 `setProcessBroker`. Before the cutover, any library call that reads or writes
 state rejects with an error whose `code` is `SLIPJAY_CUTOVER_REQUIRED`;
 `cutoverPending()` reports that state and `cutover()` runs the cutover.
@@ -284,7 +287,7 @@ including retries that started on an empty continuation child.
   landing, bisect `<last tag>..main` and read the commit's `Issue:` trailer.
 
 Every Vitest file runs under its own disposable `HOME`
-(`scripts/vitest-hermetic-env.mjs`). `scripts/hermetic-home-guard.mjs` fails a test
+(`scripts/vitest-hermetic-env.ts`). `scripts/hermetic-home-guard.ts` fails a test
 that would otherwise write the real `~/.slipjay` or `~/.pi`. The cutover tests build
 pre-v1.0.0 state in that disposable `HOME` and never touch the real one. Run a single file with
 `bunx vp test tests/<file>.test.ts`.

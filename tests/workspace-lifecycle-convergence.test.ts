@@ -6,19 +6,19 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, landWorkspace, renameWorkspace } from "../src/lib/slipjay.mjs";
-import { statePath, workspaceMetadata } from "../src/lib/workspace-state.mjs";
-import { withinWorkspaceStorage } from "../src/lib/workspace-lifecycle.mjs";
-import { landedHome, metadataHome } from "../src/lib/workspace-paths.mjs";
+import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, landWorkspace, renameWorkspace } from "../src/lib/slipjay.ts";
+import { statePath, workspaceMetadata } from "../src/lib/workspace-state.ts";
+import { withinWorkspaceStorage } from "../src/lib/workspace-lifecycle.ts";
+import { landedHome, metadataHome } from "../src/lib/workspace-paths.ts";
 
 const landedPath = (name: string) => join(landedHome(), `${name}.json`);
 const readJson = async (path: string) => JSON.parse(await readFile(path, "utf8"));
 
-const cli = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 
 function runCli(cwd: string, args: string[]) {
   return new Promise<{ code: number; stdout: string; stderr: string }>((resolveRun) => {
-    execFile(process.execPath, [cli, ...args], { cwd }, (error, stdout, stderr) =>
+    execFile("bun", [cli, ...args], { cwd }, (error, stdout, stderr) =>
       resolveRun({ code: error ? Number((error as { code?: number }).code ?? 1) : 0, stdout, stderr }));
   });
 }

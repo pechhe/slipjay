@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promise
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "vite-plus/test";
-import { runRequiredVerification } from "../src/lib/required-verification.mjs";
-import { verificationSlotEnvironment } from "../src/lib/verification-slot.mjs";
+import { runRequiredVerification } from "../src/lib/required-verification.ts";
+import { verificationSlotEnvironment } from "../src/lib/verification-slot.ts";
 
 /** A check that records the directory it ran in. */
 const recordCwd = (marker: string) => ({ executable: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.cwd())`] });

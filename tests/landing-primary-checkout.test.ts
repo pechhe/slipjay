@@ -5,15 +5,15 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/slipjay.mjs";
+import { createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
 
 // An Isolated landing integrates and pushes whatever the primary checkout holds,
 // and moves that checkout only when it is an empty `@` on integrated ancestry.
 
 type Fixture = Awaited<ReturnType<typeof project>>;
-const cli = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 const status = (cwd: string) => new Promise<Record<string, unknown>>((resolveStatus, reject) =>
-  execFile(process.execPath, [cli, "status"], { cwd }, (error, stdout) => error ? reject(error) : resolveStatus(JSON.parse(stdout))));
+  execFile("bun", [cli, "status"], { cwd }, (error, stdout) => error ? reject(error) : resolveStatus(JSON.parse(stdout))));
 
 const primary = (f: Fixture) => ({
   change: jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "change_id"]),

@@ -8,23 +8,23 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 import { beforeEach, test } from "vite-plus/test";
-import { assertHermeticHome } from "../scripts/hermetic-home-guard.mjs";
-import { cutover } from "../src/lib/cutover.mjs";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace, readWorkspaceMode } from "../src/lib/slipjay.mjs";
-import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, legacyWorkspaceHome, slipjayHome } from "../src/lib/workspace-paths.mjs";
+import { assertHermeticHome } from "../scripts/hermetic-home-guard.ts";
+import { cutover } from "../src/lib/cutover.ts";
+import { cleanupLandedWorkspace, createWorkspace, landWorkspace, readWorkspaceMode } from "../src/lib/slipjay.ts";
+import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, legacyWorkspaceHome, slipjayHome } from "../src/lib/workspace-paths.ts";
 
 // Every case builds pre-v1.0.0 state in this file's disposable HOME and cuts it
 // over; the guard below makes sure that HOME is never the developer's own.
 assertHermeticHome();
 
-const cli = fileURLToPath(new URL("../src/launcher/workspace.mjs", import.meta.url));
+const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 type Run = { code: number; stdout: string; stderr: string };
 const run = (executable: string, args: string[], cwd = homedir()) => new Promise<Run>((resolveRun) => {
   execFile(executable, args, { cwd, env: process.env, timeout: 120_000 }, (error, stdout, stderr) => {
     resolveRun({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stdout, stderr });
   });
 });
-const slipjay = (args: string[], cwd?: string) => run(process.execPath, [cli, ...args], cwd);
+const slipjay = (args: string[], cwd?: string) => run("bun", [cli, ...args], cwd);
 
 const legacy = (...parts: string[]) => join(legacyStateHome(), ...parts);
 const writeJson = async (file: string, value: unknown) => {
