@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.6.3
+
+- **A landed or failed candidate no longer pins the submitted commit (#22):** the
+  candidate bookmark (`slipjay/changes/<change>`) is forgotten through the colocated
+  integration checkout after it is pushed and again when the operation ends, and the
+  runner deletes it from the remote before reporting any verdict (including after a
+  restart, and for a landing cancelled while queued). A full `jj git fetch` by another
+  session no longer makes the submitted commit immutable, so a landed rewrite no longer
+  leaves it divergent and a failed landing stays editable.
+
 ## v3.6.2
 
 - **Upgrading no longer clears Bun's cache (#19):** the README's upgrade is
