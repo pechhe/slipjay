@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.5.0
+
+- **The runner is the only landing path (#14):** `slipjay land` always sends the change
+  to the runner, and refuses without a runner location. `--local-only`, the local
+  verification slot, post-land verification (`postLandVerification`, `post-land-run`)
+  and local finalization are gone (a policy still declaring `postLandVerification` is
+  refused), with the library's local landing exports
+  (`landWorkspace` and its helpers); `landThroughRunner` is the library's landing
+  call. `--direct` still lands the primary checkout, through the runner.
+- **Gate key renamed:** `requiredLocalVerification` is now `requiredLandingVerification`.
+  The old name is still read in this release only; declaring both is refused.
+- After a runner landing, `land` again sweeps other delivered or idle workspaces,
+  printing what it removed and which landed ones it kept, as local landings did.
+  Verification-slot and post-land state left by local landings is pruned
+  automatically.
+- Recreating an Issue workspace at the path of one whose checkout was deleted no longer
+  fails on jj 0.46+: forgetting it also removes its Git worktree registration.
+
 ## v3.4.0
 
 - **Owner controls on the runner:** `slipjay runner kill` stops the running landing or

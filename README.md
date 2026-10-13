@@ -111,7 +111,7 @@ and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.4.0
+bun add -g github:pechhe/slipjay#v3.5.0
 slipjay status
 ```
 
