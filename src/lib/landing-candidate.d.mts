@@ -30,6 +30,8 @@ export type LandingIO = {
   assertStackConflictFree(cwd: string, branch: string, changeId: string): Promise<unknown>;
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;
+  /** Frozen install of the rebased candidate; fails, restoring source, if the install edits it. */
+  prepareCandidateDependencies(cwd: string, context: CandidateContext, candidate: LandingRevision, progress?: (line: string) => void): Promise<void>;
   runVerification(context: CandidateContext, progress?: (line: string) => void): Promise<VerificationEvidence>;
   writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string, localOnly?: boolean, operationId?: string): Promise<unknown>;
   readJsonOptional(path: string): Promise<Record<string, unknown>>;

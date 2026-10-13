@@ -1,5 +1,15 @@
 # Changelog
 
+## v1.17.1
+
+- **Landing installs what the rebase brought in:** after rebasing onto the
+  integration branch and before migration generation or `requiredLocalVerification`,
+  `land` runs the workspace's frozen install (`bun install --frozen-lockfile`, or the
+  declared manager's equivalent). A workspace installed at allocation no longer fails
+  the gate because the integration branch has since added a dependency or workspace
+  package. An install that edits tracked source is undone and fails the landing. This
+  replaces the install that only migration landings ran.
+
 ## v1.17.0
 
 - **A post-release step can say why it failed:** Slipway gives the step

@@ -40,6 +40,7 @@ function fixture(direct = false, emptyChild = false) {
     },
     readJsonOptional: async () => state,
     statePath: () => "/state",
+    prepareCandidateDependencies: async () => { steps.push("deps"); },
     runVerification: async () => { throw new Error("host verifier should be used"); },
   };
   const options = {
@@ -63,7 +64,7 @@ for (const direct of [false, true]) test(`shared candidate transition preserves 
   const f = fixture(direct);
   const result = await integrateLandingCandidate("/task", f.options, f.io);
   // Housekeeping moves the canonical checkout and the landed workspace onto the integration.
-  assert.deepEqual(f.steps, ["rebase", "generate", "verify", "bookmark", "new", "new"]);
+  assert.deepEqual(f.steps, ["rebase", "deps", "generate", "verify", "bookmark", "new", "new"]);
   assert.equal(result.artifact.commitId, "generated");
   assert.equal(result.cleanupPending, false);
   assert.deepEqual(result.primaryCheckout, { action: "moved" });
@@ -73,7 +74,7 @@ for (const direct of [false, true]) test(`shared candidate transition preserves 
 test("a retry verifies the exact candidate rather than its empty continuation child", async () => {
   const f = fixture(false, true);
   const result = await integrateLandingCandidate("/task", f.options, f.io);
-  assert.deepEqual(f.steps, ["rebase", "generate", "edit", "verify", "bookmark", "new", "new"]);
+  assert.deepEqual(f.steps, ["rebase", "deps", "generate", "edit", "verify", "bookmark", "new", "new"]);
   assert.equal(result.artifact.commitId, "generated");
   assert.equal(f.state.phase, "landed");
 });
@@ -82,7 +83,7 @@ test("a live Direct writer defers the primary checkout move but never the integr
   const f = fixture();
   f.directWriter("The primary checkout is being written by Direct Pi run");
   const result = await integrateLandingCandidate("/task", f.options, f.io);
-  assert.deepEqual(f.steps, ["rebase", "generate", "verify", "bookmark"]);
+  assert.deepEqual(f.steps, ["rebase", "deps", "generate", "verify", "bookmark"]);
   assert.equal(f.state.phase, "landed");
   assert.equal(result.primaryCheckout?.action, "deferred");
   // Housekeeping stays pending so a later cleanup moves the checkout once the writer ends.
@@ -98,6 +99,6 @@ test("shared candidate transition refuses integration if verification moves the 
     return result;
   };
   await assert.rejects(integrateLandingCandidate("/task", f.options, f.io), /Integration bookmark moved/);
-  assert.deepEqual(f.steps, ["rebase", "generate", "verify"]);
+  assert.deepEqual(f.steps, ["rebase", "deps", "generate", "verify"]);
   assert.equal(f.state.phase, undefined);
 });

@@ -105,6 +105,12 @@ new checkout). The normal frozen install still runs afterwards as the
 verification, and if it fails on a cloned tree, the clone is discarded and the
 install repeated from scratch.
 
+`land` runs that frozen install again after rebasing the candidate, before any
+migration generation or verification, so the gate sees the dependencies of the
+integration tip it verifies against rather than the one the workspace was
+allocated from. An install that edits tracked source is undone and fails the
+landing.
+
 ## Environment contract
 
 | Name | Set for |

@@ -1,6 +1,5 @@
 /** Late-bound migration source belongs to the shared, serialized landing path. */
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.mjs";
-import { prepareWorkspaceDependencies } from "./workspace-dependencies.mjs";
 import { migrationCommandFailure, redactMigrationOutput } from "./migration-command-evidence.mjs";
 import { checkoutCwd } from "./checkout-cwd.mjs";
 import { verificationSlotEnvironment } from "./verification-slot.mjs";
@@ -34,10 +33,6 @@ export async function migrationCandidate(cwd, context, io, options = {}) {
           throw migrationCommandFailure([declaration.executable, ...declaration.args].join(" "), result, context.current.root, { ...process.env, ...environment });
       };
       try {
-        options.onProgress?.("[migration] preparing frozen candidate dependencies");
-        await prepareWorkspaceDependencies(context.current.root, { quiet: true, env: verificationSlotEnvironment(process.env) });
-        if ((await io.revisionFacts(cwd, candidate.changeId)).commitId !== candidate.commitId)
-          throw new Error("Dependency preparation changed the committed migration candidate; preserve and reconcile source before landing");
         await run(policy.generate);
         await io.jj(cwd, ["status"]);
         await run(policy.verify);

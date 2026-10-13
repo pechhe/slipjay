@@ -4,6 +4,8 @@ import { finalizePostIntegration } from "./post-integration-finalization.mjs";
 import { githubRepository, withIssueTrailer } from "./post-land-issue.mjs";
 import { assertNoForeignPrimaryWriter } from "./primary-checkout-writer.mjs";
 import { runRequiredVerification } from "./required-verification.mjs";
+import { verificationSlotEnvironment } from "./verification-slot.mjs";
+import { prepareWorkspaceDependencies } from "./workspace-dependencies.mjs";
 import { issueTitle, jj, revisionExists, revisionFacts, run, workspaceContext } from "./workspace-jj.mjs";
 import { stateHome } from "./workspace-paths.mjs";
 import { readJsonOptional, readLandingState, statePath, workspaceMetadata } from "./workspace-state.mjs";
@@ -73,6 +75,23 @@ async function runVerification(context, onProgress = (line) => console.log(line)
   // One landing of this repository verifies at a time; a landing already holds the slot.
   return await runRequiredVerification({ root: context.current.root, checks: context.configuration.requiredLocalVerification,
     onProgress, slot: waitForLandingSlot(context, onProgress) });
+}
+
+/**
+ * A frozen install of the rebased candidate, before migration generation and
+ * verification read `node_modules`: the workspace installed for the integration
+ * tip it was allocated from, and the rebase may have brought in dependencies or
+ * workspace packages since. An install that changes tracked source is undone and
+ * fails the landing.
+ */
+async function prepareCandidateDependencies(cwd, context, candidate, onProgress = (line) => console.log(line)) {
+  const drift = () => jj(cwd, ["diff", "--from", candidate.commitId, "--to", "@", "--summary"]);
+  if (await drift()) throw new Error("Verification checkout differs from the landing candidate; repair and rerun landing");
+  onProgress("[deps] preparing frozen candidate dependencies");
+  await prepareWorkspaceDependencies(context.current.root, { quiet: true, env: verificationSlotEnvironment(process.env) });
+  if ((await revisionFacts(cwd, candidate.changeId)).commitId === candidate.commitId && !await drift()) return;
+  await jj(cwd, ["restore", "--from", candidate.commitId, "--into", "@"]);
+  throw new Error("Dependency preparation changed the landing candidate's source; it was restored. Fix the install script and rerun landing");
 }
 
 async function ensureLandingDescription(cwd, context, target) {
@@ -179,7 +198,7 @@ export async function artifactPublished(cwd, context, state) {
 /** What the landing candidate (landing-candidate.mjs) needs from the land command. */
 export const landingIO = {
   landingPreview, ensureLandingDescription, assertNoForeignPrimaryWriter, jj,
-  assertStackConflictFree, revisionFacts, runVerification, writeLandingState,
+  assertStackConflictFree, revisionFacts, prepareCandidateDependencies, runVerification, writeLandingState,
   readJsonOptional, statePath,
 };
 

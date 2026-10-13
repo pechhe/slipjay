@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.mjs";
 
 export async function integrateLandingCandidate(cwd, options, io) {
-  const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, runVerification, writeLandingState, readJsonOptional, statePath } = io;
+  const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, prepareCandidateDependencies, runVerification, writeLandingState, readJsonOptional, statePath } = io;
   const adapter = options.adapter ?? {};
   const preview = await (adapter.preview?.() ?? landingPreview(cwd));
   const { context } = preview;
@@ -22,6 +22,7 @@ export async function integrateLandingCandidate(cwd, options, io) {
     await assertStackConflictFree(cwd, context.integrationBranch, target.changeId);
     const base = await revisionFacts(cwd, context.integrationBranch);
     let candidate = await revisionFacts(cwd, target.changeId);
+    await prepareCandidateDependencies(cwd, context, candidate, options.onProgress);
     candidate = await (adapter.finalizeCandidate?.(candidate, base) ?? migration.finalize(candidate, base));
     const assertIdentity = async () => {
       const drift = await jj(cwd, ["diff", "--from", candidate.commitId, "--to", "@", "--summary"]);

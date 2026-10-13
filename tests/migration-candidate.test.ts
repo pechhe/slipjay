@@ -126,7 +126,7 @@ test("installation source drift is fenced before generation and restored without
     const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
     const out = spawnSync("node", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
     assert.notEqual(out.status, 0);
-    assert.match(out.stderr, /Dependency preparation changed the committed migration candidate/);
+    assert.match(out.stderr, /Dependency preparation changed the landing candidate's source/);
     assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
     assert.equal(await readFile(join(f.workspace, "schema/source"), "utf8"), "new");
     assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), base);
