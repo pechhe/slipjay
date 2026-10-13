@@ -229,7 +229,7 @@ async function publish(plan: ReleasePlan, merge: string): Promise<void> {
 
 /**
  * Run the declared post-release step for a published release. Whatever goes wrong,
- * the release stands: a failure, even one to take the target lease, becomes a
+ * the release stands: a failure, even one before the step starts, becomes a
  * reported `postRelease` outcome with its retry command.
  */
 async function runPostReleaseStep(plan: ReleasePlan, merge: string, onProgress: (line: string) => void,

@@ -36,6 +36,7 @@ export type LandingAdapter = {
 };
 
 import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import { finishLanding } from "./landing-candidate.ts";
 import { finalizePostIntegration } from "./post-integration-finalization.ts";
 import { githubRepository, withIssueTrailer } from "./issue-references.ts";
@@ -43,7 +44,7 @@ import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { issueTitle, jj, revisionExists, revisionFacts, run, workspaceContext } from "./workspace-jj.ts";
 import { stateHome } from "./workspace-paths.ts";
 import { readJsonOptional, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
-import { writeWorkspaceJson } from "./workspace-transaction.ts";
+import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
 /**
  * The steps a landing is made of, below the land command itself: preview,
@@ -226,7 +227,20 @@ export const landingIO: LandingIO = {
   readJsonOptional, statePath,
 };
 
-/** Retry the housekeeping of a landing whose integration already stands. */
-export function finishLandedWorkspace(context: WorkspaceContext, state: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return finishLanding(context, state, landingIO);
+/**
+ * The client's housekeeping after a landing, or a retry of it. Several sessions'
+ * clients move the same primary checkout once their landings return, so this one
+ * step is serialized on this machine; the runner's queue needs no lock.
+ */
+export async function finishLandedWorkspace(context: WorkspaceContext, state: Record<string, unknown>): Promise<Record<string, unknown>> {
+  try {
+    return await withWorkspaceTransaction(`integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
+      () => finishLanding(context, state, landingIO));
+  } catch (error) {
+    // Only the transaction itself throws here: finishLanding records its own failures.
+    const cleanupError = error instanceof Error ? error.message : String(error);
+    delete state.primaryCheckout;
+    if (context.current.name !== "default") await writeWorkspaceJson(statePath(context.current.name), { ...state, cleanupPending: true, cleanupError });
+    return { cleanupPending: true, cleanupError };
+  }
 }

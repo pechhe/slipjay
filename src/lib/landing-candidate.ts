@@ -45,8 +45,7 @@ export type LandingIO = {
 
 /** The runner's landing candidate transition: rebase, finalize, verify, integrate. */
 import { migrationCandidate } from "./migration-candidate.ts";
-import { resolve } from "node:path";
-import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
+import { writeWorkspaceJson } from "./workspace-transaction.ts";
 
 export async function integrateLandingCandidate(cwd: string, options: CandidateOptions, io: LandingIO): Promise<{ context: CandidateContext; artifact: LandingRevision; base: string; verification: VerificationEvidence; cleanupPending: boolean; cleanupError?: string; primaryCheckout?: PrimaryCheckoutOutcome }> {
   const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, prepareCandidateDependencies, writeLandingState, readJsonOptional, statePath } = io;
@@ -85,13 +84,12 @@ export async function integrateLandingCandidate(cwd: string, options: CandidateO
     options.onStage?.("verifying");
     const verification = await adapter.verify({ base: base.commitId, candidate: candidate.commitId });
     await assertIdentity();
-    await withWorkspaceTransaction(`integrate:${resolve(context.integration.root)}:${context.integrationBranch}`, async () => {
-      await assertIdentity();
-      if (!direct) await writeLandingState(context, candidate, verification, "prepared", options.operationId);
-      options.onStage?.("integrating");
-      await jj(cwd, ["bookmark", "set", context.integrationBranch, "--revision", candidate.commitId]);
-      if (!direct) await writeLandingState(context, candidate, verification, "landed", options.operationId);
-    });
+    // The runner's queue runs one landing or release at a time: nothing else moves the bookmark here.
+    await assertIdentity();
+    if (!direct) await writeLandingState(context, candidate, verification, "prepared", options.operationId);
+    options.onStage?.("integrating");
+    await jj(cwd, ["bookmark", "set", context.integrationBranch, "--revision", candidate.commitId]);
+    if (!direct) await writeLandingState(context, candidate, verification, "landed", options.operationId);
     options.onStage?.("cleaning");
     const state = direct ? { artifactCommitId: candidate.commitId } : await readJsonOptional(statePath(context.current.name));
     const cleanup = await finishLanding(context, state!, io);
@@ -131,15 +129,13 @@ export async function finishLanding(context: WorkspaceContext | CandidateContext
   const { revisionFacts, jj, statePath } = io;
   delete state.primaryCheckout;
   try {
-    await withWorkspaceTransaction(`integrate:${resolve(context.integration.root)}:${context.integrationBranch}`, async () => {
-      const currentDefault = context.current.name === "default" ? await revisionFacts(context.integration.root, "@") : null;
-      if (currentDefault && currentDefault.commitId === state.artifactCommitId) {
-        await jj(context.integration.root, ["new", context.integrationBranch]);
-        state.primaryCheckout = { action: "moved" };
-        return;
-      }
+    const currentDefault = context.current.name === "default" ? await revisionFacts(context.integration.root, "@") : null;
+    if (currentDefault && currentDefault.commitId === state.artifactCommitId) {
+      await jj(context.integration.root, ["new", context.integrationBranch]);
+      state.primaryCheckout = { action: "moved" };
+    } else {
       state.primaryCheckout = await primaryCheckoutDisposition(context, io);
-    });
+    }
     const current = await revisionFacts(context.current.root, "@");
     if (!current.empty && current.commitId === state.artifactCommitId) await jj(context.current.root, ["new", state.artifactCommitId]);
     state.cleanupPending = false;

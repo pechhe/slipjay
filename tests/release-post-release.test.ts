@@ -1,13 +1,11 @@
 import { jj } from "./support/workspace-project.ts";
-import { landFile, releaseProject, remoteRef, until } from "./support/release-project.ts";
+import { landFile, releaseProject, remoteRef } from "./support/release-project.ts";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { targetKeyOf } from "../src/lib/post-integration-coverage.ts";
-import { withTargetLease } from "../src/lib/post-integration-finalization.ts";
-import { readExactExecutionPolicy } from "../src/lib/post-integration-source.ts";
 import { confirmRelease } from "../src/lib/release.ts";
 import { postIntegrationHome } from "../src/lib/workspace-paths.ts";
 
@@ -139,27 +137,3 @@ test("an outcome SlipJay 3.6 wrote under another host's checkout key is adopted 
   }
 });
 
-test("a post-release step holds the target lease landing's post-integration step takes", async () => {
-  const f = await releaseProject({ postRelease: recordingStep });
-  try {
-    await writeFile(join(f.root, "hold"), "");
-    const candidate = await landFile(f, "feature.txt");
-    const release = confirmRelease(f.repo, { candidate });
-    await until(() => existsSync(join(f.root, "started")), "the post-release step to start");
-    const { gitDirectory } = await readExactExecutionPolicy(jj(f.repo, ["git", "root"]), candidate);
-    let stepDoneWhenLeased: number | null = null;
-    const landing = withTargetLease(postIntegrationHome(), targetKeyOf(gitDirectory, TARGET), async () => {
-      stepDoneWhenLeased = (await runs(f.root)).length;
-    });
-    // Nothing can signal a lease that is correctly not taken, so give it a moment to be wrongly taken.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    assert.equal(stepDoneWhenLeased, null, "the lease was taken while the step ran");
-    await rm(join(f.root, "hold"));
-    await landing;
-    assert.equal(stepDoneWhenLeased, 1, "the lease waited for the step to finish");
-    assert.equal((await release).status, "released");
-  } finally {
-    await rm(join(f.root, "hold"), { force: true });
-    await f.dispose();
-  }
-});

@@ -36,7 +36,7 @@ const digest = (value: unknown): string => createHash("sha256").update(JSON.stri
 /** The external-state idempotency key of one artifact, policy and target. */
 export const artifactKey = (gitDirectory: string, commit: string, policyDigest: string, target: string): string => digest([gitDirectory, commit, policyDigest, target]);
 export const receiptPath = (stateDirectory: string, gitDirectory: string, commit: string): string => path.join(stateDirectory, `${digest([gitDirectory, commit])}.json`);
-/** The key of one repository's external target: its lease and latest outcome. */
+/** The key of one repository's external target and its latest outcome. */
 export const targetKeyOf = (gitDirectory: string, target: string): string => digest([gitDirectory, target]);
 
 function gitSucceeded(result: BoundedProcessResult): boolean {
@@ -134,9 +134,8 @@ export async function readState(file: string): Promise<(PostIntegrationResult & 
 const outcomePath = (stateDirectory: string, targetKey: string): string => path.join(stateDirectory, "targets", `${targetKey}.json`);
 
 /**
- * Record the target's latest outcome under the caller's target lease. Only a
- * successful command run (or an ancestor coverage that re-asserts its anchor)
- * records `complete`; `running` is written before any external work starts.
+ * Record the target's latest outcome. Only a successful command run (or an
+ * ancestor coverage that re-asserts its anchor) records `complete`; `running` is written before any external work starts.
  */
 export async function writeTargetOutcome(stateDirectory: string, targetKey: string, outcome: Omit<TargetOutcome, "version">): Promise<void> {
   await mkdir(path.dirname(outcomePath(stateDirectory, targetKey)), { recursive: true, mode: 448 });

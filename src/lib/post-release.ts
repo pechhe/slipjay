@@ -1,11 +1,11 @@
 /**
  * A repository's declared `postRelease` step. Once `slipjay release` has published,
- * it runs the step the released candidate declares, after its target probe,
- * holding the same external-target lease as landing's `postIntegration` step, so
- * no landing finalizes against that target meanwhile. The target follows the
- * integration branch (landing finalizes each integrated commit against it), so the
- * step runs in an exact source view of the local integration branch read under
- * that lease, not of the candidate: the newest commit any landing has finalized.
+ * it runs the step the released candidate declares, after its target probe. The
+ * runner's queue runs it alone, so no landing finalizes against that target
+ * meanwhile. The target follows the integration branch (landing finalizes each
+ * integrated commit against it), so the step runs in an exact source view of the
+ * local integration branch, not of the candidate: the newest commit any landing
+ * has finalized.
  *
  * Its failure never undoes the release. The target's latest outcome is kept on the
  * runner, and a later `slipjay release --confirm` reruns it (on its own when the
@@ -16,11 +16,9 @@ import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs
 import path from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { checkoutCwd } from "./checkout-cwd.ts";
-import { targetKeyOf } from "./post-integration-coverage.ts";
-import { withTargetLease } from "./post-integration-finalization.ts";
 import { postReleasePolicy } from "./post-integration-policy.ts";
 import { readExactExecutionPolicy, withFinalizationSource } from "./post-integration-source.ts";
-import { postIntegrationHome, stateHome } from "./workspace-paths.ts";
+import { stateHome } from "./workspace-paths.ts";
 import { run } from "./workspace-jj.ts";
 import { writeWorkspaceJson } from "./workspace-transaction.ts";
 import type { PostReleaseOutcome } from "./release.ts";
@@ -38,7 +36,7 @@ type StoredOutcome = {
 };
 
 // Outcomes are named by the external target alone, so they survive the runner moving to a
-// checkout at another path; the lease stays keyed by checkout and target, as landing's is.
+// checkout at another path.
 const outcomeKeyOf = (target: string): string => createHash("sha256").update(JSON.stringify(["post-release", target])).digest("hex");
 const outcomePath = (targetKey: string): string => path.join(stateHome(), "post-release", `${targetKey}.json`);
 // The step's output can echo the secrets it was given, so it stays in an owner-only log, never in a result.
@@ -73,10 +71,9 @@ async function declaredStep(root: string, candidate: string) {
   const { gitDirectory, configuration } = await readExactExecutionPolicy(gitRoot.stdout.trim(), candidate);
   const policy = postReleasePolicy(configuration?.postRelease);
   if (!policy) return null;
-  const leaseKey = targetKeyOf(gitDirectory, policy.target);
   const targetKey = outcomeKeyOf(policy.target);
   await adoptLegacyOutcome(policy.target, targetKey);
-  return { gitDirectory, policy, leaseKey, targetKey, latest: await readOutcome(outcomePath(targetKey)) };
+  return { gitDirectory, policy, targetKey, latest: await readOutcome(outcomePath(targetKey)) };
 }
 
 /**
@@ -99,13 +96,12 @@ async function adoptLegacyOutcome(target: string, targetKey: string): Promise<vo
 
 /**
  * Run the step declared at `candidate` for the release `merge`. With `onlyIfPending`,
- * run it only when the target's latest outcome did not complete (re-read under the
- * lease, so a run another release just finished is not repeated). Resolves to null
+ * run it only when the target's latest outcome did not complete. Resolves to null
  * when no step is declared or none is pending; never rejects for the step's own failure.
  */
 export async function runPostRelease({ root, integrationBranch, candidate, merge, onlyIfPending = false, onProgress = () => {}, environment: readEnvironment = () => process.env }: {
   root: string;
-  /** The step runs in the exact source of this local branch, read under the target lease. */
+  /** The step runs in the exact source of this local branch. */
   integrationBranch: string;
   candidate: string;
   merge: string;
@@ -116,23 +112,18 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
 }): Promise<PostReleaseOutcome | null> {
   const step = await declaredStep(root, candidate);
   if (!step || onlyIfPending && (!step.latest || step.latest.status === "complete")) return null;
-  const { gitDirectory, policy, leaseKey, targetKey } = step;
+  const { gitDirectory, policy, targetKey } = step;
   const file = outcomePath(targetKey);
-  const directory = postIntegrationHome();
-  await mkdir(directory, { recursive: true, mode: 448 });
   await mkdir(path.dirname(file), { recursive: true, mode: 448 });
-  onProgress(`[release] post-release: waiting for the ${policy.target} lease`);
-  // A step that could not start (the lease, the integration branch) is recorded too, so a retry finds it pending.
+  const attempt = (step.latest?.status === "complete" ? 0 : step.latest?.attempt ?? 0) + 1;
+  // A step that could not start (the integration branch) is recorded too, so a retry finds it pending.
   const notStarted = async (error: unknown): Promise<PostReleaseOutcome> => {
-    const failed: StoredOutcome = { version: 1, target: policy.target, candidate, merge, attempt: (step.latest?.status === "complete" ? 0 : step.latest?.attempt ?? 0) + 1, status: "failed",
+    const failed: StoredOutcome = { version: 1, target: policy.target, candidate, merge, attempt, status: "failed",
       reason: `The post-release step could not start: ${error instanceof Error ? error.message : String(error)}` };
     await writeWorkspaceJson(file, failed);
     return { ok: false, ...failed, retry: postReleaseRetry(candidate) };
   };
-  return withTargetLease(directory, leaseKey, async (abortSignal: AbortSignal) => {
-    const latest = await readOutcome(file);
-    if (onlyIfPending && (!latest || latest.status === "complete")) return null;
-    const attempt = (latest?.status === "complete" ? 0 : latest?.attempt ?? 0) + 1;
+  const runStep = async (): Promise<PostReleaseOutcome | null> => {
     const tip = await run("jj", ["--color=never", "--ignore-working-copy", "log", "--no-graph", "-r", JSON.stringify(integrationBranch),
       "-T", "commit_id"], { cwd: root });
     const source = tip.stdout.trim();
@@ -156,7 +147,7 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
         const probe = await runBoundedProcess({
           executable: policy.targetProbe.executable, args: policy.targetProbe.args,
           cwd: await checkoutCwd(view, policy.targetProbe.cwd, "Post-release target probe"),
-          env: environment, abortSignal, timeoutMs: 30000, maxOutputBytes: 16 * 1024,
+          env: environment, timeoutMs: 30000, maxOutputBytes: 16 * 1024,
         });
         if (probe.exitCode !== 0 || probe.timedOut || probe.error || probe.signal || probe.stdoutTruncated || probe.stderrTruncated)
           throw new Error(reason);
@@ -166,7 +157,7 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
         const result = await runBoundedProcess({
           executable: policy.command.executable, args: policy.command.args,
           cwd: await checkoutCwd(view, policy.command.cwd, "Post-release command"),
-          env: environment, abortSignal, timeoutMs: policy.timeoutMs, maxOutputBytes: 64 * 1024,
+          env: environment, timeoutMs: policy.timeoutMs, maxOutputBytes: 64 * 1024,
         });
         await writeFile(outputPath(targetKey), `${result.stdout ?? ""}${result.stderr ?? ""}`, { mode: 0o600 });
         if (result.exitCode !== 0 || result.timedOut || result.error || result.signal) {
@@ -174,8 +165,7 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
           reason = `Post-release command ${result.timedOut ? "timed out" : "failed"}${stepReason ? `: ${stepReason}` : ""}`;
           throw new Error(reason = `${reason}; its output is in ${outputPath(targetKey)}`);
         }
-      }, sanitizedProcessEnv, abortSignal);
-      if (abortSignal.aborted) throw new Error(reason = "Post-release lease lost; the outcome is unknown");
+      }, sanitizedProcessEnv);
       const complete: StoredOutcome = { ...evidence, status: "complete" };
       await writeWorkspaceJson(file, complete);
       return { ok: true, ...complete };
@@ -184,5 +174,6 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
       await writeWorkspaceJson(file, failed);
       return { ok: false, ...failed, retry: postReleaseRetry(candidate) };
     }
-  }).catch(notStarted);
+  };
+  return runStep().catch(notStarted);
 }

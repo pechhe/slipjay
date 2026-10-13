@@ -5,8 +5,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "./bounded-process.ts";
-import { finishLanding } from "./landing-candidate.ts";
-import { fetchIntegration, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
+import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
 import { githubRepository } from "./issue-references.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
@@ -314,7 +313,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       await jj(cwd, ["workspace", "update-stale"]);
       if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`))
         await dropSupersededCandidate(cwd, context.current.root, target, result.commitId, onLine);
-      await finishLanding(context, state, landingIO);
+      await finishLandedWorkspace(context, state);
       // Release other delivered or idle checkouts; the sweep never fails the landing.
       sweep = await sweepDisposableWorkspaces(context.integration.root, { protectedRoots: [cwd, context.current.root] }).catch(() => undefined);
       for (const removed of sweep?.removed ?? []) onLine(`Removed workspace: ${removed}`);

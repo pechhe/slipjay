@@ -80,10 +80,10 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
 /**
  * `postRelease`: a step `slipjay release` runs against an external target once a
  * release has published, in the integration branch's exact source (the target
- * follows it), under the same target lease as `postIntegration`. The human's release confirmation is its
+ * follows it), alone in the runner's queue. The human's release confirmation is its
  * approval, and it reruns until it succeeds, so it declares no approval mode or
  * idempotency contract. A reset of a whole database takes longer than a
- * migration, so its deadline may run to 15 minutes, within the lease wait.
+ * migration, so its deadline may run to 15 minutes.
  */
 export function postReleasePolicy(value: unknown): PostReleasePolicy | null {
   if (value === undefined)

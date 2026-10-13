@@ -233,9 +233,8 @@ turns in the same queue (see [Release](#release)).
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs.
   - `repos/<owner>/<name>`: the warm checkouts.
-  - Finalization receipts, target outcomes and the target lease stay in
-    `~/.slipjay/state/post-integration`, where the target lease also covers a
-    `postRelease` step. Held-integration retries rely on them; move them with the runner.
+  - Finalization receipts and target outcomes stay in
+    `~/.slipjay/state/post-integration`. Held-integration retries rely on them; move them with the runner.
   - The `postRelease` step's latest outcome per target stays in
     `~/.slipjay/state/post-release`, named by the target alone, so a failed step is
     still retried by the next confirm after a move to another path.
@@ -340,9 +339,8 @@ candidate.
    may write one short line to the file `SLIPJAY_RELEASE_REASON_FILE` names; the
    result's `reason` carries that line (first line only, control characters
    removed, at most 300 characters), so it must hold no secret. Its `targetProbe` must print `{"target": …}` equal to
-   the declared `target` first. It holds the same target lease as landing's
-   `postIntegration` step for that target, so a landing finalizing against it waits
-   (up to about 20 minutes) until the step is done, and vice versa. `timeoutMs` may
+   the declared `target` first. The runner's queue runs it like any other
+   operation, so no landing finalizes against that target meanwhile. `timeoutMs` may
    be up to 15 minutes. It runs only after the release has published, never on a
    refused or failed release, and its failure never undoes the release: the result
    is still `"released"` with `postRelease: { "ok": false, "reason": …, "retry":

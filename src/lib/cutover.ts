@@ -104,7 +104,7 @@ export async function cutoverHolders(root: string = legacyStateHome()): Promise<
     const pid = Number(await readFile(join(root, "post-land", `${record.commit}.pid`), "utf8").catch(() => ""));
     if (alive(pid)) holders.push(`post-land run ${String(record.commit).slice(0, 12)} (${record.status ?? "queued"}, pid ${pid})`);
   }
-  // Post-integration runs hold their external-target lease while they work.
+  // Post-integration runs of earlier versions hold their external-target lease while they work.
   for (const entry of await entries(join(root, "post-integration"))) {
     if (entry.isDirectory() && entry.name.startsWith("target-") && entry.name.endsWith(".lock")
       && await lockHeld(join(root, "post-integration", entry.name.slice(0, -".lock".length)), 120_000)) {

@@ -85,12 +85,11 @@ export async function withTestRunner<T>(f: { root: string; repo: string; remote:
   // Through Git's config: jj would store the symlink's resolved path.
   const setOrigin = (url: string) => execFileSync("git", ["-C", f.repo, "remote", "set-url", "origin", url]);
   setOrigin(github);
-  // A runner host has its own author for the commits it rewrites; here, in this file's disposable HOME.
-  jj(f.root, ["config", "set", "--user", "user.name", "Fixture"]);
-  jj(f.root, ["config", "set", "--user", "user.email", "fixture@example.com"]);
+  // A runner commits as the identity its config names for the commits it rewrites.
   const home = join(f.root, "runner");
   await mkdir(home, { recursive: true });
-  await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: f.remote } } }));
+  await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: f.remote } },
+    jj: { "user.name": "Fixture", "user.email": "fixture@example.com" } }));
   const runner = await startRunner({ home, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" }, port: 0 });
   try {
     return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });
