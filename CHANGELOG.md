@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.6.0
+
+- **Gate key's former name refused:** a policy declaring `requiredLocalVerification`
+  is refused with a message to rename it `requiredLandingVerification`, instead of being
+  read as the gate (#14).
+- README: moving the runner to another host.
+
 ## v3.5.0
 
 - **The runner is the only landing path (#14):** `slipjay land` always sends the change
