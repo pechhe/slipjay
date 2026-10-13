@@ -237,7 +237,7 @@ function abandonedWorkspaces(args) {
 }
 
 /**
- * A deny reason when this jj command would abandon unfinished work in a Slipjay
+ * A deny reason when this jj command would abandon unfinished work in a SlipJay
  * workspace: `dir` is in a governed repository (a secondary workspace, unless the
  * command forgets named workspaces, which is judged from any checkout) and a workspace
  * the command leaves (or forgets) has a non-empty, unintegrated `@` that is undescribed

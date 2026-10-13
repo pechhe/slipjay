@@ -1,4 +1,4 @@
-// Tests must never write the developer's real Slipjay or Slipway state (for example
+// Tests must never write the developer's real SlipJay or Slipway state (for example
 // ~/.slipjay/state/post-land, or ~/.slipway during a cutover test). `homedir()` follows HOME, but the
 // account's home comes from the user database, so a test whose HOME was not
 // isolated (a runner without the hermetic setup, or a runtime that fixes

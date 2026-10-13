@@ -4,7 +4,7 @@ Harness-neutral JJ workspace and landing tool. One tagged artifact is both the
 `slipjay` CLI and a library.
 
 slipjay was extracted from `pechhe/peach-pi` at `37a32367` as `peach-workspace`,
-became Slipway in v1.0.0, and is renamed to Slipjay in v2.0.0. It uses the
+became Slipway in v1.0.0, and is renamed to SlipJay in v2.0.0. It uses the
 `slipjay` CLI, `slipjay.json` config, `SLIPJAY_*` environment names, and state
 under `~/.slipjay`. See [CHANGELOG.md](CHANGELOG.md) and [State and cutover](#state-and-cutover).
 
@@ -140,7 +140,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or verify and publish the confirmed candidate (see [Release](#release)). |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
-| `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a Slipjay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
+| `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
 | `cutover [--check]` | Move state from `~/.slipway` to `~/.slipjay` once and retire the `slipway` CLI (see [State and cutover](#state-and-cutover)). |
 
 ## Release

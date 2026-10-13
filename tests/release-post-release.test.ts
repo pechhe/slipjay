@@ -16,7 +16,7 @@ const TARGET = "fixture-db:development";
 /**
  * A post-release step that records the release it ran for and what the remote
  * release branch held at that moment. It holds while `<root>/hold` exists, after
- * writing `<root>/started`, and fails while `<root>/fail` exists, handing Slipjay
+ * writing `<root>/started`, and fails while `<root>/fail` exists, handing SlipJay
  * a reason line with a control character and a trailing second line.
  */
 const recordingStep = (root: string, remote: string) => {

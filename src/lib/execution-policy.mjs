@@ -35,7 +35,7 @@ const fail = (message) => { throw new Error(`${policyLabel} ${message}`); };
 /** The refusal for a repository (`location`: a checkout or its `.git` directory) governed only by the retired path. */
 export function retiredExecutionPolicyError(location) {
   const where = String(location).replace(/\/\.git\/?$/, "");
-  const error = new Error(`${RETIRED_EXECUTION_POLICY_PATH} is no longer read (since Slipjay v2.0.0); rename it to ${EXECUTION_POLICY_PATH} at the repository root (${where})`);
+  const error = new Error(`${RETIRED_EXECUTION_POLICY_PATH} is no longer read (since SlipJay v2.0.0); rename it to ${EXECUTION_POLICY_PATH} at the repository root (${where})`);
   error.code = "SLIPJAY_RETIRED_POLICY_PATH";
   return error;
 }

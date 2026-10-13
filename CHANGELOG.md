@@ -2,7 +2,7 @@
 
 ## v2.0.0
 
-- **Slipway is now Slipjay:** the package is `@pechhe/slipjay`, the CLI is `slipjay`,
+- **Slipway is now SlipJay:** the package is `@pechhe/slipjay`, the CLI is `slipjay`,
   the repository config is `slipjay.json`, environment variables are `SLIPJAY_*`, and
   state lives under `~/.slipjay`. `slipjay cutover` moves state from `~/.slipway` to
   `~/.slipjay` once and records it in `~/.slipjay/cutover.json`; existing workspaces
