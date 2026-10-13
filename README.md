@@ -233,6 +233,9 @@ turns in the same queue (see [Release](#release)).
   - Finalization receipts, target outcomes and the target lease stay in
     `~/.slipjay/state/post-integration`, where the target lease also covers a
     `postRelease` step. Held-integration retries rely on them; move them with the runner.
+  - The `postRelease` step's latest outcome per target stays in
+    `~/.slipjay/state/post-release`, named by the target alone, so a failed step is
+    still retried by the next confirm after a move to another path.
 
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
@@ -242,8 +245,8 @@ turns in the same queue (see [Release](#release)).
   repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
   stop its unit. On the old host, `slipjay runner pause`, wait until no operation is
   running and none is held (the last one landed or failed before integrating), then
-  stop its unit. Copy `operations.sqlite`, `logs/` and `~/.slipjay/state/post-integration`
-  to the new host (warm checkouts are cloned again on first use), start its unit,
+  stop its unit. Copy `operations.sqlite`, `logs/`, `~/.slipjay/state/post-integration` and
+  `~/.slipjay/state/post-release` to the new host (warm checkouts are cloned again on first use), start its unit,
   point each machine's location at it (`"runner": "ssh://<new host>"`, or
   `http://127.0.0.1:7787` on the host itself), and `slipjay runner resume`: the pause
   moved with the log.

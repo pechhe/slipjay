@@ -11,7 +11,8 @@
  * runner, and a later `slipjay release --confirm` reruns it (on its own when the
  * candidate is already released) instead of skipping it.
  */
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { checkoutCwd } from "./checkout-cwd.ts";
@@ -36,6 +37,9 @@ type StoredOutcome = {
   reason?: string;
 };
 
+// Outcomes are named by the external target alone, so they survive the runner moving to a
+// checkout at another path; the lease stays keyed by checkout and target, as landing's is.
+const outcomeKeyOf = (target: string): string => createHash("sha256").update(JSON.stringify(["post-release", target])).digest("hex");
 const outcomePath = (targetKey: string): string => path.join(stateHome(), "post-release", `${targetKey}.json`);
 // The step's output can echo the secrets it was given, so it stays in an owner-only log, never in a result.
 const outputPath = (targetKey: string): string => path.join(stateHome(), "post-release", `${targetKey}.log`);
@@ -69,8 +73,28 @@ async function declaredStep(root: string, candidate: string) {
   const { gitDirectory, configuration } = await readExactExecutionPolicy(gitRoot.stdout.trim(), candidate);
   const policy = postReleasePolicy(configuration?.postRelease);
   if (!policy) return null;
-  const targetKey = targetKeyOf(gitDirectory, policy.target);
-  return { gitDirectory, policy, targetKey, latest: await readOutcome(outcomePath(targetKey)) };
+  const leaseKey = targetKeyOf(gitDirectory, policy.target);
+  const targetKey = outcomeKeyOf(policy.target);
+  await adoptLegacyOutcome(policy.target, targetKey);
+  return { gitDirectory, policy, leaseKey, targetKey, latest: await readOutcome(outcomePath(targetKey)) };
+}
+
+/**
+ * Rename an outcome SlipJay 3.6 and earlier wrote under a checkout-and-target key to its
+ * target key. That checkout may be on the host this state was copied from, so the legacy
+ * record is found by the target it names, not by recomputing its key.
+ */
+async function adoptLegacyOutcome(target: string, targetKey: string): Promise<void> {
+  const directory = path.dirname(outcomePath(targetKey));
+  if (await access(outcomePath(targetKey)).then(() => true, () => false)) return;
+  const names = (await readdir(directory).catch(() => [] as string[])).filter((name) => /^[a-f0-9]{64}\.json$/.test(name));
+  const legacy: string[] = [];
+  for (const name of names) if ((await readOutcome(path.join(directory, name)))?.target === target) legacy.push(name.slice(0, -".json".length));
+  if (legacy.length > 1) throw new Error(`Several post-release outcomes name ${target} (${legacy.join(", ")} in ${directory}); keep the newest and delete the others`);
+  const [key] = legacy;
+  if (!key) return;
+  for (const file of [outputPath, reasonPath]) await rename(file(key), file(targetKey)).catch(() => {});
+  await rename(outcomePath(key), outcomePath(targetKey));
 }
 
 /**
@@ -92,7 +116,7 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
 }): Promise<PostReleaseOutcome | null> {
   const step = await declaredStep(root, candidate);
   if (!step || onlyIfPending && (!step.latest || step.latest.status === "complete")) return null;
-  const { gitDirectory, policy, targetKey } = step;
+  const { gitDirectory, policy, leaseKey, targetKey } = step;
   const file = outcomePath(targetKey);
   const directory = postIntegrationHome();
   await mkdir(directory, { recursive: true, mode: 448 });
@@ -105,7 +129,7 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
     await writeWorkspaceJson(file, failed);
     return { ok: false, ...failed, retry: postReleaseRetry(candidate) };
   };
-  return withTargetLease(directory, targetKey, async (abortSignal: AbortSignal) => {
+  return withTargetLease(directory, leaseKey, async (abortSignal: AbortSignal) => {
     const latest = await readOutcome(file);
     if (onlyIfPending && (!latest || latest.status === "complete")) return null;
     const attempt = (latest?.status === "complete" ? 0 : latest?.attempt ?? 0) + 1;

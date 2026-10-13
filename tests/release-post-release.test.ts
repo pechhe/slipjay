@@ -2,7 +2,7 @@ import { jj } from "./support/workspace-project.ts";
 import { landFile, releaseProject, remoteRef, until } from "./support/release-project.ts";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { targetKeyOf } from "../src/lib/post-integration-coverage.ts";
@@ -92,6 +92,48 @@ test("a failed post-release step keeps the release, is reported and is retried o
     // A completed retry is not repeated.
     const settled = await confirmRelease(f.repo, { candidate });
     assert.ok(settled.ok && settled.status === "released_by" && settled.postRelease === undefined, JSON.stringify(settled));
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("a failed post-release step is still retried after the runner's checkout moves to another path", async () => {
+  const f = await releaseProject({ postRelease: recordingStep });
+  try {
+    await writeFile(join(f.root, "fail"), "");
+    const candidate = await landFile(f, "feature.txt");
+    const released = await confirmRelease(f.repo, { candidate });
+    assert.ok(released.ok && released.status === "released" && released.postRelease?.ok === false, JSON.stringify(released));
+    await rm(join(f.root, "fail"));
+    // A new host, or a new home: the same repository checked out somewhere else.
+    const moved = join(f.root, "moved");
+    await rename(f.repo, moved);
+    const retried = await confirmRelease(moved, { candidate });
+    assert.ok(retried.ok && retried.status === "released_by", JSON.stringify(retried));
+    assert.equal(retried.postRelease?.ok, true, JSON.stringify(retried.postRelease));
+    assert.equal(retried.postRelease?.attempt, 2);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("an outcome SlipJay 3.6 wrote under another host's checkout key is adopted and still retried", async () => {
+  const f = await releaseProject({ postRelease: recordingStep });
+  try {
+    await writeFile(join(f.root, "fail"), "");
+    const candidate = await landFile(f, "feature.txt");
+    assert.equal((await confirmRelease(f.repo, { candidate })).ok, true);
+    await rm(join(f.root, "fail"));
+    // Put the failed outcome where 3.6 kept it on the old host, then move the checkout too.
+    const directory = join(postIntegrationHome(), "..", "post-release");
+    const [current] = (await readdir(directory)).filter((name) => name.endsWith(".json"));
+    await rename(join(directory, current!), join(directory, `${targetKeyOf("/old-host/repos/fixture/.git", TARGET)}.json`));
+    const moved = join(f.root, "moved");
+    await rename(f.repo, moved);
+    const retried = await confirmRelease(moved, { candidate });
+    assert.ok(retried.ok && retried.status === "released_by", JSON.stringify(retried));
+    assert.equal(retried.postRelease?.ok, true, JSON.stringify(retried.postRelease));
+    assert.equal(retried.postRelease?.attempt, 2);
   } finally {
     await f.dispose();
   }
