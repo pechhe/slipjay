@@ -4,7 +4,7 @@ import { access, mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
-import { landThroughRunner } from "../src/lib/runner-client.ts";
+import { landThroughRunner, releaseThroughRunner } from "../src/lib/runner-client.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
@@ -122,6 +122,32 @@ test("queued positions and stage changes name the runner", async () => {
     await waitFor(() => f.lines.includes("[runner test-runner] verifying"));
     f.append(operation.id, { type: "cancelled", reason: "fixture done" });
     await running;
+  } finally { await f.dispose(); }
+});
+
+test("a release confirm waits behind running work, follows its release to the verdict and reattaches on a rerun", async () => {
+  const f = await fixture();
+  try {
+    f.append("ahead", { type: "submitted", repo: "fixture/project", changeId: "kkkkkkkkkkkk", commitId: "older", bookmark: candidateBookmark("kkkkkkkkkkkk"), submittedBy: "fixture" });
+    f.append("ahead", { type: "stage", stage: "verifying" });
+    const candidate = "c".repeat(40);
+    const options = { ...f.options, candidate, remote: "origin", migrationsReady: false };
+    const following = new AbortController();
+    const detached = releaseThroughRunner(f.cwd, { ...options, signal: following.signal });
+    await waitFor(() => f.lines.includes("[runner test-runner] queued (position 2, behind landing kkkkkkkkkkkk)"));
+    following.abort(new Error("detached"));
+    await assert.rejects(detached, /detached/);
+    const release = f.log.openOperations().find((op) => op.kind === "release")!;
+    const rerun = releaseThroughRunner(f.cwd, options);
+    await waitFor(() => f.lines.includes(`[runner test-runner] following the open release of ${candidate.slice(0, 12)}`));
+    assert.equal(f.log.openOperations().filter((op) => op.kind === "release").length, 1, "the rerun submitted no second release");
+    f.append("ahead", { type: "cancelled", reason: "fixture" });
+    f.append(release.id, { type: "stage", stage: "verifying" });
+    f.append(release.id, { type: "failed", stage: "verifying", reason: "Required verification failed", command: "bun run verify:release", output: "boom\n" });
+    const { operation, logUrl } = await rerun;
+    assert.equal(operation.id, release.id);
+    assert.deepEqual(operation.result, { type: "failed", stage: "verifying", reason: "Required verification failed", command: "bun run verify:release", output: "boom\n" });
+    assert.equal(logUrl, `slipjay runner log ${release.id}`);
   } finally { await f.dispose(); }
 });
 

@@ -143,7 +143,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `start [--integration] [--issue <n>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`); `--refill` then starts a background spare refill (a claimed spare is always refilled); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`) and sends all install output to stderr. |
 | `preview` | Diffstat of what a landing would integrate. |
 | `land [--local-only] [--direct]` | Verify, integrate and publish the current workspace (or, with `--direct`, the primary checkout). Afterwards it removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
-| `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or verify and publish the confirmed candidate (see [Release](#release)). |
+| `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
@@ -156,7 +156,8 @@ When a runner location is configured, `slipjay land` sends the change to one
 long-lived runner instead of verifying locally. The runner queues landings and takes
 them one at a time in arrival order. For each one it rebases onto the integration tip,
 runs the repository's declared gate in its own warm checkout, then integrates and
-publishes. The authoring machine runs none of the gate.
+publishes. The authoring machine runs none of the gate. Confirmed releases take
+turns in the same queue (see [Release](#release)).
 
 - **Location.** One value: `SLIPJAY_RUNNER`, or `"runner"` in `~/.slipjay/config.json`.
   On the runner's host it is `http://127.0.0.1:7787`. Elsewhere it is
@@ -200,17 +201,18 @@ publishes. The authoring machine runs none of the gate.
     `~/.slipjay/state/post-integration`, shared with local landings on the same host so
     the lease covers both. Held-integration retries rely on them; move them with the runner.
 
-  On restart, queued operations resume. An operation that was running is recorded as
+  On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
-  otherwise.
+  otherwise. A release that was running is recorded as failed with the
+  `slipjay release --confirm` command that reruns it.
 - **Setup.** On the runner host, with `slipjay`, `jj` and `bws` installed and the
   Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved:
   `scripts/setup-runner.sh pechhe/YardSmith=git@github.com:pechhe/YardSmith.git`.
   It writes the config and a systemd user unit that runs `bws run -- slipjay runner
   serve` with `Restart=always`, and enables lingering so the unit survives logout and
   reboot. Logs: `journalctl --user -u slipjay-runner`.
-- **API.** Under `/v1`: operations (submit, read, cancel, event stream, log) and
-  changes by jj change ID. The contract is `src/lib/runner-contract.ts`.
+- **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
+  releases (submit) and changes by jj change ID. The contract is `src/lib/runner-contract.ts`.
 
 ## Release
 
@@ -238,36 +240,28 @@ candidate.
    `{ "checked": false, "reason": … }` and the release goes ahead; `--confirm`
    checks again.
 2. After explicit human approval of that candidate, `slipjay release --confirm
-   <commit>` checks the exact commit out on its own under
-   `~/.slipjay/state/releases/checkouts`, prepares its dependencies and runs the
-   checks inside the repository's release slot, which it holds until it has
-   published. Landing continues while a release verifies. The candidate must
-   already be published on the integration branch.
+   <commit>` checks locally that the candidate is published on the integration
+   branch (and, for migration artifacts, that `--migrations-ready` was given), then
+   submits it to the runner (see [Runner](#runner)); a confirm needs a runner
+   location. The release takes its turn in the runner's one serial queue: a landing
+   submitted behind it waits, printing `queued (position 2, behind release
+   16bea7013436)`, and so does a release behind a landing. In its turn the runner
+   checks the exact candidate out in its warm checkout, prepares its dependencies
+   and runs the checks; their failure publishes nothing and prints the failing
+   command and its output verbatim. The terminal follows the stages (`verifying`,
+   `publishing`, `finalizing`); Ctrl-C stops following, and rerunning the same
+   confirm follows the open release of that candidate instead of submitting a
+   second.
 
-   Concurrent confirms coalesce rather than refuse. Candidates sit on the linear
-   integration branch, so of any two one contains the other, and releasing the
-   newer ships both. A confirm made while another release runs waits for the slot,
-   printing what it waits for (`[release] waiting for release 16bea7013436
-   (contains 5b4569ebb74d)`, or `… to finish before …` when its own candidate is
-   newer). It stands aside for any waiting confirm whose candidate contains its
-   own, so of several waiters only the newest verifies. As soon as the release
-   branch contains its candidate (the release it waited for published), or when
-   it takes the slot and a fresh fetch shows that, it returns `"status":
-   "released_by"` with the release `merge` that shipped it and that merge's
-   candidate as `releasedBy`, without verifying. Otherwise, holding the slot, it
-   plans again against the moved base and verifies and publishes its own
-   candidate, so when the release it waited for fails, an older waiter still
-   runs. Each session only ever verifies the commit it was approved for. A
-   holder or waiter stops counting once its process is gone or, for a waiter,
-   once it has not polled for a minute; a dead holder's lock goes stale after a
-   minute. A confirm whose candidate is already released when it plans returns
-   `"status": "up_to_date"`.
+   A confirm of a candidate the release branch already holds (a newer release
+   shipped it) verifies nothing: it returns `"status": "released_by"` with the
+   release `merge` that shipped it and that merge's candidate as `releasedBy`.
 3. It builds the merge `Release <integration> to <release>` (parents: base, then
    candidate; a `Release-Candidate:` trailer) and refuses unless the merge is
    conflict-free and its tree is the candidate's, so a release branch with changes
    the integration branch lacks is refused rather than merged.
-4. It pushes the release branch, refusing if the remote moved since the plan, and
-   records the release in `~/.slipjay/state/releases`.
+4. It pushes the release branch, refusing if the remote moved since the plan. The
+   runner's operation log records the release.
 
 5. When the candidate's policy declares `postRelease`, it then runs that step
    against an external target, for example resetting a development database from
@@ -281,14 +275,19 @@ candidate.
    ```
 
    It is shaped like `postIntegration`, and the candidate's declaration applies.
-   The target follows the integration branch, so the step runs in an exact source
-   view of the local integration branch, read once it holds the target lease (the
-   newest commit a landing has finalized against the target), not of the
-   candidate. The view has no dependencies installed (the command bootstraps what
+   It runs on the runner, which also finalizes every runner landing against the
+   target, and the serial queue never runs it alongside one. A landing made
+   without the runner (`--local-only`, or with no runner location) still
+   finalizes on its own machine under that machine's lease, which the runner's
+   reset does not exclude. The target follows the
+   integration branch, so the step runs in an exact source view of the runner's
+   integration branch as published (the newest commit a landing has finalized
+   against the target), not of the candidate. The view has no dependencies installed (the command bootstraps what
    it needs). The step gets the sanitized environment plus `environmentKeys`,
    `SLIPJAY_RELEASE_CANDIDATE`, `SLIPJAY_RELEASE_MERGE`, `SLIPJAY_RELEASE_SOURCE`
-   (that integration commit) and `SLIPJAY_RELEASE_TARGET`. Its output goes to an
-   owner-only log under `~/.slipjay/state/post-release`, never into the result,
+   (that integration commit) and `SLIPJAY_RELEASE_TARGET`; the runner's environment
+   supplies `environmentKeys`. Its output goes to an owner-only log under
+   `~/.slipjay/state/post-release` on the runner, never into the result,
    because it may echo the secrets it was given. To say why it failed, the step
    may write one short line to the file `SLIPJAY_RELEASE_REASON_FILE` names; the
    result's `reason` carries that line (first line only, control characters
@@ -299,14 +298,16 @@ candidate.
    be up to 15 minutes. It runs only after the release has published, never on a
    refused or failed release, and its failure never undoes the release: the result
    is still `"released"` with `postRelease: { "ok": false, "reason": …, "retry":
-   "slipjay release --confirm <candidate>" }`, and the command exits 2. A plan
-   reports a step that did not complete as `pendingPostRelease`, and a later
-   `--confirm` of an already released candidate reruns it instead of skipping it.
+   "slipjay release --confirm <candidate>" }`, and the command exits 2. A later
+   `--confirm` of an already released candidate reruns a step that did not
+   complete instead of skipping it; the plan, which never contacts the runner,
+   does not report it.
 
 `land` and `release --confirm` each append one line to
-`~/.slipjay/state/metrics/landings.jsonl` or `releases.jsonl`: stage durations in
-milliseconds (`queued` is time waiting for another landing's slot), the outcome,
-and for a release its verification time.
+`~/.slipjay/state/metrics/landings.jsonl` or `releases.jsonl` on the machine that
+ran the command: for a landing, stage durations in milliseconds (`queued` is time
+waiting for another landing's slot) and the outcome; for a release, the outcome
+and its total time.
 
 A release whose range carries migration artifacts also needs `--migrations-ready`:
 apply those migrations where the release branch deploys first. slipjay never

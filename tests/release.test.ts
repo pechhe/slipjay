@@ -1,15 +1,13 @@
 import { jj } from "./support/workspace-project.ts";
-import {
-  gatedReleaseCheck, landFile, openReleaseGate, releaseProject, remoteParents, remoteRef, remoteTree, until, verifiedCandidates,
-} from "./support/release-project.ts";
+import { landFile, releaseProject, remoteParents, remoteRef, remoteTree } from "./support/release-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { releaseIntegration } from "../src/lib/release.ts";
+import { confirmRelease, releaseIntegration } from "../src/lib/release.ts";
 
-test("a release plans, then verifies the exact candidate and publishes a merge with its tree", async () => {
+test("a release plans, then verifies the exact candidate in the confirming checkout and publishes a merge with its tree", async () => {
   // A shallow primary, as YardSmith's is: the base exists only as fetched history.
   const f = await releaseProject({ shallow: true });
   try {
@@ -25,22 +23,16 @@ test("a release plans, then verifies the exact candidate and publishes a merge w
       "a repository without GitHub still plans, saying the Spec check could not run");
     assert.equal(remoteRef(f, "release"), base, "planning publishes nothing");
 
-    const children = () => jj(f.repo, ["log", "--no-graph", "-r", `children(${candidate})`, "-T", 'commit_id ++ "\\n"']).split("\n").sort();
-    const childrenBefore = children();
-    const released = await releaseIntegration(f.repo, { confirm: candidate.slice(0, 12) });
+    const released = await confirmRelease(f.repo, { candidate: candidate.slice(0, 12) });
     assert.equal(released.status, "released", JSON.stringify(released));
     assert.ok(released.ok && released.status === "released");
     assert.equal(released.halfBuiltSpecs?.checked, false, "confirm re-runs the Spec check");
     assert.equal(remoteRef(f, "release"), released.merge);
     assert.deepEqual(remoteParents(f, released.merge), [base, candidate]);
     assert.equal(remoteTree(f, released.merge), remoteTree(f, candidate));
-    // The check ran once, in a checkout of its own that is gone afterwards.
-    const verified = (await readFile(f.verifiedRelease, "utf8")).trim().split("\n");
-    assert.equal(verified.length, 1);
-    assert.match(verified[0]!, /releases\/checkouts\//);
-    assert.ok(!jj(f.repo, ["workspace", "list"]).includes("slipjay-release-"));
-    // The release adds only the merge on the candidate: not even its checkout's empty working copy.
-    assert.deepEqual(children(), [...childrenBefore, released.merge].sort());
+    // The check ran once, on the candidate checked out where the release was confirmed.
+    assert.deepEqual((await readFile(f.verifiedRelease, "utf8")).trim().split("\n"), [await realpath(f.repo)]);
+    assert.equal(jj(f.repo, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), candidate);
 
     assert.equal((await releaseIntegration(f.repo)).status, "up_to_date");
   } finally {
@@ -53,28 +45,10 @@ test("a failed release check publishes nothing", async () => {
   try {
     const base = remoteRef(f, "release");
     const candidate = await landFile(f, "feature.txt");
-    const result = await releaseIntegration(f.repo, { confirm: candidate });
+    const result = await confirmRelease(f.repo, { candidate });
     assert.equal(result.status, "verification_failed", JSON.stringify(result));
     assert.equal(remoteRef(f, "release"), base);
   } finally {
-    await f.dispose();
-  }
-});
-
-test("a landing does not wait for a release verification", async () => {
-  const f = await releaseProject({ checks: gatedReleaseCheck });
-  try {
-    const candidate = await landFile(f, "feature.txt");
-    let releaseSettled = false;
-    const release = releaseIntegration(f.repo, { confirm: candidate }).finally(() => { releaseSettled = true; });
-    await until(async () => (await verifiedCandidates(f)).length === 1, "the release check to start");
-    // The release's check is now running and blocked; a landing must still go through.
-    await landFile(f, "during-release.txt");
-    assert.equal(releaseSettled, false, "the landing waited for the release verification");
-    await openReleaseGate(f);
-    assert.equal((await release).status, "released");
-  } finally {
-    await openReleaseGate(f).catch(() => {});
     await f.dispose();
   }
 });
@@ -85,7 +59,7 @@ test("a candidate that is not published on the integration branch is refused", a
     await landFile(f, "feature.txt");
     jj(f.repo, ["new", "main", "-m", "unpublished"]);
     const unpublished = jj(f.repo, ["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
-    const result = await releaseIntegration(f.repo, { confirm: unpublished });
+    const result = await confirmRelease(f.repo, { candidate: unpublished });
     assert.equal(result.status, "refused");
     assert.ok(!result.ok && /is not published/.test(result.reason));
   } finally {
@@ -108,9 +82,9 @@ test("a release carrying migration artifacts needs --migrations-ready", async ()
     const plan = await releaseIntegration(f.repo);
     assert.ok(plan.ok && plan.status === "planned");
     assert.deepEqual(plan.migrationArtifacts, ["migrations/0001.sql"]);
-    const refused = await releaseIntegration(f.repo, { confirm: candidate });
+    const refused = await confirmRelease(f.repo, { candidate });
     assert.ok(!refused.ok && /--migrations-ready/.test(refused.reason), JSON.stringify(refused));
-    const released = await releaseIntegration(f.repo, { confirm: candidate, migrationsReady: true });
+    const released = await confirmRelease(f.repo, { candidate, migrationsReady: true });
     assert.equal(released.status, "released", JSON.stringify(released));
   } finally {
     await f.dispose();
@@ -132,7 +106,7 @@ test("a release branch with changes the integration branch lacks is refused", as
     git(["commit", "-qm", "Hotfix"]);
     git(["push", "-q", "origin", "release"]);
     const hotfix = remoteRef(f, "release");
-    const result = await releaseIntegration(f.repo, { confirm: candidate });
+    const result = await confirmRelease(f.repo, { candidate });
     assert.ok(!result.ok && /not the verified tree/.test(result.reason), JSON.stringify(result));
     assert.equal(remoteRef(f, "release"), hotfix);
   } finally {

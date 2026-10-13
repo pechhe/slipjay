@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Releases on the runner:** `slipjay release --confirm <commit>` submits the
+  approved candidate to the runner, which verifies it with
+  `requiredReleaseVerification` in its warm checkout, publishes the release branch
+  and runs the `postRelease` step, in the same serial queue as landings (#12). The
+  authoring machine no longer verifies releases, and a confirm needs a runner
+  location. A landing queued behind a release, or a release behind a landing,
+  prints what it waits behind. Rerunning a confirm follows the open release of its
+  candidate. The release slot and its local coalescing are gone; a confirm of a
+  candidate a newer release already shipped still returns `released_by`, now also
+  in place of `up_to_date`. A plan no longer reports `pendingPostRelease`.
+
 ## v3.2.0
 
 - **Migrations on the runner:** the runner no longer declines changes touching

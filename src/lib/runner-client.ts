@@ -8,8 +8,8 @@ import { runBoundedProcess } from "./bounded-process.ts";
 import { finishLanding } from "./landing-candidate.ts";
 import { fetchIntegration, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
 import { githubRepository } from "./post-land-issue.ts";
-import { candidateBookmark, RUNNER_DEFAULT_PORT } from "./runner-contract.ts";
-import type { Operation, StoredEvent } from "./runner-contract.ts";
+import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import type { Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-landing.ts";
 import { readLandingState, statePath } from "./workspace-state.ts";
@@ -108,7 +108,9 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
   let lastSeq = initial.lastSeq;
   let lastLine = "";
   const show = () => {
-    const line = `[runner ${name}] ${operation.stage}${operation.status === "queued" && operation.position !== undefined ? ` (position ${operation.position})` : ""}`;
+    const queued = operation.status === "queued" && operation.position !== undefined
+      ? ` (position ${operation.position}${operation.waitingFor ? `, behind ${operation.waitingFor}` : ""})` : "";
+    const line = `[runner ${name}] ${operation.stage}${queued}`;
     if (line !== lastLine) { lastLine = line; onLine(line); }
   };
   const refresh = async () => {
@@ -122,7 +124,7 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
         controller.signal.throwIfAborted();
         if (error instanceof Error && /credential|HTTP/.test(error.message)) throw error;
         if (attempt === 1) onLine(`[runner ${name}] connection lost; reconnecting`);
-        if (attempt === RECONNECT_ATTEMPTS) throw new Error("Lost the runner connection; rerun slipjay land to reattach", { cause: error });
+        if (attempt === RECONNECT_ATTEMPTS) throw new Error("Lost the runner connection; rerun the command to reattach", { cause: error });
         await delay(RECONNECT_DELAY_MS, undefined, { signal: controller.signal });
       }
     }
@@ -161,7 +163,7 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
               if (stored.event.type === "stage") {
                 operation = { ...operation, stage: stored.event.stage, status: stored.event.stage === "queued" ? "queued" : "running" };
                 show();
-              } else if (["landed", "failed", "declined", "superseded", "cancelled"].includes(stored.event.type)) {
+              } else if ((TERMINAL_EVENT_TYPES as readonly string[]).includes(stored.event.type)) {
                 await refresh();
               }
             }
@@ -278,5 +280,28 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     }
     if (older) onLine(`[runner ${name}] followed an older commit; land again to submit your current commit`);
     return { ok: !older && result?.type === "landed", operation, logUrl };
+  } finally { connection.close(); }
+}
+
+/**
+ * Submit an approved release candidate to the runner, or reattach to its open
+ * release, and follow it to its verdict.
+ */
+export async function releaseThroughRunner(cwd: string, options: { candidate: string; remote: string; migrationsReady: boolean; location: string;
+  env?: NodeJS.ProcessEnv; onLine?(line: string): void; signal?: AbortSignal }): Promise<{ operation: Operation; logUrl: string }> {
+  const env = options.env ?? process.env;
+  const onLine = options.onLine ?? console.log;
+  const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), options.remote);
+  if (!repo) throw new Error("Runner releases require a GitHub repository on the publication remote");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, "/v1/releases", { method: "POST", signal: options.signal,
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, candidate: options.candidate,
+        migrationsReady: options.migrationsReady, submittedBy: `${hostname()}:${cwd}` }) });
+    const { operation: submitted, reattached } = (await response.json()) as { operation: ReleaseOperation; reattached: boolean };
+    if (reattached) onLine(`[runner ${connection.name}] following the open release of ${options.candidate.slice(0, 12)}`);
+    const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
+    return { operation, logUrl: runLogCommand(operation.id) };
   } finally { connection.close(); }
 }

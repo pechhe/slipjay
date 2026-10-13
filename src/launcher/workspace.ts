@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
-import { landThroughRunner, readRunLog, runnerLocation } from "../lib/runner-client.ts";
+import { landThroughRunner, readRunLog, releaseThroughRunner, runnerLocation } from "../lib/runner-client.ts";
+import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
 import {
@@ -129,9 +130,9 @@ async function removeWorkspaceAt(path: string): Promise<number> {
 }
 
 /**
- * `release [--confirm <commit>] [--migrations-ready]`: plan a release, or, with the
- * candidate commit a human approved, verify and publish it. Progress goes to
- * stderr; stdout is one JSON result.
+ * `release [--confirm <commit>] [--migrations-ready]`: plan a release here, or send
+ * the candidate a human approved to the runner, which verifies and publishes it.
+ * Progress goes to stderr; stdout is one JSON result.
  */
 async function runRelease(args: string[]): Promise<number> {
   const options: { migrationsReady: boolean; confirm?: string } = { migrationsReady: false };
@@ -140,11 +141,45 @@ async function runRelease(args: string[]): Promise<number> {
     else if (args[index] === "--confirm" && args[index + 1] && !args[index + 1]!.startsWith("-")) options.confirm = args[++index];
     else throw new Error("Usage: slipjay release [--confirm <commit>] [--migrations-ready]");
   }
-  const result = await releaseIntegration(process.cwd(), { ...options, onProgress: (line) => console.error(line) });
-  console.log(JSON.stringify(result, null, 2));
+  if (options.confirm === undefined) {
+    const plan = await releaseIntegration(process.cwd());
+    console.log(JSON.stringify(plan, null, 2));
+    return plan.ok ? 0 : 1;
+  }
+  const location = runnerLocation();
+  if (!location) throw new Error("slipjay release --confirm runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  const startedAt = Date.now();
+  const confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady);
+  if (confirmable.status !== "confirmable") {
+    console.log(JSON.stringify(confirmable, null, 2));
+    return 1;
+  }
+  const following = new AbortController();
+  const stopFollowing = () => following.abort(new Error(`Stopped following; rerun slipjay release --confirm ${options.confirm} to reattach`));
+  process.once("SIGINT", stopFollowing);
+  let followed: Awaited<ReturnType<typeof releaseThroughRunner>>;
+  try {
+    followed = await releaseThroughRunner(process.cwd(), { candidate: confirmable.candidate, remote: confirmable.remote,
+      migrationsReady: options.migrationsReady, location, onLine: (line) => console.error(line), signal: following.signal });
+  } finally {
+    process.removeListener("SIGINT", stopFollowing);
+  }
+  const { operation, logUrl } = followed;
+  const outcome = operation.result;
+  let printed: Record<string, unknown>;
+  if (outcome?.type === "released") printed = { ...outcome.result, log: logUrl };
+  else if (outcome?.type === "failed") {
+    console.error(`[runner] release failed at ${outcome.stage}: ${outcome.reason}`);
+    if (outcome.command) console.error(outcome.command);
+    if (outcome.output !== undefined) console.error(outcome.output);
+    printed = { ok: false, status: "failed", stage: outcome.stage, reason: outcome.reason, log: logUrl };
+  } else printed = { ok: false, status: operation.status, log: logUrl };
+  console.log(JSON.stringify(printed, null, 2));
+  await appendMetric("releases", { status: printed.status, candidate: confirmable.candidate,
+    commits: outcome?.type === "released" ? outcome.result.commits : null, totalMs: Date.now() - startedAt });
+  if (outcome?.type !== "released") return 1;
   // A published release whose post-release step failed still stands; 2 tells the caller to retry the step.
-  if (result.ok && "postRelease" in result && result.postRelease && !result.postRelease.ok) return 2;
-  return result.ok ? 0 : 1;
+  return outcome.result.postRelease && !outcome.result.postRelease.ok ? 2 : 0;
 }
 
 /** `cutover [--check]`: move Slipway's state from ~/.slipway to ~/.slipjay once, or only report whether it would. */

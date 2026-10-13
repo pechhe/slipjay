@@ -6,10 +6,11 @@ import { dirname, join } from "node:path";
 import { runBoundedProcess } from "./bounded-process.ts";
 import { integrateLandingCandidate } from "./landing-candidate.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
+import { confirmRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { repositoryKey } from "./runner-contract.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { Executor, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, StoredEvent } from "./runner-contract.ts";
+import type { Executor, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -30,7 +31,10 @@ export function localExecutor(host = hostname()): Executor {
   return { host, run: runBoundedProcess };
 }
 
-/** One serial loop owns every repository's warm checkout and landing transition. */
+/**
+ * One serial loop owns every repository's warm checkout and every transition of its
+ * integration and release branches: landings and releases take turns in arrival order.
+ */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
   publish(event: StoredEvent): void;
@@ -50,7 +54,7 @@ export function createRunnerQueue(input: {
   }
   const checkoutPath = (operation: Operation) => join(home, "repos", operation.repo);
   /** The published integration of an earlier submission of this exact commit, if any. */
-  async function publishedIntegration(checkout: string, operation: Operation, branch: string, remote: string): Promise<{ base: string; commitId: string } | null> {
+  async function publishedIntegration(checkout: string, operation: LandingOperation, branch: string, remote: string): Promise<{ base: string; commitId: string } | null> {
     for (const earlier of log.operationsForChange(operation.repo, operation.changeId)) {
       if (earlier.id === operation.id || earlier.commitId !== operation.commitId) continue;
       const integrated = log.events({ operationId: earlier.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
@@ -59,7 +63,7 @@ export function createRunnerQueue(input: {
     }
     return null;
   }
-  async function cleanup(operation: Operation, checkout: string, remote: string): Promise<void> {
+  async function cleanup(operation: LandingOperation, checkout: string, remote: string): Promise<void> {
     try {
       await jj(checkout, ["bookmark", "delete", operation.bookmark]);
       await jj(checkout, ["git", "push", "--remote", remote, "--bookmark", operation.bookmark]);
@@ -111,7 +115,7 @@ export function createRunnerQueue(input: {
       if (!context || context.current.name !== "default") throw new Error("Runner checkout must be the default jj workspace");
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
-      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, "--branch", operation.bookmark]);
+      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);
       // A commit integrated by an earlier turn but never published (a failed push, or
       // a restart after finalization) may already be applied to the external target.
       // Finish it before anything moves the bookmark: dropping it would orphan that state.
@@ -125,6 +129,11 @@ export function createRunnerQueue(input: {
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
+      // A release's post-release step runs against the integration branch just reset to the remote.
+      if (operation.kind === "release") {
+        await release(operation);
+        return;
+      }
       // A reland of a submission whose integration has since been published (by the
       // step above, or before a restart) is already landed: never integrate it twice.
       const published = await publishedIntegration(checkout, operation, branch, remote);
@@ -175,7 +184,18 @@ export function createRunnerQueue(input: {
       });
       else append(operation.id, { type: "failed", stage, reason: message(error) });
     } finally {
-      if (remote) await cleanup(operation, checkout, remote);
+      if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+    }
+    async function release(operation: ReleaseOperation): Promise<void> {
+      const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
+        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
+      if (result.status === "released" || result.status === "released_by") append(operation.id, { type: "released", result });
+      else if (result.status === "verification_failed") append(operation.id, {
+        type: "failed", stage: "verifying", reason: result.reason,
+        command: result.evidence.command, output: result.evidence.stdoutTail + result.evidence.stderrTail,
+      });
+      else if (!result.ok && result.status === "refused") append(operation.id, { type: "failed", stage, reason: result.reason });
+      else throw new Error(`Unexpected release result ${result.status}`);
     }
   }
   async function loop(): Promise<void> {
@@ -189,6 +209,12 @@ export function createRunnerQueue(input: {
     for (const operation of log.openOperations().filter((entry) => entry.status === "running")) {
       const checkout = checkoutPath(operation);
       let remote: string | undefined;
+      if (operation.kind === "release") {
+        // A release that published reports itself on a rerun confirm, which also retries its post-release step.
+        append(operation.id, { type: "failed", stage: operation.stage,
+          reason: `runner restarted during ${operation.stage}; rerun slipjay release --confirm ${operation.commitId.slice(0, 12)}` });
+        continue;
+      }
       let verdict: OperationEvent = { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; land again` };
       try {
         let integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");

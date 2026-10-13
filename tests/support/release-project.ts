@@ -43,48 +43,12 @@ export async function releaseProject(options: {
 
 export type ReleaseFixture = Awaited<ReturnType<typeof releaseProject>>;
 
-/**
- * A release check that records the checkout it verifies in `verified`, then holds
- * until `${verified}.go` exists (and, for a candidate carrying `slow.txt`, also
- * `${verified}.slow`), and fails a candidate carrying `broken.txt`.
- */
-export const gatedReleaseCheck = (verified: string) => {
-  const until = (gate: string) => `{const end=Date.now()+600000;while(!fs.existsSync(${JSON.stringify(gate)})&&Date.now()<end){Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50)}}`;
-  return [{ executable: "node", args: ["-e", `${recordCheckout(verified)};const fs=require("fs");${until(`${verified}.go`)}`
-    + `if(fs.existsSync("slow.txt"))${until(`${verified}.slow`)}if(fs.existsSync("broken.txt"))process.exit(3)`] }];
-};
-
-/** Let every gated release check through, now and later; `slow` also opens the gate for `slow.txt` candidates. */
-export const openReleaseGate = async (f: ReleaseFixture, { slow = false } = {}) => {
-  await writeFile(`${f.verifiedRelease}.go`, "");
-  if (slow) await writeFile(`${f.verifiedRelease}.slow`, "");
-};
-
-/** The checkouts release checks verified so far, by candidate prefix, in order. */
-export const verifiedCandidates = async (f: ReleaseFixture) =>
-  (await readFile(f.verifiedRelease, "utf8").catch(() => "")).split("\n").filter(Boolean)
-    .map((line) => line.match(/releases\/checkouts\/([a-f0-9]{12})/)?.[1] ?? line);
-
 export async function landFile(f: ReleaseFixture, file: string, content = `${file}\n`) {
   const workspace = await createWorkspace(file, f.repo);
   await writeFile(join(workspace.workspacePath, file), content);
   const result = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, sweepOtherWorkspaces: false });
   assert.equal(result.ok, true, JSON.stringify(result.publication));
   return result.artifact.commitId as string;
-}
-
-/**
- * Commit `file` straight onto the published integration branch, as a landing
- * would but without its gate, so a test can publish several candidates quickly.
- */
-export async function publishFile(f: ReleaseFixture, file: string) {
-  await writeFile(join(f.repo, file), `${file}\n`);
-  const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, encoding: "utf8", stdio: "pipe" }).trim();
-  git(["add", file]);
-  git(["commit", "-qm", `Add ${file}`]);
-  git(["push", "-q", "origin", "main"]);
-  jj(f.repo, ["git", "import"]);
-  return git(["rev-parse", "HEAD"]);
 }
 
 export const remoteRef = (f: ReleaseFixture, branch: string) =>

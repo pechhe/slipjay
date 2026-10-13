@@ -3,7 +3,7 @@ import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark, RUNNER_API } from "../src/lib/runner-contract.ts";
-import type { Operation, OperationEvent, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
+import type { Operation, OperationEvent, ReleaseResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 
@@ -129,6 +129,33 @@ test("submissions create, reattach, supersede queued work and conflict with runn
     assert.deepEqual(changes.operations.map((op) => op.id), [replacement.operation.id, first.operation.id]);
     assert.equal((await f.request(`/changes/${changeId}`)).status, 400);
     assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 1 });
+  } finally {
+    await f.close();
+  }
+});
+
+test("release submissions queue a release, reattach to the open release of the same candidate and reject malformed ones", async () => {
+  const f = await fixture();
+  try {
+    const candidate = "c".repeat(40);
+    const release = (body: unknown) => f.request("/releases", { method: "POST", body: JSON.stringify(body) });
+    const body = { repo: "Owner/Repo", candidate, migrationsReady: false, submittedBy: "author" };
+    const landing = await submitted(await f.submit());
+    const first = await (await release(body)).json() as ReleaseResponse;
+    assert.equal(first.reattached, false);
+    assert.equal(first.operation.kind, "release");
+    assert.equal(first.operation.commitId, candidate);
+    assert.equal(first.operation.position, 2, "a release queues behind earlier work");
+    assert.equal(f.submissions, 2);
+    const again = await (await release({ ...body, repo: "owner/repo" })).json() as ReleaseResponse;
+    assert.equal(again.reattached, true);
+    assert.equal(again.operation.id, first.operation.id);
+    assert.equal(f.submissions, 2);
+    for (const invalid of [{ ...body, candidate: "c".repeat(12) }, { ...body, migrationsReady: "yes" }, { ...body, repo: "" }])
+      assert.equal((await release(invalid)).status, 400);
+    f.append(landing.operation.id, { type: "stage", stage: "verifying" });
+    assert.equal((await (await f.request(`/operations/${first.operation.id}`)).json() as { operation: Operation }).operation.waitingFor,
+      `landing ${changeId.slice(0, 12)}`);
   } finally {
     await f.close();
   }

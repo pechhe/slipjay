@@ -8,7 +8,7 @@ import { test } from "vite-plus/test";
 import { targetKeyOf } from "../src/lib/post-integration-coverage.ts";
 import { withTargetLease } from "../src/lib/post-integration-finalization.ts";
 import { readExactExecutionPolicy } from "../src/lib/post-integration-source.ts";
-import { releaseIntegration } from "../src/lib/release.ts";
+import { confirmRelease } from "../src/lib/release.ts";
 import { postIntegrationHome } from "../src/lib/workspace-paths.ts";
 
 const TARGET = "fixture-db:development";
@@ -48,26 +48,27 @@ test("a release runs its post-release step once it has published", async () => {
   const f = await releaseProject({ postRelease: recordingStep });
   try {
     const candidate = await landFile(f, "feature.txt");
-    const released = await releaseIntegration(f.repo, { confirm: candidate });
+    const released = await confirmRelease(f.repo, { candidate });
     assert.ok(released.ok && released.status === "released", JSON.stringify(released));
     assert.equal(released.postRelease?.ok, true, JSON.stringify(released.postRelease));
     assert.deepEqual(await runs(f.root), [{ merge: released.merge, published: released.merge, source: candidate }],
       "the step ran after the release merge was on the remote");
     // A completed step is not rerun by a later confirm of the same candidate.
-    const again = await releaseIntegration(f.repo, { confirm: candidate });
-    assert.equal(again.status, "up_to_date");
+    const again = await confirmRelease(f.repo, { candidate });
+    assert.ok(again.ok && again.status === "released_by", JSON.stringify(again));
+    assert.equal(again.postRelease, undefined);
     assert.equal((await runs(f.root)).length, 1);
   } finally {
     await f.dispose();
   }
 });
 
-test("a failed post-release step keeps the release, is reported and is retried by the next confirm", async () => {
+test("a failed post-release step keeps the release, is reported and is retried once by the next confirm", async () => {
   const f = await releaseProject({ postRelease: recordingStep });
   try {
     await writeFile(join(f.root, "fail"), "");
     const candidate = await landFile(f, "feature.txt");
-    const released = await releaseIntegration(f.repo, { confirm: candidate });
+    const released = await confirmRelease(f.repo, { candidate });
     assert.ok(released.ok && released.status === "released", JSON.stringify(released));
     assert.equal(remoteRef(f, "release"), released.merge, "the failure does not undo the release");
     assert.equal(released.postRelease?.ok, false);
@@ -76,26 +77,21 @@ test("a failed post-release step keeps the release, is reported and is retried b
     assert.doesNotMatch(released.postRelease?.reason ?? "", /reset failed|second line/, "the step's output stays out of the result");
     assert.equal(released.postRelease?.retry, `slipjay release --confirm ${candidate.slice(0, 12)}`);
 
-    const plan = await releaseIntegration(f.repo);
-    assert.ok(plan.ok && plan.status === "up_to_date");
-    assert.equal(plan.pendingPostRelease?.status, "failed", "a plan reports the failed step");
-
     await rm(join(f.root, "fail"));
     // The retry runs in the integration branch as it is now, not the released candidate.
     const later = await landFile(f, "later.txt");
-    const retried = await releaseIntegration(f.repo, { confirm: candidate });
-    assert.ok(retried.ok && retried.status === "up_to_date", JSON.stringify(retried));
+    const retried = await confirmRelease(f.repo, { candidate });
+    assert.ok(retried.ok && retried.status === "released_by", JSON.stringify(retried));
+    assert.equal(retried.releasedBy, candidate);
     assert.equal(retried.postRelease?.ok, true, JSON.stringify(retried.postRelease));
     assert.equal(retried.postRelease?.attempt, 2);
     assert.equal(retried.postRelease?.merge, released.merge, "the retry names the merge that shipped the candidate");
     assert.equal(retried.postRelease?.source, later);
     assert.equal((await runs(f.root)).at(-1)?.source, later);
     assert.equal(remoteRef(f, "release"), released.merge);
-    const settled = await releaseIntegration(f.repo);
-    // later.txt is still unreleased, so the plan proposes it; only the report is gone.
-    assert.ok(settled.ok && settled.status === "planned", JSON.stringify(settled));
-    assert.equal(settled.candidate, later);
-    assert.equal(settled.pendingPostRelease, undefined, "a completed retry clears the report");
+    // A completed retry is not repeated.
+    const settled = await confirmRelease(f.repo, { candidate });
+    assert.ok(settled.ok && settled.status === "released_by" && settled.postRelease === undefined, JSON.stringify(settled));
   } finally {
     await f.dispose();
   }
@@ -106,7 +102,7 @@ test("a post-release step holds the target lease landing's post-integration step
   try {
     await writeFile(join(f.root, "hold"), "");
     const candidate = await landFile(f, "feature.txt");
-    const release = releaseIntegration(f.repo, { confirm: candidate });
+    const release = confirmRelease(f.repo, { candidate });
     await until(() => existsSync(join(f.root, "started")), "the post-release step to start");
     const { gitDirectory } = await readExactExecutionPolicy(jj(f.repo, ["git", "root"]), candidate);
     let stepDoneWhenLeased: number | null = null;

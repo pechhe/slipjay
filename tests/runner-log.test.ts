@@ -27,7 +27,7 @@ test("operation log projects stages, command runs and the latest terminal result
     log.append(id, { type: "stage", stage: "publishing" });
     const landed = log.append(id, { type: "landed", base: "old", commitId: "new", branch: "main", remote: "origin" });
     assert.deepEqual(log.operation(id), {
-      id, repo: "owner/repo", changeId: "k".repeat(32), commitId: "commit", bookmark: candidateBookmark("k".repeat(32)), submittedBy: "author",
+      id, kind: "landing", repo: "owner/repo", changeId: "k".repeat(32), commitId: "commit", bookmark: candidateBookmark("k".repeat(32)), submittedBy: "author",
       status: "landed", stage: "publishing", submittedAt: submitted.at, finishedAt: landed.at,
       runs: [
         { runId: "run-1", command: "bun run check", host: "localhost", startedAt: started.at, finishedAt: finished.at, exitCode: 0, signal: null, timedOut: false, durationMs: 50 },
@@ -60,6 +60,30 @@ test("queue positions follow submitted sequence across repos and close without a
     assert.equal(log.operation("second")?.position, 2);
     assert.deepEqual(log.operationsForChange("owner/repo", "k".repeat(32)).map((op) => op.id), ["second", "first"]);
     assert.deepEqual(log.operationsForChange("owner/repo", "z".repeat(32)), []);
+  } finally {
+    log.close();
+  }
+});
+
+test("a release is an operation in the same queue, and queued work names the operation it waits behind", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const candidate = "c".repeat(40);
+    log.append("release", { type: "submitted", kind: "release", repo: "owner/repo", commitId: candidate, migrationsReady: true, submittedBy: "author" });
+    log.append("landing", submission());
+    assert.equal(log.operation("landing")?.waitingFor, undefined, "nothing runs yet");
+    log.append("release", { type: "stage", stage: "verifying" });
+    const release = log.operation("release")!;
+    assert.equal(release.kind, "release");
+    assert.ok(release.kind === "release" && release.migrationsReady);
+    assert.equal(release.waitingFor, undefined);
+    assert.deepEqual(log.openOperations().map((op) => [op.id, op.position, op.waitingFor]),
+      [["release", 1, undefined], ["landing", 2, `release ${candidate.slice(0, 12)}`]]);
+    assert.equal(log.operation("landing")?.waitingFor, `release ${candidate.slice(0, 12)}`);
+    assert.deepEqual(log.operationsForChange("owner/repo", "k".repeat(32)).map((op) => op.id), ["landing"], "releases are not changes");
+    log.append("release", { type: "failed", stage: "verifying", reason: "test terminal" });
+    assert.equal(log.operation("release")?.status, "failed");
+    assert.equal(log.operation("landing")?.waitingFor, undefined);
   } finally {
     log.close();
   }

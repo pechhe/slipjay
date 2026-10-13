@@ -18,9 +18,14 @@ const generate = 'const fs=require("node:fs");fs.mkdirSync("migrations",{recursi
 const finalize = (root: string) => `const fs=require("node:fs");
 if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
 fs.appendFileSync(${JSON.stringify(join(root, "development.jsonl"))}, JSON.stringify({ commit: process.env.SLIPJAY_FINALIZATION_COMMIT, migrations: fs.existsSync("migrations") ? fs.readdirSync("migrations").sort() : [] }) + "\\n");`;
+// The release check records where it ran and fails while `fail-release` exists; the
+// post-release step records the release it ran for and the key the runner gave it.
+const releaseCheck = (root: string) => `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(join(root, "release-verified.log"))}, process.cwd() + "\\n");
+if (fs.existsSync(${JSON.stringify(join(root, "fail-release"))})) { process.stderr.write("release boom\\n"); process.exit(4); }`;
+const postReleaseStep = (root: string) => `require("node:fs").appendFileSync(${JSON.stringify(join(root, "post-release.jsonl"))}, JSON.stringify({ merge: process.env.SLIPJAY_RELEASE_MERGE, key: process.env.FIXTURE_KEY ?? null }) + "\\n");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
-async function fixture(migrations = false) {
+async function fixture(migrations = false, release = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -50,10 +55,20 @@ async function fixture(migrations = false) {
         targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
       },
     } : {}),
+    ...(release ? {
+      releaseBranch: "release",
+      requiredReleaseVerification: [{ executable: "node", args: ["-e", releaseCheck(root)] }],
+      postRelease: {
+        version: 1, target: "fixture-development-db", timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
+        command: { executable: "node", args: ["-e", postReleaseStep(root)] },
+        targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
+      },
+    } : {}),
   }));
   jj(seed, ["describe", "-m", "Seed policy"]);
   jj(seed, ["git", "remote", "add", "origin", origin]);
   jj(seed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
+  if (release) jj(seed, ["git", "push", "--remote", "origin", "--named", "release=main"]);
   jj(root, ["git", "clone", origin, author]);
   // While `reject-push` exists the remote refuses every push, as an outage would.
   await writeFile(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -e ${JSON.stringify(join(root, "reject-push"))} ]; then echo "remote unavailable" >&2; exit 1; fi\n`);
@@ -61,8 +76,11 @@ async function fixture(migrations = false) {
   const log = openOperationLog(":memory:");
   const published: StoredEvent[] = [];
   const executor = localExecutor();
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } } }, publish: (event) => { published.push(event); } });
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } } }, publish: (event) => { published.push(event); },
+    environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
+  const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
+  const parents = (commit: string) => git(["--git-dir", origin, "log", "-1", "--format=%P", commit]).split(" ");
   const remoteFile = (file: string) => git(["--git-dir", origin, "show", `main:${file}`]);
   async function push(): Promise<SubmitRequest> {
     // The runner deletes candidate bookmarks when it closes an operation.
@@ -89,10 +107,16 @@ async function fixture(migrations = false) {
     log.append(id, { type: "submitted", ...request });
     return id;
   }
+  function submitRelease(commitId: string) {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", kind: "release", repo: "fixture/repo", commitId, migrationsReady: false, submittedBy: "test" });
+    return id;
+  }
+  const lines = async (file: string) => (await readFile(join(root, file), "utf8").catch(() => "")).split("\n").filter(Boolean);
   const result = (id: string) => log.operation(id)!.result;
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
-  return { root, development, land, origin, author, home, log, queue, executor, published, main, remoteFile, push, candidate, submit, result,
+  return { root, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, lines, result,
     async dispose() { await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -315,5 +339,80 @@ test("unknown repositories and stale submitted commits fail without publishing",
       assert.match(result.reason, id === unknown ? /not configured/ : /does not resolve to submitted commit/);
     }
     assert.equal(f.main(), before);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+const stagesOf = (f: Awaited<ReturnType<typeof fixture>>, id: string) =>
+  f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []);
+
+test("a release takes its turn, verifies the exact candidate on the runner, publishes the release branch and runs its post-release step", async () => {
+  const f = await fixture(false, true);
+  try {
+    const base = f.releaseRef();
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const candidate = f.main();
+    const release = f.submitRelease(candidate);
+    const behind = f.submit(await f.candidate("b.txt"));
+    f.queue.wake(); await f.queue.idle();
+    const outcome = f.result(release);
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
+    assert.equal(f.releaseRef(), outcome.result.merge);
+    assert.deepEqual(f.parents(outcome.result.merge), [base, candidate]);
+    assert.equal(outcome.result.postRelease?.ok, true, JSON.stringify(outcome.result.postRelease));
+    assert.deepEqual(stagesOf(f, release), ["fetching", "installing", "verifying", "publishing", "finalizing"]);
+    // The check ran once, through the executor, in the runner's warm checkout.
+    assert.deepEqual(await f.lines("release-verified.log"), [join(f.home, "repos", "fixture/repo")]);
+    assert.equal(f.log.operation(release)!.runs.length, 1);
+    assert.equal(f.log.operation(release)!.runs[0]!.exitCode, 0);
+    assert.deepEqual((await f.lines("post-release.jsonl")).map((line) => JSON.parse(line)), [{ merge: outcome.result.merge, key: "from-runner" }],
+      "the step ran once, with the declared key from the runner's environment");
+    // The landing submitted behind the release waited for it.
+    assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
+    const order = f.published.filter((stored) => ["released", "landed"].includes(stored.event.type)).map((stored) => stored.operationId);
+    assert.deepEqual(order.slice(-2), [release, behind]);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a failed release verification publishes nothing and reports its output verbatim", async () => {
+  const f = await fixture(false, true);
+  try {
+    const base = f.releaseRef();
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    await writeFile(join(f.root, "fail-release"), "");
+    const outcome = await f.land(f.submitRelease(f.main()));
+    assert.ok(outcome?.type === "failed", JSON.stringify(outcome));
+    assert.equal(outcome.stage, "verifying");
+    assert.match(outcome.output ?? "", /release boom/);
+    assert.equal(f.releaseRef(), base);
+    assert.deepEqual(await f.lines("post-release.jsonl"), []);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a release of a candidate the release branch already holds verifies nothing and names the release that shipped it", async () => {
+  const f = await fixture(false, true);
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const older = f.main();
+    assert.equal((await f.land(f.submit(await f.candidate("b.txt"))))?.type, "landed");
+    const newer = f.main();
+    const shipped = await f.land(f.submitRelease(newer));
+    assert.ok(shipped?.type === "released" && shipped.result.status === "released", JSON.stringify(shipped));
+    const again = await f.land(f.submitRelease(older));
+    assert.ok(again?.type === "released" && again.result.status === "released_by", JSON.stringify(again));
+    assert.equal(again.result.releasedBy, newer);
+    assert.equal(again.result.merge, shipped.result.merge);
+    assert.equal((await f.lines("release-verified.log")).length, 1);
+    assert.equal((await f.lines("post-release.jsonl")).length, 1, "a completed post-release step is not rerun");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("recovery fails an interrupted release with the command that reruns it", async () => {
+  const f = await fixture(false, true);
+  try {
+    const release = f.submitRelease(f.main());
+    f.log.append(release, { type: "stage", stage: "verifying" });
+    await f.queue.recover();
+    assert.deepEqual(f.result(release), { type: "failed", stage: "verifying",
+      reason: `runner restarted during verifying; rerun slipjay release --confirm ${f.main().slice(0, 12)}` });
   } finally { await f.dispose(); }
 }, 120_000);

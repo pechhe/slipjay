@@ -1,4 +1,5 @@
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
+import type { ReleaseResult } from "./release.ts";
 
 /**
  * The runner's contract: one long-lived control plane that owns the landing queue
@@ -22,11 +23,17 @@ export const candidateBookmark = (changeId: string): string => `slipjay/changes/
 export type RunnerStage = "queued" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing";
 
 /** Terminal and live states of an operation, derived from its events. */
-export type OperationStatus = "queued" | "running" | "landed" | "failed" | "declined" | "superseded" | "cancelled";
+export type OperationStatus = "queued" | "running" | "landed" | "released" | "failed" | "declined" | "superseded" | "cancelled";
+
+/** A release the runner verified and published, or found already published. */
+export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
 
 /** One fact appended to the log. Nothing is updated or deleted. */
 export type OperationEvent =
-  | { type: "submitted"; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
+  /** A landing of one change; rows from before releases existed carry no `kind`. */
+  | { type: "submitted"; kind?: "landing"; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
+  /** A release of `commitId`, the integration commit a human approved. */
+  | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   | { type: "stage"; stage: RunnerStage }
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
@@ -36,6 +43,8 @@ export type OperationEvent =
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
+  /** A release's outcome; one whose post-release step failed still stands. */
+  | { type: "released"; result: CompletedRelease }
   /** The change touches migration trigger or artifact paths; the author lands it locally (until #11). */
   | { type: "declined"; reason: string; paths: string[] }
   /** `output` is the failing command's output verbatim (bounded as the local gate bounds it). */
@@ -53,21 +62,31 @@ export type RunRecord = {
   finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number;
 };
 
-/** An operation as clients see it: a pure projection of its stored events plus queue order. */
-export type Operation = {
-  id: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string;
+/** Event types that close an operation. */
+export const TERMINAL_EVENT_TYPES = ["landed", "released", "failed", "declined", "superseded", "cancelled"] as const;
+
+type OperationFields = {
+  id: string; repo: string; commitId: string; submittedBy: string;
   status: OperationStatus;
   /** Latest stage reached; `queued` until it starts. */
   stage: RunnerStage;
   /** 1-based place in the runner's one serial queue, across repositories (1 = running or next); absent once closed. */
   position?: number;
+  /** While queued, the running operation it waits behind, e.g. `release 1a2b3c4d5e6f`. */
+  waitingFor?: string;
   submittedAt: string; finishedAt?: string;
   runs: RunRecord[];
   /** The terminal event, when closed. */
-  result?: Extract<OperationEvent, { type: "landed" | "declined" | "failed" | "superseded" | "cancelled" }>;
+  result?: Extract<OperationEvent, { type: (typeof TERMINAL_EVENT_TYPES)[number] }>;
   /** Seq of the latest event, for resuming a stream after it. */
   lastSeq: number;
 };
+export type LandingOperation = OperationFields & { kind: "landing"; changeId: string; bookmark: string };
+/** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
+export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
+
+/** An operation as clients see it: a pure projection of its stored events plus queue order. */
+export type Operation = LandingOperation | ReleaseOperation;
 
 /** The append-only log and its projections. One implementation, on `node:sqlite`. */
 export interface OperationLog {
@@ -77,7 +96,7 @@ export interface OperationLog {
   events(options?: { operationId?: string; afterSeq?: number }): StoredEvent[];
   operation(id: string): Operation | null;
   /** Every operation of a change, newest first. */
-  operationsForChange(repo: string, changeId: string): Operation[];
+  operationsForChange(repo: string, changeId: string): LandingOperation[];
   /** Open (queued or running) operations of a repository, oldest first: the queue. */
   openOperations(repo?: string): Operation[];
   close(): void;
@@ -85,6 +104,14 @@ export interface OperationLog {
 
 /** POST /v1/operations body. The commit must already be on the remote as `bookmark`. */
 export type SubmitRequest = { repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string };
+
+/**
+ * POST /v1/releases body: the full id of a candidate already published on the
+ * integration branch. An open release of the same candidate is returned instead
+ * of a second (`reattached: true`), so a confirm rerun follows it.
+ */
+export type ReleaseRequest = { repo: string; candidate: string; migrationsReady: boolean; submittedBy: string };
+export type ReleaseResponse = { operation: ReleaseOperation; reattached: boolean };
 
 /**
  * POST /v1/operations response.
@@ -99,6 +126,7 @@ export type SubmitResponse = { operation: Operation; reattached: boolean; supers
 /**
  * Routes (all require `Authorization: Bearer <token>`; anything else is 401):
  * - POST /v1/operations                         SubmitRequest → SubmitResponse (200, or 409 `{ operation }`)
+ * - POST /v1/releases                           ReleaseRequest → ReleaseResponse
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,
  *                                                 replaying after `seq`, then live; ends after the terminal event

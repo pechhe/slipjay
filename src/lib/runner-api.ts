@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { candidateBookmark, repositoryKey, RUNNER_API } from "./runner-contract.ts";
-import type { OperationLog, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import { candidateBookmark, repositoryKey, RUNNER_API, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import type { OperationLog, ReleaseRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -41,6 +41,25 @@ export function createRunnerHandler(input: {
       input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
       input.onSubmitted();
       return json({ operation: input.log.operation(id), reattached: false, ...existing ? { superseded: existing.id } : {} });
+    }
+    if (request.method === "POST" && path === `${RUNNER_API}/releases`) {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!validRelease(body))
+        return json({ error: "Invalid release" }, 400);
+      const repo = repositoryKey(body.repo);
+      // A rerun confirm follows the open release of its candidate; the queue coalesces the rest.
+      const existing = input.log.openOperations(repo).find((op) => op.kind === "release" && op.commitId === body.candidate);
+      if (existing)
+        return json({ operation: existing, reattached: true });
+      const id = newOperationId();
+      input.log.append(id, { type: "submitted", kind: "release", repo, commitId: body.candidate, migrationsReady: body.migrationsReady, submittedBy: body.submittedBy });
+      input.onSubmitted();
+      return json({ operation: input.log.operation(id), reattached: false });
     }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {
@@ -87,12 +106,20 @@ function validSubmission(body: unknown): body is SubmitRequest {
   return /^[k-z]{12,64}$/.test(value.changeId as string) && value.bookmark === candidateBookmark(value.changeId as string);
 }
 
+function validRelease(body: unknown): body is ReleaseRequest {
+  if (typeof body !== "object" || body === null)
+    return false;
+  const value = body as Record<string, unknown>;
+  return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0)
+    && typeof value.candidate === "string" && /^[a-f0-9]{40,64}$/.test(value.candidate) && typeof value.migrationsReady === "boolean";
+}
+
 function json(body: unknown, status = 200): Response {
   return Response.json(body, { status });
 }
 
 function terminal(stored: StoredEvent): boolean {
-  return ["landed", "failed", "declined", "superseded", "cancelled"].includes(stored.event.type);
+  return (TERMINAL_EVENT_TYPES as readonly string[]).includes(stored.event.type);
 }
 
 function eventStream(input: Parameters<typeof createRunnerHandler>[0], id: string, after: number, signal: AbortSignal): Response {

@@ -1,39 +1,36 @@
 /**
  * `slipjay release`: promote the published integration branch to the release
- * branch its committed policy declares. Without a confirmation it only plans: it
- * names the candidate (the integration branch on the remote), the base (the
- * release branch on the remote), the commits between them, any migration
- * artifacts and any half-built Specs (warned about, never refused). With `confirm`, the candidate commit id a human approved, it checks
- * that exact commit out on its own, runs `requiredReleaseVerification`, builds the
- * release merge, refuses unless its tree is the verified tree, and publishes it.
- * Concurrent confirms coalesce: see `holdReleaseSlot`. Once it has published, it
- * runs the candidate's declared `postRelease` step (see `post-release.ts`), whose
- * failure is reported in the result without undoing the release.
+ * branch its committed policy declares. `releaseIntegration` only plans, on the
+ * author's machine: it names the candidate (the integration branch on the
+ * remote), the base (the release branch on the remote), the commits between them,
+ * any migration artifacts and any half-built Specs (warned about, never refused).
  *
- * jj commands ignore working copies, except creating the verification checkout,
- * which snapshots only the checkout the release runs from.
+ * `confirmRelease` runs on the runner, in its warm checkout, for the candidate
+ * commit a human approved: it checks that exact commit out, runs
+ * `requiredReleaseVerification`, builds the release merge, refuses unless its tree
+ * is the verified tree, and publishes it. Once it has published, it runs the
+ * candidate's declared `postRelease` step (see `post-release.ts`), whose failure is
+ * reported in the result without undoing the release. The runner's serial queue
+ * orders releases against each other and against landings.
+ *
+ * jj commands ignore working copies, except checking the candidate out.
  */
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { readExecutionPolicyAtCommit } from "./execution-policy.ts";
 import { githubRepository } from "./post-land-issue.ts";
-import { pendingPostRelease, postReleaseRetry, runPostRelease } from "./post-release.ts";
+import { postReleaseRetry, runPostRelease } from "./post-release.ts";
 import { halfBuiltSpecs } from "./release-specs.ts";
-import { runRequiredVerification } from "./required-verification.ts";
+import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
-import { run, workspaceContext } from "./workspace-jj.ts";
-import { stateHome } from "./workspace-paths.ts";
-import { appendMetric } from "./metrics.ts";
-import { withVerificationSlot } from "./verification-slot.ts";
+import { jj, run, workspaceContext } from "./workspace-jj.ts";
 
+import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { GraphqlRunner, HalfBuiltSpecs } from "./release-specs.ts";
-import type { VerificationDeclaration, VerificationEvidence } from "./verification-policy.ts";
+import type { RunnerStage } from "./runner-contract.ts";
+import type { VerificationDeclaration } from "./verification-policy.ts";
 import type { WorkspaceCommandResult } from "./workspace-command.ts";
-import type { VerificationSlotRecord } from "./verification-slot.ts";
 
 export type ReleasePlan = {
   root: string;
-  integrationRoot: string;
   remote: string;
   integrationBranch: string;
   releaseBranch: string;
@@ -77,32 +74,39 @@ export type PostReleaseOutcome = {
 
 /** Present after a confirmed release, or a confirm that retried a pending step. */
 type PostReleaseField = { postRelease?: PostReleaseOutcome };
-/** Present on a plan while the target's latest post-release step did not complete. */
-type PendingPostReleaseField = { pendingPostRelease?: PostReleaseOutcome };
 
 export type ReleaseResult =
-  | ({ ok: true; status: "up_to_date" } & ReleaseSummary & PostReleaseField & PendingPostReleaseField)
-  | ({ ok: true; status: "planned"; subjects: string[]; next: string } & ReleaseSummary & PendingPostReleaseField)
+  | ({ ok: true; status: "up_to_date" } & ReleaseSummary)
+  | ({ ok: true; status: "planned"; subjects: string[]; next: string } & ReleaseSummary)
   | ({ ok: true; status: "released"; merge: string; verification: unknown; releasedAt: string } & ReleaseSummary & PostReleaseField)
   /**
-   * The release branch already contains the candidate: a release this one waited
-   * for shipped it, so it verified nothing. `merge` is the release merge that
-   * first contained it and `releasedBy` that merge's candidate. Without such a
-   * merge (the branch was moved outside `slipjay release`), `merge` is the
-   * release branch head and `releasedBy` null. The summary describes the plan
-   * against that head, so `commits` is 0.
+   * The release branch already contains the candidate (an earlier or newer
+   * release shipped it), so the confirm verified nothing; it reruns a post-release
+   * step that did not complete. `merge` is the release merge that first contained
+   * it and `releasedBy` that merge's candidate. Without such a merge (the branch
+   * was moved outside `slipjay release`), `merge` is the release branch head and
+   * `releasedBy` null. The summary describes the plan against that head, so
+   * `commits` is 0.
    */
   | ({ ok: true; status: "released_by"; merge: string; releasedBy: string | null } & ReleaseSummary & PostReleaseField)
   | { ok: false; status: "refused"; reason: string }
-  | { ok: false; status: "verification_failed"; reason: string; evidence: unknown };
+  | { ok: false; status: "verification_failed"; reason: string; evidence: RequiredVerificationError["evidence"] };
 
-type ReleaseOptions = { confirm?: string; migrationsReady?: boolean; onProgress?: (line: string) => void; graphql?: GraphqlRunner };
-type ShippedOutcome = { summary: ReleaseSummary; merge: string; releasedBy: string | null };
-type VerifiedOutcome = { summary: ReleaseSummary; merge: string; verification: VerificationEvidence | { passed: never[]; gaps: never[] } };
+export type ConfirmReleaseOptions = {
+  /** The full candidate commit id a human approved. */
+  candidate: string;
+  /** Acknowledges that the release's migration artifacts are already applied where it deploys. */
+  migrationsReady?: boolean;
+  onProgress?: (line: string) => void;
+  onStage?: (stage: Extract<RunnerStage, "installing" | "verifying" | "publishing" | "finalizing">) => void;
+  /** Where each verification command runs (the runner's executor). */
+  run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
+  environment?: () => NodeJS.ProcessEnv;
+  graphql?: GraphqlRunner;
+};
 
 const COMMIT_PREFIX = /^[a-f0-9]{12,64}$/;
 const CANDIDATE_TRAILER = "Release-Candidate: ";
-const releaseHome = (): string => join(stateHome(), "releases");
 
 class ReleaseRefusal extends Error {
   constructor(message: string) {
@@ -174,108 +178,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   const artifactPaths = policy.migrationFinalization?.artifactPaths ?? [];
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
   const migrationArtifacts = changed.filter((file) => artifactPaths.some((path: string) => file === path || file.startsWith(`${path}/`)));
-  return { root, integrationRoot: context.integration.root, remote, integrationBranch, releaseBranch,
-    base, candidate, commits, migrationArtifacts, checks };
-}
-
-/** Check the candidate out on its own, prepare its dependencies and run the declared checks. */
-async function verifyCandidate(plan: ReleasePlan, onProgress: (line: string) => void): Promise<VerifiedOutcome["verification"]> {
-  const short = plan.candidate.slice(0, 12);
-  const name = `slipjay-release-${short}`;
-  const checkout = join(releaseHome(), "checkouts", short);
-  await rm(checkout, { recursive: true, force: true });
-  await mkdir(join(releaseHome(), "checkouts"), { recursive: true });
-  // A leftover from an interrupted release would block the name.
-  await jjRun(plan.root, ["workspace", "forget", name]);
-  const added = await run("jj", ["--color=never", "workspace", "add", "--name", name, "--revision", plan.candidate, checkout], { cwd: plan.root });
-  if (added.code !== 0) throw new Error(`jj workspace add failed: ${(added.stderr || added.stdout).trim()}`);
-  try {
-    if (!plan.checks.length) return { passed: [], gaps: [] };
-    onProgress(`[release] preparing dependencies for ${short}`);
-    await prepareWorkspaceDependencies(checkout, { quiet: true });
-    // The caller holds the release slot, so this verification passes straight through it.
-    return await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress });
-  } finally {
-    const workingCopy = await commitOf(plan.root, `${symbol(name)}@`);
-    await jjRun(plan.root, ["workspace", "forget", name]);
-    if (workingCopy) await jjRun(plan.root, ["abandon", workingCopy]);
-    await rm(checkout, { recursive: true, force: true });
-  }
-}
-
-/**
- * Run a release's verification and publication in the repository's release slot.
- * Releases have their own slot: a release verifies a pinned candidate in its own
- * checkout and only touches the release branch, so landings never wait for it.
- *
- * Candidates sit on the linear integration branch, so of any two one contains the
- * other, and a release of the newer ships both. A confirm therefore never refuses
- * a busy slot: it waits, standing aside for every waiting release whose candidate
- * contains its own, so of several waiters only the newest verifies. The operation
- * re-reads the release branch once it holds the slot; what the release it waited
- * for already shipped needs no verification. A dead contender's records and lock
- * go stale as for any verification slot, so they never block.
- *
- * Resolves to null, without the slot, when the release branch already contains
- * the candidate while another release holds the slot or outranks this one: the
- * release it waited for shipped it, and waiting behind the next cannot add to that.
- */
-async function holdReleaseSlot<T>(plan: ReleasePlan, onProgress: (line: string) => void, operation: () => Promise<T>): Promise<T | null> {
-  const ours = plan.candidate;
-  const short = (commit: string): string => commit.slice(0, 12);
-  const containment = new Map<string, boolean>();
-  let fetched = false;
-  // Whether `theirs` contains ours. A candidate published after this plan's fetch is fetched once.
-  const contains = async (theirs: unknown): Promise<boolean> => {
-    if (typeof theirs !== "string" || !/^[a-f0-9]{40,64}$/.test(theirs)) return false;
-    if (theirs === ours) return true;
-    if (!containment.has(theirs)) {
-      if (!await commitOf(plan.root, theirs)) {
-        if (fetched) return false;
-        fetched = true;
-        await fetch(plan.root, plan.remote, plan.integrationBranch);
-        if (!await commitOf(plan.root, theirs)) return false;
-      }
-      containment.set(theirs, Boolean(await commitOf(plan.root, `${ours} & ::${theirs}`)));
-    }
-    return containment.get(theirs)!;
-  };
-  const earlier = (record: VerificationSlotRecord, own: VerificationSlotRecord): boolean => record.since < own.since || (record.since === own.since && record.id < own.id);
-  const released = `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`;
-  const shipped = new AbortController();
-  let reported = "";
-  try {
-    return await withVerificationSlot(operation, {
-    scope: `${plan.integrationRoot}#release`,
-    label: `release ${short(ours)}`,
-    record: { candidate: ours },
-    signal: shipped.signal,
-    yieldTo: async ({ own, holder, waiters }): Promise<boolean> => {
-      // Stand aside for a waiter that ships ours: newer, or the same candidate confirmed earlier.
-      let newer: VerificationSlotRecord | null = null;
-      for (const waiter of waiters) {
-        if (await contains(waiter.candidate) && (waiter.candidate !== ours || earlier(waiter, own))) newer = waiter;
-      }
-      // Waiting behind anyone, report a candidate the release branch already holds instead.
-      // Publishing fetched the release branch into the shared repository, so no fetch is needed to see it.
-      if ((newer || holder) && await commitOf(plan.root, `${ours} & ::${released}`)) {
-        shipped.abort();
-        return true;
-      }
-      const attached = holder && await contains(holder.candidate) ? holder : newer;
-      const awaited = attached ?? holder;
-      if (awaited) {
-        const name = typeof awaited.candidate === "string" ? `release ${short(awaited.candidate)}` : awaited.label ?? "another release";
-        const line = `[release] waiting for ${name} ${attached ? `(contains ${short(ours)})` : `to finish before ${short(ours)}`}`;
-        if (line !== reported) onProgress(reported = line);
-      }
-      return Boolean(newer);
-    },
-    });
-  } catch (error) {
-    if (shipped.signal.aborted) return null;
-    throw error;
-  }
+  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, checks };
 }
 
 /** The release merge on the release branch that first shipped `plan.candidate`, and its candidate. */
@@ -325,32 +228,15 @@ async function publish(plan: ReleasePlan, merge: string): Promise<void> {
 }
 
 /**
- * Plan, or with `confirm` verify and publish, a release. `confirm` is the
- * candidate commit a human approved; `migrationsReady` acknowledges that the
- * release's migration artifacts are already applied where it deploys.
- */
-export async function releaseIntegration(cwd = process.cwd(), options: ReleaseOptions = {}): Promise<ReleaseResult> {
-  const startedAt = Date.now();
-  const measured: { verifyMs?: number } = {};
-  const result: ReleaseResult & { candidate?: string; commits?: number } = await releaseIntegrationUnmeasured(cwd, options, (verifyMs) => { measured.verifyMs = verifyMs; });
-  if (options.confirm !== undefined) {
-    await appendMetric("releases", { status: result.status, candidate: result.candidate ?? options.confirm,
-      commits: result.commits ?? null, totalMs: Date.now() - startedAt, ...measured });
-  }
-  return result;
-}
-
-/**
  * Run the declared post-release step for a published release. Whatever goes wrong,
  * the release stands: a failure, even one to take the target lease, becomes a
  * reported `postRelease` outcome with its retry command.
  */
-async function runPostReleaseStep(plan: ReleasePlan, mergeOf: () => Promise<string>, onProgress: (line: string) => void, { onlyIfPending }: { onlyIfPending: boolean }): Promise<PostReleaseField> {
-  let merge: string | null = null;
+async function runPostReleaseStep(plan: ReleasePlan, merge: string, onProgress: (line: string) => void,
+  { onlyIfPending, environment }: { onlyIfPending: boolean; environment?: () => NodeJS.ProcessEnv }): Promise<PostReleaseField> {
   try {
-    merge = await mergeOf();
     const outcome = await runPostRelease({ root: plan.root, integrationBranch: plan.integrationBranch, candidate: plan.candidate,
-      merge, onlyIfPending, onProgress });
+      merge, onlyIfPending, onProgress, ...(environment ? { environment } : {}) });
     if (outcome && !outcome.ok) onProgress(`[release] post-release step failed: ${outcome.reason}. Retry with \`${outcome.retry}\`.`);
     return outcome ? { postRelease: outcome } : {};
   } catch (error) {
@@ -359,12 +245,6 @@ async function runPostReleaseStep(plan: ReleasePlan, mergeOf: () => Promise<stri
     onProgress(`[release] post-release step failed: ${reason}. Retry with \`${retry}\`.`);
     return { postRelease: { ok: false, status: "failed", candidate: plan.candidate, merge, reason, retry } };
   }
-}
-
-/** A plan reports a post-release step that did not complete, so no release silently skips it. */
-async function pendingPostReleaseField(plan: ReleasePlan): Promise<PendingPostReleaseField> {
-  const pending = await pendingPostRelease(plan.root, plan.candidate);
-  return pending ? { pendingPostRelease: pending } : {};
 }
 
 /** The result fields describing `plan`; the Spec check runs again on every call, as a Spec's Tickets may have closed in between. */
@@ -379,65 +259,86 @@ async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefine
   return summary;
 }
 
-async function releaseIntegrationUnmeasured(cwd: string, { confirm, migrationsReady = false, onProgress = () => {}, graphql }: ReleaseOptions = {}, onVerified: (verifyMs: number) => void = () => {}): Promise<ReleaseResult> {
+/** Refuse a release carrying migration artifacts that its approver has not marked as applied. */
+function requireMigrationsReady(plan: ReleasePlan, migrationsReady: boolean): void {
+  if (plan.migrationArtifacts.length && !migrationsReady) {
+    refuse(`This release carries migration artifacts (${plan.migrationArtifacts.join(", ")}). Apply them where ${plan.releaseBranch} deploys, then rerun with --migrations-ready.`);
+  }
+}
+
+const refusalOf = (error: unknown): ReleaseResult => {
+  if (error instanceof ReleaseRefusal) return { ok: false, status: "refused", reason: error.message };
+  if (error instanceof RequiredVerificationError) return { ok: false, status: "verification_failed", reason: error.message, evidence: error.evidence };
+  throw error;
+};
+
+/** Plan a release of the integration branch on the remote; publishes nothing. */
+export async function releaseIntegration(cwd = process.cwd(), { graphql }: { graphql?: GraphqlRunner } = {}): Promise<ReleaseResult> {
   try {
-    const plan = await planRelease(cwd, confirm === undefined ? {} : { candidate: confirm });
-    if (!plan.commits.length) {
-      // A confirm of a released candidate retries a post-release step that did not complete.
-      const retried = confirm === undefined ? await pendingPostReleaseField(plan)
-        : await runPostReleaseStep(plan, async () => (await shippedBy(plan)).merge, onProgress, { onlyIfPending: true });
-      return { ok: true, status: "up_to_date", ...await describePlan(plan, graphql), ...retried };
-    }
+    const plan = await planRelease(cwd);
     const summary = await describePlan(plan, graphql);
-    if (confirm === undefined) {
-      return { ok: true, status: "planned", ...summary, ...await pendingPostReleaseField(plan), subjects: plan.commits.map((commit) => commit.subject),
-        next: `After explicit human approval: slipjay release --confirm ${plan.candidate.slice(0, 12)}`
-          + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "") };
-    }
-    const requireMigrationsReady = (current: ReleasePlan): void => {
-      if (current.migrationArtifacts.length && !migrationsReady) {
-        refuse(`This release carries migration artifacts (${current.migrationArtifacts.join(", ")}). Apply them where ${current.releaseBranch} deploys, then rerun with --migrations-ready.`);
-      }
-    };
-    requireMigrationsReady(plan);
-    // What the release branch already holds needs no slot and no verification; null when it lacks the candidate.
-    const alreadyShipped = async (current: ReleasePlan): Promise<ShippedOutcome | null> =>
-      current.commits.length ? null : { summary: await describePlan(current, graphql), ...await shippedBy(current) };
-    const inSlot = async (): Promise<ShippedOutcome | VerifiedOutcome> => {
-      // A release that waited finds the release branch moved by the one it waited for: plan again against it.
-      await fetch(plan.root, plan.remote, plan.releaseBranch);
-      const moved = await commitOf(plan.root, `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`) !== plan.base;
-      const current = moved ? await planRelease(cwd, { candidate: plan.candidate }) : plan;
-      const shippedOutcome = await alreadyShipped(current);
-      if (shippedOutcome) return shippedOutcome;
-      const described = moved ? await describePlan(current, graphql) : summary;
-      requireMigrationsReady(current);
-      const verifyStarted = Date.now();
-      const verification = await verifyCandidate(current, onProgress).finally(() => onVerified(Date.now() - verifyStarted));
-      // The base must still be what was planned: a moved release branch needs a new plan.
-      await fetch(current.root, current.remote, current.releaseBranch);
-      const base = await commitOf(current.root, `${symbol(current.releaseBranch)}@${symbol(current.remote)}`);
-      if (base !== current.base) refuse(`${current.releaseBranch}@${current.remote} moved during the release; rerun it`);
-      const merge = await buildMerge(current);
-      await publish(current, merge);
-      return { summary: described, merge, verification };
-    };
-    let outcome: ShippedOutcome | VerifiedOutcome | null = null;
-    // A release that stood aside because its candidate shipped confirms that against a fresh plan.
-    while (!outcome) outcome = await holdReleaseSlot(plan, onProgress, inSlot) ?? await alreadyShipped(await planRelease(cwd, { candidate: plan.candidate }));
-    if ("releasedBy" in outcome) {
-      onProgress(`[release] ${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}`
-        + (outcome.releasedBy ? `, released by ${outcome.releasedBy.slice(0, 12)}` : ""));
-      return { ok: true, status: "released_by", ...outcome.summary, merge: outcome.merge, releasedBy: outcome.releasedBy,
-        ...await runPostReleaseStep(plan, async () => outcome!.merge, onProgress, { onlyIfPending: true }) };
-    }
-    const record = { ...outcome.summary, merge: outcome.merge, verification: outcome.verification, releasedAt: new Date().toISOString() };
-    await mkdir(releaseHome(), { recursive: true });
-    await writeFile(join(releaseHome(), `${record.releasedAt.replace(/[:.]/g, "-")}-${plan.candidate.slice(0, 12)}.json`), `${JSON.stringify(record, null, 2)}\n`);
-    return { ok: true, status: "released", ...record, ...await runPostReleaseStep(plan, async () => outcome!.merge, onProgress, { onlyIfPending: false }) };
+    if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
+    return { ok: true, status: "planned", ...summary, subjects: plan.commits.map((commit) => commit.subject),
+      next: `After explicit human approval: slipjay release --confirm ${plan.candidate.slice(0, 12)}`
+        + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "") };
   } catch (error) {
-    if (error instanceof ReleaseRefusal) return { ok: false, status: "refused", reason: error.message };
-    if ((error as { name?: string } | null | undefined)?.name === "RequiredVerificationError") return { ok: false, status: "verification_failed", reason: (error as { message: string }).message, evidence: (error as { evidence: unknown }).evidence };
-    throw error;
+    return refusalOf(error);
+  }
+}
+
+/**
+ * On the author's machine, before a confirm goes to the runner: the full id of the
+ * approved candidate, or the refusal the runner would return for it.
+ */
+export async function confirmableCandidate(cwd: string, confirm: string, migrationsReady: boolean): Promise<{ ok: true; status: "confirmable"; candidate: string; remote: string } | ReleaseResult> {
+  try {
+    const plan = await planRelease(cwd, { candidate: confirm });
+    if (plan.commits.length) requireMigrationsReady(plan, migrationsReady);
+    return { ok: true, status: "confirmable", candidate: plan.candidate, remote: plan.remote };
+  } catch (error) {
+    return refusalOf(error);
+  }
+}
+
+/**
+ * Verify and publish the approved `candidate` from `checkout`, which this call owns
+ * for its duration (the runner's warm checkout: it checks the candidate out there).
+ * A candidate the release branch already holds verifies nothing and only reruns a
+ * post-release step that did not complete.
+ */
+export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
+  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql } = options;
+  try {
+    const plan = await planRelease(checkout, { candidate });
+    if (!plan.commits.length) {
+      const { merge, releasedBy } = await shippedBy(plan);
+      onProgress(`[release] ${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}`
+        + (releasedBy ? `, released by ${releasedBy.slice(0, 12)}` : ""));
+      onStage("finalizing");
+      return { ok: true, status: "released_by", ...await describePlan(plan, graphql), merge, releasedBy,
+        ...await runPostReleaseStep(plan, merge, onProgress, { onlyIfPending: true, environment }) };
+    }
+    requireMigrationsReady(plan, migrationsReady);
+    const summary = await describePlan(plan, graphql);
+    onStage("installing");
+    await jj(checkout, ["new", plan.candidate]);
+    await prepareWorkspaceDependencies(checkout, { quiet: true, ...(environment ? { env: environment() } : {}) });
+    onStage("verifying");
+    const verification = plan.checks.length
+      ? await runRequiredVerification({ checks: plan.checks, root: checkout, slot: false, onProgress,
+        ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
+      : { passed: [], gaps: [] };
+    onStage("publishing");
+    // The base must still be what was planned: a moved release branch needs a new plan.
+    await fetch(plan.root, plan.remote, plan.releaseBranch);
+    const base = await commitOf(plan.root, `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`);
+    if (base !== plan.base) refuse(`${plan.releaseBranch}@${plan.remote} moved during the release; rerun it`);
+    const merge = await buildMerge(plan);
+    await publish(plan, merge);
+    onStage("finalizing");
+    return { ok: true, status: "released", ...summary, merge, verification, releasedAt: new Date().toISOString(),
+      ...await runPostReleaseStep(plan, merge, onProgress, { onlyIfPending: false, environment }) };
+  } catch (error) {
+    return refusalOf(error);
   }
 }

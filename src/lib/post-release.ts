@@ -7,9 +7,9 @@
  * step runs in an exact source view of the local integration branch read under
  * that lease, not of the candidate: the newest commit any landing has finalized.
  *
- * Its failure never undoes the release. The target's latest outcome is kept, a
- * plan reports a failed one, and a later `slipjay release --confirm` reruns it
- * (on its own when the candidate is already released) instead of skipping it.
+ * Its failure never undoes the release. The target's latest outcome is kept on the
+ * runner, and a later `slipjay release --confirm` reruns it (on its own when the
+ * candidate is already released) instead of skipping it.
  */
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -73,20 +73,13 @@ async function declaredStep(root: string, candidate: string) {
   return { gitDirectory, policy, targetKey, latest: await readOutcome(outcomePath(targetKey)) };
 }
 
-/** The target's latest post-release outcome when it did not complete, for a plan to report; null otherwise. */
-export async function pendingPostRelease(root: string, candidate: string): Promise<PostReleaseOutcome | null> {
-  const step = await declaredStep(root, candidate);
-  if (!step?.latest || step.latest.status === "complete") return null;
-  return { ...step.latest, ok: false, retry: postReleaseRetry(candidate) };
-}
-
 /**
  * Run the step declared at `candidate` for the release `merge`. With `onlyIfPending`,
  * run it only when the target's latest outcome did not complete (re-read under the
  * lease, so a run another release just finished is not repeated). Resolves to null
  * when no step is declared or none is pending; never rejects for the step's own failure.
  */
-export async function runPostRelease({ root, integrationBranch, candidate, merge, onlyIfPending = false, onProgress = () => {} }: {
+export async function runPostRelease({ root, integrationBranch, candidate, merge, onlyIfPending = false, onProgress = () => {}, environment: readEnvironment = () => process.env }: {
   root: string;
   /** The step runs in the exact source of this local branch, read under the target lease. */
   integrationBranch: string;
@@ -94,6 +87,8 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
   merge: string;
   onlyIfPending?: boolean;
   onProgress?: (line: string) => void;
+  /** Where the declared `environmentKeys` are read from. */
+  environment?: () => NodeJS.ProcessEnv;
 }): Promise<PostReleaseOutcome | null> {
   const step = await declaredStep(root, candidate);
   if (!step || onlyIfPending && (!step.latest || step.latest.status === "complete")) return null;
@@ -125,8 +120,9 @@ export async function runPostRelease({ root, integrationBranch, candidate, merge
     try {
       await withFinalizationSource(gitDirectory, source, async (view) => {
         const environment = sanitizedProcessEnv();
+        const declared = readEnvironment();
         for (const key of policy.environmentKeys) {
-          if (process.env[key] !== undefined) environment[key] = process.env[key];
+          if (declared[key] !== undefined) environment[key] = declared[key];
         }
         await rm(reasonPath(targetKey), { force: true });
         Object.assign(environment, { SLIPJAY_RELEASE_CANDIDATE: candidate, SLIPJAY_RELEASE_MERGE: merge,

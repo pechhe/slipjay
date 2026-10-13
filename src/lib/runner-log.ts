@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import type { Operation, OperationEvent, OperationLog, RunRecord, StoredEvent } from "./runner-contract.ts";
+import { TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import type { LandingOperation, Operation, OperationEvent, OperationLog, RunRecord, StoredEvent } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -29,7 +30,7 @@ export function openOperationLog(path: string): OperationLog {
       event: JSON.parse(row.data) as OperationEvent,
     }));
   };
-  const terminalTypes = "('landed','failed','declined','superseded','cancelled')";
+  const terminalTypes = `(${TERMINAL_EVENT_TYPES.map((type) => `'${type}'`).join(",")})`;
   // Projections read only the operations they need: open ones (the queue) or one change's.
   const openIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
     AND operation_id NOT IN (SELECT operation_id FROM events WHERE type IN ${terminalTypes}) ORDER BY seq`);
@@ -37,20 +38,23 @@ export function openOperationLog(path: string): OperationLog {
     AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.changeId') = ? ORDER BY seq DESC`);
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
-  // One serial queue across repositories, in submission order; positions come from the id list alone.
-  const openOrder = (): string[] => (openIds.all() as { operation_id: string }[]).map((row) => row.operation_id);
+  // One serial queue across repositories, in submission order.
   function queue(): Operation[] {
-    const open = projectIds(openOrder());
-    open.forEach((operation, index) => { operation.position = index + 1; });
+    const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
+    const running = open.find((operation) => operation.status === "running");
+    open.forEach((operation, index) => {
+      operation.position = index + 1;
+      if (running && operation.status === "queued") operation.waitingFor = label(running);
+    });
     return open;
   }
-  function withPosition(projected: Operation, order: string[]): Operation {
-    const index = order.indexOf(projected.id);
-    return index >= 0 ? { ...projected, position: index + 1 } : projected;
+  // An open operation carries its queue fields; a closed one is its bare projection.
+  function placed<T extends Operation>(projected: T, open: Operation[]): T {
+    return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;
   }
   function operation(id: string): Operation | null {
     const projected = project(id, events({ operationId: id }));
-    return projected ? withPosition(projected, openOrder()) : null;
+    return projected ? placed(projected, queue()) : null;
   }
   return {
     append(operationId, event) {
@@ -61,25 +65,32 @@ export function openOperationLog(path: string): OperationLog {
     events,
     operation,
     operationsForChange: (repo, changeId) => {
-      const order = openOrder();
+      const open = queue();
       return projectIds((changeIds.all(repo, changeId) as { operation_id: string }[]).map((row) => row.operation_id))
-        .map((entry) => withPosition(entry, order));
+        .filter((entry): entry is LandingOperation => entry.kind === "landing")
+        .map((entry) => placed(entry, open));
     },
     openOperations: (repo) => queue().filter((entry) => repo === undefined || entry.repo === repo),
     close: () => db.close(),
   };
 }
 
+/** How a queued operation names the one running ahead of it. */
+const label = (operation: Operation): string =>
+  operation.kind === "release" ? `release ${operation.commitId.slice(0, 12)}` : `landing ${operation.changeId.slice(0, 12)}`;
+
 function project(id: string, events: StoredEvent[]): Operation | null {
   const submitted = events.find((stored) => stored.event.type === "submitted");
   if (!submitted || submitted.event.type !== "submitted")
     return null;
-  const { repo, changeId, commitId, bookmark, submittedBy } = submitted.event;
-  const operation: Operation = {
-    id, repo, changeId, commitId, bookmark, submittedBy,
-    status: "queued", stage: "queued", submittedAt: submitted.at,
+  const fields = {
+    id, repo: submitted.event.repo, commitId: submitted.event.commitId, submittedBy: submitted.event.submittedBy,
+    status: "queued" as const, stage: "queued" as const, submittedAt: submitted.at,
     runs: [], lastSeq: events.at(-1)!.seq,
   };
+  const operation: Operation = submitted.event.kind === "release"
+    ? { ...fields, kind: "release", migrationsReady: submitted.event.migrationsReady }
+    : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {
     const event = stored.event;
@@ -103,6 +114,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
         break;
       }
       case "landed":
+      case "released":
       case "failed":
       case "declined":
       case "superseded":
