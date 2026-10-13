@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.4.0
+
+- **Owner controls on the runner:** `slipjay runner kill` stops the running landing or
+  release until it passes verification; it ends `cancelled` with "killed by the owner,
+  not run to completion", nothing moves, and the queue goes on. `slipjay runner pause`
+  and `resume` hold and release the queue (queued operations show `paused`); the pause
+  is recorded in the operation log (#13). Under a systemd user manager each runner run
+  gets its own scope, so a kill reaches tools a gate starts in their own process group,
+  and nothing a run leaves behind survives it. `/v1/health` reports `paused`.
+
 ## v3.3.0
 
 - **Releases on the runner:** `slipjay release --confirm <commit>` submits the
