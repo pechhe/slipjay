@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.6.2
+
+- **Upgrading no longer clears Bun's cache (#19):** the README's upgrade is
+  `bun remove -g @pechhe/slipjay && bun add -g github:pechhe/slipjay#<tag>`, never
+  `bun pm cache rm`, which broke every project linking into Bun's global store
+  (`globalStore = true`). New `slipjay --version` prints the installed release.
+- **Damaged global store diagnosed (#19):** when a checkout's declared packages, or their
+  dependencies, link into a Bun store entry that is gone, `start` and landing's deps stage
+  stop with the dangling links, any half-linked `links/*.tmp-*` entries and the repair,
+  instead of a later module-resolution error.
+
 ## v3.6.1
 
 - **A landing is recorded even when abandoning the submitted commit fails:** when the
