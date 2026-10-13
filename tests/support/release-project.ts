@@ -1,9 +1,9 @@
-import { jj, project, recordCheckout } from "./workspace-project.ts";
+import { jj, landThroughTestRunner, project, recordCheckout } from "./workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createWorkspace, landWorkspace } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/slipjay.ts";
 
 /**
  * A project whose `main` is promoted to `release`, which starts at the initial
@@ -46,9 +46,10 @@ export type ReleaseFixture = Awaited<ReturnType<typeof releaseProject>>;
 export async function landFile(f: ReleaseFixture, file: string, content = `${file}\n`) {
   const workspace = await createWorkspace(file, f.repo);
   await writeFile(join(workspace.workspacePath, file), content);
-  const result = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, sweepOtherWorkspaces: false });
-  assert.equal(result.ok, true, JSON.stringify(result.publication));
-  return result.artifact.commitId as string;
+  const result = await landThroughTestRunner(f, workspace.workspacePath);
+  assert.equal(result.ok, true, result.lines.join("\n"));
+  assert.equal(result.operation.result?.type, "landed");
+  return (result.operation.result as { commitId: string }).commitId;
 }
 
 export const remoteRef = (f: ReleaseFixture, branch: string) =>

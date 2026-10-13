@@ -7,7 +7,6 @@ import {
   attachWorkspaceIssue,
   cleanupLandedWorkspace,
   createWorkspace,
-  landWorkspace,
   inspectWorkspaces,
   landingPreview,
   releaseIntegration,
@@ -19,9 +18,7 @@ import {
   readySpares,
   describeRetention,
   retainedWorkspaceMaterial,
-  latestPostLandResult,
   readLandingState,
-  runPostLandVerification,
   removeWorkspace,
   startSpareRefill,
   cutover,
@@ -33,7 +30,6 @@ import { landingTimingLine, landingTimingRecord } from "../lib/landing-timing.ts
 import { appendMetric } from "../lib/metrics.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { writeSync } from "node:fs";
-import { setPriority } from "node:os";
 import { basename, resolve } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -215,12 +211,10 @@ try {
     }, null, 2));
   } else if (command === "status") {
     const context = await workspaceContext();
-    const postLand = context ? await latestPostLandResult(context.integration.root) : null;
     const landing = context && context.current.name !== "default" ? await readLandingState(context.current.name, { readOnly: true }) : null;
     console.log(context
       ? JSON.stringify({ mode: await readWorkspaceMode(), workspace: context.current, integration: context.integration, integrationBranch: context.integrationBranch,
-        ...(landing ? { landing: { phase: landing.phase, artifactCommitId: landing.artifactCommitId, ...(landing.primaryCheckout ? { primaryCheckout: landing.primaryCheckout } : {}) } } : {}),
-        ...(postLand ? { postLand: { commit: postLand.commit, status: postLand.status, finishedAt: postLand.finishedAt, log: postLand.log, ...(postLand.failed ? { failed: postLand.failed.command } : {}) } } : {}) }, null, 2)
+        ...(landing ? { landing: { phase: landing.phase, artifactCommitId: landing.artifactCommitId, ...(landing.primaryCheckout ? { primaryCheckout: landing.primaryCheckout } : {}) } } : {}) }, null, 2)
       : "Not inside a Jujutsu repository");
   } else if (command === "mode") {
     const requested = rest[0];
@@ -283,56 +277,29 @@ try {
     const preview = await landingPreview();
     console.log(preview.stat || "(no changed files)");
   } else if (command === "land") {
-    if (rest.some((flag) => flag !== "--local-only" && flag !== "--direct")) throw new Error("Usage: slipjay land [--local-only] [--direct]");
+    if (rest.some((flag) => flag !== "--direct")) throw new Error("Usage: slipjay land [--direct]");
     // --direct lands the primary checkout itself, for a session explicitly working Direct.
+    const location = runnerLocation();
+    if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
     const timing: { startedAt: number; stages: [string, number][] } = { startedAt: Date.now(), stages: [] };
     // The landing may remove this very directory, after which process.cwd() throws.
     const landedFrom = basename(process.cwd());
-    const localLanding = () => landWorkspace(process.cwd(), {
-      onStage: (stage) => timing.stages.push([stage, Date.now()]),
-      localOnly: rest.includes("--local-only") ? true : undefined,
-      allowDefaultWorkspace: rest.includes("--direct"),
-      // This CLI, bundled or not, is its own background verification runner.
-      postLandRunner: [process.execPath, process.argv[1]!, "post-land-run"],
-    });
-    const location = rest.includes("--local-only") ? null : runnerLocation();
-    let runner: Awaited<ReturnType<typeof landThroughRunner>> | null = null;
-    if (location) {
-      const following = new AbortController();
-      const stopFollowing = () => following.abort(new Error("Stopped following; rerun slipjay land to reattach"));
-      process.once("SIGINT", stopFollowing);
-      try {
-        runner = await landThroughRunner(process.cwd(), {
-          location, direct: rest.includes("--direct"), onLine: (line) => console.error(line),
-          // The local fallback is not a follow: Ctrl-C must stop it as usual.
-          fallback: () => { process.removeListener("SIGINT", stopFollowing); return localLanding(); },
-          signal: following.signal,
-        });
-      } finally {
-        process.removeListener("SIGINT", stopFollowing);
-      }
-    }
-    if (runner && runner.fallback === undefined) {
-      console.log(JSON.stringify({ ok: runner.ok, verdict: runner.operation.status, log: runner.logUrl }));
-      if (!runner.ok) process.exitCode = 1;
-    } else {
-      const result = runner ? runner.fallback as Awaited<ReturnType<typeof landWorkspace>> : await localLanding();
+    const following = new AbortController();
+    const stopFollowing = () => following.abort(new Error("Stopped following; rerun slipjay land to reattach"));
+    process.once("SIGINT", stopFollowing);
+    try {
+      const runner = await landThroughRunner(process.cwd(), {
+        location, direct: rest.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
+        onStage: (stage) => timing.stages.push([stage, Date.now()]),
+      });
       // stderr, so stdout stays the JSON result.
       const finished = { ...timing, finishedAt: Date.now() };
-      console.error(landingTimingLine(finished, result));
-      for (const name of result.sweep?.removed ?? []) console.error(`Removed workspace: ${name}`);
-      // An undelivered checkout kept by its session is the normal case; a delivered one is a leftover.
-      for (const skipped of result.sweep?.skipped ?? []) if (skipped.landed) console.error(`Kept landed workspace ${skipped.name}: ${skipped.reason}`);
-      await appendMetric("landings", { workspace: landedFrom, ...landingTimingRecord(finished, result) });
-      console.log(JSON.stringify({ artifact: result.artifact, publication: result.publication, postIntegration: result.postIntegration,
-        ...(result.primaryCheckout ? { primaryCheckout: result.primaryCheckout } : {}),
-        ...(result.postLand ? { postLand: result.postLand } : {}), ...(result.postLandWarning ? { postLandWarning: result.postLandWarning } : {}),
-        ...(result.sweep ? { sweep: result.sweep } : {}), ...(result.released ? { released: result.released } : {}) }, null, 2));
-      if (!result.ok) process.exitCode = 1;
-      // After the result, because this directory may be gone: it was the landed workspace.
-      const own = result.context?.current.name ?? landedFrom;
-      if (result.released?.cleaned) console.error(`Removed landed workspace ${own}; this shell's directory no longer exists, so cd to the primary checkout.`);
-      else if (result.released) console.error(`Kept landed workspace ${own}: ${result.released.reason}`);
+      console.error(landingTimingLine(finished));
+      await appendMetric("landings", { workspace: landedFrom, verdict: runner.operation.status, ...landingTimingRecord(finished, runner.ok) });
+      console.log(JSON.stringify({ ok: runner.ok, verdict: runner.operation.status, log: runner.logUrl }));
+      if (!runner.ok) process.exitCode = 1;
+    } finally {
+      process.removeListener("SIGINT", stopFollowing);
     }
   } else if (command === "release") {
     process.exitCode = await runRelease(rest);
@@ -354,11 +321,6 @@ try {
       await new Promise<void>((resolve) => process.once("SIGTERM", () => resolve()));
       process.exit(0);
     } else throw new Error("Usage: slipjay runner <serve|log <operation>|kill|pause|resume>");
-  } else if (command === "post-land-run") {
-    // Internal: the detached process a landing starts for its background
-    // verification. Landings take priority over it for the machine.
-    try { setPriority(10); } catch { /* unsupported */ }
-    await runPostLandVerification(rest[0] ?? "");
   } else if (command === "guard") {
     // Claude Code PreToolUse hook: reads the tool call on stdin, prints a deny decision.
     let input = "";
@@ -369,8 +331,6 @@ try {
     if (rest.length > 1 || rest[0]?.startsWith("-")) throw new Error("Usage: slipjay cleanup [path]");
     const result = await cleanupLandedWorkspace(rest[0] ? resolve(rest[0]) : process.cwd());
     console.log(result.cleaned ? "Workspace removed." : `Workspace retained: ${describeRetention(result)}.`);
-    const superseded = result.supersededPostIntegration;
-    if (superseded) console.log(`Superseded post-integration record (${superseded.status}, attempt ${superseded.attempt}${superseded.reason ? `: ${superseded.reason}` : ""}): a later landing published this artifact.`);
   } else if (command === "remove") {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));

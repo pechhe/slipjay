@@ -1,11 +1,12 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
+import { createWorkspace, readLandingState } from "../src/lib/slipjay.ts";
+import type { PrimaryCheckoutOutcome } from "../src/lib/landing-candidate.ts";
 
 // An Isolated landing integrates and pushes whatever the primary checkout holds,
 // and moves that checkout only when it is an empty `@` on integrated ancestry.
@@ -24,10 +25,11 @@ const primary = (f: Fixture) => ({
 async function land(f: Fixture, file: string) {
   const workspace = await createWorkspace(file, f.repo);
   await writeFile(join(workspace.workspacePath, file), `${file}\n`);
-  const result = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, sweepOtherWorkspaces: false, releaseLandedWorkspace: false });
-  assert.equal(result.ok, true, JSON.stringify(result.publication));
-  assert.equal(result.publication.status, "pushed");
+  // Kept, so its landing record (where the primary checkout outcome lives) stays readable.
+  const landed = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
+  assert.equal(landed.ok, true, landed.lines.join("\n"));
   assert.equal(f.remoteFile(file), `${file}\n`);
+  const result = (await readLandingState(workspace.current.name, { readOnly: true }))! as { artifactCommitId: string; cleanupPending?: boolean; primaryCheckout?: PrimaryCheckoutOutcome };
   return { workspace, result };
 }
 
@@ -38,7 +40,7 @@ test("an empty primary checkout moves onto the new integration", async () => {
     assert.deepEqual(result.primaryCheckout, { action: "moved" });
     assert.equal(primary(f).parent, jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]));
     assert.deepEqual((await status(workspace.workspacePath)).landing, {
-      phase: "landed", artifactCommitId: result.artifact.commitId, primaryCheckout: { action: "moved" } });
+      phase: "landed", artifactCommitId: result.artifactCommitId, primaryCheckout: { action: "moved" } });
   } finally {
     await f.dispose();
   }

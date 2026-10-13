@@ -1,4 +1,4 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -6,7 +6,7 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { attachWorkspaceIssue, createWorkspace, landWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
+import { attachWorkspaceIssue, createWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
 import { lockPath } from "../src/lib/workspace-state.ts";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
 
@@ -20,10 +20,10 @@ function occupy(cwd: string) {
   return () => child.kill();
 }
 
-async function land(cwd: string, file: string) {
+async function land(f: { root: string; repo: string; remote: string }, cwd: string, file: string, options: { keep?: boolean } = {}) {
   await writeFile(join(cwd, file), `${file}\n`);
-  const result = await landWorkspace(cwd, { onProgress: () => {}, releaseLandedWorkspace: false });
-  assert.equal(result.ok, true, JSON.stringify(result.publication));
+  const result = await landThroughTestRunner(f, cwd, options);
+  assert.equal(result.ok, true, result.lines.join("\n"));
   return result;
 }
 
@@ -115,22 +115,23 @@ test("landing anywhere releases other delivered checkouts, but not one still in 
   const f = await project();
   let release = () => {};
   try {
+    // Held while it lands, so it outlives its own landing as a delivered checkout.
     const first = await createWorkspace("first", f.repo);
-    await land(first.workspacePath, "first.txt");
+    await land(f, first.workspacePath, "first.txt", { keep: true });
+    assert.ok(existsSync(first.workspacePath));
     const issue = await createWorkspace("issue", f.repo);
     await attachWorkspaceIssue(issue.workspacePath, 41);
-    await land(issue.workspacePath, "issue.txt");
-    assert.equal(existsSync(first.workspacePath), false, "the next landing released the first delivered checkout");
+    const landed = await land(f, issue.workspacePath, "issue.txt");
+    assert.deepEqual(landed.sweep?.removed, [first.current.name], "the next landing releases the delivered checkout and reports it");
+    assert.equal(existsSync(first.workspacePath), false);
+    assert.equal(existsSync(issue.workspacePath), false, "the landing releases its own checkout");
     const busy = await createWorkspace("busy", f.repo);
-    const landed = await land(busy.workspacePath, "busy.txt");
-    assert.deepEqual(landed.sweep?.removed, [issue.current.name], "a delivered Issue checkout is released and reported");
-    assert.equal(existsSync(issue.workspacePath), false);
+    await land(f, busy.workspacePath, "busy.txt", { keep: true });
     release = occupy(busy.workspacePath);
     const last = await createWorkspace("last", f.repo);
-    const kept = (await land(last.workspacePath, "last.txt")).sweep?.skipped ?? [];
+    const kept = (await land(f, last.workspacePath, "last.txt")).sweep?.skipped ?? [];
     assert.deepEqual(kept.map(({ name, landed }) => [name, landed]), [[busy.current.name, true]], "the landing reports the delivered checkout it kept");
     assert.ok(existsSync(busy.workspacePath), "a delivered checkout with a live process is kept");
-    assert.ok(existsSync(last.workspacePath), "the landing never removes its own checkout");
     assert.equal(f.remoteFile("last.txt"), "last.txt\n");
   } finally {
     release();

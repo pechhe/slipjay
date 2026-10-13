@@ -1,7 +1,9 @@
-import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
+import { landThroughRunner } from "../../src/lib/runner-client.ts";
+import { startRunner } from "../../src/lib/runner-service.ts";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
 // HOME they leak into ~/.pi and race live sessions, so a runner that skipped the
@@ -45,7 +47,7 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   await writeFile(join(repo, options.policyPath ?? "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: "main",
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLocalVerification: [{ executable: "node", args: ["-e", options.verify?.(verified) ?? recordCheckout(verified)] }],
+    requiredLandingVerification: [{ executable: "node", args: ["-e", options.verify?.(verified) ?? recordCheckout(verified)] }],
     ...(options.generatedPaths === undefined ? {} : { generatedPaths: options.generatedPaths }),
     ...(options.postIntegration === undefined ? {} : { postIntegration: options.postIntegration }),
     ...options.policy,
@@ -67,4 +69,52 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   jj(repo, ["bookmark", "track", "main", "--remote", "origin"]);
   const remoteFile = (path: string) => execFileSync("git", ["--git-dir", remote, "show", `main:${path}`], { encoding: "utf8" });
   return { root, repo, remote, verified, remoteFile, dispose: () => rm(root, { recursive: true, force: true }) };
+}
+
+/**
+ * Run `body` against a runner started in-process with its own home under the
+ * fixture's root, stopped afterwards. `env` names it (SLIPJAY_RUNNER) and carries
+ * its token, so `body` can land through the library or the CLI.
+ */
+export async function withTestRunner<T>(f: { root: string; repo: string; remote: string }, body: (runner: { location: string; env: NodeJS.ProcessEnv }) => Promise<T>): Promise<T> {
+  // The client names the repository by its GitHub remote. Origin carries a GitHub-shaped
+  // alias only while the runner is up, so nothing else a test runs reaches for GitHub.
+  const github = join(f.root, "github.com", "fixture", "project.git");
+  await mkdir(dirname(github), { recursive: true });
+  await symlink(f.remote, github).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+  // Through Git's config: jj would store the symlink's resolved path.
+  const setOrigin = (url: string) => execFileSync("git", ["-C", f.repo, "remote", "set-url", "origin", url]);
+  setOrigin(github);
+  // A runner host has its own author for the commits it rewrites; here, in this file's disposable HOME.
+  jj(f.root, ["config", "set", "--user", "user.name", "Fixture"]);
+  jj(f.root, ["config", "set", "--user", "user.email", "fixture@example.com"]);
+  const home = join(f.root, "runner");
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: f.remote } } }));
+  const runner = await startRunner({ home, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" }, port: 0 });
+  try {
+    return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });
+  } finally {
+    await runner.close();
+    setOrigin(f.remote);
+  }
+}
+
+/**
+ * Land `cwd` the one way SlipJay lands: through a test runner (withTestRunner).
+ * `keep` holds the workspace with another process while it lands, so the landing
+ * keeps it as it would any workspace in use; `direct` lands the primary checkout.
+ */
+export function landThroughTestRunner(f: { root: string; repo: string; remote: string }, cwd: string, options: { direct?: boolean; keep?: boolean } = {}) {
+  return withTestRunner(f, async ({ location, env }) => {
+    // Its own process group: the landing ignores its caller's group as it would the CLI's.
+    const holder = options.keep ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd, stdio: "ignore", detached: true }) : null;
+    const lines: string[] = [];
+    try {
+      const result = await landThroughRunner(cwd, { location, env, direct: options.direct, onLine: (line) => { lines.push(line); } });
+      return { ...result, lines };
+    } finally {
+      holder?.kill();
+    }
+  });
 }

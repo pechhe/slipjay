@@ -1,4 +1,4 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -10,7 +10,7 @@ import lockfile from "proper-lockfile";
 import { beforeEach, test } from "vite-plus/test";
 import { assertHermeticHome } from "../scripts/hermetic-home-guard.ts";
 import { cutover } from "../src/lib/cutover.ts";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace, readWorkspaceMode } from "../src/lib/slipjay.ts";
+import { cleanupLandedWorkspace, createWorkspace, readWorkspaceMode } from "../src/lib/slipjay.ts";
 import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, legacyWorkspaceHome, slipjayHome } from "../src/lib/workspace-paths.ts";
 
 // Every case builds pre-v1.0.0 state in this file's disposable HOME and cuts it
@@ -131,8 +131,8 @@ test("the cutover moves state, keeps an existing workspace usable through landin
     assert.deepEqual({ path: JSON.parse(resumed.stdout).workspacePath, reused: JSON.parse(resumed.stdout).reused }, { path: workspacePath, reused: true });
     await writeFile(join(workspacePath, "legacy.txt"), "landed after cutover\n");
     jj(workspacePath, ["describe", "-m", "Land from a pre-cutover workspace"]);
-    const landed = await landWorkspace(workspacePath, { onProgress: () => {}, sweepOtherWorkspaces: false, releaseLandedWorkspace: false });
-    assert.equal(landed.ok, true, JSON.stringify(landed.publication));
+    const landed = await landThroughTestRunner(f, workspacePath, { keep: true });
+    assert.equal(landed.ok, true, landed.lines.join("\n"));
     assert.equal(f.remoteFile("legacy.txt"), "landed after cutover\n");
     assert.equal(existsSync(join(state, `${name}.json`)), true, "the landing record lives in the new state");
     const cleaned = await cleanupLandedWorkspace(workspacePath);

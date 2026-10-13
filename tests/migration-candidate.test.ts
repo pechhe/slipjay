@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
-import { jj, project } from "./support/workspace-project.ts";
+import { createWorkspace } from "../src/lib/slipjay.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import { migrationCommandFailure } from "../src/lib/migration-command-evidence.ts";
 import { runBoundedProcess } from "../src/lib/bounded-process.ts";
 
-const cli = resolve("src/launcher/workspace.ts");
-const native = (cwd: string, args: string[]) => execFileSync("bun", [cli, ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
-const advance = (cwd: string, title: string) => { jj(cwd, ["commit", "-m", title]); jj(cwd, ["bookmark", "set", "main", "-r", "@-"]); };
+const advance = (cwd: string, title: string) => { jj(cwd, ["commit", "-m", title]); jj(cwd, ["bookmark", "set", "main", "-r", "@-"]); jj(cwd, ["git", "push", "--bookmark", "main"]); };
 async function write(root: string, path: string, value: string) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), value); }
 
 async function fixture(generate: string) {
@@ -23,16 +22,17 @@ async function fixture(generate: string) {
   // Logs are external; verifier must not edit the candidate.
   await write(f.repo, "verify.mjs", `import { appendFileSync } from "node:fs"; appendFileSync(${JSON.stringify(join(f.root, "migration-verified"))}, "yes");`);
   advance(f.repo, "Configure migration");
-  const started = JSON.parse(native(f.repo, ["start", "--integration", "--json", "migration fixture"]));
-  const workspace = started.workspacePath as string;
+  const workspace = (await createWorkspace("migration fixture", f.repo)).workspacePath;
   await write(workspace, "schema/source", "new");
   jj(workspace, ["describe", "-m", "Change schema"]); jj(workspace, ["new"]);
-  return { ...f, workspace };
+  const remoteMain = () => execFileSync("git", ["--git-dir", f.remote, "rev-parse", "main"], { encoding: "utf8" }).trim();
+  const land = async () => { const result = await landThroughTestRunner(f, workspace); return { ...result, output: result.lines.join("\n") }; };
+  return { ...f, workspace, remoteMain, land };
 }
 
 const append = 'import { mkdirSync, writeFileSync } from "node:fs"; mkdirSync("migrations",{recursive:true}); writeFileSync("migrations/0001.sql","generated");';
 
-test("actual CLI prepares dependency drift from final rebase before generating and verifying", async () => {
+test("the runner prepares dependency drift from final rebase before generating and verifying", async () => {
   const f = await fixture('import { marker } from "fixture-dependency"; if(marker!==42)throw Error("dependency wrong");' + append);
   try {
     await write(f.repo, "package.json", JSON.stringify({ name: "fixture", private: true, packageManager: "bun@1.4.2", workspaces: ["packages/*"], dependencies: { "fixture-dependency": "workspace:*" } }));
@@ -41,29 +41,27 @@ test("actual CLI prepares dependency drift from final rebase before generating a
     execFileSync("bun", ["install"], { cwd: f.repo, stdio: "pipe" });
     advance(f.repo, "Dependency introduced after allocation");
     assert.equal(existsSync(join(f.workspace, "node_modules/fixture-dependency")), false);
-    const out = native(f.workspace, ["land", "--local-only"]);
-    assert.match(out, /0001|commitId/);
-    // The landing removed its own workspace, so read what it integrated from the repository.
-    assert.equal(jj(f.repo, ["file", "show", "-r", "main", "migrations/0001.sql"]), "generated");
+    const landed = await f.land();
+    assert.equal(landed.ok, true, landed.output);
+    assert.equal(f.remoteFile("migrations/0001.sql"), "generated");
     assert.equal(await readFile(join(f.root, "migration-verified"), "utf8"), "yes");
-    assert.match(await readFile(f.verified, "utf8"), /workspaces/);
+    assert.ok(existsSync(f.verified), "the landing gate ran");
     assert.equal(existsSync(f.workspace), false, "the landed workspace was released");
   } finally { await f.dispose(); }
 }, 60000);
 
-test("actual CLI frozen preparation failure prevents generation and integration and retains semantic source", async () => {
+test("a frozen preparation failure prevents generation and integration and retains semantic source", async () => {
   const f = await fixture(append);
   try {
     await write(f.repo, "package.json", JSON.stringify({ name: "fixture", packageManager: "bun@1.4.2", dependencies: { missing: "file:./does-not-exist" } }));
     advance(f.repo, "Uninstallable final graph");
-    const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const result = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr + result.stdout, /Dependency command failed.*bun install/);
-    assert.doesNotMatch(result.stderr, /rollback requires reconciliation/);
-    assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
+    const base = f.remoteMain();
+    const result = await f.land();
+    assert.equal(result.ok, false);
+    assert.match(result.output, /bun install/);
+    assert.doesNotMatch(result.output, /rollback requires reconciliation/);
     assert.equal(existsSync(join(f.root, "migration-verified")), false);
-    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), base);
+    assert.equal(f.remoteMain(), base);
     assert.equal(await readFile(join(f.workspace, "schema/source"), "utf8"), "new");
   } finally { await f.dispose(); }
 }, 60000);
@@ -72,17 +70,15 @@ for (const [name, source, pass] of [
   ["append", append, true], ["no-op", "", true],
   ["undeclared artifact", append + 'writeFileSync("unexpected", "bad");', false],
   ["failed generation rollback", append + 'console.error("generation evidence");process.exit(9);', false],
-] as const) test(`actual CLI retains ${name} migration behaviour`, async () => {
+] as const) test(`the runner retains ${name} migration behaviour`, async () => {
   const f = await fixture(source);
   try {
-    const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const out = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
-    assert.equal(out.status === 0, pass, out.stderr);
+    const base = f.remoteMain();
+    const out = await f.land();
+    assert.equal(out.ok, pass, out.output);
     if (!pass) {
-      assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
-      assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), base);
-      assert.equal(await readFile(join(f.workspace, "schema/source"), "utf8"), "new");
-      if (name === "failed generation rollback") assert.match(out.stderr, /generation evidence/);
+      assert.equal(f.remoteMain(), base);
+      if (name === "failed generation rollback") assert.match(out.output, /generation evidence/);
     }
   } finally { await f.dispose(); }
 }, 60000);
@@ -100,18 +96,17 @@ test("complete split-stream credentials redact before clipping; truncated eviden
 });
 
 
-test("actual CLI failed verification reports evidence and rolls generated artifacts back", async () => {
+test("a failed migration verification reports evidence and rolls generated artifacts back", async () => {
   const f = await fixture(append);
   try {
     await write(f.repo, "verify.mjs", 'console.error("verification evidence");process.exit(6);');
     advance(f.repo, "Fail configured verifier");
-    const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const out = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
-    assert.notEqual(out.status, 0);
-    assert.doesNotMatch(out.stderr, /rollback requires reconciliation/);
-    assert.match(out.stderr, /verification evidence/);
-    assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
-    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), base);
+    const base = f.remoteMain();
+    const out = await f.land();
+    assert.equal(out.ok, false);
+    assert.doesNotMatch(out.output, /rollback requires reconciliation/);
+    assert.match(out.output, /verification evidence/);
+    assert.equal(f.remoteMain(), base);
   } finally { await f.dispose(); }
 }, 60000);
 
@@ -123,13 +118,11 @@ test("installation source drift is fenced before generation and restored without
     execFileSync("bun", ["install"], { cwd: f.repo, stdio: "pipe" });
     await write(f.repo, "schema/source", "old");
     advance(f.repo, "Install script changes source");
-    const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    const out = spawnSync("bun", [cli, "land", "--local-only"], { cwd: f.workspace, encoding: "utf8" });
-    assert.notEqual(out.status, 0);
-    assert.match(out.stderr, /Dependency preparation changed the landing candidate's source/);
-    assert.equal(existsSync(join(f.workspace, "migrations/0001.sql")), false);
-    assert.equal(await readFile(join(f.workspace, "schema/source"), "utf8"), "new");
-    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), base);
+    const base = f.remoteMain();
+    const out = await f.land();
+    assert.equal(out.ok, false);
+    assert.match(out.output, /Dependency preparation changed the landing candidate's source/);
+    assert.equal(f.remoteMain(), base);
   } finally { await f.dispose(); }
 }, 60000);
 

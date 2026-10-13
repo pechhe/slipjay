@@ -9,20 +9,19 @@ export type CandidateContext = {
   integration: { name: string; root: string };
   integrationBranch: string;
   /** Verification, publication and migration policy read by landing steps. */
-  configuration: { requiredLocalVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null };
+  configuration: { requiredLandingVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null };
 };
 /** What an Isolated landing did with the primary checkout; it never blocks integration or push. */
 export type PrimaryCheckoutOutcome = {
-  /** `moved` onto the new integration, already `current`, `left` in place, or `deferred` by a live Direct writer. */
-  action: "moved" | "current" | "left" | "deferred";
+  /** `moved` onto the new integration, already `current`, or `left` in place. */
+  action: "moved" | "current" | "left";
   reason?: string;
   /** Something the primary checkout's owner should resolve, such as a conflict. */
   warning?: string;
 };
 /** Internal adapters and progress callbacks for candidate integration. */
 export type CandidateOptions = {
-  adapter?: LandingAdapter;
-  localOnly?: boolean;
+  adapter: LandingAdapter;
   operationId?: string;
   environment?: () => NodeJS.ProcessEnv;
   /** Runs migration generation and verification commands (default: a bounded local process). */
@@ -34,34 +33,31 @@ export type CandidateOptions = {
 export type LandingIO = {
   landingPreview(cwd: string): Promise<{ context: CandidateContext; target: LandingRevision }>;
   ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision): Promise<LandingRevision>;
-  assertNoForeignPrimaryWriter(integrationRoot: string): Promise<void>;
   assertStackConflictFree(cwd: string, branch: string, changeId: string): Promise<unknown>;
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;
   /** Frozen install of the rebased candidate; fails, restoring source, if the install edits it. */
   prepareCandidateDependencies(cwd: string, context: CandidateContext, candidate: LandingRevision, progress?: (line: string) => void): Promise<void>;
-  runVerification(context: CandidateContext, progress?: (line: string) => void): Promise<VerificationEvidence>;
-  writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string, localOnly?: boolean, operationId?: string): Promise<unknown>;
+  writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string, operationId?: string): Promise<unknown>;
   readJsonOptional(path: string): Promise<Record<string, unknown> | null>;
   statePath(name: string): string;
 };
 
-/** One shared landing candidate transition, used by both native Pi and the host. */
+/** The runner's landing candidate transition: rebase, finalize, verify, integrate. */
 import { migrationCandidate } from "./migration-candidate.ts";
 import { resolve } from "node:path";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
 export async function integrateLandingCandidate(cwd: string, options: CandidateOptions, io: LandingIO): Promise<{ context: CandidateContext; artifact: LandingRevision; base: string; verification: VerificationEvidence; cleanupPending: boolean; cleanupError?: string; primaryCheckout?: PrimaryCheckoutOutcome }> {
-  const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, prepareCandidateDependencies, runVerification, writeLandingState, readJsonOptional, statePath } = io;
-  const adapter = options.adapter ?? {};
-  const preview = await (adapter.preview?.() ?? landingPreview(cwd));
+  const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, prepareCandidateDependencies, writeLandingState, readJsonOptional, statePath } = io;
+  const { adapter } = options;
+  const preview = await landingPreview(cwd);
   const { context } = preview;
   const direct = context.current.name === "default";
-  let target = await ensureLandingDescription(cwd, context, preview.target);
-  if (adapter.repairTarget) target = await adapter.repairTarget(target);
+  const target = await ensureLandingDescription(cwd, context, preview.target);
   // The primary checkout's working copy never gates an Isolated landing: housekeeping
   // moves it afterwards only when that is safe (see primaryCheckoutDisposition).
-  // The machine-wide slot protects generation and verification. The repository
+  // The runner's serial queue protects generation and verification. The repository
   // transaction covers only the final identity check and bookmark transition.
   const migration = await migrationCandidate(cwd, context, io, options);
   try {
@@ -87,18 +83,18 @@ export async function integrateLandingCandidate(cwd: string, options: CandidateO
       await assertIdentity();
     }
     options.onStage?.("verifying");
-    const verification = await (adapter.verify?.({ base: base.commitId, candidate: candidate.commitId }) ?? runVerification(context, options.onProgress));
+    const verification = await adapter.verify({ base: base.commitId, candidate: candidate.commitId });
     await assertIdentity();
     await withWorkspaceTransaction(`integrate:${resolve(context.integration.root)}:${context.integrationBranch}`, async () => {
       await assertIdentity();
-      if (!direct) await writeLandingState(context, candidate, verification, "prepared", options.localOnly, options.operationId);
+      if (!direct) await writeLandingState(context, candidate, verification, "prepared", options.operationId);
       options.onStage?.("integrating");
       await jj(cwd, ["bookmark", "set", context.integrationBranch, "--revision", candidate.commitId]);
-      if (!direct) await writeLandingState(context, candidate, verification, "landed", options.localOnly, options.operationId);
+      if (!direct) await writeLandingState(context, candidate, verification, "landed", options.operationId);
     });
     options.onStage?.("cleaning");
     const state = direct ? { artifactCommitId: candidate.commitId } : await readJsonOptional(statePath(context.current.name));
-    const cleanup = await finishLanding(context, state!, options, io);
+    const cleanup = await finishLanding(context, state!, io);
     return { context, artifact: candidate, base: base.commitId, verification, ...cleanup };
   } catch (error) {
     try { await migration.rollback(); } catch (rollbackError) {
@@ -111,17 +107,12 @@ export async function integrateLandingCandidate(cwd: string, options: CandidateO
 /**
  * What an Isolated landing does with the primary checkout. It moves only an empty
  * `@` whose parents are already integrated; edits, conflicts and unintegrated
- * ancestry stay exactly where they are (the next Direct landing rebases them), and a
- * live Direct writer defers the move. None of these block integration or push.
+ * ancestry stay exactly where they are (the next Direct landing rebases them). None
+ * of these block integration or push.
  */
 async function primaryCheckoutDisposition(context: CandidateContext, io: LandingIO): Promise<PrimaryCheckoutOutcome> {
-  const { revisionFacts, jj, assertNoForeignPrimaryWriter } = io;
+  const { revisionFacts, jj } = io;
   const root = context.integration.root;
-  // Fence before any jj command in the primary: even a snapshot touches a live writer's checkout.
-  if (context.current.name !== "default") {
-    try { await assertNoForeignPrimaryWriter(root); }
-    catch (error) { return { action: "deferred", reason: error instanceof Error ? error.message : String(error) }; }
-  }
   const facts = await revisionFacts(root, "@");
   if (facts.conflict) return { action: "left", reason: "conflicted",
     warning: "The primary checkout has conflicts; it was left in place for its owner to resolve" };
@@ -136,7 +127,7 @@ async function primaryCheckoutDisposition(context: CandidateContext, io: Landing
 }
 
 /** Move the primary checkout (when safe) and the landed workspace onto the new integration. */
-export async function finishLanding(context: WorkspaceContext | CandidateContext, state: Record<string, unknown> & { primaryCheckout?: PrimaryCheckoutOutcome; cleanupPending?: boolean; cleanupError?: string }, options: CandidateOptions, io: LandingIO): Promise<{ cleanupPending: boolean; cleanupError?: string; primaryCheckout?: PrimaryCheckoutOutcome }> {
+export async function finishLanding(context: WorkspaceContext | CandidateContext, state: Record<string, unknown> & { primaryCheckout?: PrimaryCheckoutOutcome; cleanupPending?: boolean; cleanupError?: string }, io: LandingIO): Promise<{ cleanupPending: boolean; cleanupError?: string; primaryCheckout?: PrimaryCheckoutOutcome }> {
   const { revisionFacts, jj, statePath } = io;
   delete state.primaryCheckout;
   try {
@@ -148,8 +139,6 @@ export async function finishLanding(context: WorkspaceContext | CandidateContext
         return;
       }
       state.primaryCheckout = await primaryCheckoutDisposition(context, io);
-      // A live Direct writer keeps housekeeping pending so a later cleanup moves the checkout.
-      if (state.primaryCheckout.action === "deferred") throw new Error(state.primaryCheckout.reason);
     });
     const current = await revisionFacts(context.current.root, "@");
     if (!current.empty && current.commitId === state.artifactCommitId) await jj(context.current.root, ["new", state.artifactCommitId]);

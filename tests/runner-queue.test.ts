@@ -50,7 +50,7 @@ async function fixture(migrations = false, release = false) {
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: "main",
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLocalVerification: [{ executable: "node", args: ["-e", gate] }],
+    requiredLandingVerification: [{ executable: "node", args: ["-e", gate] }],
     unattendedMergeToIntegration: true,
     ...(migrations ? {
       migrationFinalization: {

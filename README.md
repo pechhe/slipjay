@@ -13,7 +13,7 @@ under `~/.slipjay`. See [CHANGELOG.md](CHANGELOG.md) and [State and cutover](#st
 
 | What | Location |
 | --- | --- |
-| Landing state, locks, verification slots, post-land and post-integration records | `~/.slipjay/state` |
+| Landing state, locks and post-integration records | `~/.slipjay/state` |
 | Checkout mode (`slipjay mode`) | `~/.slipjay/mode.json` |
 | New isolated workspaces | `~/.slipjay/workspaces` |
 | Cutover record | `~/.slipjay/cutover.json` |
@@ -27,7 +27,7 @@ every command except `status` and `cutover` refuses until the cutover has run.
 
 1. Refuses, naming each holder, while any landing transaction, verification slot
    (or a landing waiting for one), Direct primary-checkout writer, post-land run or
-   post-integration run is held or live. Nothing changes.
+   post-integration run that a pre-v1.0.0 Slipway left is held or live. Nothing changes.
 2. Moves `~/.slipway/state` and `~/.slipway/mode.json` to `~/.slipjay`, by rename,
    or across devices by copy, verify, then delete. Existing workspaces stay at
    `~/.slipway/workspaces/...` and keep working through landing and cleanup; new
@@ -100,9 +100,7 @@ landing.
 
 | Name | Set for |
 | --- | --- |
-| `SLIPJAY_POST_LAND_BASE`, `SLIPJAY_POST_LAND_COMMIT` | Post-land verification commands. |
 | `SLIPJAY_WORKSPACE_NAME`, `SLIPJAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
-| `SLIPJAY_VERIFICATION_SLOT` | Commands running inside the held verification slot. Set to `held`, it lets a nested landing pass through. |
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 
 slipjay reads `SLIPJAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
@@ -133,7 +131,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 
 | Command | Effect |
 | --- | --- |
-| `status` | Mode, current workspace, integration checkout, landing and post-land state (JSON). |
+| `status` | Mode, current workspace, integration checkout and landing state (JSON). |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
 | `list` | Workspaces with their state, Issue and retained material. |
 | `pool [refill]` | Show ready spare workspaces, or provision one (up to `spares`). |
@@ -142,7 +140,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). |
 | `start [--integration] [--issue <n>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`); `--refill` then starts a background spare refill (a claimed spare is always refilled); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`) and sends all install output to stderr. |
 | `preview` | Diffstat of what a landing would integrate. |
-| `land [--local-only] [--direct]` | Verify, integrate and publish the current workspace (or, with `--direct`, the primary checkout). Afterwards it removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
+| `land [--direct]` | Send the current workspace (or, with `--direct`, the primary checkout) to the runner, which verifies, integrates and publishes it (see [Runner](#runner)); without a runner location it refuses. Afterwards it removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
 | `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
@@ -152,18 +150,24 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 
 ## Runner
 
-When a runner location is configured, `slipjay land` sends the change to one
-long-lived runner instead of verifying locally. The runner queues landings and takes
+`slipjay land` sends the change to one long-lived runner; it is the only way a
+change lands. The runner queues landings and takes
 them one at a time in arrival order. For each one it rebases onto the integration tip,
 runs the repository's declared gate in its own warm checkout, then integrates and
 publishes. The authoring machine runs none of the gate. Confirmed releases take
 turns in the same queue (see [Release](#release)).
 
+- **Gate.** `requiredLandingVerification` in `slipjay.json`, an array of commands
+  (`{ "executable", "args"?, "cwd"? }`), run in the runner's checkout.
+  `requiredLocalVerification` is still read as its old name for this release only
+  (a runner from before it reads only the old name, so rename the key in a repository
+  only once its runner runs this release);
+  declaring both is refused. A policy declaring `postLandVerification` (no longer run)
+  is refused; move its checks into the gate or remove it.
 - **Location.** One value: `SLIPJAY_RUNNER`, or `"runner"` in `~/.slipjay/config.json`.
   On the runner's host it is `http://127.0.0.1:7787`. Elsewhere it is
   `ssh://<host>`, and `land` opens an SSH port forward for the duration of the call
-  (the host must be reachable with key auth). Without a location, `land` runs locally
-  as before. `--local-only` always runs locally.
+  (the host must be reachable with key auth). Without a location, `land` refuses.
 - **Credential.** A bearer token: `SLIPJAY_RUNNER_TOKEN` in the environment, or else
   the Bitwarden Secrets Manager key of that name, read through `bws`. A request
   without it is refused. The runner binds loopback only.
@@ -209,14 +213,18 @@ turns in the same queue (see [Release](#release)).
   processes a gate tool started in a separate process group; the scope is cleared
   after every run, so a gate cannot leave processes behind. Elsewhere, such as macOS,
   only the run's process group is killed.
+- **A release that breaks the runner.** The runner runs the SlipJay version
+  installed on its host, so a broken release cannot land its own fix. Reinstall the
+  previous tag there (`bun add -g github:pechhe/slipjay#v<previous>`), restart the
+  runner unit, then land the fix.
 - **State.** The runner's own state lives in `~/.slipjay/runner`:
   - `config.json`: the name, the listen port and the repositories, keyed `owner/name` with their git URL.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs.
   - `repos/<owner>/<name>`: the warm checkouts.
   - Finalization receipts, target outcomes and the target lease stay in
-    `~/.slipjay/state/post-integration`, shared with local landings on the same host so
-    the lease covers both. Held-integration retries rely on them; move them with the runner.
+    `~/.slipjay/state/post-integration`, where the target lease also covers a
+    `postRelease` step. Held-integration retries rely on them; move them with the runner.
 
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
@@ -242,7 +250,7 @@ integration branch to it only through `slipjay release`:
 ```
 
 `requiredReleaseVerification` takes the same command shape as
-`requiredLocalVerification`. A release branch without it is refused; declare `[]`
+`requiredLandingVerification`. A release branch without it is refused; declare `[]`
 to release without checks. The policy that applies is the one committed in the
 candidate.
 
@@ -293,10 +301,7 @@ candidate.
 
    It is shaped like `postIntegration`, and the candidate's declaration applies.
    It runs on the runner, which also finalizes every runner landing against the
-   target, and the serial queue never runs it alongside one. A landing made
-   without the runner (`--local-only`, or with no runner location) still
-   finalizes on its own machine under that machine's lease, which the runner's
-   reset does not exclude. The target follows the
+   target, and the serial queue never runs it alongside one. The target follows the
    integration branch, so the step runs in an exact source view of the runner's
    integration branch as published (the newest commit a landing has finalized
    against the target), not of the candidate. The view has no dependencies installed (the command bootstraps what
@@ -333,7 +338,7 @@ migrates a release environment itself.
 ## Library
 
 ```js
-import { createWorkspace, landWorkspace, workspaceContext } from "@pechhe/slipjay";
+import { createWorkspace, landThroughRunner, workspaceContext } from "@pechhe/slipjay";
 ```
 
 `@pechhe/slipjay` and `@pechhe/slipjay/delivery` export the same public entry,
@@ -352,13 +357,6 @@ state rejects with an error whose `code` is `SLIPJAY_CUTOVER_REQUIRED`;
 slipjay lands its own changes through `slipjay land` from an isolated JJ workspace, under its own
 `slipjay.json`.
 
-If a concurrent publisher leaves the integration bookmark conflicted after an
-isolated landing, rerun `slipjay land` from that preserved workspace. Recovery
-accepts only its exact recorded artifact and the declared remote's published tip,
-with matching committed policies and an unchanged workspace. It retains the
-earlier receipt, takes the published tip as the base, and rebases and verifies the
-candidate again before publication. Extra heads, policy disagreement or later
-workspace edits require reconciliation. An interrupted recovery remains retryable.
 Verification checks run with the working-copy revision on the exact candidate,
 including retries that started on an empty continuation child.
 

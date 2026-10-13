@@ -111,3 +111,22 @@ test("cleanup takes a workspace path and retains a workspace that has not landed
     await f.dispose();
   }
 });
+
+test("land refuses without a runner location, and --local-only is a usage error", async () => {
+  const f = await project();
+  const runner = process.env.SLIPJAY_RUNNER;
+  delete process.env.SLIPJAY_RUNNER;
+  try {
+    // This file's disposable HOME has no ~/.slipjay/config.json.
+    const refused = await slipjay(f.repo, ["land"]);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /No runner location: set SLIPJAY_RUNNER or "runner" in ~\/\.slipjay\/config\.json/);
+    const localOnly = await slipjay(f.repo, ["land", "--local-only"]);
+    assert.equal(localOnly.code, 1);
+    assert.match(localOnly.stderr, /Usage: slipjay land \[--direct\]/);
+    assert.equal(jj(f.repo, ["log", "--no-graph", "-r", "main", "-T", "description"]), "Initial", "nothing landed");
+  } finally {
+    if (runner !== undefined) process.env.SLIPJAY_RUNNER = runner;
+    await f.dispose();
+  }
+}, 60_000);

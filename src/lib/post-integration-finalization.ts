@@ -25,7 +25,6 @@ export type PostIntegrationInput = {
   integratedCommitSha: string;
   readIntegrationTip: () => Promise<string>;
   approval?: unknown;
-  inspectOnly?: boolean;
   abortSignal?: AbortSignal;
   recoverDescendant?: boolean;
   /** Internal test/storage seam, never accepted from delivery tool input. */
@@ -143,13 +142,13 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
       && !completedLegacyReceipt(previous, gitDirectory, commit, policy)) {
       throw new Error("Post-integration identity drift requires reconciliation");
     }
-    if (previous?.status === "complete" || previous?.status === "covered" || input.inspectOnly === true && previous)
+    if (previous?.status === "complete" || previous?.status === "covered")
       return previous;
     const evidence: Pick<PostIntegrationResult, "sourceIntegrated" | "integratedCommitSha" | "policyDigest" | "target" | "idempotencyKey"> = { sourceIntegrated: true, integratedCommitSha: commit, policyDigest, target: policy.target, idempotencyKey: identity };
     const policyApproved = policy.approvalMode === "automatic-development";
     const humanApproved = exactPostIntegrationApproval(input.approval, commit, policyDigest, policy.target);
     const approved = policyApproved || input.approval === undefined && previous?.approved === true || humanApproved;
-    if (!approved || input.inspectOnly === true) {
+    if (!approved) {
       const pending: PostIntegrationResult = {
         ...evidence,
         ok: false,

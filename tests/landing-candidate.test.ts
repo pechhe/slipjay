@@ -11,18 +11,16 @@ function fixture(direct = false, emptyChild = false) {
   const context = {
     current: { name: direct ? "default" : "task", root: "/task" },
     integration: { name: "default", root: "/repo" }, integrationBranch: "develop",
-    configuration: { requiredLocalVerification: [], migrationFinalization: null },
+    configuration: { requiredLandingVerification: [], migrationFinalization: null },
   };
   const candidate = { changeId: "change", commitId: "semantic", empty: false, conflict: false, description: "Task" };
   let liveCandidate = candidate;
   let liveBase = "base";
-  let primaryWriter: string | null = null;
   const steps: string[] = [];
   const state: Record<string, unknown> = {};
   const io = {
     landingPreview: async () => ({ context, target: candidate }),
     ensureLandingDescription: async () => candidate,
-    assertNoForeignPrimaryWriter: async () => { if (primaryWriter) throw new Error(primaryWriter); },
     assertStackConflictFree: async () => {},
     revisionFacts: async (cwd: string, revision: string) => revision === "develop"
       ? { ...candidate, commitId: liveBase }
@@ -41,7 +39,6 @@ function fixture(direct = false, emptyChild = false) {
     readJsonOptional: async () => state,
     statePath: () => "/state",
     prepareCandidateDependencies: async () => { steps.push("deps"); },
-    runVerification: async () => { throw new Error("host verifier should be used"); },
   };
   const options = {
     adapter: {
@@ -57,7 +54,7 @@ function fixture(direct = false, emptyChild = false) {
       },
     },
   };
-  return { io, options, steps, state, drift: () => { liveBase = "changed"; }, directWriter: (message: string) => { primaryWriter = message; } };
+  return { io, options, steps, state, drift: () => { liveBase = "changed"; } };
 }
 
 for (const direct of [false, true]) test(`shared candidate transition preserves ${direct ? "Direct" : "isolated"} landing order`, async () => {
@@ -77,17 +74,6 @@ test("a retry verifies the exact candidate rather than its empty continuation ch
   assert.deepEqual(f.steps, ["rebase", "deps", "generate", "edit", "verify", "bookmark", "new", "new"]);
   assert.equal(result.artifact.commitId, "generated");
   assert.equal(f.state.phase, "landed");
-});
-
-test("a live Direct writer defers the primary checkout move but never the integration", async () => {
-  const f = fixture();
-  f.directWriter("The primary checkout is being written by Direct Pi run");
-  const result = await integrateLandingCandidate("/task", f.options, f.io);
-  assert.deepEqual(f.steps, ["rebase", "deps", "generate", "verify", "bookmark"]);
-  assert.equal(f.state.phase, "landed");
-  assert.equal(result.primaryCheckout?.action, "deferred");
-  // Housekeeping stays pending so a later cleanup moves the checkout once the writer ends.
-  assert.equal(result.cleanupPending, true);
 });
 
 test("shared candidate transition refuses integration if verification moves the base", async () => {

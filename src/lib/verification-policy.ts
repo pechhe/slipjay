@@ -64,7 +64,7 @@ export async function runVerificationStages<Check extends { concurrent?: unknown
   return outcomes;
 }
 
-export function normalizeVerificationDeclaration(value: unknown, field = "requiredLocalVerification"): VerificationDeclaration {
+export function normalizeVerificationDeclaration(value: unknown, field = "requiredLandingVerification"): VerificationDeclaration {
   const base = command(value, field);
   if ((value as Record<string, unknown>).capability == null) return base;
   const capability = (value as Record<string, unknown>).capability;
@@ -132,7 +132,7 @@ export function normalizeDeclaredVerification(value: unknown): VerificationDecla
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry, index) => {
     try {
-      return [normalizeVerificationDeclaration(entry, `requiredLocalVerification[${index}]`)];
+      return [normalizeVerificationDeclaration(entry, `requiredLandingVerification[${index}]`)];
     } catch {
       return [];
     }

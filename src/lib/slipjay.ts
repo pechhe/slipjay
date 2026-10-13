@@ -19,7 +19,6 @@ export {
 export { provisionSpare, readySpares, startSpareRefill } from "./workspace-pool.ts";
 export { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 export { withWorkspaceTransaction } from "./workspace-transaction.ts";
-export { acquirePrimaryWriter, activePrimaryWriter, releasePrimaryWriter } from "./primary-checkout-writer.ts";
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
 export { assertCompletedIssueDelivered, selectImplementationIssue } from "./issue-eligibility.ts";
 
@@ -28,14 +27,12 @@ export { cutover } from "./cutover.ts";
 export { cutoverPending } from "./workspace-paths.ts";
 
 // Landing and its verification (CLI, extension, desktop delivery).
-export { assertWorkspaceDelivered, landWorkspace, prepareWorkspaceContinuation } from "./workspace-landing.ts";
 export { landingPreview } from "./landing-steps.ts";
 export { planRelease, releaseIntegration } from "./release.ts";
 export type { ReleasePlan, ReleaseResult, ReleaseSummary } from "./release.ts";
 export { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 export { classifyCapabilityProbe, normalizeDeclaredVerification, normalizeVerificationDeclaration } from "./verification-policy.ts";
 export { redactVerificationOutput } from "./verification-failure.ts";
-export { latestPostLandResult, runPostLandVerification } from "./post-land-verification.ts";
 
 // Repository policy and post-integration finalization (desktop, peach-pi scripts).
 export { parseExecutionPolicy, readExecutionPolicy, readIntegrationPolicy, resolveIntegrationBranch } from "./execution-policy.ts";

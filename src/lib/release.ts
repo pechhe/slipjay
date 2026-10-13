@@ -16,7 +16,7 @@
  * jj commands ignore working copies, except checking the candidate out.
  */
 import { readExecutionPolicyAtCommit } from "./execution-policy.ts";
-import { githubRepository } from "./post-land-issue.ts";
+import { githubRepository } from "./issue-references.ts";
 import { postReleaseRetry, runPostRelease } from "./post-release.ts";
 import { halfBuiltSpecs } from "./release-specs.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
@@ -325,7 +325,7 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
     await prepareWorkspaceDependencies(checkout, { quiet: true, ...(environment ? { env: environment() } : {}) });
     onStage("verifying");
     const verification = plan.checks.length
-      ? await runRequiredVerification({ checks: plan.checks, root: checkout, slot: false, onProgress,
+      ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,
         ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
       : { passed: [], gaps: [] };
     onStage("publishing");

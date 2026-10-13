@@ -1,4 +1,4 @@
-import { jj, project, recordCheckout } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -6,7 +6,7 @@ import { existsSync } from "node:fs";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, landWorkspace, renameWorkspace } from "../src/lib/slipjay.ts";
+import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, renameWorkspace } from "../src/lib/slipjay.ts";
 import { statePath, workspaceMetadata } from "../src/lib/workspace-state.ts";
 import { withinWorkspaceStorage } from "../src/lib/workspace-lifecycle.ts";
 import { landedHome, metadataHome } from "../src/lib/workspace-paths.ts";
@@ -26,8 +26,9 @@ function runCli(cwd: string, args: string[]) {
 async function landed(f: Awaited<ReturnType<typeof project>>, file: string) {
   const workspace = await createWorkspace(file, f.repo);
   await writeFile(join(workspace.workspacePath, file), `${file}\n`);
-  const result = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
-  assert.equal(result.ok, true, JSON.stringify(result.publication));
+  // Held while it lands, so the landing keeps it for the test.
+  const result = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
+  assert.equal(result.ok, true, result.lines.join("\n"));
   return workspace;
 }
 
@@ -71,33 +72,6 @@ test("rename preserves landing state in both locations with its history", async 
   }
 }, 120_000);
 
-const verifiedLines = async (file: string) => (await readFile(file, "utf8").catch(() => "")).split("\n").filter(Boolean).length;
-
-async function waitFor(condition: () => boolean | Promise<boolean>) {
-  while (!await condition()) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-}
-
-test("a prepared landing whose bookmark already moved is finished, not verified again", async () => {
-  const f = await project();
-  try {
-    const workspace = await landed(f, "prepared.txt");
-    // A crash after the bookmark moved leaves only the prepared record, here the legacy one.
-    const state = await readJson(statePath(workspace.current.name));
-    await mkdir(join(landedPath(workspace.current.name), ".."), { recursive: true });
-    await writeFile(landedPath(workspace.current.name), JSON.stringify({ ...state, phase: "prepared", cleanupPending: true }));
-    await rm(statePath(workspace.current.name));
-    const before = await verifiedLines(f.verified);
-
-    const rerun = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
-    assert.equal(rerun.ok, true, JSON.stringify(rerun.publication));
-    assert.equal(rerun.artifact.commitId, state.artifactCommitId);
-    assert.equal(await verifiedLines(f.verified), before, "landed source is not verified again");
-    assert.equal((await readJson(statePath(workspace.current.name))).cleanupPending, false);
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
-
 test("cleanup retries pending housekeeping before releasing a landed workspace", async () => {
   const f = await project();
   try {
@@ -111,28 +85,6 @@ test("cleanup retries pending housekeeping before releasing a landed workspace",
   }
 }, 120_000);
 
-test("a landing and a cleanup of the same workspace serialize on one key", async () => {
-  const f = await project({ verify: (verified) => `const fs = require("node:fs"); const gate = process.env.SLIPJAY_TEST_GATE;
-    fs.writeFileSync(gate + ".started", "");
-    const timer = setInterval(() => { if (fs.existsSync(gate)) { clearInterval(timer); ${recordCheckout(verified)}; } }, 50);` });
-  const gate = join(f.root, "gate");
-  process.env.SLIPJAY_TEST_GATE = gate;
-  try {
-    const workspace = await createWorkspace("serialized", f.repo);
-    await writeFile(join(workspace.workspacePath, "serialized.txt"), "serialized\n");
-    const landing = landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
-    await waitFor(() => existsSync(`${gate}.started`));
-    const cleanup = cleanupLandedWorkspace(workspace.workspacePath);
-    await writeFile(gate, "");
-    assert.equal((await landing).ok, true);
-    // Run during verification, cleanup would have found no landing; it waited for the integration instead.
-    assert.deepEqual(await cleanup, { cleaned: true });
-  } finally {
-    delete process.env.SLIPJAY_TEST_GATE;
-    await f.dispose();
-  }
-}, 120_000);
-
 test("cleanup refuses a checkout outside workspace storage", async () => {
   const f = await project();
   try {
@@ -140,34 +92,11 @@ test("cleanup refuses a checkout outside workspace storage", async () => {
     jj(f.repo, ["workspace", "add", "--name", "outside", outside]);
     await writeFile(join(outside, "outside.txt"), "outside\n");
     jj(outside, ["describe", "-m", "Add outside"]);
-    assert.equal((await landWorkspace(outside, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
+    assert.equal((await landThroughTestRunner(f, outside)).ok, true);
     assert.equal(await withinWorkspaceStorage(outside), false);
     assert.deepEqual(await cleanupLandedWorkspace(outside), { cleaned: false, reason: "outside-workspace-storage" });
     assert.ok(existsSync(join(outside, "outside.txt")));
   } finally {
-    await f.dispose();
-  }
-}, 120_000);
-
-test("a hung jj fetch times out instead of holding the landing", async () => {
-  const f = await project();
-  const hang = join(f.root, "hang-ssh");
-  await writeFile(hang, "#!/bin/sh\nexec sleep 600\n", { mode: 0o755 });
-  jj(f.repo, ["git", "remote", "set-url", "origin", "ssh://hang.invalid/remote.git"]);
-  // GIT_SSH_COMMAND reaches git as a credential key of the landing command environment.
-  process.env.GIT_SSH_COMMAND = hang;
-  process.env.SLIPJAY_COMMAND_TIMEOUT_MS = "1500";
-  try {
-    const workspace = await createWorkspace("hung remote", f.repo);
-    await writeFile(join(workspace.workspacePath, "hung.txt"), "hung\n");
-    const result = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
-    assert.equal(result.ok, false);
-    assert.equal(result.publication.status, "push_failed");
-    assert.match(result.publication.reason ?? "", /timed out after/);
-    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), result.artifact.commitId, "the local integration is kept");
-  } finally {
-    delete process.env.GIT_SSH_COMMAND;
-    delete process.env.SLIPJAY_COMMAND_TIMEOUT_MS;
     await f.dispose();
   }
 }, 120_000);
@@ -211,7 +140,7 @@ test("an Issue workspace is resumed, and refused once it has landed", async () =
     assert.deepEqual([resumed.reused, resumed.workspacePath], [true, workspace.workspacePath]);
     assert.equal((await workspaceMetadata(workspace.current.name))?.task, "Issue work again");
     await writeFile(join(workspace.workspacePath, "issue.txt"), "issue\n");
-    assert.equal((await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
+    assert.equal((await landThroughTestRunner(f, workspace.workspacePath, { keep: true })).ok, true);
     await assert.rejects(createWorkspace("after landing", f.repo, { issueNumber: 96501 }), /has landed, so it is read-only/);
   } finally {
     await dispose();

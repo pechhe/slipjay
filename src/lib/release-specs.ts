@@ -4,7 +4,7 @@
  * refuses. Every failure to look them up becomes `{ checked: false, reason }`.
  */
 import { runBoundedProcess } from "./bounded-process.ts";
-import { originatingIssue } from "./post-land-issue.ts";
+import { originatingIssue } from "./issue-references.ts";
 
 export type HalfBuiltSpec = {
   number: number;

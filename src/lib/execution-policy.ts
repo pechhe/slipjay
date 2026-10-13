@@ -1,5 +1,4 @@
 import type { VerificationDeclaration } from "./verification-policy.ts";
-import type { PostLandCheck } from "./post-land-verification.ts";
 export type MigrationCommand = { executable: string; args: string[]; cwd: string | null };
 
 export type MigrationFinalizationPolicy = {
@@ -17,12 +16,11 @@ export type ExecutionPolicy = {
   integrationBranch?: string;
   remote: string | null;
   parallelExecution: boolean;
-  requiredLocalVerification: VerificationDeclaration[];
+  requiredLandingVerification: VerificationDeclaration[];
   /** The branch `slipjay release` promotes the integration branch to. */
   releaseBranch?: string;
   /** Checks the exact release candidate must pass; undefined when undeclared. */
   requiredReleaseVerification?: VerificationDeclaration[];
-  postLandVerification: PostLandCheck[];
   migrationFinalization: MigrationFinalizationPolicy | null;
   /** Run in a workspace (cwd = its path) before it is removed; undefined when undeclared. */
   workspaceTeardown?: { executable: string; args: string[] };
@@ -108,18 +106,21 @@ function gateCommand(command: VerificationDeclaration, field: string): void {
   if (command.cwd !== undefined) containedCwd(command.cwd, `${field}.cwd`);
 }
 
-/** Declared post-land commands: `[{ executable, args, cwd? }]`. */
-function postLandChecks(value: unknown): PostLandCheck[] {
-  if (!Array.isArray(value)) fail("postLandVerification must be a list of commands");
-  return value.map((check) => {
-    if (!check || typeof check.executable !== "string" || !Array.isArray(check.args)
-      || (check.cwd !== undefined && typeof check.cwd !== "string")) fail("postLandVerification has a malformed entry");
-    return { executable: check.executable, args: check.args.map(String), ...(check.cwd ? { cwd: check.cwd } : {}) };
-  });
+/**
+ * The landing gate. `requiredLocalVerification` is its former name, accepted for one
+ * release: a runner that predates the rename reads only the old name (and an empty gate
+ * without it), so repositories rename the key only once every runner reads both.
+ */
+function landingGate(parsed: Record<string, unknown>): VerificationDeclaration[] {
+  if (parsed.requiredLandingVerification !== undefined && parsed.requiredLocalVerification !== undefined)
+    fail("Declare requiredLandingVerification only; requiredLocalVerification is its former name");
+  return parsed.requiredLocalVerification !== undefined
+    ? gateChecks(parsed.requiredLocalVerification, "requiredLocalVerification")
+    : gateChecks(parsed.requiredLandingVerification);
 }
 
 /** Declared gate checks (landing's in exactly the shape the verification digest has always covered). */
-function gateChecks(value: unknown, name = "requiredLocalVerification"): VerificationDeclaration[] {
+function gateChecks(value: unknown, name = "requiredLandingVerification"): VerificationDeclaration[] {
   if (value == null) return [];
   if (!Array.isArray(value) || value.length > MAX_CHECKS) fail(`${name} must be a list of at most ${MAX_CHECKS} commands`);
   return value.map((entry, index) => {
@@ -264,6 +265,8 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     fail("declares an unsafe integrationBranch");
   if (parsed.projectCode != null && (typeof parsed.projectCode !== "string" || !/^[a-z0-9]{2,8}$/.test(parsed.projectCode)))
     fail("declares a projectCode that is not 2-8 lowercase letters or digits");
+  // Refused, not ignored: a declared check that silently stopped running would read as passing.
+  if (parsed.postLandVerification !== undefined) fail("declares postLandVerification, which is no longer run; move its checks into requiredLandingVerification or remove it");
   postIntegrationPolicy(parsed.postIntegration);
   if (parsed.postRelease !== undefined && parsed.releaseBranch == null) fail("declares postRelease without a releaseBranch");
   postReleasePolicy(parsed.postRelease);
@@ -276,9 +279,8 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     integrationBranch: (parsed.integrationBranch as string | null | undefined) ?? undefined,
     remote: declaredPublicationRemote(parsed),
     parallelExecution: parsed.parallelExecution === true,
-    requiredLocalVerification: gateChecks(parsed.requiredLocalVerification),
+    requiredLandingVerification: landingGate(parsed),
     ...releasePolicy(parsed),
-    postLandVerification: postLandChecks(parsed.postLandVerification ?? []),
     migrationFinalization: migrationFinalization(parsed.migrationFinalization),
     workspaceTeardown: workspaceTeardown(parsed.workspaceTeardown),
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
@@ -287,7 +289,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
 }
 
 /** The landing configuration of a repository that declares no policy. */
-export const UNDECLARED_POLICY: Readonly<Pick<ExecutionPolicy, "requiredLocalVerification" | "postLandVerification" | "remote" | "parallelExecution" | "migrationFinalization">> = Object.freeze({ requiredLocalVerification: [], postLandVerification: [], remote: null, parallelExecution: false, migrationFinalization: null });
+export const UNDECLARED_POLICY: Readonly<Pick<ExecutionPolicy, "requiredLandingVerification" | "remote" | "parallelExecution" | "migrationFinalization">> = Object.freeze({ requiredLandingVerification: [], remote: null, parallelExecution: false, migrationFinalization: null });
 
 /** The policy in a checkout's working files, or null when it declares none. */
 export async function readExecutionPolicy(root: string): Promise<ExecutionPolicy | null> {

@@ -7,12 +7,14 @@ import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "./bounded-process.ts";
 import { finishLanding } from "./landing-candidate.ts";
 import { fetchIntegration, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
-import { githubRepository } from "./post-land-issue.ts";
+import { githubRepository } from "./issue-references.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts } from "./workspace-jj.ts";
-import { releaseLandedWorkspace } from "./workspace-landing.ts";
+import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { readLandingState, statePath } from "./workspace-state.ts";
+import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
+import type { SweepResult } from "./workspace-sweep.ts";
 import { writeWorkspaceJson } from "./workspace-transaction.ts";
 
 export function runnerLocation(env: NodeJS.ProcessEnv = process.env): string | null {
@@ -99,7 +101,7 @@ const RECONNECT_ATTEMPTS = 30;
 const RECONNECT_DELAY_MS = 2000;
 
 async function follow(baseUrl: string, token: string, initial: Operation, name: string, onLine: (line: string) => void,
-  env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<Operation> {
+  env: NodeJS.ProcessEnv, signal?: AbortSignal, onStage?: (stage: string) => void): Promise<Operation> {
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
   signal?.addEventListener("abort", abort, { once: true });
@@ -107,7 +109,9 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
   let operation = initial;
   let lastSeq = initial.lastSeq;
   let lastLine = "";
+  let lastStage = "";
   const show = () => {
+    if (operation.stage !== lastStage) { lastStage = operation.stage; onStage?.(operation.stage); }
     const queued = operation.status === "queued" && operation.position !== undefined
       ? ` (position ${operation.position}${operation.waitingFor ? `, behind ${operation.waitingFor}` : ""})` : "";
     const line = `[runner ${name}] ${operation.stage}${queued}`;
@@ -221,7 +225,7 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
 }
 
 export async function landThroughRunner(cwd: string, options: { direct?: boolean; location: string; env?: NodeJS.ProcessEnv;
-  onLine?(line: string): void; signal?: AbortSignal; fallback(): Promise<unknown> }): Promise<{ ok: boolean; operation: Operation; logUrl: string; fallback?: unknown }> {
+  onLine?(line: string): void; onStage?(stage: string): void; signal?: AbortSignal }): Promise<{ ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult }> {
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
   const { context, target: preview } = await landingPreview(cwd, { allowDefaultWorkspace: options.direct });
@@ -262,10 +266,11 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       operation = ((await response.json()) as { operation: Operation }).operation;
       older = response.status === 409;
     }
-    operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal);
+    operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // The forward and its port end with this call, so the log is named by a command, not a URL.
     const logUrl = runLogCommand(operation.id);
     const result = operation.result;
+    let sweep: SweepResult | undefined;
     if (older && result?.type === "landed") {
       onLine(`[runner ${name}] followed an older commit (${operation.commitId}); land again to publish your current commit`);
       onLine(logUrl);
@@ -278,19 +283,23 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       const facts = await revisionFacts(cwd, result.commitId);
       let state: Record<string, unknown> = { artifactCommitId: result.commitId };
       if (context.current.name !== "default") {
-        await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", false, operation.id);
+        await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
         state = { ...await readLandingState(context.current.name), runner: { location: options.location, operationId: operation.id } };
         await writeWorkspaceJson(statePath(context.current.name), state);
       }
-      await finishLanding(context, state, {}, landingIO);
+      await finishLanding(context, state, landingIO);
+      // Release other delivered or idle checkouts; the sweep never fails the landing.
+      sweep = await sweepDisposableWorkspaces(context.integration.root, { protectedRoots: [cwd, context.current.root] }).catch(() => undefined);
+      for (const removed of sweep?.removed ?? []) onLine(`Removed workspace: ${removed}`);
+      // An undelivered checkout kept by its session is the normal case; a delivered one is a leftover.
+      for (const skipped of sweep?.skipped ?? []) if (skipped.landed) onLine(`Kept landed workspace ${skipped.name}: ${skipped.reason}`);
       if (context.current.name !== "default") {
         const released = await releaseLandedWorkspace(context).catch((error: unknown) => ({ cleaned: false, reason: String(error) }));
         if (!released.cleaned) onLine(`Kept landed workspace ${context.current.name}: ${released.reason}`);
       }
     } else if (result?.type === "declined") {
+      // Only runners from before migration landings declined; nothing lands locally now.
       onLine(`[runner ${name}] declined: ${result.reason}\n${result.paths.join("\n")}`);
-      const fallback = await options.fallback();
-      return { ok: typeof fallback === "object" && fallback !== null && "ok" in fallback && fallback.ok === true, operation, logUrl, fallback };
     } else if (result?.type === "failed") {
       onLine(`[runner ${name}] failed at ${result.stage}: ${result.reason}`);
       if (result.command) onLine(result.command);
@@ -300,7 +309,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       onLine(`[runner ${name}] ${operation.status}${result?.type === "cancelled" ? `: ${result.reason}` : ""}`);
     }
     if (older) onLine(`[runner ${name}] followed an older commit; land again to submit your current commit`);
-    return { ok: !older && result?.type === "landed", operation, logUrl };
+    return { ok: !older && result?.type === "landed", operation, logUrl, ...(sweep ? { sweep } : {}) };
   } finally { connection.close(); }
 }
 

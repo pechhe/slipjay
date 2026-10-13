@@ -1,23 +1,22 @@
 import { existsSync } from "node:fs";
 import { readdir, readlink, realpath, rm } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
-import { artifactPublished, finishLandedWorkspace, publicationRemote } from "./landing-steps.ts";
+import { artifactPublished, finishLandedWorkspace } from "./landing-steps.ts";
 import type { WorkspaceContext } from "./workspace-jj.ts";
 import { revisionExists, run, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.ts";
 import { workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import { generatedPathMatchers, readExecutionPolicy } from "./execution-policy.ts";
-import { finalizePostIntegration } from "./post-integration-finalization.ts";
 import { cleanupRetentionReason } from "./workspace-delivery-lifecycle.ts";
+import { callerPids, describeHolders, workspaceHolders } from "./workspace-holders.ts";
 import { archiveIntegratedWorkspaceEvidence } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
 import { withWorkspaceTransaction } from "./workspace-transaction.ts";
 
-/** Host seams for retiring a checkout: its guarded forget, lifecycle event and command environment. */
+/** Host seams for retiring a checkout: its guarded forget and lifecycle event. */
 export interface RetirementHooks {
   forget?: (integrationRoot: string, workspaceName: string, workspacePath: string) => Promise<void>;
   onReleased?: (release: { workspaceName: string; projectRoot: string; issueNumber: number | null }) => void;
-  environment?: () => NodeJS.ProcessEnv;
   /** Overrides the `workspaceTeardown` timeout (tests). */
   teardownTimeoutMs?: number;
   /** Called after cleanup's delivery checks and just before it retires the checkout (tests, hosts). */
@@ -29,7 +28,6 @@ type CleanupResult = {
   reason?: string;
   paths?: string[];
   /** A failed post-integration record a later published landing superseded. */
-  supersededPostIntegration?: { status: string; attempt: number; reason?: string };
 };
 
 async function jj(cwd: string, args: string[]): Promise<string> {
@@ -100,9 +98,9 @@ export async function uniqueUntrackedMaterial(root: string, limit: number = 5, g
 
 /**
  * Release a delivered checkout: integrated, published, no new or unique material.
- * Serialized with landing and host writes on the workspace's `writer:` key, which
+ * Serialized with removal and host writes on the workspace's `writer:` key, which
  * is not reentrant: never call this while holding that key. `hooks` lets a host
- * supply its guarded forget, lifecycle event and command environment.
+ * supply its guarded forget and lifecycle event.
  */
 export async function cleanupLandedWorkspace(cwd: string = process.cwd(), hooks: RetirementHooks = {}): Promise<CleanupResult> {
   const context = await workspaceContext(cwd);
@@ -111,6 +109,18 @@ export async function cleanupLandedWorkspace(cwd: string = process.cwd(), hooks:
 }
 
 /** Thrown when a checkout's working copy changed between cleanup's judgement and its retirement. */
+/**
+ * Remove the workspace a landing delivered, as `slipjay cleanup` would. Anything
+ * else working inside it keeps it, and is named so its owner can stop it.
+ */
+export async function releaseLandedWorkspace(context: WorkspaceContext) {
+  const holders = await workspaceHolders(context.current.root, { ignore: await callerPids() });
+  if (!holders) return { cleaned: false, reason: "process working directories unavailable" };
+  if (holders.length) return { cleaned: false, reason: `in use by a live process: ${describeHolders(holders)}`, holders };
+  const result = await cleanupLandedWorkspace(context.current.root);
+  return result.cleaned ? { cleaned: true } : { cleaned: false, reason: describeRetention(result) };
+}
+
 export class WorkingCopyChangedError extends Error {
   /** Stable code for hosts handling a changed working copy. */
   declare code: "WORKING_COPY_CHANGED";
@@ -157,18 +167,9 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
     judged = await judgeCheckout(context);
     if (judged.retained) return judged.retained;
   }
-  // A pending or failed external step keeps the workspace for its land retry.
   const gitDirectory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
-  // The runner owns external steps; publication is still checked below.
-  const external = state.runner ? null : await finalizePostIntegration({ gitDirectory, integratedCommitSha: state.artifactCommitId, inspectOnly: true,
-    readIntegrationTip: () => jj(context.integration.root, ["--ignore-working-copy", "log", "--no-graph", "-r", state.integrationBranch, "-T", "commit_id"]),
-    ...(hooks.environment ? { environment: hooks.environment } : {}) });
+  // The runner finalizes before it publishes, so a published artifact has no pending step.
   const published = await artifactPublished(cwd, context, state);
-  // A failed step never pushes, so a declared remote holding the artifact means a
-  // later landing published it after its own step: the failed record is superseded,
-  // not retried. Without a remote, "published" proves nothing about that step.
-  const superseded = external?.status === "failed" && !external.ok && published && publicationRemote(context, state.localOnly === true) !== null;
-  if (external && !external.ok && !superseded) return { cleaned: false, reason: `post-integration-${external.status}` };
   if (!published) return { cleaned: false, reason: "not-published" };
   // Cleanup deletes only checkouts beneath slipjay workspace storage.
   if (!await withinWorkspaceStorage(context.current.root)) return { cleaned: false, reason: "outside-workspace-storage" };
@@ -180,9 +181,7 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
     if (error instanceof WorkingCopyChangedError) return { cleaned: false, reason: "working-copy-changed" };
     throw error;
   }
-  return superseded && external
-    ? { cleaned: true, supersededPostIntegration: { status: external.status, attempt: external.attempt!, reason: external.reason } }
-    : { cleaned: true };
+  return { cleaned: true };
 }
 
 /** Remove an isolated workspace after checking its work and Issue attachment. */

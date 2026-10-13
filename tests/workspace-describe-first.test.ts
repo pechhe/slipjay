@@ -1,10 +1,10 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace, provisionSpare } from "../src/lib/slipjay.ts";
+import { createWorkspace, provisionSpare } from "../src/lib/slipjay.ts";
 import { landingGuardDecision } from "../src/lib/landing-guard.ts";
 
 const description = (cwd: string) => jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "description"]);
@@ -48,7 +48,7 @@ test("landing never publishes the wip placeholder: it falls back to the task, as
     const workspace = await createWorkspace("Add widgets", f.repo);
     await writeFile(join(workspace.workspacePath, "widgets.txt"), "w\n");
     assert.equal(description(workspace.workspacePath).trim(), "wip: Add widgets");
-    const landed = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
+    const landed = await landThroughTestRunner(f, workspace.workspacePath);
     assert.equal(landed.ok, true);
     assert.equal(remoteMessage(f.remote), "Add widgets");
   } finally {
@@ -62,7 +62,7 @@ test("only the generated placeholder is replaced: a hand-written wip: descriptio
     const workspace = await createWorkspace("Add widgets", f.repo);
     await writeFile(join(workspace.workspacePath, "widgets.txt"), "w\n");
     jj(workspace.workspacePath, ["describe", "-m", "wip: spike the widget cache"]);
-    const landed = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
+    const landed = await landThroughTestRunner(f, workspace.workspacePath);
     assert.equal(landed.ok, true);
     assert.equal(remoteMessage(f.remote), "wip: spike the widget cache");
   } finally {
@@ -78,7 +78,7 @@ test("landing refuses a stack whose lower commit still has the generated placeho
     jj(workspace.workspacePath, ["new"]);
     await writeFile(join(workspace.workspacePath, "b.txt"), "b\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add b"]);
-    await assert.rejects(landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false }), /real description for commit \w+.*jj describe -r/s);
+    await assert.rejects(landThroughTestRunner(f, workspace.workspacePath), /real description for commit \w+.*jj describe -r/s);
   } finally {
     await f.dispose();
   }

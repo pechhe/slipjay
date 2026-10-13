@@ -59,7 +59,7 @@ async function fixture(dropStream = false) {
   };
   const lines: string[] = [];
   const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
-    onLine: (line: string) => { lines.push(line); }, fallback: async () => { throw new Error("unexpected fallback"); } };
+    onLine: (line: string) => { lines.push(line); } };
   return { ...f, remote, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
     setKill: (outcome: { operation: Operation; killed: boolean } | null) => { killed = outcome; },
     dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
@@ -198,21 +198,18 @@ test("a published landing finishes housekeeping and releases the author workspac
   } finally { await f.dispose(); }
 });
 
-test("a migration decline reports paths and returns the local landing result", async () => {
+test("a decline from an older runner reports its paths and fails without landing anywhere", async () => {
   const f = await fixture();
   try {
-    const local = { ok: true, marker: "local result" };
-    let calls = 0;
-    const running = landThroughRunner(f.cwd, { ...f.options, fallback: async () => { calls++; return local; } });
+    const running = landThroughRunner(f.cwd, f.options);
     void running.catch(() => {});
     await waitFor(() => f.lines.some((line) => line.includes("queued")));
     const op = f.log.openOperations()[0]!;
     f.append(op.id, { type: "declined", reason: "migration needs local landing", paths: ["schema/change.sql"] });
     const result = await running;
-    assert.equal(result.ok, true);
-    assert.equal(result.fallback, local);
-    assert.equal(calls, 1);
+    assert.equal(result.ok, false);
     assert.ok(f.lines.some((line) => line.includes("migration needs local landing") && line.includes("schema/change.sql")));
+    assert.notEqual(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), op.commitId);
   } finally { await f.dispose(); }
 });
 

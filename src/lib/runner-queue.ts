@@ -199,15 +199,14 @@ export function createRunnerQueue(input: {
         runCommand: run,
         adapter: {
           verify: () => runRequiredVerification({
-            root: checkout, checks: candidateContext.configuration.requiredLocalVerification,
-            slot: false, environment, onProgress: progress, run,
+            root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
+            environment, onProgress: progress, run,
           }),
         },
       }, {
         ...landingIO,
         landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, operation.commitId) }),
         ensureLandingDescription: async (_cwd, _context, target) => target,
-        assertNoForeignPrimaryWriter: async () => {},
         async prepareCandidateDependencies(cwd, candidate, target, onProgress) {
           setStage("installing");
           await landingIO.prepareCandidateDependencies(cwd, candidate, target, onProgress);

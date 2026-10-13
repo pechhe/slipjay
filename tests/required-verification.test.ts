@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "vite-plus/test";
 import { runRequiredVerification } from "../src/lib/required-verification.ts";
-import { verificationSlotEnvironment } from "../src/lib/verification-slot.ts";
 
 /** A check that records the directory it ran in. */
 const recordCwd = (marker: string) => ({ executable: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.cwd())`] });
@@ -17,8 +16,7 @@ async function fixture() {
   await mkdir(outside);
   await symlink(outside, path.join(root, "escape"));
   const marker = path.join(base, "ran-in.txt");
-  // Run as if inside a held slot, so the test never queues behind real landings.
-  const run = (checks: object[]) => runRequiredVerification({ root, checks, environment: () => verificationSlotEnvironment(process.env) });
+  const run = (checks: object[]) => runRequiredVerification({ root, checks });
   return { root, marker, run, dispose: () => rm(base, { recursive: true, force: true }) };
 }
 

@@ -59,13 +59,13 @@ export const workspaceStorageHomes = (): string[] => [workspaceHome(), legacyWor
 /** Checkout mode (`isolated`/`direct`) chosen through `slipjay mode`. */
 export const modePath = (): string => settled(join(slipjayHome(), "mode.json"));
 
-/** Machine-local landing state: top-level landing sidecars and verification slots. */
+/** Machine-local landing state: top-level landing sidecars. */
 export const stateHome = (): string => settled(join(slipjayHome(), "state"));
 
 /** When `start` last refreshed each integration branch from its remote. */
 export const startFetchHome = (): string => join(stateHome(), "start-fetches");
 
-/** Legacy per-workspace owner records and primary-checkout writer records. */
+/** Legacy per-workspace owner records. */
 export const lockHome = (): string => join(stateHome(), "locks");
 
 /** Per-workspace metadata (Issue, task, spare readiness). */
@@ -76,9 +76,6 @@ export const landedHome = (): string => join(stateHome(), "landed");
 
 /** Cross-process transaction locks. */
 export const transactionHome = (): string => join(stateHome(), "transactions");
-
-/** Background post-land verification records, logs and queues. */
-export const postLandHome = (): string => join(stateHome(), "post-land");
 
 /** Post-integration finalization receipts and locks. */
 export const postIntegrationHome = (): string => join(stateHome(), "post-integration");

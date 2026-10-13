@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readdir, rm, rmdir, stat } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { revisionExists, run } from "./workspace-jj.ts";
@@ -11,15 +11,12 @@ import { readJsonOptional } from "./workspace-state.ts";
 /**
  * Housekeeping for machine-local state that outlives its workspace: per-workspace
  * metadata, landing sidecars and owner records under the state home whose
- * workspace no longer exists in its repository, and verification-slot records
- * whose owning process is dead. Conservative by construction: a file is removed
- * only when its repository can be listed and does not contain the workspace, the
- * checkout is gone, and nothing in flight could still use it. Integrated-artifact
- * evidence (`landed/artifact-*.json`), transaction locks and the post-land and
- * post-integration records are never touched.
+ * workspace no longer exists in its repository, and what local landings left behind.
+ * Conservative by construction: a file is removed only when its repository can be
+ * listed and does not contain the workspace, the checkout is gone, and nothing in
+ * flight could still use it. Integrated-artifact evidence (`landed/artifact-*.json`),
+ * transaction locks and the post-integration records are never touched.
  */
-
-const SLOT_WAITING_IDLE_MS = 10 * 60_000;
 
 /** Fields read from machine-local housekeeping records. */
 type PruneRecordData = Record<string, unknown> & {
@@ -103,31 +100,21 @@ export async function pruneWorkspaceState(): Promise<string[]> {
         removed.push(path.slice(stateHome().length + 1));
       } catch { /* undeterminable: keep */ }
     }
-    removed.push(...await pruneSlotRecords());
+    removed.push(...await pruneRetiredLandingState());
   } catch { /* housekeeping never fails its caller */ }
   return removed;
 }
 
-/** Verification-slot waiting and holder records whose process is dead, and idle empty waiting directories. */
-async function pruneSlotRecords() {
+/**
+ * State only local landings wrote: verification-slot locks and records, and post-land
+ * runs. Landings verify on the runner now, so nothing here is in flight.
+ */
+async function pruneRetiredLandingState() {
   const removed: string[] = [];
   for (const entry of await names(stateHome())) {
-    if (!entry.startsWith("verification-slot")) continue;
-    const path = join(stateHome(), entry);
-    try {
-      if (entry.endsWith(".holder.json") || (entry.endsWith(".waiting") && (await stat(path)).isFile())) {
-        const record = await readJsonOptional(path);
-        if (record && Number.isInteger(record.pid) && !processAlive(record.pid)) { await rm(path, { force: true }); removed.push(entry); }
-      } else if (entry.endsWith(".waiting") && (await stat(path)).isDirectory()) {
-        for (const file of await names(path)) {
-          if (!file.endsWith(".json")) continue;
-          const record = await readJsonOptional(join(path, file));
-          if (record && Number.isInteger(record.pid) && !processAlive(record.pid)) { await rm(join(path, file), { force: true }); removed.push(`${entry}/${file}`); }
-        }
-        // An enqueueing waiter creates the directory just before writing its record: leave a fresh one.
-        if (!(await names(path)).length && Date.now() - (await stat(path)).mtimeMs > SLOT_WAITING_IDLE_MS) { await rmdir(path); removed.push(entry); }
-      }
-    } catch { /* keep */ }
+    if (!entry.startsWith("verification-slot") && entry !== "post-land") continue;
+    try { await rm(join(stateHome(), entry), { recursive: true, force: true }); removed.push(entry); }
+    catch { /* keep */ }
   }
   return removed;
 }

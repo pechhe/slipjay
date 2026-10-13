@@ -3,10 +3,10 @@ import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
-import { referencesIssue, withIssueTrailer } from "../src/lib/post-land-issue.ts";
+import { createWorkspace } from "../src/lib/slipjay.ts";
+import { referencesIssue, withIssueTrailer } from "../src/lib/issue-references.ts";
 import { metadataHome } from "../src/lib/workspace-paths.ts";
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 
 const remoteMessage = (remote: string) => execFileSync("git", ["--git-dir", remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();
 
@@ -29,8 +29,8 @@ test("an Isolated landing records its Issue as a trailer on the pushed commit", 
   try {
     await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add a"]);
-    assert.equal((await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
-    assert.equal(remoteMessage(f.remote), "Add a\n\nIssue: #96601");
+    assert.equal((await landThroughTestRunner(f, workspace.workspacePath)).ok, true);
+    assert.equal(remoteMessage(f.remote), "Add a\n\nIssue: fixture/project#96601");
   } finally {
     await rm(workspace.workspacePath, { recursive: true, force: true });
     await f.dispose();
@@ -43,7 +43,7 @@ test("an Isolated landing that already references its Issue is not changed", asy
   try {
     await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add a (#96602)"]);
-    assert.equal((await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
+    assert.equal((await landThroughTestRunner(f, workspace.workspacePath)).ok, true);
     assert.equal(remoteMessage(f.remote), "Add a (#96602)");
   } finally {
     await rm(workspace.workspacePath, { recursive: true, force: true });
@@ -57,7 +57,7 @@ test("a landing without an Issue adds no trailer", async () => {
   try {
     await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add a"]);
-    assert.equal((await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
+    assert.equal((await landThroughTestRunner(f, workspace.workspacePath)).ok, true);
     assert.equal(remoteMessage(f.remote), "Add a");
   } finally {
     await rm(workspace.workspacePath, { recursive: true, force: true });
@@ -73,9 +73,9 @@ test("a Direct landing records the Issue named by the primary checkout's metadat
     await writeFile(join(directory, "default.json"), JSON.stringify({ version: 1, workspaceName: "default", issueNumber: 96603 }));
     await writeFile(join(f.repo, "direct.txt"), "d\n");
     jj(f.repo, ["describe", "-m", "Add direct"]);
-    const landed = await landWorkspace(f.repo, { allowDefaultWorkspace: true, onProgress: () => {} });
+    const landed = await landThroughTestRunner(f, f.repo, { direct: true });
     assert.equal(landed.ok, true);
-    assert.equal(remoteMessage(f.remote), "Add direct\n\nIssue: #96603");
+    assert.equal(remoteMessage(f.remote), "Add direct\n\nIssue: fixture/project#96603");
   } finally {
     await rm(join(directory, "default.json"), { force: true });
     await f.dispose();

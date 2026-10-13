@@ -1,12 +1,12 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project, withTestRunner } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readlinkSync } from "node:fs";
-import { chmod, mkdir, readdir, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace } from "../src/lib/slipjay.ts";
+import { cleanupLandedWorkspace, createWorkspace } from "../src/lib/slipjay.ts";
 import { pruneWorkspaceState } from "../src/lib/workspace-state-prune.ts";
 import { landedHome, lockHome, metadataHome, stateHome, workspaceHome } from "../src/lib/workspace-paths.ts";
 import { EMPTY_IDLE_MS, sweepDisposableWorkspaces } from "../src/lib/workspace-sweep.ts";
@@ -21,12 +21,15 @@ function occupy(cwd: string) {
   return { pid: child.pid, dispose: () => child.kill() };
 }
 
-async function landedWorkspace(repo: string, task: string, file = `${task}.txt`) {
-  const workspace = await createWorkspace(task, repo);
+type Fixture = Awaited<ReturnType<typeof project>>;
+
+/** A workspace landed while another process held it, so the landing kept it. */
+async function landedWorkspace(f: Fixture, task: string, file = `${task}.txt`) {
+  const workspace = await createWorkspace(task, f.repo);
   await writeFile(join(workspace.workspacePath, file), `${file}\n`);
   jj(workspace.workspacePath, ["describe", "-m", `Add ${file}`]);
-  const landed = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
-  assert.equal(landed.ok, true, JSON.stringify(landed.publication));
+  const landed = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
+  assert.equal(landed.ok, true, landed.lines.join("\n"));
   return workspace;
 }
 
@@ -40,7 +43,7 @@ async function deadPid() {
 test("an edit made after cleanup's checks is kept, not orphaned by the forget", async () => {
   const f = await project();
   try {
-    const workspace = await landedWorkspace(f.repo, "race");
+    const workspace = await landedWorkspace(f, "race");
     const raced = await cleanupLandedWorkspace(workspace.workspacePath, {
       afterChecks: () => writeFile(join(workspace.workspacePath, "late.txt"), "late\n"),
     });
@@ -60,8 +63,9 @@ test("landing removes its own workspace, naming any other process that holds it"
     const gone = await createWorkspace("alone", f.repo);
     await writeFile(join(gone.workspacePath, "alone.txt"), "alone\n");
     jj(gone.workspacePath, ["describe", "-m", "Add alone"]);
-    const alone = await landWorkspace(gone.workspacePath, { onProgress: () => {} });
-    assert.deepEqual(alone.released, { cleaned: true });
+    const alone = await landThroughTestRunner(f, gone.workspacePath);
+    assert.equal(alone.ok, true, alone.lines.join("\n"));
+    assert.ok(!alone.lines.some((line) => line.startsWith("Kept landed workspace")), alone.lines.join("\n"));
     assert.equal(existsSync(gone.workspacePath), false);
     assert.ok(!names(f.repo).includes(gone.current.name));
 
@@ -69,9 +73,9 @@ test("landing removes its own workspace, naming any other process that holds it"
     Object.assign(holder, occupy(held.workspacePath));
     await writeFile(join(held.workspacePath, "held.txt"), "held\n");
     jj(held.workspacePath, ["describe", "-m", "Add held"]);
-    const kept = await landWorkspace(held.workspacePath, { onProgress: () => {} });
-    assert.equal(kept.released?.cleaned, false);
-    assert.match(kept.released?.reason ?? "", new RegExp(`pid ${holder.pid} \\(sleep\\)`));
+    const kept = await landThroughTestRunner(f, held.workspacePath);
+    assert.equal(kept.ok, true, kept.lines.join("\n"));
+    assert.match(kept.lines.join("\n"), new RegExp(`Kept landed workspace ${held.current.name}: .*pid ${holder.pid} \\(sleep\\)`));
     assert.ok(existsSync(held.workspacePath));
     holder.dispose();
     assert.equal((await cleanupLandedWorkspace(held.workspacePath)).cleaned, true, "slipjay cleanup still works as before");
@@ -81,18 +85,17 @@ test("landing removes its own workspace, naming any other process that holds it"
   }
 }, 180_000);
 
-test("the CLI's own working directory inside the workspace does not keep it after `slipjay land`, nor does its post-land run", async () => {
-  // A declared post-land check starts a detached run during the landing; it must not hold the workspace.
-  const f = await project({ policy: { postLandVerification: [{ executable: "node", args: ["-e", "setTimeout(() => {}, 20000)"] }] } });
+test("the CLI's own working directory inside the workspace does not keep it after `slipjay land`", async () => {
+  const f = await project();
   try {
     const workspace = await createWorkspace("cli", f.repo);
     await writeFile(join(workspace.workspacePath, "cli.txt"), "cli\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add cli"]);
-    const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
-      execFile("bun", [cli, "land"], { cwd: workspace.workspacePath }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
-    });
-    assert.deepEqual(JSON.parse(stdout.slice(stdout.lastIndexOf("\n{\n") + 1)).released, { cleaned: true }, "the JSON result follows the verification progress");
-    assert.match(stderr, /Removed landed workspace/);
+    const { stdout, stderr } = await withTestRunner(f, ({ env }) => new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
+      execFile("bun", [cli, "land"], { cwd: workspace.workspacePath, env }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
+    }));
+    assert.equal(JSON.parse(stdout).ok, true, stderr);
+    assert.doesNotMatch(stderr, /Kept landed workspace/);
     assert.equal(existsSync(workspace.workspacePath), false);
   } finally {
     await f.dispose();
@@ -132,7 +135,7 @@ test("an empty workspace attached to a closed Issue is swept; open, unknown and 
   }
 }, 120_000);
 
-test("state of vanished workspaces and dead slot owners is pruned; everything undeterminable or in flight is kept", async () => {
+test("state of vanished workspaces and all retired local-landing state is pruned; undeterminable or in-flight workspace records are kept", async () => {
   const f = await project();
   const holder = occupy(f.root);
   try {
@@ -154,22 +157,19 @@ test("state of vanished workspaces and dead slot owners is pruned; everything un
     await write(join(metadataHome(), "elsewhere.json"), record("elsewhere", { integrationRoot: join(f.root, "no-such-repo") }));
     await write(join(lockHome(), "ghost-live.json"), { version: 1, workspaceName: "ghost-live", pid: process.pid });
     await write(join(landedHome(), "artifact-abc.json"), landing("ghost", { phase: "landed" }));
-    // Verification slots: a dead waiter, a live one, an idle empty directory and a fresh one.
-    const slot = (name: string) => join(stateHome(), `verification-slot-${name}.waiting`);
-    for (const name of ["a", "b", "c", "d"]) await mkdir(slot(name), { recursive: true });
-    await write(join(slot("a"), "x.json"), { id: "x", pid: dead });
-    await write(join(slot("b"), "y.json"), { id: "y", pid: holder.pid });
-    const old = new Date(Date.now() - 3_600_000);
-    await utimes(slot("c"), old, old);
-
+    // What local landings left behind goes whatever it holds: slot locks, waiters and post-land runs.
+    const retired = [join(stateHome(), "verification-slot-feedface"), join(stateHome(), "verification-slot-feedface.waiting"), join(stateHome(), "post-land")];
+    for (const path of retired) await mkdir(path, { recursive: true });
+    await write(join(stateHome(), "verification-slot-feedface.waiting", "y.json"), { id: "y", pid: holder.pid });
+    await write(join(stateHome(), "post-land", "abc.json"), { version: 1, commit: "abc", status: "running" });
     const removed = await pruneWorkspaceState();
     assert.ok(removed.includes("workspaces/ghost.json") || removed.some((path) => path.endsWith("ghost.json")), JSON.stringify(removed));
-    for (const gone of [join(metadataHome(), "ghost.json"), join(lockHome(), "ghost.json"), join(stateHome(), "ghost.json"), join(slot("a"), "x.json"), slot("c")]) {
+    for (const gone of [join(metadataHome(), "ghost.json"), join(lockHome(), "ghost.json"), join(stateHome(), "ghost.json"), ...retired]) {
       assert.equal(existsSync(gone), false, gone);
     }
     for (const kept of [join(metadataHome(), "ghost-spare.json"), join(stateHome(), "ghost-prepared.json"), join(stateHome(), "ghost-unproven.json"),
       join(metadataHome(), "elsewhere.json"), join(lockHome(), "ghost-live.json"), join(landedHome(), "artifact-abc.json"),
-      join(metadataHome(), `${live.current.name}.json`), join(slot("b"), "y.json"), slot("d")]) {
+      join(metadataHome(), `${live.current.name}.json`)]) {
       assert.equal(existsSync(kept), true, kept);
     }
     assert.ok((await readdir(landedHome())).some((file) => file.startsWith("artifact-") && file !== "artifact-abc.json"), "the ghost's integrated delivery was archived before its sidecar went");
@@ -188,8 +188,8 @@ test("a workspace linked to a shared path in the primary checkout is still relea
     await writeFile(join(link, "report.json"), "{}\n");
     await writeFile(join(workspace.workspacePath, "shared.txt"), "shared\n");
     jj(workspace.workspacePath, ["describe", "-m", "Add shared"]);
-    const landed = await landWorkspace(workspace.workspacePath, { onProgress: () => {}, releaseLandedWorkspace: false });
-    assert.equal(landed.ok, true);
+    const landed = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
+    assert.equal(landed.ok, true, landed.lines.join("\n"));
     assert.deepEqual(await cleanupLandedWorkspace(workspace.workspacePath), { cleaned: true });
     assert.equal(existsSync(join(f.repo, "artifacts", "report.json")), true, "the primary's artifacts outlive the workspace");
   } finally {

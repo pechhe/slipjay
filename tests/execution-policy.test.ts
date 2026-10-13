@@ -1,4 +1,4 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -12,7 +12,7 @@ import {
   parseExecutionPolicy, readExecutionPolicy, readExecutionPolicyAtCommit, readIntegrationPolicy, resolveIntegrationBranch,
 } from "../src/lib/execution-policy.ts";
 import { readExactExecutionPolicy } from "../src/lib/post-integration-source.ts";
-import { landWorkspace, workspaceContext } from "../src/lib/slipjay.ts";
+import { workspaceContext } from "../src/lib/slipjay.ts";
 
 // peach-pi's policy as extracted (pechhe/peach-pi 37a32367): its landing records
 // carry this declaration's digest, so the parser must keep reproducing it.
@@ -20,7 +20,7 @@ const peachPolicy = JSON.stringify({
   version: 1,
   integrationBranch: "master",
   remote: "origin",
-  requiredLocalVerification: [
+  requiredLandingVerification: [
     { executable: "bun", args: ["install", "--frozen-lockfile"] },
     { executable: "bun", args: ["dedupe", "--check"], concurrent: true },
     { executable: "bun", args: ["run", "check"], concurrent: true },
@@ -41,7 +41,7 @@ const yardsmithPolicy = {
   sourcePublication: { version: 1, mode: "required", remote: "origin" },
   releaseBranch: "master",
   generatedPaths: ["apps/planner-workbench/src/paraglide", ".yardsmith/diagnostics"],
-  requiredLocalVerification: [{ executable: "bun", args: ["run", "test:business-journeys:critical"], cwd: null }],
+  requiredLandingVerification: [{ executable: "bun", args: ["run", "test:business-journeys:critical"], cwd: null }],
   unattendedMergeToIntegration: true,
   parallelExecution: true,
   migrationFinalization: {
@@ -69,11 +69,9 @@ test("peach-pi's policy parses with its landing shape and verification digest un
   assert.equal(parsed.remote, "origin");
   assert.equal(parsed.parallelExecution, true);
   assert.equal(parsed.unattendedMergeToIntegration, true);
-  // Heavy suites run at release (`bun run verify:release`), not after each landing.
-  assert.deepEqual(parsed.postLandVerification, []);
-  assert.deepEqual(parsed.requiredLocalVerification[1], { executable: "bun", args: ["dedupe", "--check"], concurrent: true });
+  assert.deepEqual(parsed.requiredLandingVerification[1], { executable: "bun", args: ["dedupe", "--check"], concurrent: true });
   // The digest landing records for this declaration before the shared parser existed.
-  assert.equal(digest(parsed.requiredLocalVerification), "25effc2d61517a47e37578dae699fe59599f9b43732013020df26aab978316b8");
+  assert.equal(digest(parsed.requiredLandingVerification), "25effc2d61517a47e37578dae699fe59599f9b43732013020df26aab978316b8");
 });
 
 test("slipjay's own policy gates a landing on fast static checks only", () => {
@@ -81,9 +79,8 @@ test("slipjay's own policy gates a landing on fast static checks only", () => {
   assert.equal(parsed.integrationBranch, "main");
   assert.equal(parsed.remote, "origin");
   // The complete suite runs at release (`bun run verify:release`), never per landing.
-  assert.deepEqual(parsed.requiredLocalVerification.map((step: { args: string[] }) => step.args.join(" ")),
+  assert.deepEqual(parsed.requiredLandingVerification.map((step: { args: string[] }) => step.args.join(" ")),
     ["install --frozen-lockfile", "run check", "run typecheck"]);
-  assert.deepEqual(parsed.postLandVerification, []);
 });
 
 test("a YardSmith-shaped policy keeps every declaration it makes", () => {
@@ -94,15 +91,26 @@ test("a YardSmith-shaped policy keeps every declaration it makes", () => {
   assert.deepEqual(parsed.sourcePublication, yardsmithPolicy.sourcePublication);
   assert.deepEqual(parsed.generatedPaths, yardsmithPolicy.generatedPaths);
   assert.deepEqual(parsed.postIntegration, yardsmithPolicy.postIntegration);
-  assert.deepEqual(parsed.requiredLocalVerification, [{ executable: "bun", args: ["run", "test:business-journeys:critical"] }]);
-  assert.equal(digest(parsed.requiredLocalVerification), "41f1dc81f59107adca78bf8466b3bea732d36595686ec012bb10e081494b4e66");
+  assert.deepEqual(parsed.requiredLandingVerification, [{ executable: "bun", args: ["run", "test:business-journeys:critical"] }]);
+  assert.equal(digest(parsed.requiredLandingVerification), "41f1dc81f59107adca78bf8466b3bea732d36595686ec012bb10e081494b4e66");
   assert.deepEqual(parsed.migrationFinalization?.generate, { executable: "bun", args: ["run", "db:generate"], cwd: "apps/planner-workbench" });
   assert.equal(parsed.migrationFinalization?.verify.cwd, null);
 });
 
+test("the gate's former name is read for one release, but never beside the new one", () => {
+  assert.deepEqual(parseExecutionPolicy(policy({ requiredLocalVerification: [check("bun")] })).requiredLandingVerification, [check("bun")]);
+  assert.throws(() => parseExecutionPolicy(policy({ requiredLocalVerification: [check("bun")], requiredLandingVerification: [check("bun")] })),
+    /Declare requiredLandingVerification only/);
+  assert.throws(() => parseExecutionPolicy(policy({ requiredLocalVerification: [check("bash")] })), /requiredLocalVerification\[0\]\.executable is unsafe/);
+});
+
+test("a policy still declaring postLandVerification is refused, not silently ignored", () => {
+  assert.throws(() => parseExecutionPolicy(policy({ postLandVerification: [check("bun")] })), /postLandVerification, which is no longer run/);
+});
+
 test("an empty or absent check list is a valid landing policy", () => {
-  assert.deepEqual(parseExecutionPolicy(policy({ requiredLocalVerification: [] })).requiredLocalVerification, []);
-  assert.deepEqual(parseExecutionPolicy(policy({})).requiredLocalVerification, []);
+  assert.deepEqual(parseExecutionPolicy(policy({ requiredLandingVerification: [] })).requiredLandingVerification, []);
+  assert.deepEqual(parseExecutionPolicy(policy({})).requiredLandingVerification, []);
   assert.equal(parseExecutionPolicy(policy({})).remote, null);
 });
 
@@ -112,13 +120,13 @@ test("the strict rules reject unsafe or malformed policies", () => {
   rejects("{", /not valid JSON/);
   rejects(policy({ padding: "x".repeat(64 * 1024) }), /64 KiB/);
   for (const shell of ["bash", "sh", "zsh", "fish", "pwsh", "git", "jj", "Bash"]) {
-    rejects(policy({ requiredLocalVerification: [check(shell)] }), /unsafe for a landing gate/);
+    rejects(policy({ requiredLandingVerification: [check(shell)] }), /unsafe for a landing gate/);
   }
-  rejects(policy({ requiredLocalVerification: [check("/usr/bin/node")] }), /bare executable name/);
-  rejects(policy({ requiredLocalVerification: [check("bun", { cwd: "../x" })] }), /inside the checkout/);
-  rejects(policy({ requiredLocalVerification: [check("bun", { cwd: "/tmp" })] }), /inside the checkout/);
-  rejects(policy({ requiredLocalVerification: [{ executable: "bun", args: Array(101).fill("x") }] }), /at most 100/);
-  rejects(policy({ requiredLocalVerification: Array(21).fill(check("bun")) }), /at most 20/);
+  rejects(policy({ requiredLandingVerification: [check("/usr/bin/node")] }), /bare executable name/);
+  rejects(policy({ requiredLandingVerification: [check("bun", { cwd: "../x" })] }), /inside the checkout/);
+  rejects(policy({ requiredLandingVerification: [check("bun", { cwd: "/tmp" })] }), /inside the checkout/);
+  rejects(policy({ requiredLandingVerification: [{ executable: "bun", args: Array(101).fill("x") }] }), /at most 100/);
+  rejects(policy({ requiredLandingVerification: Array(21).fill(check("bun")) }), /at most 20/);
   for (const branch of ["-main", "main..master", "feature branch", "", "x".repeat(201)]) {
     rejects(policy({ integrationBranch: branch }), /unsafe integrationBranch/);
   }
@@ -219,15 +227,15 @@ test("landing verifies with the integration bookmark's policy and ignores an unc
     const primaryPolicy = join(f.repo, "slipjay.json");
     const committed = JSON.parse(await readFile(primaryPolicy, "utf8"));
     await writeFile(primaryPolicy, JSON.stringify({ ...committed,
-      requiredLocalVerification: [{ executable: "node", args: ["-e", "process.exit(9)"] }] }));
+      requiredLandingVerification: [{ executable: "node", args: ["-e", "process.exit(9)"] }] }));
     await writeFile(join(f.repo, "task.txt"), "task\n");
     jj(f.repo, ["describe", "-m", "Task"]);
     const context = await workspaceContext(f.repo);
-    assert.deepEqual(context?.configuration.requiredLocalVerification, committed.requiredLocalVerification);
-    const landed = await landWorkspace(f.repo, { allowDefaultWorkspace: true, onProgress: () => {} });
-    assert.equal(landed.ok, true);
-    // The committed check ran, not the edited one; the edit itself is now integrated.
-    assert.deepEqual((await readFile(f.verified, "utf8")).trim().split("\n"), [f.repo]);
+    assert.deepEqual(context?.configuration.requiredLandingVerification, committed.requiredLandingVerification);
+    const landed = await landThroughTestRunner(f, f.repo, { direct: true });
+    assert.equal(landed.ok, true, landed.lines.join("\n"));
+    // The committed check ran once, on the runner, not the edited one; the edit itself is now integrated.
+    assert.equal((await readFile(f.verified, "utf8")).trim().split("\n").length, 1);
     assert.match(f.remoteFile("slipjay.json"), /process\.exit\(9\)/);
   } finally {
     await f.dispose();

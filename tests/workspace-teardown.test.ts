@@ -3,8 +3,8 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { jj, project } from "./support/workspace-project.ts";
-import { cleanupLandedWorkspace, createWorkspace, landWorkspace, pruneEmptyWorkspaces, removeWorkspace, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
+import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
+import { cleanupLandedWorkspace, createWorkspace, pruneEmptyWorkspaces, removeWorkspace, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
 import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
 import { runWorkspaceTeardown } from "../src/lib/workspace-teardown.ts";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
@@ -17,10 +17,10 @@ const recording = (log: string) => ({
   },
 });
 
-async function landed(cwd: string, file: string) {
+async function landed(f: { root: string; repo: string; remote: string }, cwd: string, file: string) {
   await writeFile(join(cwd, file), `${file}\n`);
   // Kept after landing, so the cleanup under test is what removes it.
-  assert.equal((await landWorkspace(cwd, { onProgress: () => {}, releaseLandedWorkspace: false })).ok, true);
+  assert.equal((await landThroughTestRunner(f, cwd, { keep: true })).ok, true);
 }
 
 test("cleanup runs the declared teardown in the workspace before deleting it", async () => {
@@ -29,7 +29,7 @@ test("cleanup runs the declared teardown in the workspace before deleting it", a
   try {
     await writeFile(join(f.repo, "slipjay.json"), JSON.stringify({ ...JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8")), ...recording(log) }));
     const ws = await createWorkspace("landed", f.repo);
-    await landed(ws.workspacePath, "landed.txt");
+    await landed(f, ws.workspacePath, "landed.txt");
     const result = await cleanupLandedWorkspace(ws.workspacePath);
     assert.equal(result.cleaned, true);
     assert.equal(await readFile(log, "utf8"), `${ws.workspacePath} true\n`);

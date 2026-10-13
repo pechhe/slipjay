@@ -1,12 +1,11 @@
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import type { CandidateContext, LandingIO } from "./landing-candidate.ts";
 import type { VerificationEvidence } from "./verification-policy.ts";
-import type { MigrationFinalizationPolicy } from "./execution-policy.ts";
 
 /** Result of the push step that ends every landing. */
 export interface LandingPublication {
   ok: boolean;
-  status: "pushed" | "push_failed" | "local_only" | "not_declared" | "blocked";
+  status: "pushed" | "push_failed" | "not_declared" | "blocked";
   commitId: string;
   remote?: string;
   branch?: string;
@@ -14,7 +13,6 @@ export interface LandingPublication {
 }
 /** Options for finalization and publication after integration. */
 export type LandingTailOptions = {
-  localOnly?: boolean;
   /** Human approval for an `explicit-human` post-integration step; see post-integration-policy. */
   postIntegrationApproval?: unknown;
   environment?: () => NodeJS.ProcessEnv;
@@ -31,21 +29,16 @@ export type LandingTail = {
 };
 /** Immutable revision facts used throughout landing. */
 export type LandingRevision = { commitId: string; changeId: string; empty: boolean; conflict: boolean; description: string };
-/** Internal host seams, not accepted from tool input. They do not own landing order. */
+/** The runner's seams into a candidate landing: its gate, and (in tests) a stand-in for migration finalization. */
 export type LandingAdapter = {
-  preview?: () => Promise<{ context: { current: { name: string; root: string }; integration: { name: string; root: string }; integrationBranch: string; configuration: { requiredLocalVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null } }; target: LandingRevision }>;
-  repairTarget?: (target: LandingRevision) => Promise<LandingRevision>;
   finalizeCandidate?: (candidate: LandingRevision, base: LandingRevision) => Promise<LandingRevision>;
-  verify?: (identity: { base: string; candidate: string }) => Promise<import("./verification-policy.ts").VerificationEvidence>;
+  verify: (identity: { base: string; candidate: string }) => Promise<import("./verification-policy.ts").VerificationEvidence>;
 };
 
 import { mkdir } from "node:fs/promises";
 import { finishLanding } from "./landing-candidate.ts";
 import { finalizePostIntegration } from "./post-integration-finalization.ts";
-import { githubRepository, withIssueTrailer } from "./post-land-issue.ts";
-import { assertNoForeignPrimaryWriter } from "./primary-checkout-writer.ts";
-import { runRequiredVerification } from "./required-verification.ts";
-import { verificationSlotEnvironment } from "./verification-slot.ts";
+import { githubRepository, withIssueTrailer } from "./issue-references.ts";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { issueTitle, jj, revisionExists, revisionFacts, run, workspaceContext } from "./workspace-jj.ts";
 import { stateHome } from "./workspace-paths.ts";
@@ -58,13 +51,13 @@ import { writeWorkspaceJson } from "./workspace-transaction.ts";
  * Workspace housekeeping reuses them to finish a landing whose integration stands.
  */
 
-async function writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string = "landed", localOnly?: boolean, operationId?: string): Promise<void> {
+async function writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string = "landed", operationId?: string): Promise<void> {
   await mkdir(stateHome(), { recursive: true, mode: 0o700 });
   const metadata = await workspaceMetadata(context.current.name);
   const prior = await readLandingState(context.current.name, { readOnly: true });
   const landedAt = new Date().toISOString();
   await writeWorkspaceJson(statePath(context.current.name), {
-    version: 1, phase, operationId, cleanupPending: true, ...(localOnly !== undefined ? { localOnly } : {}), workspaceName: context.current.name, workspacePath: context.current.root,
+    version: 1, phase, operationId, cleanupPending: true, workspaceName: context.current.name, workspacePath: context.current.root,
     integrationRoot: context.integration.root, integrationBranch: context.integrationBranch,
     artifactCommitId: artifact.commitId, artifactChangeId: artifact.changeId,
     artifactDescription: artifact.description, verification: verification.status,
@@ -105,19 +98,6 @@ async function assertStackConflictFree(cwd: string, branch: string, changeId: st
     );
 }
 
-/** The verification-slot options of one landing, reporting its place in the queue. */
-export const waitForLandingSlot = (context: CandidateContext, onProgress: (line: string) => void = (line) => console.log(line)): { scope: string; label: string; onWait: (wait: { ahead: number; holder?: string | null }) => void } => ({
-  scope: context.integration.root,
-  label: `jj:${context.current.name}`,
-  onWait: ({ ahead, holder }) => onProgress(`[verify] waiting for the verification slot: ${ahead} landing${ahead === 1 ? "" : "s"} ahead${holder ? ` (${holder} holds it)` : ""}`),
-});
-
-async function runVerification(context: CandidateContext, onProgress: (line: string) => void = (line) => console.log(line)): Promise<VerificationEvidence> {
-  // One landing of this repository verifies at a time; a landing already holds the slot.
-  return await runRequiredVerification({ root: context.current.root, checks: context.configuration.requiredLocalVerification,
-    onProgress, slot: waitForLandingSlot(context, onProgress) });
-}
-
 /**
  * A frozen install of the rebased candidate, before migration generation and
  * verification read `node_modules`: the workspace installed for the integration
@@ -129,7 +109,7 @@ async function prepareCandidateDependencies(cwd: string, context: CandidateConte
   const drift = () => jj(cwd, ["diff", "--from", candidate.commitId, "--to", "@", "--summary"]);
   if (await drift()) throw new Error("Verification checkout differs from the landing candidate; repair and rerun landing");
   onProgress("[deps] preparing frozen candidate dependencies");
-  await prepareWorkspaceDependencies(context.current.root, { quiet: true, env: verificationSlotEnvironment(process.env) });
+  await prepareWorkspaceDependencies(context.current.root, { quiet: true });
   if ((await revisionFacts(cwd, candidate.changeId)).commitId === candidate.commitId && !await drift()) return;
   await jj(cwd, ["restore", "--from", candidate.commitId, "--into", "@"]);
   throw new Error("Dependency preparation changed the landing candidate's source; it was restored. Fix the install script and rerun landing");
@@ -153,7 +133,6 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
       : null;
     const taskDescription = typeof metadata?.task === "string" ? metadata.task.trim() : "";
     description = (issueDescription?.trim() || taskDescription).slice(0, 500);
-    // A post-land failure Issue carries this description; a placeholder would carry nothing.
     if (!description)
       throw new Error(`Landing needs a description of the change: run \`jj describe -r ${target.changeId} -m "<what this change does>"\` and land again`);
   }
@@ -165,9 +144,9 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   return revisionFacts(cwd, target.changeId);
 }
 
-/** The remote this landing publishes to, or null for local-only/undeclared delivery. */
-export function publicationRemote(context: { configuration: { remote?: string | null } }, localOnly?: boolean): string | null {
-  return localOnly === true ? null : context.configuration.remote ?? null;
+/** The remote this landing publishes to, or null when the repository declares none. */
+export function publicationRemote(context: { configuration: { remote?: string | null } }): string | null {
+  return context.configuration.remote ?? null;
 }
 
 export const fetchIntegration = (cwd: string, remote: string, branch: string, options: { timeoutMs?: number } = {}): ReturnType<typeof import("./workspace-command.ts").runWorkspaceCommand> => run("jj", ["--color=never", "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
@@ -213,7 +192,7 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
     ...(options.environment ? { environment: options.environment } : {}),
   });
   timings.publishingStartedAt = Date.now();
-  const remote = publicationRemote(context, options.localOnly);
+  const remote = publicationRemote(context);
   if (!postIntegration.ok) {
     const failure = `Post-integration ${postIntegration.status}${postIntegration.reason ? `: ${postIntegration.reason}` : ""}.`;
     // The caller fetched the remote: a later landing that already pushed this artifact ran its own step first.
@@ -227,13 +206,13 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
   options.onPublishing?.();
   const publication: LandingPublication = remote
     ? await publishIntegration(cwd, remote, context.integrationBranch, commitId)
-    : { ok: true, status: options.localOnly === true ? "local_only" : "not_declared", commitId };
+    : { ok: true, status: "not_declared", commitId };
   return { ok: publication.ok, postIntegration, publication, timings: { ...timings, finishedAt: Date.now() } };
 }
 
 /** True when the landed artifact is on the declared remote, or when no publication applies. */
-export async function artifactPublished(cwd: string, context: { integrationBranch: string; configuration: { remote?: string | null } }, state: { artifactCommitId: string; localOnly?: boolean }): Promise<boolean> {
-  const remote = publicationRemote(context, state.localOnly);
+export async function artifactPublished(cwd: string, context: { integrationBranch: string; configuration: { remote?: string | null } }, state: { artifactCommitId: string }): Promise<boolean> {
+  const remote = publicationRemote(context);
   if (!remote) return true;
   await fetchIntegration(cwd, remote, context.integrationBranch);
   return revisionExists(cwd, `${state.artifactCommitId} & ::${context.integrationBranch}@${remote}`);
@@ -241,12 +220,12 @@ export async function artifactPublished(cwd: string, context: { integrationBranc
 
 /** What the landing candidate (landing-candidate.ts) needs from the land command. */
 export const landingIO: LandingIO = {
-  landingPreview, ensureLandingDescription, assertNoForeignPrimaryWriter, jj,
-  assertStackConflictFree, revisionFacts, prepareCandidateDependencies, runVerification, writeLandingState,
+  landingPreview, ensureLandingDescription, jj,
+  assertStackConflictFree, revisionFacts, prepareCandidateDependencies, writeLandingState,
   readJsonOptional, statePath,
 };
 
 /** Retry the housekeeping of a landing whose integration already stands. */
 export function finishLandedWorkspace(context: WorkspaceContext, state: Record<string, unknown>): Promise<Record<string, unknown>> {
-  return finishLanding(context, state, {}, landingIO);
+  return finishLanding(context, state, landingIO);
 }

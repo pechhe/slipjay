@@ -6,7 +6,6 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-proc
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { migrationCommandFailure, redactMigrationOutput } from "./migration-command-evidence.ts";
 import { checkoutCwd } from "./checkout-cwd.ts";
-import { verificationSlotEnvironment } from "./verification-slot.ts";
 
 const matches = (roots: string[], file: string): boolean => roots.some(root => file === root || file.startsWith(root + "/"));
 const changedPaths = (summary: string): string[] => summary.split(/\r?\n/).filter(Boolean).map(line => line.replace(/^[A-Z?]\s+/, ""));
@@ -19,7 +18,7 @@ export async function migrationPaths(cwd: string, policy: MigrationFinalizationP
   return { owned: changed.filter(file => matches([...policy.triggerPaths, ...policy.artifactPaths], file)), changed };
 }
 
-/** Called inside the shared verification slot, before the final rebase and held
+/** Called in the runner's serial queue, before the final rebase and held
  * through generation, verification and integration by the caller. No second lease. */
 export async function migrationCandidate(cwd: string, context: {
   current: { root: string }; integrationBranch: string;
@@ -51,7 +50,7 @@ export async function migrationCandidate(cwd: string, context: {
       await io.jj(cwd, ["edit", candidate.changeId]);
       const run = async (declaration: MigrationCommand): Promise<void> => {
         const commandRoot = await checkoutCwd(context.current.root, declaration.cwd, "Migration command");
-        const environment = verificationSlotEnvironment((options.environment ?? sanitizedProcessEnv)());
+        const environment = (options.environment ?? sanitizedProcessEnv)();
         options.onProgress?.(`[migration] ${redactMigrationOutput([declaration.executable, ...declaration.args].join(" "), context.current.root, { ...process.env, ...environment }).slice(0, 1000)}`);
         const result = await (options.runCommand ?? runBoundedProcess)({ ...declaration, cwd: commandRoot, timeoutMs: 3600000, maxOutputBytes: 65536, env: environment, redactOutput: value => redactMigrationOutput(value, context.current.root, { ...process.env, ...environment }) });
         if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error)
