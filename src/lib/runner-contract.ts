@@ -128,5 +128,3 @@ export type RunnerConfig = {
 
 /** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */
 export const repositoryKey = (name: string): string => name.toLowerCase();
-
-export const gateFailureProbe: number = "acceptance";
