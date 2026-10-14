@@ -239,13 +239,15 @@ export function createRunnerQueue(input: {
     // A refused first verify applied nothing, so the code before the promotion still fits the schema.
     if (manual.length && record.migrations?.status !== "verify_failed") return { automatic: false,
       reason: `not rolled back automatically, because the promotion carries non-additive migrations (${manual.join(", ")}): the owner decides` };
-    const serving = record.projects.filter((project) => project.activated);
-    if (serving.length) return { automatic: true,
-      reason: `rollback incomplete: ${serving.map((project) => `${project.name} still serves the promotion (${project.reason ?? "no earlier deployment"})`).join(", ")}; the release branch stays on the release` };
+    const unrecovered = record.projects.filter((project) => project.activated);
+    if (unrecovered.length) return { automatic: false,
+      reason: `rollback incomplete: ${unrecovered.map((project) => project.activated === "unknown"
+        ? `${project.name} activation or recovery outcome is unknown (${project.reason ?? "no earlier deployment"})`
+        : `${project.name} still serves the promotion (${project.reason ?? "no earlier deployment"})`).join(", ")}; the release branch stays on the release` };
     const returned = await serially(() => returnRelease(checkoutPath(operation), merge));
     return returned.returned
       ? { automatic: true, releaseBranch: returned.releaseBranch, reason: `rolled back: production serves what it served before, and the release branch is back on ${returned.releaseBranch.slice(0, 12)}` }
-      : { automatic: true, reason: `rolled back: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
+      : { automatic: false, reason: `rollback incomplete: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
   }
   /** Run `work` in the serial lane, after the running turn, and resume the queue after it. */
   function serially<T>(work: () => Promise<T>): Promise<T> {

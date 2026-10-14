@@ -302,9 +302,15 @@ integration branch; `production` deploys only through a promotion (see
   taking traffic: only once every project deployed and passed its check does each
   `activate` (with `SLIPJAY_DEPLOY_URL`) move that project's traffic to its
   deployment. Otherwise nothing is activated and the environment keeps serving what
-  it served before. If one activation fails, the projects already activated are
+  it served before. If one activation fails, its traffic state is recorded as
+  `activated: "unknown"`. When compensation is allowed, the failing project and
+  the projects already activated are
   activated again on the deployment they last served, with `SLIPJAY_DEPLOY_RESTORE=1`
   (a host may move back to an earlier deployment differently from activating a new one).
+  A missing previous URL or a failed restore leaves recovery unresolved; a successful
+  restore records `activated: false` and `restored: true`. Later projects that were
+  never attempted are unchanged. Unknown outcomes cannot establish a future served
+  baseline.
   Every activation also receives runner-owned `SLIPJAY_DEPLOY_ROLLBACK_ALLOWED=1`
   when compensation is permitted, or `0` when the promotion's migration policy
   prohibits it. Downstream activation commands must honor this flag before their
@@ -394,12 +400,16 @@ that commit in the deploy lane, and `--confirm` follows it: the promotion ends
 `deployed`, or `deploy failed: <project> (<reason>)` (exit 1). Rerunning `--confirm`
 deploys a failed promotion again and reuses one that deployed.
 
-A promotion's production deploy that fails is rolled back automatically: production
+When recovery can be proven, a failed production promotion is rolled back
+automatically: production
 keeps (or is moved back to) what it served before, the release branch returns to
 the commit before the release merge (unless a later release moved it), and the
-deploy's `rollback` and reason say so. So `production` must declare `activate` for
-every project. A project that could not be moved back is named, and the release
-branch stays on the release, since production still partly serves it. Rollback is
+deploy's `rollback` and reason say so. `rollback.automatic` is true only after every
+project is proven restored or unchanged and the release pointer actually returned.
+An unknown outcome or a failed pointer return records `automatic: false`. So
+`production` must declare `activate` for every project. A project that could not
+be moved back is named, and the release branch stays on the release because
+production may still serve the candidate. Rollback is
 code only. The plan's `nonAdditiveMigrations` names migration artifacts that drop,
 rename, retype or delete something, or tighten what an existing table accepts (a
 heuristic, `nonAdditiveSql` in `src/lib/release.ts`), and its `next` repeats them: a

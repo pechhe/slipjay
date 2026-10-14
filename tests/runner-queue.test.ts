@@ -45,11 +45,18 @@ const resetProbe = (root: string) => `console.log(JSON.stringify({ target: requi
 const deployStep = (root: string, name: string) => `const fs=require("node:fs");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-deploy-${name}`))})) { console.error("${name} build failed"); process.exit(5); }
 fs.appendFileSync(${JSON.stringify(join(root, "deploys.jsonl"))}, JSON.stringify({ project: "${name}", environment: process.env.SLIPJAY_DEPLOY_ENVIRONMENT, commit: process.env.SLIPJAY_DEPLOY_COMMIT, key: process.env.FIXTURE_KEY ?? null, head: require("node:child_process").execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() }) + "\\n");
-console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DEPLOY_COMMIT.slice(0, 7) + ".example");`;
-// Production checks each deployment and then activates it, recording both; each fails while `fail-health-<name>` / `fail-activate-<name>` exists.
+console.log("building"); if (!fs.existsSync(${JSON.stringify(join(root, `omit-url-${name}`))})) console.log("https://${name}-" + process.env.SLIPJAY_DEPLOY_COMMIT.slice(0, 7) + ".example");`;
+// Activation switches a real traffic pointer before a forward failure. Restoration failures
+// have a separate marker and leave that pointer unchanged.
 const productionStep = (root: string, name: string, step: "health" | "activate") => `const fs=require("node:fs");
 if ("${step}" === "activate") fs.appendFileSync(${JSON.stringify(join(root, "rollback-authority.jsonl"))}, JSON.stringify({ project: "${name}", allowed: process.env.SLIPJAY_DEPLOY_ROLLBACK_ALLOWED, restore: process.env.SLIPJAY_DEPLOY_RESTORE ?? null }) + "\\n");
-if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
+const restore = process.env.SLIPJAY_DEPLOY_RESTORE === "1";
+if ("${step}" === "activate") {
+  if (restore && fs.existsSync(${JSON.stringify(join(root, "reject-after-restore"))})) fs.writeFileSync(${JSON.stringify(join(root, "reject-push"))}, "");
+  if (restore && fs.existsSync(${JSON.stringify(join(root, `fail-restore-${name}`))})) { console.error("${name} restore failed"); process.exit(7); }
+  fs.writeFileSync(${JSON.stringify(join(root, `active-${name}.txt`))}, process.env.SLIPJAY_DEPLOY_URL);
+}
+if (!restore && fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
 fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL, ...process.env.SLIPJAY_DEPLOY_RESTORE ? { restore: true } : {} }) + "\\n");
 fs.appendFileSync(${JSON.stringify(join(root, "order.log"))}, "${step} ${name}\\n");`;
 // Production's database is \`production-db.json\`, the migrations it applied. Verify exits 0 when they are
@@ -816,7 +823,15 @@ test("a promotion that fails its health check activates nothing and returns the 
     await writeFile(join(f.root, "fail-activate-hq"), "");
     const incomplete = (await promote(first)).result;
     assert.ok(incomplete?.type === "failed", JSON.stringify(incomplete));
-    assert.match(incomplete.reason, /; rollback incomplete: app still serves the promotion \(could not be moved back: no earlier deployment is recorded\); the release branch stays on the release$/);
+    assert.match(incomplete.reason, /rollback incomplete/);
+    assert.match(incomplete.reason, /app.*no earlier deployment is recorded/);
+    assert.match(incomplete.reason, /hq.*no earlier deployment is recorded/);
+    assert.ok(incomplete.deployment);
+    assert.equal(incomplete.deployment.rollback?.automatic, false);
+    assert.deepEqual(incomplete.deployment.projects.map(({ name, activated }) => [name, activated]),
+      [["app", true], ["hq", "unknown"], ["www", false]]);
+    assert.equal(await readFile(join(f.root, "active-hq.txt"), "utf8"), url("hq", first));
+    assert.deepEqual(await f.lines("active-www.txt"), [], "later unattempted project is unchanged");
     assert.deepEqual((await f.lines("rollback-authority.jsonl")).map((line) => JSON.parse(line)), [
       { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null },
     ], "first activation receives runner authority despite declared spoofed environment key");
@@ -863,17 +878,118 @@ test("a promotion that fails its health check activates nothing and returns the 
     assert.match(moved.reason, /www \(activation failed: exited 6: www activate failed\); rolled back/);
     assert.deepEqual((await activations()).slice(4), [
       { project: "app", url: url("app", second) }, { project: "hq", url: url("hq", second) },
-      { project: "app", url: url("app", first), restore: true }, { project: "hq", url: url("hq", first), restore: true },
+      { project: "app", url: url("app", first), restore: true }, { project: "hq", url: url("hq", first), restore: true }, { project: "www", url: url("www", first), restore: true },
     ], "app and hq moved to the new deployment and back to the one they served before");
     assert.deepEqual((await f.lines("rollback-authority.jsonl")).slice(5).map((line) => JSON.parse(line)), [
       { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null }, { project: "www", allowed: "1", restore: null },
-      { project: "app", allowed: "1", restore: "1" }, { project: "hq", allowed: "1", restore: "1" },
+      { project: "app", allowed: "1", restore: "1" }, { project: "hq", allowed: "1", restore: "1" }, { project: "www", allowed: "1", restore: "1" },
     ], "ordinary activation and compensation receive runner permission, with restore separately marked");
     assert.deepEqual(moved.deployment.projects.map(({ name, activated, restored }) => [name, activated, restored ?? false]),
-      [["app", false, true], ["hq", false, true], ["www", false, false]]);
+      [["app", false, true], ["hq", false, true], ["www", false, true]]);
+    assert.equal(moved.deployment.rollback?.automatic, true);
+    for (const project of ["app", "hq", "www"])
+      assert.equal(await readFile(join(f.root, `active-${project}.txt`), "utf8"), url(project, first), "actual traffic pointer returned");
     assert.equal(f.releaseRef(), before);
   } finally { await f.dispose(); }
 }, 300_000);
+
+for (const scenario of ["first activation", "failed restore", "forbidden compensation", "missing activation URL", "failed pointer return"] as const) {
+  test(`production recovery records traffic and release pointer evidence after ${scenario}`, async () => {
+    const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+    const promote = async (commit: string) => {
+      const release = f.submitRelease(commit);
+      await f.land(release);
+      await f.queue.idle();
+      const outcome = f.result(release);
+      assert.ok(outcome?.type === "released" && outcome.deploy, JSON.stringify(outcome));
+      return f.log.operation(outcome.deploy)!;
+    };
+    const url = (project: string, commit: string) => `https://${project}-${commit.slice(0, 7)}.example`;
+    try {
+      await f.land(f.submit(await f.candidate("baseline.txt")));
+      await f.queue.idle();
+      const baseline = f.main();
+      if (scenario !== "first activation") assert.equal((await promote(baseline)).status, "deployed");
+      const before = f.releaseRef();
+      await f.land(f.submit(await f.candidate("candidate.txt")));
+      await f.queue.idle();
+      const candidate = f.main();
+      const failing = scenario === "first activation" ? "app" : "hq";
+      if (scenario === "missing activation URL") await writeFile(join(f.root, "omit-url-www"), "");
+      else await writeFile(join(f.root, `fail-activate-${failing}`), "");
+      if (scenario === "failed pointer return") await writeFile(join(f.root, "reject-after-restore"), "");
+      if (scenario === "failed restore") await writeFile(join(f.root, "fail-restore-hq"), "");
+      let authorityBefore = (await f.lines("rollback-authority.jsonl")).length;
+      let operation;
+      let restrictedMerge: string | undefined;
+      if (scenario === "forbidden compensation") {
+        // Leave a failed promotion on the release pointer before testing its governed retry.
+        await writeFile(join(f.root, "fail-restore-hq"), "");
+        assert.equal((await promote(candidate)).status, "failed");
+        await rm(join(f.root, "fail-restore-hq"));
+        const retainedMerge = f.releaseRef();
+        restrictedMerge = retainedMerge;
+        authorityBefore = (await f.lines("rollback-authority.jsonl")).length;
+        // A retry carries the original migration authority, rather than deriving a new allowance.
+        const prior = newOperationId();
+        f.log.append(prior, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "production", commitId: candidate, submittedBy: "promotion:test",
+          promotion: { merge: retainedMerge, nonAdditiveMigrations: ["migrations/drop.sql"] } });
+        f.log.append(prior, { type: "failed", stage: "deploying", reason: "earlier deployment failed" });
+        operation = await promote(candidate);
+      } else operation = await promote(candidate);
+      const result = operation.result;
+      assert.ok(result?.type === "failed" && result.deployment, JSON.stringify(result));
+      const record = result.deployment;
+      if (scenario === "missing activation URL" || scenario === "failed pointer return") {
+        assert.equal(record.rollback?.automatic, scenario === "missing activation URL");
+        assert.deepEqual(record.projects.map((project) => project.activated), [false, false, false]);
+        for (const project of ["app", "hq", "www"])
+          assert.equal(await readFile(join(f.root, `active-${project}.txt`), "utf8"), url(project, baseline));
+        assert.deepEqual((await f.lines("rollback-authority.jsonl")).slice(authorityBefore).map((line) => JSON.parse(line)), scenario === "missing activation URL" ? [] : [
+          { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null },
+          { project: "app", allowed: "1", restore: "1" }, { project: "hq", allowed: "1", restore: "1" },
+        ], "only projects whose activation ran are restored");
+        if (scenario === "missing activation URL") assert.equal(f.releaseRef(), before);
+        else {
+          assert.notEqual(f.releaseRef(), before);
+          assert.match(result.reason, /rollback incomplete/);
+          assert.doesNotMatch(result.reason, /; rolled back:/);
+        }
+        return;
+      }
+      assert.equal(record.rollback?.automatic, false);
+      assert.equal(record.projects.find((project) => project.name === failing)?.activated, "unknown");
+      assert.match(record.projects.find((project) => project.name === failing)?.reason ?? "", /activation failed: exited 6/);
+      const attempts = (await f.lines("rollback-authority.jsonl")).slice(authorityBefore).map((line) => JSON.parse(line));
+      if (scenario === "first activation") {
+        assert.match(record.projects[0]?.reason ?? "", /no earlier deployment is recorded/);
+        assert.deepEqual(attempts, [{ project: "app", allowed: "1", restore: null }]);
+        assert.deepEqual(await f.lines("active-hq.txt"), []);
+        assert.deepEqual(await f.lines("active-www.txt"), []);
+      } else {
+        assert.equal(record.projects[0]?.activated, scenario === "failed restore" ? false : true);
+        assert.equal(await readFile(join(f.root, "active-app.txt"), "utf8"), url("app", scenario === "failed restore" ? baseline : candidate));
+        assert.equal(await readFile(join(f.root, "active-www.txt"), "utf8"), url("www", baseline), "later project never moved");
+        if (scenario === "failed restore") {
+          assert.match(record.projects[1]?.reason ?? "", /could not be moved back: exited 7: hq restore failed/);
+          assert.deepEqual(attempts, [
+            { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null },
+            { project: "app", allowed: "1", restore: "1" }, { project: "hq", allowed: "1", restore: "1" },
+          ]);
+        } else assert.deepEqual(attempts, [
+          { project: "app", allowed: "0", restore: null }, { project: "hq", allowed: "0", restore: null },
+        ], "forbidden compensation makes no recovery calls");
+      }
+      assert.equal(await readFile(join(f.root, `active-${failing}.txt`), "utf8"), url(failing, candidate), "failure happened after traffic switched");
+      if (restrictedMerge) assert.equal(f.releaseRef(), restrictedMerge, "forbidden compensation retains the exact candidate release pointer");
+      assert.notEqual(f.releaseRef(), before, "unresolved traffic retains the candidate release pointer");
+      assert.equal(f.parents(f.releaseRef()).at(-1), candidate);
+      const persisted = f.log.deployments("fixture/repo", "production").find((entry) => entry.id === operation.id)?.result;
+      assert.deepEqual(persisted, result, "unknown outcome survives the stored deployment projection");
+      assert.doesNotMatch(result.reason, /; rolled back:/);
+    } finally { await f.dispose(); }
+  }, 180_000);
+}
 
 test("a promotion migrates production after every project is healthy and before any activates; a failed verify or apply activates nothing", async () => {
   const f = await fixture(true, true, { minIntervalMs: 0, production: "migrations" });

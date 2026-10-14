@@ -50,13 +50,14 @@ export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "re
 /**
  * One project's outcome in a deploy: `url` is the deployment its command reported, and
  * `ok` that it deployed and passed its health check. In an environment that activates,
- * `activated` says whether the project's traffic moved to it; one moved and then moved
- * back (another project's activation failed) is `restored`.
+ * `activated` says whether the project's traffic moved to it; `unknown` means an
+ * activation or recovery command failed and the runner cannot establish what serves.
+ * A project proved moved back after activation failed is `restored`.
  */
-export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string; activated?: boolean; restored?: boolean };
+export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string; activated?: boolean | "unknown"; restored?: boolean };
 
-/** Whether a project of a deploy served it: it deployed, and took traffic where the environment activates. */
-export const servedDeploy = (project: DeployProjectOutcome): boolean => project.ok && project.activated !== false;
+/** Proven serving outcome, excluding unconfirmed activation or recovery as a future restore target. */
+export const servedDeploy = (project: DeployProjectOutcome): boolean => project.ok && project.activated !== false && project.activated !== "unknown";
 
 /**
  * What one deploy put in an environment: the commit, the commit the environment
@@ -70,8 +71,8 @@ export type DeployRecord = {
   /**
    * A promotion that does not serve: `automatic` when production stays on what it served
    * before and the release branch returns to the commit before the release merge
-   * (`releaseBranch`, absent if it could not); otherwise the promotion carries
-   * non-additive migrations and nothing more is undone: the owner decides.
+   * (`releaseBranch`). False means restoration was prohibited or remained incomplete:
+   * the reason names the unresolved outcome and the owner decides recovery.
    */
   rollback?: { automatic: boolean; releaseBranch?: string; reason: string };
   /** Present once an environment that declares migrations reached them: see `DeployMigrations`. */

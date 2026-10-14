@@ -2,6 +2,11 @@
 
 ## v3.12.0
 
+- **Report rollback only after recovery is proven (#41):** a failed activation
+  records its traffic state as `unknown` until a successful restore, including for
+  the project whose activation failed. Unresolved recovery or a failed release
+  pointer return leaves rollback incomplete instead of reporting success.
+
 - **Activation commands learn whether rollback is allowed (#35):** a production
   `activate` step gets `SLIPJAY_DEPLOY_ROLLBACK_ALLOWED` (`1`, or `0` when the
   promotion applied non-additive migrations). A project that reverts itself when its

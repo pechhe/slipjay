@@ -150,17 +150,20 @@ export async function runDeploy(input: {
         input.onProgress(`[deploy ${project.name}] activated ${outcome.url}`);
         continue;
       }
-      Object.assign(outcome, { ok: false, reason: `activation failed: ${failed}` });
+      Object.assign(outcome, { ok: false, activated: outcome.url ? "unknown" : false, reason: `activation failed: ${failed}` });
       input.onProgress(`[deploy ${project.name}] activation failed: ${failed}`);
-      for (const [earlier, moved] of policy.projects.slice(0, index).entries()) {
-        if (!restore) continue;
+      // A non-zero activation can have moved traffic before it failed. Recover that
+      // project too; only a successful restore proves the earlier deployment serves.
+      for (const [earlier, moved] of policy.projects.slice(0, index + 1).entries()) {
         const activated = outcomes[earlier]!;
+        if (!restore || activated.activated === false) continue;
         const before = previousUrls[moved.name];
         // A deployment that served before may need another call than a first activation (Vercel: rollback, not promote).
         const unrestored = before ? failure(await step(moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "1" }), policy.timeoutMs) : "no earlier deployment is recorded";
-        // The project stays activated on the promotion, and the record says why.
+        // An unsuccessful recovery cannot prove the earlier deployment serves.
         if (unrestored) {
-          activated.reason = `could not be moved back: ${unrestored}`;
+          if (before) activated.activated = "unknown";
+          activated.reason = `${activated.reason ? `${activated.reason}; ` : ""}could not be moved back: ${unrestored}`;
           input.onProgress(`[deploy ${moved.name}] could not be moved back: ${unrestored}`);
         } else {
           Object.assign(activated, { activated: false, restored: true });
