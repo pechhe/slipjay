@@ -1,5 +1,25 @@
 # Changelog
 
+## v3.9.0
+
+- **Production ships by one-tap promotion (#32):** a candidate whose `slipjay.json`
+  declares `deployments.environments.production` is a promotion. `slipjay promote`
+  (`release` stays an alias) plans the newest commit staging deployed, not the
+  integration tip, and when an earlier approval did not ship, shows only the
+  `delta` since it. The runner refuses to release a commit staging did not deploy;
+  once the release branch holds the candidate, it deploys production from exactly
+  that commit in the deploy lane, and `--confirm` follows it to `deployed` or
+  `deploy failed`. Rerunning `--confirm` redeploys a failed promotion.
+- **Health checks and rollback (#33):** production projects must declare `activate`
+  (`healthCheck` is optional, in any environment). A deploy builds every project
+  without traffic, checks each, and activates only if all pass; a failed activation
+  activates the projects already moved on the deployment they last served, with
+  `SLIPJAY_DEPLOY_RESTORE=1`. A failed promotion returns the release branch to
+  before its merge, unless a project could not be moved back. The plan's
+  `nonAdditiveMigrations` names migrations that drop, rename, retype, delete or
+  tighten an existing table; a failed promotion carrying one is left for the owner.
+  **Upgrading:** a policy declaring `production` needs this version on the runner.
+
 ## v3.8.0
 
 - **The runner deploys staging (#31):** `slipjay.json` can declare
