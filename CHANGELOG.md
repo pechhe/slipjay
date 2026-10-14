@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.14.1
+
+- **The runner never abandons published integration history:** a runner checkout now
+  pins jj's `trunk()` to the integration branch after each fetch, and candidate cleanup
+  excludes it. Before, a repository integrating a branch other than main, master or
+  trunk could lose that branch's published history when a candidate sat on an older base.
+
 ## v3.14.0
 
 - **Each repository's queue runs on its own worker (#55):** landings, releases and resets
