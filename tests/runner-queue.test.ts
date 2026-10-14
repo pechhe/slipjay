@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vite-plus/test";
+import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../src/lib/runner-contract.ts";
 import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
@@ -72,6 +72,9 @@ fs.appendFileSync(${JSON.stringify(join(root, "order.log"))}, "${step}\\n");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}`))})) { console.error("postgres://owner:hunter2@db.example/prod refused"); process.exit(1); }
 if ("${step}"==="apply") fs.writeFileSync(db, JSON.stringify(wanted));
 else process.exit(JSON.stringify(applied)===JSON.stringify(wanted)?0:2);`;
+// Every test builds its own origin, checkouts and queue under a fresh root, so they run together:
+// one after another they take over five minutes, the longest pole of the suite.
+const test = serialTest.concurrent;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 // `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
