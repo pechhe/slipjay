@@ -1,6 +1,23 @@
 # Changelog
 
-## Unreleased
+## v3.14.0
+
+- **Each repository's queue runs on its own worker (#55):** landings, releases and resets
+  still take turns within a repository, but different repositories run at once, up to
+  `workers` (runner config, default 2; `1` restores one queue). Repositories that share
+  external state share a `lane`. Every run, deploys included, joins `slipjay.slice`,
+  whose `limits` cap them together (default MemoryHigh 40G, MemoryMax 48G, CPUQuota
+  1400%, TasksMax 4096). A queued operation names the running one it waits behind, or
+  the workers holding it.
+- **Kill names its operation (#51):** `slipjay runner kill <operation>`; bare kill stops
+  the only running operation and refuses, listing ids, when several run; an operation
+  that is not running is refused. The menu confirms a kill naming the operation and
+  sends its id, and a cancel that lost the race says the operation already started.
+- **Typed pipeline events and `slipjay metrics` (yardsmith#2379):** the ledger records
+  identity, change shape, stage detail and classified causes; `slipjay metrics` reports
+  outcomes, causes, stage, queue and command percentiles, attempts and flake candidates.
+- **`land` reports its local work as `housekeeping`:** the timing line no longer counts
+  recording the landing and sweeping other workspaces as publishing.
 
 - **A deploy cut short by a runner restart is documented, and its rerun is not rolled back (#48):**
   projects a promotion activated before the restart keep serving it, and a later deploy of
