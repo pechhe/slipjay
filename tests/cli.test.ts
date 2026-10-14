@@ -130,3 +130,17 @@ test("land refuses without a runner location, and --local-only is a usage error"
     await f.dispose();
   }
 }, 60_000);
+
+
+test("release is retired without planning or confirming, while promote keeps its argument validation", async () => {
+  for (const args of [["release"], ["release", "--confirm", "deadbeef"]]) {
+    const run = await slipjay(homedir(), args);
+    assert.equal(run.code, 2);
+    assert.equal(run.stdout, "", "the retired command emits no promotion result");
+    assert.match(run.stderr, /slipjay release is retired; use slipjay promote/);
+  }
+  const promote = await slipjay(homedir(), ["promote", "--bogus"]);
+  assert.equal(promote.code, 1);
+  assert.match(promote.stderr, /Usage: slipjay promote/);
+  assert.doesNotMatch(promote.stderr, /retired/);
+});

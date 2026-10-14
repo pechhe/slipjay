@@ -126,11 +126,10 @@ async function removeWorkspaceAt(path: string): Promise<number> {
 }
 
 /**
- * `release [--confirm <commit>] [--migrations-ready]`: plan a release here, or send
+ * `promote [--confirm <commit>] [--migrations-ready]`: plan a release here, or send
  * the candidate a human approved to the runner, which verifies and publishes it.
  * Progress goes to stderr; stdout is one JSON result.
  */
-/** `promote` (formerly `release`): plan a promotion, or confirm the candidate a human approved and follow it to production. */
 async function runPromote(args: string[]): Promise<number> {
   const options: { migrationsReady: boolean; confirm?: string } = { migrationsReady: false };
   for (let index = 0; index < args.length; index += 1) {
@@ -373,8 +372,10 @@ try {
     } finally {
       process.removeListener("SIGINT", stopFollowing);
     }
-  } else if (command === "promote" || command === "release") {
-    // `release` stays an alias until the docs that name it move to `promote`.
+  } else if (command === "release") {
+    console.error("slipjay release is retired; use slipjay promote [--confirm <commit>] [--migrations-ready]");
+    process.exitCode = 2;
+  } else if (command === "promote") {
     process.exitCode = await runPromote(rest);
   } else if (command === "deploy") {
     process.exitCode = await runDeploy(rest);
