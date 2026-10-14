@@ -1,0 +1,10 @@
+{"version":1,"type":"event","event":{"seq":20,"operationId":"release","at":"2026-10-14T00:00:00Z","event":{"type":"submitted","kind":"release","repo":"fixture/repo","commitId":"candidate","submittedBy":"owner"}}}
+{"version":1,"type":"event","event":{"seq":21,"operationId":"release","at":"2026-10-14T00:00:01Z","event":{"type":"stage","stage":"verifying"}}}
+{"version":1,"type":"event","event":{"seq":22,"operationId":"release","at":"2026-10-14T00:00:02Z","event":{"type":"failed","reason":"fixture gate failure","command":"bun run verify:release"}}}
+{"version":1,"type":"event","event":{"seq":23,"operationId":"release","at":"2026-10-14T00:00:03Z","event":{"type":"released","result":{"status":"released","merge":"merge-commit"}}}}
+{"version":1,"type":"event","event":{"seq":24,"operationId":"deploy","at":"2026-10-14T00:00:04Z","event":{"type":"submitted","kind":"deploy","environment":"production","repo":"fixture/repo","commitId":"merge-commit","submittedBy":"owner","promotion":{"merge":"merge-commit","nonAdditiveMigrations":[]}}}}
+{"version":1,"type":"event","event":{"seq":25,"operationId":"deploy","at":"2026-10-14T00:00:05Z","event":{"type":"deployed","record":{"environment":"production","commitId":"merge-commit","previous":null,"changes":[],"projects":[]}}}}
+{"version":1,"type":"event","event":{"seq":26,"operationId":"deploy","at":"2026-10-14T00:00:06Z","event":{"type":"failed","reason":"fixture deploy failure","deployment":{"rollback":{"automatic":true,"reason":"restored"},"migrations":{"status":"applied"}}}}}
+{"version":1,"type":"event","event":{"seq":27,"operationId":"release","at":"2026-10-14T00:00:07Z","event":{"type":"release_coalesced","by":"newer","fixtureOnly":true}}}
+{"version":1,"type":"event","event":{"seq":28,"operationId":"release","at":"2026-10-14T00:00:08Z","event":{"type":"release_fallback","fixtureOnly":true}}}
+{"version":1,"type":"event","event":{"seq":29,"operationId":"suite","at":"2026-10-14T00:00:09Z","event":{"type":"suite_failed","reason":"fixture only; producer unavailable","fixtureOnly":true}}}

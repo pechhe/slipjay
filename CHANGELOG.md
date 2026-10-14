@@ -2,6 +2,12 @@
 
 ## v3.12.0
 
+- **Native Mac menu bar (#40):** a signed SwiftUI app shows both runner lanes,
+  held integrations, timing warnings and release outcomes. It sends deduplicated
+  release and needs-attention notifications and uses the existing CLI for controls
+  and logs. The queue snapshot retains recent Production deploy outcomes so a new
+  watcher can show failures and rollbacks. Build and install with `scripts/menu-bar.sh`.
+
 - **Watch runner queues and reconnect safely (#39):** `slipjay watch --json` streams
   authenticated queue snapshots, stored events and heartbeats, reconnecting with a
   replay cursor. `GET /v1/queue` exposes ordered lanes and runner timing facts;

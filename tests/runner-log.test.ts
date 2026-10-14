@@ -231,3 +231,19 @@ test("snapshot latest staging attempt includes failure after success and a failu
     assert.deepEqual(log.snapshot("runner").lastStagingDeploys.map((op) => [op.id, op.status, op.result?.type]), [["failed-B", "failed", "failed"], ["only-failed", "failed", "failed"]]);
   } finally { log.close(); }
 });
+
+test("snapshot retains a completed production outcome for a new watcher", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append("production", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "production", commitId: "candidate", submittedBy: "owner" });
+    log.append("production", { type: "failed", stage: "deploying", reason: "health failed", deployment: {
+      environment: "production", commitId: "candidate", previous: "previous", changes: [], projects: [],
+      rollback: { automatic: true, reason: "health failed" },
+    } });
+    const snapshot = log.snapshot("runner");
+    assert.deepEqual(snapshot.lanes.deploy, []);
+    const outcome = snapshot.recentProductionDeploys[0];
+    assert.equal(outcome?.id, "production");
+    assert.equal(outcome?.result?.type === "failed" && outcome.result.deployment?.rollback?.automatic, true);
+  } finally { log.close(); }
+});

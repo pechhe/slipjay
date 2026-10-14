@@ -516,3 +516,42 @@ Continue finite export from `nextSeq` while `hasMore` is true.
 `slipjay cancel <id>` requests queued-only cancellation and records the local
 hostname as its actor. Running operations are refused; cancellation does not relax
 the runner's kill safety.
+
+### Native Mac menu bar
+
+The SwiftUI app runs the installed `slipjay watch --json` CLI; it holds no credential,
+SSH forward or HTTP client. Its direct CLI default is `~/.bun/bin/slipjay`; set
+`SLIPJAY_CLI` to an explicit executable path when launching a different installation.
+Its child environment includes `~/.bun/bin`, `~/.local/bin` and system tools.
+The menu shows both ordered lanes, runner-owned timing, held and paused state,
+staging attempts, recent releases and contact. The hourly suite remains unavailable
+until its producer exists. Controls use existing CLI authority; queued cancellation
+asks for confirmation and unsafe kill stages are disabled. Logs open in a native
+window through `slipjay runner log`, without a shell.
+
+On the Mac with Command Line Tools (full Xcode is unnecessary):
+
+```sh
+bash scripts/menu-bar.sh build
+bash scripts/menu-bar.sh test
+bash scripts/menu-bar.sh install '<your signing identity>'
+bash scripts/menu-bar.sh status
+```
+
+Installation verifies the signature, preserves the previous bundle and login plist
+under `~/Library/Application Support/SlipJay/backups`, and registers a RunAtLoad
+LaunchAgent with KeepAlive disabled so Quit stays quit. The stable bundle identifier
+is `com.pechhe.slipjay-menubar`; use the same signing identity for upgrades. To recover,
+boot out that LaunchAgent, restore the saved bundle and plist, then bootstrap the
+restored plist. `SLIPJAY_SIGNING_IDENTITY` can supply the identity instead of argument 2.
+
+Release and needs-attention notifications are on by default; landing failures are
+opt-in. The app requests actual OS permission and shows denial in its menu. Dedup keys
+persist across reconnect/restart and are saved only when the OS accepts a notification
+request. Clicking an operation notification opens its run log. Signature/build tests
+prove neither OS notification delivery nor menu rendering: those need installed-Mac
+acceptance. Linux landing gates do not run or claim these Swift checks.
+
+For a static fixture launch (EOF does not reconnect), run the built executable with
+`--fixture <absolute-jsonl-path>`. This exercises native menu/permission behavior without
+controlling live work; never kill or cancel a real operation merely to test controls.

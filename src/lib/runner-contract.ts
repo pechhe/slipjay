@@ -309,6 +309,6 @@ export type QueueSnapshot = {
   version: 1; runner: string; seq: number; observedAt: string;
   lanes: { serial: WatchOperation[]; deploy: WatchOperation[] };
   paused: { by: string; at: string } | null; held: HeldIntegrationState[];
-  recentReleases: ReleaseOperation[]; lastStagingDeploys: DeployOperation[];
+  recentReleases: ReleaseOperation[]; recentProductionDeploys: DeployOperation[]; lastStagingDeploys: DeployOperation[];
   lastSuite: { status: "unavailable" };
 };
