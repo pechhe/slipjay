@@ -32,9 +32,9 @@ case "${1:-}" in
     launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null || true
     ditto "$app" "$installed"
     python3 - "$plist" "$installed/Contents/MacOS/SlipJay" <<'PY'
-import plistlib,sys
+import os,plistlib,sys
 with open(sys.argv[1],'wb') as f:
- plistlib.dump({'Label':'com.pechhe.slipjay-menubar','ProgramArguments':[sys.argv[2]],'RunAtLoad':True,'KeepAlive':False},f)
+ plistlib.dump({'Label':'com.pechhe.slipjay-menubar','ProgramArguments':[sys.argv[2]],'EnvironmentVariables':{'PATH':os.environ['PATH']},'RunAtLoad':True,'KeepAlive':False},f)
 PY
     plutil -lint "$plist"
     launchctl enable "gui/$(id -u)/com.pechhe.slipjay-menubar"

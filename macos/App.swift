@@ -27,7 +27,7 @@ import UserNotifications
     let cli = ProcessInfo.processInfo.environment["SLIPJAY_CLI"] ?? NSHomeDirectory() + "/.bun/bin/slipjay"
     var environment: [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = NSHomeDirectory() + "/.bun/bin:" + NSHomeDirectory() + "/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = NSHomeDirectory() + "/.bun/bin:" + NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")
         return env
     }
     override init() {
