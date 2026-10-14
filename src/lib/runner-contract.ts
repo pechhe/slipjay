@@ -290,21 +290,53 @@ export interface Executor {
 }
 
 /** Runner-side configuration: `~/.slipjay/runner/config.json`. The token comes from `SLIPJAY_RUNNER_TOKEN`. */
-export type RunnerControlRequest = { by: string };
+/** `operation` names the operation a kill targets; pause and resume take none. */
+export type RunnerControlRequest = { by: string; operation?: string };
+
+/**
+ * What a kill found. `refused`: the operation is past the killable stages. `not_running`: the named
+ * operation is not running (it finished, or has not started); `operation` is it, when known.
+ * `ambiguous`: an unnamed kill found several running, so it killed none.
+ */
+export type KillOutcome =
+  | { status: "idle" }
+  | { status: "killed"; operation: Operation }
+  | { status: "refused"; operation: Operation }
+  | { status: "not_running"; operation: Operation | null }
+  | { status: "ambiguous"; operations: Operation[] };
+
+/** How many landings, releases and resets of different repositories run at once, unless the config sets `workers`. */
+export const RUNNER_DEFAULT_WORKERS = 2;
+/** The systemd slice every run's scope joins, so one set of limits covers every gate, deploy and their children. */
+export const RUNNER_SLICE = "slipjay.slice";
+/** The slice's limits unless the config sets `limits`: systemd resource-control values. */
+export const RUNNER_DEFAULT_LIMITS: Readonly<Required<RunnerLimits>> = { memoryHigh: "40G", memoryMax: "48G", cpuQuota: "1400%", tasksMax: 4096 };
+export type RunnerLimits = { memoryHigh?: string; memoryMax?: string; cpuQuota?: string; tasksMax?: number };
 
 export type RunnerConfig = {
   /** Shown in every client progress line; defaults to the host name. */
   name?: string;
   /** Always loopback; the port defaults to RUNNER_DEFAULT_PORT. */
   listen?: { host?: "127.0.0.1"; port?: number };
-  /** Repositories this runner lands, keyed `owner/name`, with the git URL its warm checkout clones. */
-  repos: Record<string, { url: string }>;
+  /**
+   * Repositories this runner lands, keyed `owner/name`, with the git URL its warm checkout clones.
+   * Repositories with the same `lane` share one serial lane: give it to repositories whose gates
+   * share external state (a database, a deploy environment, fixed ports). Each defaults to its own.
+   */
+  repos: Record<string, { url: string; lane?: string }>;
   /**
    * jj settings the runner sets as repository config in every warm checkout before it
    * touches one, over RUNNER_JJ_DEFAULTS, so nothing depends on the host's own jj config. The runner commits as
    * `user.name` and `user.email`, which it requires at startup.
    */
   jj?: Record<string, string>;
+  /**
+   * How many repositories' serial lanes run at once (RUNNER_DEFAULT_WORKERS); each repository
+   * still runs one landing, release or reset at a time. 1 is the single serial lane.
+   */
+  workers?: number;
+  /** Combined limits of every run on a systemd host (RUNNER_DEFAULT_LIMITS), deploys included. */
+  limits?: RunnerLimits;
 };
 
 /** jj settings the runner sets unless its config overrides them: YardSmith checks in files over jj's 1MiB default. */
@@ -313,8 +345,18 @@ export const RUNNER_JJ_DEFAULTS: Readonly<Record<string, string>> = { "snapshot.
 /** Why the runner refuses to start with `config`; null when it can. */
 export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   const missing = ["user.name", "user.email"].filter((key) => !config.jj?.[key]?.trim());
-  return missing.length ? `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity` : null;
+  if (missing.length) return `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity`;
+  if (config.workers !== undefined && !(Number.isSafeInteger(config.workers) && config.workers >= 1)) return `The runner config's "workers" must be a whole number of at least 1`;
+  const limits = Object.entries(config.limits ?? {});
+  if (limits.some(([key, value]) => !(key in RUNNER_DEFAULT_LIMITS) || (key === "tasksMax" ? !(Number.isSafeInteger(value) && Number(value) >= 1) : typeof value !== "string" || !/^[0-9]+(?:\.[0-9]+)?[KMGT%]?$/.test(value))))
+    return `The runner config's "limits" takes memoryHigh and memoryMax (such as "40G"), cpuQuota (such as "1400%") and tasksMax (a whole number)`;
+  if (Object.values(config.repos).some((repo) => repo.lane !== undefined && (typeof repo.lane !== "string" || !repo.lane.trim()))) return `A repository's "lane" in the runner config must be a non-empty name`;
+  return null;
 };
+
+/** The serial lane a repository's landings, releases and resets take turns in. */
+export const repositoryLane = (config: Pick<RunnerConfig, "repos">, repo: string): string =>
+  Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1].lane?.trim() ?? repositoryKey(repo);
 
 /** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */
 export const repositoryKey = (name: string): string => name.toLowerCase();

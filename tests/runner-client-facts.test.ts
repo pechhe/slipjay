@@ -21,7 +21,7 @@ async function fixture() {
   const cwd = workspace.workspacePath;
   const log = openOperationLog(":memory:");
   const handler = createRunnerHandler({ log, token: "fake-token", runnerName: "fixture", readLog: async () => "", onSubmitted: () => {},
-    kill: () => null, subscribe: () => () => {} });
+    kill: () => ({ status: "idle" }), subscribe: () => () => {} });
   let loseAcknowledgement = false;
   let beforeAcknowledgement: (() => Promise<void>) | undefined;
   const eventIds: string[] = [];

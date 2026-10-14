@@ -432,10 +432,10 @@ try {
       const location = runnerLocation();
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
       process.stdout.write(await readRunLog(location, rest[1]!));
-    } else if (rest.length === 1 && (rest[0] === "kill" || rest[0] === "pause" || rest[0] === "resume")) {
+    } else if ((rest.length === 1 && (rest[0] === "kill" || rest[0] === "pause" || rest[0] === "resume")) || (rest.length === 2 && rest[0] === "kill" && !rest[1]!.startsWith("-"))) {
       const location = runnerLocation();
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
-      const outcome = await controlRunner(location, rest[0]);
+      const outcome = await controlRunner(location, rest[0] as "kill" | "pause" | "resume", process.env, rest[1]);
       console.log(outcome.line);
       if (!outcome.ok) process.exitCode = 1;
     } else if (rest.join(" ") === "serve") {
@@ -444,7 +444,7 @@ try {
       // systemd stops the unit with SIGTERM; a running gate is left to restart recovery.
       await new Promise<void>((resolve) => process.once("SIGTERM", () => resolve()));
       process.exit(0);
-    } else throw new Error("Usage: slipjay runner <serve|log <operation>|kill|pause|resume>");
+    } else throw new Error("Usage: slipjay runner <serve|log <operation>|kill [<operation>]|pause|resume>");
   } else if (command === "guard") {
     // Claude Code PreToolUse hook: reads the tool call on stdin, prints a deny decision.
     let input = "";
@@ -459,7 +459,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

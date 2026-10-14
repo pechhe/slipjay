@@ -7,7 +7,7 @@ import { createWorkspace } from "../src/lib/workspace-create.ts";
 import { controlRunner, landThroughRunner, releaseThroughRunner } from "../src/lib/runner-client.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
-import type { Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
+import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { configureLocalGithubTransport, jj, project } from "./support/workspace-project.ts";
@@ -28,9 +28,10 @@ async function fixture(dropStream = false, racedSubmission = false) {
       const stored = log.append(id, event);
       for (const listener of listeners) listener(stored);
     };
-    let killed: { operation: Operation; killed: boolean } | null = null;
+    let killed: KillOutcome = { status: "idle" };
+    const killRequests: (string | undefined)[] = [];
     const handler = createRunnerHandler({ log, token: "test-token", runnerName: "test-runner",
-      readLog: async () => "test log", onSubmitted: () => {}, kill: () => killed,
+      readLog: async () => "test log", onSubmitted: () => {}, kill: (operationId) => { killRequests.push(operationId); return killed; },
       subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     });
     const streamRequests: number[] = [];
@@ -63,7 +64,8 @@ async function fixture(dropStream = false, racedSubmission = false) {
     const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
       onLine: (line: string) => { lines.push(line); } };
     return { ...f, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
-      setKill: (outcome: { operation: Operation; killed: boolean } | null) => { killed = outcome; },
+      setKill: (outcome: KillOutcome) => { killed = outcome; },
+      killRequests,
       dispose: async () => {
         try { await server.close(); log.close(); }
         finally { try { transport.restore(); } finally { await f.dispose(); } }
@@ -99,12 +101,37 @@ test("owner controls say what they did", async () => {
     const operation: Operation = { kind: "landing", id: "op", repo: "fixture/project", changeId: f.change, commitId: f.commit, bookmark: candidateBookmark(f.change),
       submittedBy: "test", status: "running", stage: "verifying", submittedAt: "", runs: [], lastSeq: 1 };
     const subject = `landing ${f.change.slice(0, 12)}`;
-    f.setKill({ operation, killed: true });
+    f.setKill({ status: "killed", operation });
     assert.deepEqual(await control("kill"), { ok: true, line: `[runner test-runner] killed ${subject}` });
-    f.setKill({ operation: { ...operation, stage: "installing" as const }, killed: true });
+    f.setKill({ status: "killed", operation: { ...operation, stage: "installing" as const } });
     assert.deepEqual(await control("kill"), { ok: true, line: `[runner test-runner] killing ${subject}: it stops when installing finishes, before verification` });
-    f.setKill({ operation: { ...operation, stage: "publishing" as const }, killed: false });
+    f.setKill({ status: "refused", operation: { ...operation, stage: "publishing" as const } });
     assert.deepEqual(await control("kill"), { ok: false, line: `[runner test-runner] not killed: ${subject} publishing is past verification and cannot be killed; it finishes on its own` });
+    const id = "op_00mv8o85yu_f70a90f79d88f6b6664c3c82";
+    f.setKill({ status: "killed", operation: { ...operation, id } });
+    assert.deepEqual(await controlRunner(f.server.url, "kill", f.options.env, id), { ok: true, line: `[runner test-runner] killed ${subject}` });
+    assert.equal(f.killRequests.at(-1), id, "a named kill reaches the runner with its operation");
+    f.setKill({ status: "not_running", operation: { ...operation, id, status: "landed" } });
+    assert.deepEqual(await controlRunner(f.server.url, "kill", f.options.env, id), { ok: false, line: `[runner test-runner] not killed: ${subject} is not running (landed); nothing was killed` });
+    f.setKill({ status: "not_running", operation: null });
+    assert.deepEqual(await controlRunner(f.server.url, "kill", f.options.env, id), { ok: false, line: `[runner test-runner] not killed: ${id} is not a known operation; nothing was killed` });
+    const other: Operation = { kind: "release", id: "op_00mv8o85yu_aaaaaaaaaaaaaaaaaaaaaaaa", repo: "fixture/other", commitId: "c".repeat(40), migrationsReady: false, submittedBy: "test", status: "running", stage: "verifying", submittedAt: "", runs: [], lastSeq: 2 };
+    f.setKill({ status: "ambiguous", operations: [{ ...operation, id }, other] });
+    assert.deepEqual(await control("kill"), { ok: false, line: `[runner test-runner] not killed: 2 operations are running; name one:\n  slipjay runner kill ${id}  (${subject}, verifying)\n  slipjay runner kill ${other.id}  (release cccccccccccc, verifying)` });
+    assert.equal(f.killRequests.at(-1), undefined, "an unnamed kill names no operation");
+    await assert.rejects(controlRunner(f.server.url, "kill", f.options.env, "not-an-id"), /HTTP 400: Invalid control request/);
+  } finally { await f.dispose(); }
+}, 60_000);
+
+test("a landing's stages end with this machine's housekeeping once the runner reports its verdict", async () => {
+  const f = await fixture(false, true);
+  try {
+    const stages: string[] = [];
+    const running = landThroughRunner(f.cwd, { ...f.options, onStage: (stage) => stages.push(stage) });
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    f.append(f.log.openOperations()[0]!.id, { type: "cancelled", reason: "fixture done" });
+    await running;
+    assert.equal(stages.at(-1), "housekeeping", stages.join());
   } finally { await f.dispose(); }
 }, 60_000);
 

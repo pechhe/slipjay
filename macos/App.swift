@@ -143,7 +143,7 @@ import UserNotifications
                 process.waitUntilExit()
                 let text = String(decoding: data, as: UTF8.self)
                 Task { @MainActor in
-                    if process.terminationStatus != 0 { self.error = text.isEmpty ? "SlipJay refused or failed this action; inspect the CLI runner log." : text }
+                    if process.terminationStatus != 0 { self.error = ControlPolicy.commandError(arguments: arguments, output: text) }
                     completion(text)
                 }
             } catch { Task { @MainActor in self.error = "Could not launch SlipJay" } }
@@ -219,6 +219,7 @@ struct RunnerMenu: View {
     @ObservedObject var model: RunnerAppModel
     @State private var controls = ControlPolicy()
     private var cancelling: Operation? { controls.pendingCancellation }
+    private var killing: Operation? { controls.pendingKill }
     func age(_ stamp: String?) -> String {
         guard let date = runnerDate(stamp) else { return "unknown" }
         return "\(max(0, Int(Date().timeIntervalSince(date))))s"
@@ -241,7 +242,7 @@ struct RunnerMenu: View {
                 Button("Log") { model.openLog(item.id) }
                 if item.status == "queued" { Button("Cancel…") { _ = controls.requestCancellation(item) } }
                 if item.status == "running" {
-                    Button("Kill") { if let arguments = ControlPolicy.killCommand(for: item) { model.command(arguments) { _ in } } }.disabled(ControlPolicy.killCommand(for: item) == nil)
+                    Button("Kill…") { _ = controls.requestKill(item) }.disabled(ControlPolicy.killCommand(for: item) == nil)
                     if let reason = item.kill?.reason { Text(reason).font(.caption) }
                 }
             }
@@ -254,12 +255,13 @@ struct RunnerMenu: View {
                     Text("SlipJay · \(model.state.connection)").font(.title3)
                     Text("Last contact: \(model.state.lastContact.map { Int(Date().timeIntervalSince($0)).description + "s ago" } ?? "unavailable")").font(.caption)
                     if let error = model.error { Text(error).foregroundColor(.red).textSelection(.enabled) }
+                    if let refusal = controls.refusal { Text(refusal).foregroundColor(.red) }
                     if let snapshot = model.state.snapshot {
                         if let pause = snapshot.paused { Text("Paused by \(pause.by) · \(age(pause.at))") }
                         ForEach(snapshot.held, id: \.repo) { held in
                             Text("Held \(held.repo) · \(held.commitId.prefix(8)) · \(age(held.since)) · retries \(held.retries)\n\(held.reason)").foregroundColor(.red)
                         }
-                        Text("Serial lane").font(.headline)
+                        Text("Landings, releases and resets: one at a time per repository").font(.headline)
                         if snapshot.lanes.serial.isEmpty { Text("Idle") }
                         ForEach(snapshot.lanes.serial) { operation($0) }
                         Divider(); Text("Deploy lane").font(.headline)
@@ -284,6 +286,10 @@ struct RunnerMenu: View {
                     Button("Quit") { model.stop(); NSApp.terminate(nil) }
                 }.padding().frame(width: 480, alignment: .leading)
             }.frame(width: 480, height: 620)
+            .confirmationDialog("Kill \(killing?.kind ?? "operation") in \(killing?.repo ?? "") (\(killing?.commitId.prefix(8) ?? ""))?", isPresented: Binding(get: { killing != nil }, set: { if !$0 { controls.dismissKill() } }), presenting: killing) { item in
+                Button("Kill \(item.kind)", role: .destructive) { if let arguments = controls.confirmKill(current: model.state.operations[item.id]) { model.command(arguments) { _ in } } }
+                Button("Keep running", role: .cancel) { controls.dismissKill() }
+            } message: { item in Text(ControlPolicy.killConsequence(item)) }
         }.confirmationDialog("Cancel \(cancelling?.kind ?? "operation") in \(cancelling?.repo ?? "") (\(cancelling?.commitId.prefix(8) ?? ""))?", isPresented: Binding(get: { cancelling != nil }, set: { if !$0 { controls.dismissCancellation() } })) {
             Button("Cancel queued operation", role: .destructive) { if let item = cancelling, let arguments = controls.confirmCancellation(current: model.state.operations[item.id]) { model.command(arguments) { _ in } } }
             Button("Keep queued", role: .cancel) { controls.dismissCancellation() }

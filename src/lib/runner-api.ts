@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { ClientFact, DeployRequest, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import type { ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -10,7 +10,7 @@ export function createRunnerHandler(input: {
   readLog(operationId: string): Promise<string | null>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
-  kill(): { operation: Operation; killed: boolean } | null;
+  kill(operationId?: string): KillOutcome;
   /** A queued operation was cancelled: its candidate bookmark is the queue's to delete. */
   onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
@@ -64,10 +64,14 @@ export function createRunnerHandler(input: {
       if (!validControl(body))
         return json({ error: "Invalid control request" }, 400);
       if (control[1] === "kill") {
-        const outcome = input.kill();
-        if (outcome && !outcome.killed)
+        const outcome = input.kill(body.operation);
+        if (outcome.status === "refused")
           return json({ operation: outcome.operation, reason: `${outcome.operation.stage} is past verification and cannot be killed; it finishes on its own` }, 409);
-        return json({ operation: outcome?.operation ?? null });
+        if (outcome.status === "not_running")
+          return json({ operation: outcome.operation, reason: outcome.operation ? `is not running (${outcome.operation.status}); nothing was killed` : "is not a known operation; nothing was killed" }, 409);
+        if (outcome.status === "ambiguous")
+          return json({ operations: outcome.operations, reason: `${outcome.operations.length} operations are running; kill names one: ${outcome.operations.map((operation) => operation.id).join(", ")}` }, 409);
+        return json({ operation: outcome.status === "killed" ? outcome.operation : null });
       }
       const pausing = control[1] === "pause";
       if (pausing !== (input.log.paused() !== null))
@@ -279,7 +283,9 @@ function validSubmission(body: unknown): body is SubmitRequest {
 }
 
 function validControl(body: unknown): body is RunnerControlRequest {
-  return typeof body === "object" && body !== null && typeof (body as Record<string, unknown>).by === "string" && ((body as Record<string, unknown>).by as string).trim().length > 0;
+  const fields = body as Record<string, unknown>;
+  return typeof body === "object" && body !== null && typeof fields.by === "string" && fields.by.trim().length > 0
+    && (fields.operation === undefined || (typeof fields.operation === "string" && /^op_[0-9a-z]+_[0-9a-f]+$/.test(fields.operation)));
 }
 
 function validRelease(body: unknown): body is ReleaseRequest {

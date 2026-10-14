@@ -21,7 +21,7 @@ async function fixture() {
   const listeners = new Set<(event: StoredEvent) => void>();
   let submissions = 0;
   let onSubscribe: (() => void) | undefined;
-  let killOutcome: ReturnType<Parameters<typeof createRunnerHandler>[0]["kill"]> = null;
+  let killOutcome: ReturnType<Parameters<typeof createRunnerHandler>[0]["kill"]> = { status: "idle" };
   const handler = createRunnerHandler({
     log, token, runnerName: "test-runner",
     readLog: (id) => Promise.resolve(id === "missing-log" ? null : "command output\n"),
@@ -319,9 +319,9 @@ test("owner controls kill the running operation until verification ends, and pau
     assert.equal((await control("kill", {})).status, 400);
     assert.deepEqual(await (await control("kill")).json(), { operation: null });
     const { operation } = await submitted(await f.submit());
-    f.killOutcome = { operation, killed: true };
+    f.killOutcome = { status: "killed", operation };
     assert.equal((await (await control("kill")).json() as { operation: { id: string } }).operation.id, operation.id);
-    f.killOutcome = { operation: { ...operation, stage: "publishing" }, killed: false };
+    f.killOutcome = { status: "refused", operation: { ...operation, stage: "publishing" } };
     const refused = await control("kill");
     assert.equal(refused.status, 409);
     assert.match((await refused.json() as { reason: string }).reason, /publishing is past verification/);
@@ -445,7 +445,7 @@ test("global feed closes a slow consumer and releases its durable subscription",
   const subscribe = log.subscribe.bind(log);
   log.subscribe = (listener) => { active++; const stop = subscribe(listener); return () => { active--; stop(); }; };
   try {
-    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => null, subscribe });
+    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe });
     const request = () => new Request("http://localhost/v1/metrics/events?since=0", { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" } });
     const response = await handler(request());
     assert.equal(active, 1);
@@ -475,7 +475,7 @@ test("snapshot cursor replays the append between snapshot and stream and the sub
     return stop;
   };
   try {
-    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => null, subscribe });
+    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe });
     const snapshot = log.snapshot("r");
     log.append("control", { type: "paused", by: "between" });
     const response = await handler(new Request(`http://localhost/v1/metrics/events?since=${snapshot.seq}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" } }));
@@ -493,7 +493,7 @@ test("snapshot cursor replays the append between snapshot and stream and the sub
 test("cancel rechecks state after a delayed request body", async () => {
   const log = openOperationLog(":memory:");
   try {
-    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => null, subscribe: log.subscribe });
+    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: log.subscribe });
     for (const stage of ["verifying", "publishing"] as const) {
       log.append(stage, { type: "submitted", ...submission() });
       let release!: () => void;

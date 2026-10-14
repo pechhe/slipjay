@@ -74,7 +74,9 @@ if ("${step}"==="apply") fs.writeFileSync(db, JSON.stringify(wanted));
 else process.exit(JSON.stringify(applied)===JSON.stringify(wanted)?0:2);`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
-async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false) {
+// `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
+async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
+  { workers, other = false, lane }: { workers?: number; other?: boolean; lane?: string } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -133,10 +135,23 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   jj(seed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
   if (release) jj(seed, ["git", "push", "--remote", "origin", "--named", "release=main"]);
   jj(root, ["git", "clone", origin, author]);
+  const otherOrigin = join(root, "other.git");
+  const otherAuthor = join(root, "other-author");
+  if (other) {
+    const otherSeed = join(root, "other-seed");
+    await mkdir(otherSeed);
+    git(["init", "--bare", "-b", "main", otherOrigin]);
+    jj(otherSeed, ["git", "init"]);
+    await writeFile(join(otherSeed, "slipjay.json"), await readFile(join(seed, "slipjay.json"), "utf8"));
+    jj(otherSeed, ["describe", "-m", "Seed policy"]);
+    jj(otherSeed, ["git", "remote", "add", "origin", otherOrigin]);
+    jj(otherSeed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
+    jj(root, ["git", "clone", otherOrigin, otherAuthor]);
+  }
   // While `reject-push` exists the remote refuses every push, as an outage would.
   await writeFile(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -e ${JSON.stringify(join(root, "reject-push"))} ]; then echo "remote unavailable" >&2; exit 1; fi\n`);
   await chmod(join(origin, "hooks", "pre-receive"), 0o755);
-  const log = openOperationLog(":memory:");
+  const log = openOperationLog(":memory:", { ...workers === undefined ? {} : { workers }, ...lane ? { lane: () => lane } : {} });
   const published: StoredEvent[] = [];
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
@@ -153,14 +168,16 @@ async function fixture(migrations = false, release = false, deployments?: { minI
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
   });
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } },
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {} },
+    ...workers === undefined ? {} : { workers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
   const parents = (commit: string) => git(["--git-dir", origin, "log", "-1", "--format=%P", commit]).split(" ");
   const remoteFile = (file: string) => git(["--git-dir", origin, "show", `main:${file}`]);
-  async function push(): Promise<SubmitRequest> {
+  const authorRoot = author;
+  async function push(author = authorRoot, repo = "fixture/repo"): Promise<SubmitRequest> {
     // The runner deletes candidate bookmarks when it closes an operation.
     jj(author, ["git", "fetch", "--remote", "origin"]);
     const changeId = jj(author, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
@@ -171,14 +188,14 @@ async function fixture(migrations = false, release = false, deployments?: { minI
       jj(author, ["bookmark", "set", bookmark, "-r", "@", "--allow-backwards"]);
       jj(author, ["git", "push", "--remote", "origin", "--bookmark", bookmark]);
     } else jj(author, ["git", "push", "--remote", "origin", "--named", `${bookmark}=@`]);
-    return { repo: "fixture/repo", changeId, commitId, bookmark, submittedBy: "test" };
+    return { repo, changeId, commitId, bookmark, submittedBy: "test" };
   }
-  async function candidate(file: string): Promise<SubmitRequest> {
+  async function candidate(file: string, author = authorRoot, repo = "fixture/repo"): Promise<SubmitRequest> {
     jj(author, ["new", "main"]);
     await mkdir(join(author, file, ".."), { recursive: true });
     await writeFile(join(author, file), `${file}\n`);
     jj(author, ["describe", "-m", `Add ${file}`]);
-    return push();
+    return push(author, repo);
   }
   function submit(request: SubmitRequest) {
     const id = newOperationId();
@@ -199,7 +216,8 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const result = (id: string) => log.operation(id)!.result;
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
-  return { root, requestedTimeouts, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
+  const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
+  return { root, requestedTimeouts, candidateAtVerdict, development, land, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
@@ -342,15 +360,14 @@ test("the owner's kill stops a running gate: cancelled, never passed, main uncha
     await writeFile(join(f.author, "hang"), `${pids}\n`);
     const killed = f.submit(await f.push());
     const next = f.submit(await f.candidate("next.txt"));
-    assert.equal(f.queue.kill(), null, "an idle runner has nothing to kill");
+    assert.deepEqual(f.queue.kill(), { status: "idle" }, "an idle runner has nothing to kill");
     f.queue.wake();
     const [gatePid, childPid, toolPid] = await until(async () => {
       const text = await readFile(pids, "utf8").catch(() => "");
       return text ? JSON.parse(text) as [number, number, number] : undefined;
     });
     const outcome = f.queue.kill();
-    assert.equal(outcome?.killed, true);
-    assert.equal(outcome?.operation.id, killed);
+    assert.ok(outcome.status === "killed" && outcome.operation.id === killed, JSON.stringify(outcome));
     await f.queue.idle();
     assert.deepEqual(f.result(killed), { type: "cancelled", reason: OWNER_KILL_REASON });
     const landed = f.result(next);
@@ -361,7 +378,7 @@ test("the owner's kill stops a running gate: cancelled, never passed, main uncha
     // A systemd scope reaches the tool's own process group; a bare process group cannot.
     if (process.platform === "linux" && process.env.XDG_RUNTIME_DIR) assert.equal(alive(toolPid), false, "the gate's detached tool is gone");
     else process.kill(toolPid, "SIGKILL");
-    assert.equal(f.queue.kill(), null);
+    assert.deepEqual(f.queue.kill(), { status: "idle" });
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -373,8 +390,7 @@ test("a kill past verification is refused and the landing completes", async () =
     f.queue.wake();
     await until(() => f.log.operation(id)!.stage === "finalizing" ? true : undefined);
     const outcome = f.queue.kill();
-    assert.equal(outcome?.killed, false);
-    assert.equal(outcome?.operation.stage, "finalizing");
+    assert.ok(outcome.status === "refused" && outcome.operation.stage === "finalizing", JSON.stringify(outcome));
     await rm(join(f.root, "hold-finalize"));
     await f.queue.idle();
     assert.equal(f.result(id)?.type, "landed", JSON.stringify(f.result(id)));
@@ -390,10 +406,85 @@ test("the owner's kill stops a release's verification and publishes nothing", as
     const release = f.submitRelease(f.main());
     f.queue.wake();
     await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
-    assert.equal(f.queue.kill()?.killed, true);
+    assert.equal(f.queue.kill().status, "killed");
     await f.queue.idle();
     assert.deepEqual(f.result(release), { type: "cancelled", reason: OWNER_KILL_REASON });
     assert.equal(f.releaseRef(), base);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+/** Commit a `hang` gate in `author` that records its pids in `pids`, and push it: the gate then never ends. */
+async function hanging(f: Awaited<ReturnType<typeof fixture>>, pids: string, author = f.author, repo = "fixture/repo") {
+  await f.candidate("hang", author, repo);
+  await writeFile(join(author, "hang"), `${pids}\n`);
+  return f.push(author, repo);
+}
+const started = (pids: string) => until(async () => await readFile(pids, "utf8").then((text) => text ? true : undefined, () => undefined));
+
+test("another repository's landing runs beside a hanging one; a kill must name which of the two it stops", async () => {
+  const f = await fixture(false, false, undefined, false, { other: true });
+  try {
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    const queued = f.submit(await f.candidate("queued.txt"));
+    const otherPids = join(f.root, "other-pids.json");
+    const other = f.submit(await hanging(f, otherPids, f.otherAuthor, "fixture/other"));
+    f.queue.wake();
+    await started(pids);
+    await started(otherPids);
+    assert.deepEqual([f.log.operation(stuck)!.status, f.log.operation(other)!.status], ["running", "running"]);
+    // The same repository's next landing still waits for its predecessor.
+    assert.match(f.log.operation(queued)!.waitingFor ?? "", /^landing [0-9a-z]{12}$/);
+    const ambiguous = f.queue.kill();
+    assert.ok(ambiguous.status === "ambiguous" && ambiguous.operations.map((operation) => operation.id).sort().join() === [stuck, other].sort().join(), JSON.stringify(ambiguous));
+    assert.equal(f.log.operation(stuck)!.status, "running", "an ambiguous kill stops nothing");
+    assert.deepEqual(f.queue.kill("op_0000000000_000000000000000000000000"), { status: "not_running", operation: null });
+    assert.equal(f.queue.kill(other).status, "killed");
+    await until(() => f.log.operation(other)!.result ? true : undefined);
+    assert.deepEqual(f.result(other), { type: "cancelled", reason: OWNER_KILL_REASON });
+    assert.equal(f.log.operation(stuck)!.status, "running", "killing one operation leaves the other running");
+    const finished = f.queue.kill(other);
+    assert.ok(finished.status === "not_running" && finished.operation?.status === "cancelled", JSON.stringify(finished));
+    // With one left running, the unnamed kill stops it, and the queued landing follows.
+    assert.equal(f.queue.kill().status, "killed");
+    await f.queue.idle();
+    assert.equal(f.result(queued)?.type, "landed", JSON.stringify(f.result(queued)));
+    for (const file of [pids, otherPids]) for (const pid of JSON.parse(await readFile(file, "utf8")) as number[]) try { process.kill(pid, "SIGKILL"); } catch {}
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("repositories that share a lane take turns even with a worker free", async () => {
+  const f = await fixture(false, false, undefined, false, { other: true, lane: "shared-database" });
+  try {
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    const other = f.submit(await f.candidate("other.txt", f.otherAuthor, "fixture/other"));
+    f.queue.wake();
+    await started(pids);
+    assert.deepEqual([f.log.operation(other)!.status, f.log.operation(other)!.position], ["queued", 2]);
+    assert.match(f.log.operation(other)!.waitingFor ?? "", /^landing [0-9a-z]{12}$/);
+    assert.equal(f.queue.kill(stuck).status, "killed");
+    await f.queue.idle();
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+    for (const pid of JSON.parse(await readFile(pids, "utf8")) as number[]) try { process.kill(pid, "SIGKILL"); } catch {}
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("with one worker, another repository's landing waits for it and names what holds the worker", async () => {
+  const f = await fixture(false, false, undefined, false, { other: true, workers: 1 });
+  try {
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    const other = f.submit(await f.candidate("other.txt", f.otherAuthor, "fixture/other"));
+    f.queue.wake();
+    await started(pids);
+    const waiting = f.log.operation(other)!;
+    assert.equal(waiting.status, "queued");
+    assert.match(waiting.waitingFor ?? "", /^a worker \(landing [0-9a-z]{12}\)$/);
+    assert.equal(f.queue.kill(stuck).status, "killed");
+    await f.queue.idle();
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+    for (const pid of JSON.parse(await readFile(pids, "utf8")) as number[]) try { process.kill(pid, "SIGKILL"); } catch {}
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -1202,7 +1293,7 @@ test("the owner's kill stops a running reset: cancelled, never passed, and the s
     f.submit(await f.candidate("a.txt"));
     f.queue.wake();
     await until(async () => await stat(join(f.root, "reset-started")).then(() => true, () => undefined));
-    assert.equal(f.queue.kill()?.killed, true);
+    assert.equal(f.queue.kill().status, "killed");
     await f.queue.idle();
     const resets = f.log.resets("fixture/repo");
     assert.equal(resets.length, 1);

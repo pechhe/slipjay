@@ -2,7 +2,7 @@ import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { classifyFailure } from "./failure-classification.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState } from "./runner-contract.ts";
 
 export function newOperationId(): string {
@@ -11,7 +11,11 @@ export function newOperationId(): string {
 
 type EventRow = { seq: number; operation_id: string; at: string; data: string };
 
-export function openOperationLog(path: string): OperationLog {
+/**
+ * `workers` and `lane` are the queue's (runner config `workers`, `repositoryLane`), so a queued
+ * operation names what it really waits for.
+ */
+export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, lane = (repo: string) => repo }: { workers?: number; lane?: (repo: string) => string } = {}): OperationLog {
   const db = new DatabaseSync(path);
   if (path !== ":memory:")
     db.exec("PRAGMA journal_mode = WAL");
@@ -56,22 +60,29 @@ export function openOperationLog(path: string): OperationLog {
   }
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
-  // Two serial lanes across repositories, each in submission order: landings with
-  // releases and resets, and deploys.
+  // Lanes in submission order: each repository lane's landings with its releases and resets,
+  // and deploys. Queued work names the lane's running operation; with none, the lane's first
+  // queued operation, while every worker is busy, names the operations holding them.
   function queue(): Operation[] {
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
     const held = paused() !== null;
-    for (const lane of [open.filter((operation) => operation.kind !== "deploy"), open.filter((operation) => operation.kind === "deploy")]) {
-      const running = lane.find((operation) => operation.status === "running");
-      lane.forEach((operation, index) => {
+    const serial = open.filter((operation) => operation.kind !== "deploy");
+    const busy = serial.filter((operation) => operation.status === "running");
+    const lanes = [...new Set(serial.map((operation) => lane(operation.repo)))].map((key) => serial.filter((operation) => lane(operation.repo) === key));
+    for (const entries of [...lanes, open.filter((operation) => operation.kind === "deploy")]) {
+      const running = entries.find((operation) => operation.status === "running");
+      entries.forEach((operation, index) => {
         operation.position = index + 1;
         if (operation.status !== "queued") return;
         if (held) operation.stage = "paused";
         if (running) operation.waitingFor = label(running);
+        else if (index === 0 && operation.kind !== "deploy" && busy.length >= workers) operation.waitingFor = `a worker (${busy.map(label).join(", ")})`;
       });
     }
     return open;
   }
+  /** The lane an operation queues in: its repository's serial lane, or the deploys. */
+  const laneOf = (operation: Operation) => queue().filter((entry) => entry.kind === "deploy" ? operation.kind === "deploy" : operation.kind !== "deploy" && lane(entry.repo) === lane(operation.repo));
   // An open operation carries its queue fields; a closed one is its bare projection.
   function placed<T extends Operation>(projected: T, open: Operation[]): T {
     return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;
@@ -153,7 +164,7 @@ export function openOperationLog(path: string): OperationLog {
       for (const listener of [...listeners]) listener(stored);
       if (event.type === "submitted") {
         const current = operation(operationId)!;
-        const lane = queue().filter((entry) => (entry.kind === "deploy") === (current.kind === "deploy"));
+        const lane = laneOf(current);
         append(operationId, { type: "queue_snapshot", position: current.position ?? 1, depth: lane.length, waitingFor: current.waitingFor ?? (lane.at(-2)?.id ?? null), paused: paused() !== null });
       }
       return stored;

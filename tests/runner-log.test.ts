@@ -65,18 +65,33 @@ test("operation log projects stages, command runs and the latest terminal result
   }
 });
 
-test("queue positions follow submitted sequence across repos and close without a position", () => {
-  const log = openOperationLog(":memory:");
+test("queue positions follow submitted sequence within each repository and close without a position", () => {
+  const log = openOperationLog(":memory:", { workers: 1 });
   try {
     log.append("first", submission());
     log.append("other", submission("owner/other"));
     log.append("second", submission());
     log.append("first", { type: "stage", stage: "verifying" });
-    assert.deepEqual(log.openOperations().map((op) => [op.id, op.position]), [["first", 1], ["other", 2], ["second", 3]]);
+    assert.deepEqual(log.openOperations().map((op) => [op.id, op.position]), [["first", 1], ["other", 1], ["second", 2]]);
+    // Another repository's operation waits for no landing of this one, only for a free worker.
+    assert.equal(log.operation("other")?.waitingFor, `a worker (landing ${"k".repeat(12)})`);
+    const two = openOperationLog(":memory:");
+    two.append("first", submission());
+    two.append("other", submission("owner/other"));
+    two.append("first", { type: "stage", stage: "verifying" });
+    assert.equal(two.operation("other")?.waitingFor, undefined, "with a worker free, nothing holds it");
+    two.close();
+    const shared = openOperationLog(":memory:", { lane: () => "shared" });
+    shared.append("first", submission());
+    shared.append("other", submission("owner/other"));
+    shared.append("first", { type: "stage", stage: "verifying" });
+    assert.deepEqual([shared.operation("other")?.position, shared.operation("other")?.waitingFor], [2, `landing ${"k".repeat(12)}`], "repositories sharing a lane queue together");
+    shared.close();
+    assert.equal(log.operation("second")?.waitingFor, `landing ${"k".repeat(12)}`);
     assert.deepEqual(log.openOperations("owner/repo").map((op) => op.id), ["first", "second"]);
     log.append("first", { type: "cancelled", reason: "test terminal" });
     assert.equal(log.operation("first")?.position, undefined);
-    assert.equal(log.operation("second")?.position, 2);
+    assert.equal(log.operation("second")?.position, 1);
     assert.deepEqual(log.operationsForChange("owner/repo", "k".repeat(32)).map((op) => op.id), ["second", "first"]);
     assert.deepEqual(log.operationsForChange("owner/repo", "z".repeat(32)), []);
   } finally {
@@ -170,7 +185,7 @@ test("a repository's releases list newest first, without its deploys or other re
     release("other", "owner/other");
     log.append("deploy", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "staging", commitId: "d".repeat(40), submittedBy: "author" });
     release("second", "owner/repo");
-    assert.deepEqual(log.releases("owner/repo").map((op) => [op.id, op.kind, op.position]), [["second", "release", 3], ["first", "release", 1]]);
+    assert.deepEqual(log.releases("owner/repo").map((op) => [op.id, op.kind, op.position]), [["second", "release", 2], ["first", "release", 1]]);
     assert.deepEqual(log.releases("owner/none"), []);
   } finally {
     log.close();
@@ -188,7 +203,7 @@ test("a repository's resets share the landing lane, list newest first and close 
     log.append("first", { type: "stage", stage: "resetting" });
     assert.equal(log.operation("landing")!.waitingFor, `reset ${"e".repeat(12)}`);
     log.append("first", { type: "reset", target: "db", source: "f".repeat(40) });
-    assert.deepEqual(log.resets("owner/repo").map((op) => [op.id, op.kind, op.status, op.position]), [["second", "reset", "queued", 3], ["first", "reset", "reset", undefined]]);
+    assert.deepEqual(log.resets("owner/repo").map((op) => [op.id, op.kind, op.status, op.position]), [["second", "reset", "queued", 2], ["first", "reset", "reset", undefined]]);
     assert.deepEqual(log.resets("owner/repo")[1]!.result, { type: "reset", target: "db", source: "f".repeat(40) });
     assert.deepEqual(log.resets("owner/none"), []);
   } finally {

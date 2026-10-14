@@ -3,7 +3,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { createRunnerHandler } from "./runner-api.ts";
-import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, runnerConfigProblem } from "./runner-contract.ts";
+import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
@@ -26,9 +26,9 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const problem = runnerConfigProblem(config);
   if (problem) throw new Error(`${problem}; rerun scripts/setup-runner.sh or add it to ${join(home, "config.json")}`);
   mkdirSync(home, { recursive: true });
-  const log = openOperationLog(join(home, "operations.sqlite"));
+  const log = openOperationLog(join(home, "operations.sqlite"), { ...config.workers === undefined ? {} : { workers: config.workers }, lane: (repo) => repositoryLane(config, repo) });
   const queue = createRunnerQueue({
-    log, home, config, executor: localExecutor(config.name ?? hostname(), env),
+    log, home, config, executor: localExecutor(config.name ?? hostname(), env, config.limits),
     environment: () => env,
   });
   await queue.recover();

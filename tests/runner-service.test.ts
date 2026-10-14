@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
+import { repositoryLane, runnerConfigProblem } from "../src/lib/runner-contract.ts";
 import { startRunner } from "../src/lib/runner-service.ts";
 
 test("the runner refuses to start without the commit identity its config must name", async () => {
@@ -56,4 +57,17 @@ test("runner controls reach a connected metrics stream through the durable log",
     await runner?.close();
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test("the runner refuses a config whose workers, limits or lanes it cannot honour", () => {
+  const base = { repos: { "Owner/Repo": { url: "git@example.com:owner/repo.git" } }, jj: { "user.name": "Runner", "user.email": "runner@example.com" } };
+  assert.equal(runnerConfigProblem(base), null);
+  assert.equal(runnerConfigProblem({ ...base, workers: 2, limits: { memoryHigh: "40G", memoryMax: "48G", cpuQuota: "1400%", tasksMax: 4096 } }), null);
+  for (const workers of [0, 1.5, "2" as unknown as number, Number.NaN]) assert.match(runnerConfigProblem({ ...base, workers }) ?? "", /"workers"/);
+  assert.match(runnerConfigProblem({ ...base, limits: { memoryMax: "lots" } }) ?? "", /"limits"/);
+  assert.match(runnerConfigProblem({ ...base, limits: { tasksMax: 0 } }) ?? "", /"limits"/);
+  assert.match(runnerConfigProblem({ ...base, limits: { swapMax: "1G" } as never }) ?? "", /"limits"/);
+  assert.match(runnerConfigProblem({ ...base, repos: { "Owner/Repo": { url: "x", lane: " " } } }) ?? "", /"lane"/);
+  assert.equal(repositoryLane({ repos: { "Owner/Repo": { url: "x", lane: "shared" }, "Owner/Other": { url: "y" } } }, "owner/repo"), "shared");
+  assert.equal(repositoryLane({ repos: { "Owner/Repo": { url: "x", lane: "shared" }, "Owner/Other": { url: "y" } } }, "owner/other"), "owner/other");
 });

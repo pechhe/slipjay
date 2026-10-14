@@ -276,20 +276,26 @@ export async function readRunLog(location: string, operationId: string, env: Nod
 }
 
 /**
- * The owner's controls: kill the running operation (until it passes verification),
- * or pause and resume the queue. Returns the line to print and whether it took effect.
+ * The owner's controls: kill a running operation (until it passes verification),
+ * or pause and resume the queue. A kill names the operation it means; unnamed, it kills
+ * the only one running and refuses when several are. Returns the line to print and
+ * whether it took effect.
  */
-export async function controlRunner(location: string, action: "kill" | "pause" | "resume", env: NodeJS.ProcessEnv = process.env): Promise<{ ok: boolean; line: string }> {
+export async function controlRunner(location: string, action: "kill" | "pause" | "resume", env: NodeJS.ProcessEnv = process.env, operationId?: string): Promise<{ ok: boolean; line: string }> {
   const token = await runnerToken(env);
   const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
   try {
     const response = await request(connection.baseUrl, token, `/v1/runner/${action}`, { method: "POST",
-      headers: { "content-type": "application/json" }, body: JSON.stringify({ by: hostname() }) });
-    const body = await response.json() as { operation?: Operation | null; reason?: string; paused?: boolean };
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ by: hostname(), ...operationId ? { operation: operationId } : {} }) });
+    const body = await response.json() as { operation?: Operation | null; operations?: Operation[]; reason?: string; paused?: boolean };
     const prefix = `[runner ${connection.name}]`;
     if (action !== "kill") return { ok: true, line: `${prefix} ${body.paused ? "paused: queued changes wait until resumed" : "resumed"}` };
-    if (!body.operation) return { ok: true, line: `${prefix} nothing running` };
-    const subject = body.operation.kind === "landing" ? `landing ${body.operation.changeId.slice(0, 12)}` : `${body.operation.kind} ${body.operation.commitId.slice(0, 12)}`;
+    const subjectOf = (operation: Operation) => operation.kind === "landing" ? `landing ${operation.changeId.slice(0, 12)}` : `${operation.kind} ${operation.commitId.slice(0, 12)}`;
+    if (body.operations) return { ok: false, line: `${prefix} not killed: ${body.operations.length} operations are running; name one:\n${body.operations.map((operation) => `  slipjay runner kill ${operation.id}  (${subjectOf(operation)}, ${operation.stage})`).join("\n")}` };
+    if (!body.operation) return response.status === 409
+      ? { ok: false, line: `${prefix} not killed: ${operationId} ${body.reason}` }
+      : { ok: true, line: `${prefix} nothing running` };
+    const subject = subjectOf(body.operation);
     if (response.status === 409) return { ok: false, line: `${prefix} not killed: ${subject} ${body.reason}` };
     return { ok: true, line: body.operation.stage === "verifying" ? `${prefix} killed ${subject}`
       : `${prefix} killing ${subject}: it stops when ${body.operation.stage} finishes, before verification` };
@@ -367,6 +373,8 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     }
     await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
+    // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.
+    if (operation.result) options.onStage?.("housekeeping");
     // A fetch of every bookmark while the candidate was on the remote imports it untracked,
     // which makes the submitted commit immutable: the author could neither fix a failure
     // nor abandon a landed commit, and the landed rewrite would show as divergent.

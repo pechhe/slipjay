@@ -13,13 +13,13 @@ import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHave
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, repositoryKey, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { redactVerificationOutput } from "./verification-failure.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose } from "./runner-contract.ts";
+import type { CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerLimits, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -47,22 +47,37 @@ class OwnerKill extends Error {
  * signal never reaches. Under a systemd user manager each run therefore gets its
  * own transient scope, and stopping the scope kills everything left in it, on
  * abort and after every run. Elsewhere only the run's process group is killed.
+ * Every scope joins RUNNER_SLICE, whose `limits` bound all runs together: the
+ * workers' gates, deploys and every process they start, however they nest.
+ * Memory beyond `memoryHigh` is throttled; `memoryMax` is the hard ceiling.
  */
-export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = process.env): Executor {
+export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = process.env, limits: RunnerLimits = {}): Executor {
   const runtimeDir = process.platform === "linux" ? env.XDG_RUNTIME_DIR : undefined;
   if (!runtimeDir) return { host, run: runBoundedProcess };
-  const kill = (unit: string) => new Promise<void>((resolve) =>
-    execFile("systemctl", ["--user", "kill", "--signal=SIGKILL", unit], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir } }, () => resolve()));
+  const systemctl = (args: string[]) => new Promise<string | null>((resolve) =>
+    execFile("systemctl", ["--user", ...args], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir } }, (error, _stdout, stderr) => resolve(error ? (stderr.trim() || error.message) : null)));
+  const kill = (unit: string) => systemctl(["kill", "--signal=SIGKILL", unit]).then(() => {});
+  const { memoryHigh, memoryMax, cpuQuota, tasksMax } = { ...RUNNER_DEFAULT_LIMITS, ...limits };
+  // Runtime properties: they last until the user manager restarts, and each runner start sets them again.
+  // A run never waits on a failure to set them: the runner's journal says so and the next run tries again.
+  let sliced: Promise<void> | undefined;
+  const slice = () => sliced ??= systemctl(["set-property", "--runtime", RUNNER_SLICE,
+    `MemoryHigh=${memoryHigh}`, `MemoryMax=${memoryMax}`, `CPUQuota=${cpuQuota}`, `TasksMax=${tasksMax}`]).then((failure) => {
+    if (failure === null) return;
+    console.error(`SlipJay runner: could not set the limits of ${RUNNER_SLICE}, so runs are not capped: ${failure}`);
+    sliced = undefined;
+  });
   return {
     host,
     async run(request) {
+      await slice();
       const unit = `slipjay-run-${randomUUID()}.scope`;
       const stop = () => { void kill(unit); };
       request.abortSignal?.addEventListener("abort", stop, { once: true });
       try {
         return await runBoundedProcess({
           ...request, executable: "systemd-run",
-          args: ["--user", "--scope", "--quiet", "--collect", `--unit=${unit}`, "--", request.executable, ...request.args],
+          args: ["--user", "--scope", "--quiet", "--collect", `--slice=${RUNNER_SLICE}`, `--unit=${unit}`, "--", request.executable, ...request.args],
           env: { ...request.env ?? sanitizedProcessEnv(), XDG_RUNTIME_DIR: runtimeDir },
         });
       } finally {
@@ -74,10 +89,12 @@ export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = proces
 }
 
 /**
- * One serial loop owns every repository's warm checkout and every transition of its
- * integration and release branches: landings, releases and resets of the target
- * landings finalize against take turns in arrival order.
- * Deploys take turns in a second lane that only reads the warm store, so a deploy
+ * Each repository has one serial lane that owns its warm checkout and every transition
+ * of its integration and release branches: its landings, releases and resets of the
+ * target landings finalize against take turns in arrival order. Different repositories
+ * share no checkout, branch, target or environment, so their lanes run at once, at most
+ * `workers` of them; an operation waiting for a worker is admitted oldest first.
+ * Deploys take turns in a separate lane that only reads the warm store, so a deploy
  * that waits minutes on its build never holds a landing.
  */
 export function createRunnerQueue(input: {
@@ -89,13 +106,24 @@ export function createRunnerQueue(input: {
   cancelled(operation: Operation): void;
   /** Stop scheduling deploys and resets: clears timers that are waiting for an interval. */
   close(): void;
-  /** Kill the running landing, release or reset if it is still in KILLABLE_STAGES: `null` when idle. */
-  kill(): { operation: Operation; killed: boolean } | null;
+  /**
+   * Kill a running landing, release or reset while it is in KILLABLE_STAGES: the named one, or,
+   * unnamed, the only one running. An unnamed kill with several running kills none.
+   */
+  kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
   const { log, executor, home, config, environment } = input;
-  let active: Promise<void> | undefined;
-  let current: { operation: Operation; stage: RunnerStage; controller: AbortController } | undefined;
+  const workers = Math.max(1, Math.floor(config.workers ?? RUNNER_DEFAULT_WORKERS));
+  /** Each lane's work holding its repositories' checkouts now, and any chained behind it, by `repositoryLane`. */
+  const lanes = new Map<string, Promise<void>>();
+  const laneOf = (repo: string) => repositoryLane(config, repo);
+  /** Operations admitted to a worker, which they hold until they finish. */
+  const admitted = new Set<string>();
+  /** Running landings, releases and resets, by operation, in their current stage. */
+  const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
+  /** Recovery holds every lane: nothing is admitted until it finishes. */
+  let recovering: Promise<void> | undefined;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
   function append(id: string, event: OperationEvent): void {
     log.append(id, event);
@@ -252,16 +280,16 @@ export function createRunnerQueue(input: {
       reason: `rollback incomplete: ${unrecovered.map((project) => project.activated === "unknown"
         ? `${project.name} activation or recovery outcome is unknown (${project.reason ?? "no earlier deployment"})`
         : `${project.name} still serves the promotion (${project.reason ?? "no earlier deployment"})`).join(", ")}; the release branch stays on the release` };
-    const returned = await serially(() => returnRelease(checkoutPath(operation), merge));
+    const returned = await serially(operation.repo, () => returnRelease(checkoutPath(operation), merge));
     return returned.returned
       ? { automatic: true, releaseBranch: returned.releaseBranch, reason: `rolled back: production serves what it served before, and the release branch is back on ${returned.releaseBranch.slice(0, 12)}` }
       : { automatic: false, reason: `rollback incomplete: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
   }
-  /** Run `work` in the serial lane, after the running turn, and resume the queue after it. */
-  function serially<T>(work: () => Promise<T>): Promise<T> {
+  /** Run `work` in the repository's lane, after its running turn, and resume the queue after it. */
+  function serially<T>(repo: string, work: () => Promise<T>): Promise<T> {
     let value: T;
-    const pending = start(async () => { value = await work(); }, active);
-    // Submissions that woke the queue while `work` held it are taken up after it.
+    const pending = inLane(repo, async () => { value = await work(); });
+    // Submissions that woke the queue while `work` held the lane are taken up after it.
     pending.then(wakeMain, wakeMain);
     return pending.then(() => value);
   }
@@ -283,9 +311,20 @@ export function createRunnerQueue(input: {
       submittedBy: `promotion:${promotion.id}`, promotion: shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations, migrationArtifacts: result.migrationArtifacts } });
     return id;
   }
-  /** Take up the serial lane's queued operations, unless a turn is already running (it takes them up itself). */
+  /**
+   * Admit queued landings, releases and resets, oldest first, while a worker is free: each
+   * to its repository's lane once that lane is idle, so a repository's operations keep
+   * their order. A pause admits nothing new; running operations finish.
+   */
   function wakeMain(): void {
-    if (!active) void start(loop);
+    if (recovering || log.paused()) return;
+    for (const operation of log.openOperations()) {
+      if (admitted.size >= workers) return;
+      if (operation.kind === "deploy" || operation.status !== "queued" || lanes.has(laneOf(operation.repo))) continue;
+      admitted.add(operation.id);
+      void inLane(operation.repo, () => processOperation(operation))
+        .finally(() => { admitted.delete(operation.id); wakeMain(); });
+    }
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation): Promise<void> {
     let stage: RunnerStage = "queued";
@@ -296,7 +335,7 @@ export function createRunnerQueue(input: {
     const stageDetail = (): OperationEvent => ({ type: "stage_detail", stage, durationMs: Date.now() - stageStarted,
       ...(stage === "installing" ? { installSource } : {}), ...(stage === "rebasing" ? { conflict: rebaseConflict, files: conflictFiles } : {}) });
     const controller = new AbortController();
-    current = { operation, stage, controller };
+    running.set(operation.id, { operation, stage, controller });
     let verdict: OperationEvent | undefined;
     const checkout = checkoutPath(operation);
     let remote: string | undefined;
@@ -341,7 +380,7 @@ export function createRunnerQueue(input: {
       if (stage !== "queued") append(operation.id, stageDetail());
       stageStarted = Date.now();
       stage = next;
-      current = { operation, stage, controller };
+      running.set(operation.id, { operation, stage, controller });
       append(operation.id, { type: "stage", stage });
     };
     try {
@@ -464,7 +503,7 @@ export function createRunnerQueue(input: {
       else verdict = { type: "failed", stage, reason: message(error) };
     } finally {
       if (stage !== "queued") append(operation.id, stageDetail());
-      current = undefined;
+      running.delete(operation.id);
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
       if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
@@ -545,14 +584,6 @@ export function createRunnerQueue(input: {
       });
       else if (!result.ok && result.status === "refused") append(operation.id, { type: "failed", stage, reason: result.reason });
       else throw new Error(`Unexpected release result ${result.status}`);
-    }
-  }
-  async function loop(): Promise<void> {
-    for (;;) {
-      if (log.paused()) return;
-      const operation = log.openOperations().find((entry): entry is LandingOperation | ReleaseOperation | ResetOperation => entry.kind !== "deploy" && entry.status === "queued");
-      if (!operation) return;
-      await processOperation(operation);
     }
   }
   async function recoverRunning(): Promise<void> {
@@ -650,11 +681,14 @@ export function createRunnerQueue(input: {
       } catch { /* An unavailable checkout cannot prove recovery; retain recorded holds. */ }
     }
   }
-  function start(work: () => Promise<void>, previous?: Promise<void>): Promise<void> {
-    const pending = (previous ?? Promise.resolve()).then(work).finally(() => {
-      if (active === pending) active = undefined;
+  /** Run `work` in the repository's lane, after whatever holds it. A failure of earlier work does not stop it. */
+  function inLane(repo: string, work: () => Promise<void>): Promise<void> {
+    const lane = laneOf(repo);
+    const previous = lanes.get(lane) ?? Promise.resolve();
+    const pending = previous.catch(() => {}).then(work).finally(() => {
+      if (lanes.get(lane) === pending) lanes.delete(lane);
     });
-    active = pending;
+    lanes.set(lane, pending);
     return pending;
   }
   return {
@@ -663,34 +697,42 @@ export function createRunnerQueue(input: {
       wakeDeploys();
     },
     async recover() {
-      await start(async () => { await recoverRunning(); await reconcileHeld(); }, active);
+      // Every lane is idle at startup; recovery waits for any that is not, and holds them all.
+      recovering = Promise.allSettled([...lanes.values()]).then(async () => { await recoverRunning(); await reconcileHeld(); })
+        .finally(() => { recovering = undefined; });
+      await recovering;
       for (const repo of Object.keys(config.repos).map(repositoryKey)) await scheduleLatest(repo);
     },
     cancelled(operation) {
       if (operation.kind !== "landing") return;
-      void start(async () => {
+      // A submission that woke the queue while this cleanup held the lane is admitted after it.
+      void inLane(operation.repo, async () => {
         const checkout = checkoutPath(operation);
         const context = await workspaceContext(checkout).catch(() => null);
         if (context) await cleanup(operation, checkout, context.configuration.remote ?? "origin");
-        // A submission that woke the queue while this cleanup held it waits for this pass.
-        await loop();
-      }, active);
+      }).finally(wakeMain);
     },
     async idle() {
       for (;;) {
-        if (active) await active;
+        if (recovering) await recovering;
+        await Promise.allSettled([...lanes.values()]);
         const lane = deploying;
         await lane;
-        if (!active && lane === deploying) return;
+        if (!recovering && !lanes.size && lane === deploying) return;
       }
     },
     close() { scheduler.close(); resetScheduler.close(); },
-    kill() {
-      if (!current) return null;
-      const operation = log.operation(current.operation.id) ?? current.operation;
-      if (!KILLABLE_STAGES.includes(current.stage)) return { operation, killed: false };
-      current.controller.abort();
-      return { operation, killed: true };
+    kill(operationId) {
+      const target = operationId === undefined ? undefined : running.get(operationId);
+      if (operationId !== undefined && !target) return { status: "not_running", operation: log.operation(operationId) };
+      if (!target && running.size > 1)
+        return { status: "ambiguous", operations: [...running.values()].map((entry) => log.operation(entry.operation.id) ?? entry.operation) };
+      const entry = target ?? [...running.values()][0];
+      if (!entry) return { status: "idle" };
+      const operation = log.operation(entry.operation.id) ?? entry.operation;
+      if (!KILLABLE_STAGES.includes(entry.stage)) return { status: "refused", operation };
+      entry.controller.abort();
+      return { status: "killed", operation };
     },
     logPath,
     async readLog(id) {

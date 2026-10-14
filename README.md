@@ -183,16 +183,31 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `promote`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
 | `cutover [--check]` | Move state from `~/.slipway` to `~/.slipjay` once and retire the `slipway` CLI (see [State and cutover](#state-and-cutover)). |
-| `runner <serve\|log <operation>\|kill\|pause\|resume>` | Run the landing runner on this host, print one operation's run log, or use the owner's controls (see [Runner](#runner)). |
+| `runner <serve\|log <operation>\|kill [<operation>]\|pause\|resume>` | Run the landing runner on this host, print one operation's run log, or use the owner's controls (see [Runner](#runner)). |
 
 ## Runner
 
 `slipjay land` sends the change to one long-lived runner; it is the only way a
-change lands. The runner queues landings and takes
-them one at a time in arrival order. For each one it rebases onto the integration tip,
+change lands. The runner queues landings and takes each repository's one at a time
+in arrival order. For each one it rebases onto the integration tip,
 runs the repository's declared gate in its own warm checkout, then integrates and
-publishes. The authoring machine runs none of the gate. Confirmed releases take
-turns in the same queue (see [Release](#release)).
+publishes. The authoring machine runs none of the gate. Confirmed releases and
+resets take turns in the same repository's queue (see [Release](#release)).
+
+- **Workers.** Different repositories share no checkout, branch, reset target or
+  environment, so their queues run at once: at most `workers` of them (runner config,
+  default 2; `1` is a single queue for every repository). Repositories whose gates do
+  share external state (a database, a deploy environment, fixed ports) must share a
+  queue: give them the same `lane` in the runner config's `repos` entries. When every
+  worker is busy, the next operation of an idle queue waits, oldest first, and names
+  what holds the workers (`a worker (landing …)`); one waiting behind its own queue
+  names the running operation.
+- **Limits.** On a systemd host every run, deploys included, joins `slipjay.slice`, so
+  the workers' gates and everything they start share one cap: `limits` in the runner
+  config sets `memoryHigh` (throttled above, default `40G`), `memoryMax` (the hard
+  ceiling, `48G`), `cpuQuota` (`1400%`) and `tasksMax` (`4096`). The runner sets them
+  as runtime properties at its first run after each start; if systemd refuses, its
+  journal says the runs are uncapped and the next run tries again.
 
 - **Gate.** `requiredLandingVerification` in `slipjay.json`, an array of commands
   (`{ "executable", "args"?, "cwd"? }`), run in the runner's checkout.
@@ -231,8 +246,8 @@ turns in the same queue (see [Release](#release)).
   failure needs a person: reconcile the target, then on the runner host move the
   checkout's integration bookmark back to the remote
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
-- **Owner controls.** From any machine with the location, `slipjay runner kill` stops
-  the running landing or release while it is still fetching, rebasing, installing or
+- **Owner controls.** From any machine with the location, `slipjay runner kill <operation>` stops
+  that running landing or release while it is still fetching, rebasing, installing or
   verifying, and a reset while it is fetching or resetting: verification's and the
   reset's commands are killed at once (an earlier stage finishes its
   current step, such as an install, then stops before verification), it ends
@@ -240,8 +255,12 @@ turns in the same queue (see [Release](#release)).
   nothing moves, and the queue goes on. From
   `integrating` on (a release: `publishing`) the kill is refused with exit 1, because
   stopping there could leave the integration target ahead of the remote; it finishes
-  on its own. Killing an idle runner does nothing. `slipjay runner pause` makes the
-  runner take no next operation: the running one finishes, and queued ones show
+  on its own. A kill of an operation that is not running (it finished, or has not
+  started) kills nothing and exits 1. Bare `slipjay runner kill` stops the only running
+  operation; with several running it kills none, exits 1 and lists the
+  `slipjay runner kill <operation>` commands; with none it does nothing.
+  `slipjay runner pause` makes the
+  runner take no next operation: running ones finish, and queued ones show
   `paused` as their stage until `slipjay runner resume`, then proceed in order. The
   pause is recorded in the operation log, so it survives a restart. Each run's
   commands go in their own systemd user scope when the runner has a user manager
@@ -380,7 +399,7 @@ never runs at promotion:
   submitting a second. The schedule reads `reset` at the last landed commit, and is
   rebuilt at startup, after every landing and after every reset. A repository needs an
   `integrationBranch` to declare it, and must have landed on the runner once.
-- **Where.** A reset takes its turn in the serial queue with landings and releases,
+- **Where.** A reset takes its turn in its repository's queue with landings and releases,
   because landings finalize migrations against the same target, and `runner pause`
   holds it like any queued operation. In its turn the runner fetches the integration
   branch and reads `reset` at its tip; a tip that declares none fails the reset. The
@@ -465,7 +484,7 @@ nothing, so it rolls back and restores earlier projects as usual.
    branch (and, for a release that is not a promotion and carries migration
    artifacts, that `--migrations-ready` was given), then
    submits it to the runner (see [Runner](#runner)); a confirm needs a runner
-   location. The release takes its turn in the runner's one serial queue: a landing
+   location. The release takes its turn in its repository's queue on the runner: a landing
    submitted behind it waits, printing `queued (position 2, behind release
    16bea7013436)`, and so does a release behind a landing. In its turn the runner
    checks the exact candidate out in its warm checkout, prepares its dependencies
@@ -488,7 +507,8 @@ nothing, so it rolls back and restores earlier projects as usual.
    runner's operation log records the release.
 
 The runner's append-only SQLite operation log is the pipeline ledger. `land` keeps
-its timing line on stderr; `landings.jsonl` and `releases.jsonl` are no longer written.
+its timing line on stderr, one duration per runner stage, then `housekeeping`: this
+machine's own work after the verdict (recording the landing, sweeping other workspaces); `landings.jsonl` and `releases.jsonl` are no longer written.
 `slipjay metrics [--since <ISO date>]` reads that ledger and prints outcomes, cause
 classes, median and p90 stage and command durations, active and paused queue waits,
 held integrations, attempts per change, and flake candidates. The default range
@@ -606,10 +626,13 @@ The SwiftUI app runs the installed `slipjay watch --json` CLI; it holds no crede
 SSH forward or HTTP client. Its direct CLI default is `~/.bun/bin/slipjay`; set
 `SLIPJAY_CLI` to an explicit executable path when launching a different installation.
 Its child environment includes `~/.bun/bin`, `~/.local/bin` and system tools.
-The menu shows both ordered lanes, runner-owned timing, held and paused state,
+The menu shows the queued and running landings, releases and resets (each repository
+in order), the deploy lane, runner-owned timing, held and paused state,
 staging attempts, recent releases and contact. The hourly suite remains unavailable
 until its producer exists. Controls use existing CLI authority; queued cancellation
-asks for confirmation and unsafe kill stages are disabled. Logs open in a native
+and kill each ask for confirmation naming the operation, a kill sends that operation's
+id and nothing once it is past its killable stages, and a cancel that lost the race to
+the runner says the operation already started. Unsafe kill stages are disabled. Logs open in a native
 window through `slipjay runner log`, without a shell.
 
 On the Mac with Command Line Tools (full Xcode is unnecessary):

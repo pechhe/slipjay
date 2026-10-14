@@ -9,5 +9,6 @@
     { "executable": "bun", "args": ["run", "test"], "concurrent": true }
   ],
   "unattendedMergeToIntegration": true,
-  "parallelExecution": true
+  "parallelExecution": true,
+  "generatedPaths": [".build/menu-bar"]
 }
