@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.13.0
+
+- **Bind migration context to rebased source, base and Issue (#45):** the non-secret
+  `SLIPJAY_MIGRATION_CONTEXT` records the rebased source and base revisions and Issue,
+  with strict GitHub host attribution.
+- **Preserve tool paths in menu app launches (#42):** the menu app preserves installed
+  Bun and BWS tool paths, including the login item's `PATH`.
+
 ## v3.12.0
 
 - **Report rollback only after recovery is proven (#41):** a failed activation
