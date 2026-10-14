@@ -200,8 +200,9 @@ export function createRunnerQueue(input: {
         return url ? [[name, url]] : [];
       }));
       const manual = operation.promotion?.nonAdditiveMigrations ?? [];
-      const earlierSchemaChange = earlier.some(({ entry, record }) => entry.commitId === operation.commitId
-        && (record?.migrations?.status === "applied" || record?.migrations?.status === "apply_failed"));
+      // A closed deploy of this commit with no record (a restart or crash cut it short) may have applied them too: nothing says it did not.
+      const earlierSchemaChange = earlier.some(({ entry, record }) => entry.commitId === operation.commitId && entry.result
+        && (!record || record.migrations?.status === "applied" || record.migrations?.status === "apply_failed"));
       const record = await runDeploy({
         gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
         previousUrls, nonAdditive: manual.length > 0, earlierSchemaChange, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
@@ -562,8 +563,9 @@ export function createRunnerQueue(input: {
         // Scheduling at startup retries a deploy whose projects never ran.
         // Production deploys only through a promotion, whose rerun confirm deploys it again.
         const again = operation.environment === "production" ? `slipjay promote --confirm ${operation.commitId.slice(0, 12)}` : `slipjay deploy ${operation.environment}`;
-        // A restart can stop a deploy between activations; it is not rolled back.
-        const activating = operation.promotion ? "; projects it activated before the restart keep serving it" : "";
+        // A restart can stop a deploy between activations or part-way through its migrations; it is not rolled back,
+        // and its rerun follows the schema as possibly changed.
+        const activating = operation.promotion ? "; projects it activated before the restart keep serving it, and its migrations may have been applied" : "";
         append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}${activating}; deploy again with ${again}` });
         continue;
       }

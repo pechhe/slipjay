@@ -272,7 +272,11 @@ turns in the same queue (see [Release](#release)).
   recorded as failed ("run slipjay reset again"); the schedule waits a full interval
   after it. A deploy that was running is
   recorded as failed, and the schedule deploys that commit again; a production
-  deploy's failure names the `slipjay promote --confirm` that deploys it again.
+  deploy's failure names the `slipjay promote --confirm` that deploys it again. A
+  restart can stop a promotion's deploy between activations: projects it already
+  activated keep serving it, nothing moves them back, and its migrations may have been
+  applied, so the rerun is not rolled back automatically if it carries non-additive
+  ones (a deploy with no record cannot show the schema untouched).
 - **Moving the runner to another host.** Run Setup on the new host with the same
   repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
   stop its unit. On the old host, `slipjay runner pause`, wait until no operation is

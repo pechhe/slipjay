@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A deploy cut short by a runner restart is documented, and its rerun is not rolled back (#48):**
+  projects a promotion activated before the restart keep serving it, and a later deploy of
+  the same commit that has no record (the restart left none) counts as possibly having
+  changed the schema, so a rerun carrying non-additive migrations is left for the owner.
+
 - **Non-additive detection is meaningful, and rollback needs a changed schema (#46):**
   `nonAdditiveSql` no longer flags tables the migration creates (temporary ones too),
   columns it adds and constraints or unique indexes over only those, a CHECK dropped
