@@ -37,6 +37,9 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   await mkdir(join(repo, dirname(options.policyPath ?? "slipjay.json")), { recursive: true });
   const git = (args: string[], cwd = repo) => execFileSync("git", args, { cwd, stdio: "pipe" });
   git(["init", "-q", "--bare", "-b", "main", remote], root);
+  // Tests write commits straight into the remote; a host without a global git identity must not fail them.
+  git(["--git-dir", remote, "config", "user.name", "Fixture"], root);
+  git(["--git-dir", remote, "config", "user.email", "fixture@example.com"], root);
   git(["init", "-q", "-b", "main"]);
   git(["config", "user.name", "Fixture"]);
   git(["config", "user.email", "fixture@example.com"]);

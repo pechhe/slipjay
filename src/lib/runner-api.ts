@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { Operation, OperationLog, ReleaseRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import type { DeployRequest, Operation, OperationLog, ReleaseRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -88,6 +88,34 @@ export function createRunnerHandler(input: {
       input.onSubmitted();
       return json({ operation: input.log.operation(id), reattached: false });
     }
+    if (request.method === "POST" && path === `${RUNNER_API}/deploys`) {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!validDeploy(body))
+        return json({ error: "Invalid deploy" }, 400);
+      const repo = repositoryKey(body.repo);
+      const open = input.log.openOperations(repo).filter((op) => op.kind === "deploy" && op.environment === body.environment);
+      const same = open.find((op) => op.commitId === body.commitId);
+      if (same)
+        return json({ operation: same, reattached: true });
+      const id = newOperationId();
+      // A queued deploy of an older commit would only be overwritten by this one.
+      for (const stale of open.filter((op) => op.status === "queued"))
+        input.log.append(stale.id, { type: "superseded", by: id });
+      input.log.append(id, { type: "submitted", kind: "deploy", repo, environment: body.environment, commitId: body.commitId, submittedBy: body.submittedBy });
+      input.onSubmitted();
+      return json({ operation: input.log.operation(id), reattached: false });
+    }
+    if (request.method === "GET" && path === `${RUNNER_API}/deploys`) {
+      const repo = url.searchParams.get("repo");
+      if (!repo)
+        return json({ error: "repo is required" }, 400);
+      return json({ operations: input.log.deployments(repositoryKey(repo), url.searchParams.get("environment") ?? undefined) });
+    }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {
       const repo = url.searchParams.get("repo");
@@ -145,6 +173,15 @@ function validRelease(body: unknown): body is ReleaseRequest {
   const value = body as Record<string, unknown>;
   return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0)
     && typeof value.candidate === "string" && /^[a-f0-9]{40,64}$/.test(value.candidate) && typeof value.migrationsReady === "boolean";
+}
+
+function validDeploy(body: unknown): body is DeployRequest {
+  if (typeof body !== "object" || body === null)
+    return false;
+  const value = body as Record<string, unknown>;
+  return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0)
+    && typeof value.environment === "string" && /^[a-z][a-z0-9-]{0,39}$/.test(value.environment)
+    && typeof value.commitId === "string" && /^[a-f0-9]{40,64}$/.test(value.commitId);
 }
 
 function json(body: unknown, status = 200): Response {

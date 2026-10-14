@@ -40,5 +40,5 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   // Queued operations from before a restart resume here.
   queue.wake();
-  return { url: server.url, close: async () => { await server.close(); await queue.idle(); log.close(); } };
+  return { url: server.url, close: async () => { await server.close(); queue.close(); await queue.idle(); log.close(); } };
 }

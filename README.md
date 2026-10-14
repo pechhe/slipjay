@@ -152,6 +152,8 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `preview` | Diffstat of what a landing would integrate. |
 | `land [--direct]` | Send the current workspace (or, with `--direct`, the primary checkout) to the runner, which verifies, integrates and publishes it (see [Runner](#runner)); without a runner location it refuses. Afterwards it removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
 | `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
+| `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
+| `deploys [--environment <name>] [--json]` | Each deploy, newest first: environment, commit, outcome per project, and the commits it added since the previous deploy. |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
@@ -242,7 +244,8 @@ turns in the same queue (see [Release](#release)).
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
   otherwise. A release that was running is recorded as failed with the
-  `slipjay release --confirm` command that reruns it.
+  `slipjay release --confirm` command that reruns it. A deploy that was running is
+  recorded as failed, and the schedule deploys that commit again.
 - **Moving the runner to another host.** Run Setup on the new host with the same
   repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
   stop its unit. On the old host, `slipjay runner pause`, wait until no operation is
@@ -260,7 +263,40 @@ turns in the same queue (see [Release](#release)).
   serve` with `Restart=always`, and enables lingering so the unit survives logout and
   reboot. Logs: `journalctl --user -u slipjay-runner`.
 - **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
-  releases (submit) and changes by jj change ID. The contract is `src/lib/runner-contract.ts`.
+  releases (submit), deploys (submit, list) and changes by jj change ID.
+
+### Deploys
+
+A repository can declare environments the runner deploys. `staging` follows the
+integration branch:
+
+```json
+{ "deployments": { "version": 1, "environments": { "staging": {
+  "minIntervalMs": 3600000, "timeoutMs": 900000, "environmentKeys": ["VERCEL_TOKEN"],
+  "projects": [{ "name": "app", "command": { "executable": "bun", "args": ["scripts/deploy.ts", "app", "staging"] } }]
+} } } }
+```
+
+- **When.** After each landing, the runner deploys the latest landed commit once
+  `minIntervalMs` (default one hour) has passed since the environment's last deploy.
+  Otherwise one timer deploys it when the interval ends. It never redeploys a commit
+  the environment already has. A commit whose projects failed is retried only on
+  demand (`slipjay deploy staging`) or by the next landing. Scheduling is rebuilt from
+  the log at startup.
+- **Where.** Deploys take turns in their own lane, so a deploy waiting minutes on its
+  build never holds a landing. Each project's command runs, one after another, in an
+  exact source view of the commit (a detached git checkout that borrows the warm
+  checkout's objects). It gets the declared `environmentKeys`,
+  `SLIPJAY_DEPLOY_ENVIRONMENT` and `SLIPJAY_DEPLOY_COMMIT`, and must finish within
+  `timeoutMs` (at most 30 minutes). The last line it prints that is a URL is recorded
+  as that project's deployment. A deploy is never killed by `runner kill`, but it
+  honours `runner pause`.
+- **Records.** A deploy ends `deployed`, or `failed` with `deploy failed: <projects>`.
+  Once its projects ran, either way it records the commit, the commit the environment
+  served before (the last deploy any project succeeded in), the commits between them,
+  and each project's outcome. A deploy that failed before its projects ran (the commit
+  is not on the integration branch, or the runner restarted) records only its reason.
+  `slipjay deploys` reads them back. The contract is `src/lib/runner-contract.ts`.
 
 ## Release
 

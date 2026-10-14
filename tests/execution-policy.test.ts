@@ -313,3 +313,21 @@ test("sharedPaths and spares are validated strictly and kept only when declared"
   }
   for (const spares of [-1, 9, 1.5, "2", null]) assert.throws(() => policy({ spares }), /spares must be an integer from 0 to 8/, JSON.stringify(spares));
 });
+
+test("deployments declare environments with projects; unknown environments and malformed projects are refused", () => {
+  const project = { name: "app", command: { executable: "bun", args: ["scripts/deploy.ts", "app"] } };
+  const parsed = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { staging: { timeoutMs: 600_000, environmentKeys: ["VERCEL_TOKEN"], projects: [project] } } } }));
+  assert.deepEqual(parsed.deployments, { version: 1, environments: { staging: {
+    minIntervalMs: 3_600_000, timeoutMs: 600_000, environmentKeys: ["VERCEL_TOKEN"],
+    projects: [{ name: "app", command: { executable: "bun", args: ["scripts/deploy.ts", "app"], cwd: "." } }],
+  } } });
+  assert.equal(parseExecutionPolicy(policy({})).deployments, undefined);
+  for (const deployments of [
+    { version: 1, environments: { qa: { timeoutMs: 1, projects: [project] } } },
+    { version: 1, environments: { staging: { timeoutMs: 1, projects: [] } } },
+    { version: 1, environments: { staging: { timeoutMs: 1, projects: [project, project] } } },
+    { version: 1, environments: { staging: { timeoutMs: 1, projects: [{ ...project, command: { executable: "bun", args: [], cwd: "../x" } }] } } },
+    { version: 1, environments: { staging: { projects: [project] } } },
+    { version: 2, environments: {} },
+  ]) assert.throws(() => parseExecutionPolicy(policy({ deployments })), JSON.stringify(deployments));
+});

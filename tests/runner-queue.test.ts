@@ -32,9 +32,14 @@ const releaseCheck = (root: string) => `const fs=require("node:fs");fs.appendFil
 if (fs.existsSync(${JSON.stringify(join(root, "fail-release"))})) { process.stderr.write("release boom\\n"); process.exit(4); }
 if (fs.existsSync(${JSON.stringify(join(root, "hang-release"))})) { fs.writeFileSync(${JSON.stringify(join(root, "release-started"))}, ""); setInterval(()=>{},1000); }`;
 const postReleaseStep = (root: string) => `require("node:fs").appendFileSync(${JSON.stringify(join(root, "post-release.jsonl"))}, JSON.stringify({ merge: process.env.SLIPJAY_RELEASE_MERGE, key: process.env.FIXTURE_KEY ?? null }) + "\\n");`;
+// Each deploy project records what it deployed and prints its deployment URL; it fails while `fail-deploy-<name>` exists.
+const deployStep = (root: string, name: string) => `const fs=require("node:fs");
+if (fs.existsSync(${JSON.stringify(join(root, `fail-deploy-${name}`))})) { console.error("${name} build failed"); process.exit(5); }
+fs.appendFileSync(${JSON.stringify(join(root, "deploys.jsonl"))}, JSON.stringify({ project: "${name}", environment: process.env.SLIPJAY_DEPLOY_ENVIRONMENT, commit: process.env.SLIPJAY_DEPLOY_COMMIT, key: process.env.FIXTURE_KEY ?? null, head: require("node:child_process").execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() }) + "\\n");
+console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DEPLOY_COMMIT.slice(0, 7) + ".example");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
-async function fixture(migrations = false, release = false) {
+async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -63,6 +68,10 @@ async function fixture(migrations = false, release = false) {
         command: { executable: "node", args: ["-e", finalize(root)] },
         targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
       },
+    } : {}),
+    ...(deployments ? {
+      deployments: { version: 1, environments: { staging: { minIntervalMs: deployments.minIntervalMs, timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
+        projects: ["app", "hq"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) } } },
     } : {}),
     ...(release ? {
       releaseBranch: "release",
@@ -134,7 +143,7 @@ async function fixture(migrations = false, release = false) {
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
   return { root, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, lines, result,
-    async dispose() { await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
+    async dispose() { queue.close(); await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
 test("queued candidates land in arrival order on the previous candidate, with runner gate records and streamed logs", async () => {
@@ -551,5 +560,71 @@ test("recovery fails an interrupted release with the command that reruns it", as
     await f.queue.recover();
     assert.deepEqual(f.result(release), { type: "failed", stage: "verifying",
       reason: `runner restarted during verifying; rerun slipjay release --confirm ${f.main().slice(0, 12)}` });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a landing deploys staging from an exact view of the landed commit and records it; the next records the changes since", async () => {
+  const f = await fixture(false, false, { minIntervalMs: 0 });
+  try {
+    const a = await f.land(f.submit(await f.candidate("a.txt")));
+    assert.equal(a?.type, "landed");
+    await f.queue.idle();
+    const [first] = f.log.deployments("fixture/repo", "staging");
+    assert.equal(first?.status, "deployed", JSON.stringify(first?.result));
+    assert.ok(first?.result?.type === "deployed");
+    const firstRecord = first.result.record;
+    assert.equal(firstRecord.commitId, f.main());
+    assert.equal(firstRecord.previous, null);
+    assert.deepEqual(firstRecord.changes.map((change) => change.subject), ["Add a.txt"]);
+    assert.deepEqual(firstRecord.projects, ["app", "hq"].map((name) => ({ name, ok: true, url: `https://${name}-${f.main().slice(0, 7)}.example` })));
+    assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)), ["app", "hq"].map((project) =>
+      ({ project, environment: "staging", commit: f.main(), key: "from-runner", head: f.main() })), "each project ran in the exact commit with the declared key");
+    assert.deepEqual(first.runs.map((run) => run.exitCode), [0, 0]);
+    await writeFile(join(f.root, "fail-deploy-hq"), "");
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.land(f.submit(await f.candidate("c.txt")));
+    await f.queue.idle();
+    const deploys = f.log.deployments("fixture/repo", "staging");
+    const latest = deploys[0]!;
+    assert.equal(latest.commitId, f.main(), "the latest landing is deployed");
+    assert.ok(latest.result?.type === "failed" && latest.result.deployment);
+    assert.equal(latest.result.reason, "deploy failed: hq");
+    // The landing of b deployed app but not hq: staging served b, so c's changes start there.
+    assert.equal(latest.result.deployment.previous, deploys[1]!.commitId);
+    assert.notEqual(deploys[1]!.commitId, firstRecord.commitId);
+    assert.ok(latest.result.deployment.changes.map((change) => change.subject).includes("Add c.txt"));
+    assert.deepEqual(latest.result.deployment.projects.map((project) => [project.name, project.ok]), [["app", true], ["hq", false]]);
+    assert.match(latest.result.deployment.projects[1]!.reason!, /exited 5: hq build failed/);
+    await rm(join(f.root, "fail-deploy-hq"));
+    await f.land(f.submit(await f.candidate("d.txt")));
+    await f.queue.idle();
+    const next = f.log.deployments("fixture/repo", "staging")[0]!;
+    assert.ok(next.result?.type === "deployed", JSON.stringify(next.result));
+    assert.equal(next.result.record.previous, latest.commitId, "a deploy that reached some projects is what the environment served");
+    // A commit that never landed is refused before any project runs.
+    const unlanded = await f.candidate("e.txt");
+    const refused = newOperationId();
+    f.log.append(refused, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "staging", commitId: unlanded.commitId, submittedBy: "test" });
+    f.queue.wake(); await f.queue.idle();
+    const outcome = f.result(refused);
+    assert.ok(outcome?.type === "failed" && !outcome.deployment, JSON.stringify(outcome));
+    assert.match(outcome.reason, /is not on main; only landed commits deploy/);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("within the interval a landing does not deploy, and recovery fails a deploy interrupted by a restart", async () => {
+  const f = await fixture(false, false, { minIntervalMs: 3_600_000 });
+  try {
+    await f.land(f.submit(await f.candidate("a.txt")));
+    await f.queue.idle();
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.queue.idle();
+    assert.equal(f.log.deployments("fixture/repo").length, 1, "the second landing waits for the hour");
+    const interrupted = newOperationId();
+    f.log.append(interrupted, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "staging", commitId: f.main(), submittedBy: "test" });
+    f.log.append(interrupted, { type: "stage", stage: "deploying" });
+    await f.queue.recover();
+    assert.equal(f.result(interrupted)?.type, "failed");
+    assert.match(f.result(interrupted)!.type === "failed" ? (f.result(interrupted) as { reason: string }).reason : "", /runner restarted during deploying; deploy again with slipjay deploy staging/);
   } finally { await f.dispose(); }
 }, 120_000);

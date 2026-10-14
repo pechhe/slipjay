@@ -7,11 +7,15 @@ import { dirname, join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { integrateLandingCandidate } from "./landing-candidate.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
+import { createDeployScheduler } from "./deploy-scheduler.ts";
+import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy } from "./deploy.ts";
+import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey, RUNNER_JJ_DEFAULTS } from "./runner-contract.ts";
+import { newOperationId } from "./runner-log.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { Executor, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
+import type { DeployOperation, Executor, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -68,6 +72,8 @@ export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = proces
 /**
  * One serial loop owns every repository's warm checkout and every transition of its
  * integration and release branches: landings and releases take turns in arrival order.
+ * Deploys take turns in a second lane that only reads the warm store, so a deploy
+ * that waits minutes on its build never holds a landing.
  */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
@@ -77,7 +83,9 @@ export function createRunnerQueue(input: {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
   cancelled(operation: Operation): void;
-  /** Kill the running operation if it has not passed verification: `null` when idle. */
+  /** Stop scheduling deploys: clears timers that are waiting for an environment's interval. */
+  close(): void;
+  /** Kill the running landing or release if it has not passed verification: `null` when idle. */
   kill(): { operation: Operation; killed: boolean } | null;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
@@ -91,7 +99,8 @@ export function createRunnerQueue(input: {
     mkdirSync(dirname(logPath(id)), { recursive: true });
     appendFileSync(logPath(id), `${JSON.stringify(stored)}\n`);
   }
-  const checkoutPath = (operation: Operation) => join(home, "repos", operation.repo);
+  const repoCheckout = (repo: string) => join(home, "repos", repo);
+  const checkoutPath = (operation: Operation) => repoCheckout(operation.repo);
   /** The published integration of an earlier submission of this exact commit, if any. */
   async function publishedIntegration(checkout: string, operation: LandingOperation, branch: string, remote: string): Promise<{ base: string; commitId: string } | null> {
     for (const earlier of log.operationsForChange(operation.repo, operation.changeId)) {
@@ -116,7 +125,84 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${message(error)}` });
     }
   }
-  async function processOperation(operation: Operation): Promise<void> {
+  /** Ask the scheduler about every environment the commit declares; it decides whether one is due. */
+  async function scheduleDeploys(repo: string, commitId: string): Promise<void> {
+    const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
+    if (configuration?.deployments) scheduler.consider(repo, configuration.deployments.environments);
+  }
+  const scheduler = createDeployScheduler({
+    log,
+    submit(repo, environment, commitId) {
+      log.append(newOperationId(), { type: "submitted", kind: "deploy", repo, environment, commitId, submittedBy: `${executor.host}:schedule` });
+      wakeDeploys();
+    },
+  });
+  let deploying: Promise<void> = Promise.resolve();
+  let deployPending = false;
+  function wakeDeploys(): void {
+    if (deployPending) return;
+    deployPending = true;
+    deploying = deploying.then(() => { deployPending = false; return deployLoop(); });
+  }
+  async function deployLoop(): Promise<void> {
+    for (;;) {
+      if (log.paused()) return;
+      const operation = log.openOperations().find((entry): entry is DeployOperation => entry.kind === "deploy" && entry.status === "queued");
+      if (!operation) return;
+      await processDeploy(operation);
+    }
+  }
+  async function processDeploy(operation: DeployOperation): Promise<void> {
+    const progress = (line: string) => append(operation.id, { type: "progress", line });
+    let verdict: OperationEvent;
+    append(operation.id, { type: "stage", stage: "deploying" });
+    try {
+      const repository = configuredRepository(config, operation.repo);
+      if (!repository) throw new Error(`Repository ${operation.repo} is not configured on this runner`);
+      const gitDirectory = join(checkoutPath(operation), ".git");
+      if (!await stat(gitDirectory).then(() => true, () => false))
+        throw new Error(`The runner has no checkout of ${operation.repo} yet; it makes one at its first landing`);
+      await ensureDeployCommit(gitDirectory, repository.url, operation.commitId);
+      const exact = await readExactExecutionPolicy(gitDirectory, operation.commitId);
+      // The branch comes from the last commit this runner landed, not from the commit asking to deploy.
+      const landed = log.lastLanded(operation.repo);
+      const branch = (landed ? (await readExactExecutionPolicy(gitDirectory, landed.commitId)).configuration : exact.configuration)?.integrationBranch;
+      if (!branch) throw new Error(`${operation.repo} declares no integrationBranch to deploy from`);
+      await ensureOnIntegrationBranch(gitDirectory, repository.url, branch, operation.commitId);
+      const policy = exact.configuration?.deployments?.environments[operation.environment];
+      if (!policy) throw new Error(`${operation.commitId.slice(0, 12)} declares no ${operation.environment} deployment`);
+      // The environment served a commit once any of its projects deployed it.
+      const previous = log.deployments(operation.repo, operation.environment).find((entry) => entry.id !== operation.id
+        && (entry.result?.type === "deployed" || (entry.result?.type === "failed" && entry.result.deployment?.projects.some((project) => project.ok))))?.commitId ?? null;
+      const record = await runDeploy({
+        gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
+        readEnvironment: environment ?? (() => process.env), onProgress: progress,
+        run: async (request) => {
+          const runId = randomUUID();
+          const started = Date.now();
+          append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host });
+          const result = await executor.run(request).catch((error: unknown) => {
+            append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
+            throw error;
+          });
+          append(operation.id, { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, durationMs: Date.now() - started });
+          return result;
+        },
+      });
+      const failed = record.projects.filter((project) => !project.ok).map((project) => project.name);
+      verdict = failed.length
+        ? { type: "failed", stage: "deploying", reason: `deploy failed: ${failed.join(", ")}`, deployment: record }
+        : { type: "deployed", record };
+    } catch (error) {
+      verdict = { type: "failed", stage: "deploying", reason: message(error) };
+    }
+    append(operation.id, verdict);
+    // Landings that arrived while this deploy ran were told to wait for it; a deploy that
+    // never reached its projects is retried once the interval passes.
+    const landed = log.lastLanded(operation.repo);
+    if (landed) await scheduleDeploys(operation.repo, landed.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
+  }
+  async function processOperation(operation: LandingOperation | ReleaseOperation): Promise<void> {
     let stage: RunnerStage = "queued";
     const controller = new AbortController();
     current = { operation, stage, controller };
@@ -242,6 +328,8 @@ export function createRunnerQueue(input: {
       // every bookmark after that would otherwise import it and pin the submitted commit.
       if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
       if (verdict) append(operation.id, verdict);
+      if (verdict?.type === "landed")
+        await scheduleDeploys(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
     }
     async function release(operation: ReleaseOperation): Promise<void> {
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
@@ -259,7 +347,7 @@ export function createRunnerQueue(input: {
   async function loop(): Promise<void> {
     for (;;) {
       if (log.paused()) return;
-      const operation = log.openOperations().find((entry) => entry.status === "queued");
+      const operation = log.openOperations().find((entry): entry is LandingOperation | ReleaseOperation => entry.kind !== "deploy" && entry.status === "queued");
       if (!operation) return;
       await processOperation(operation);
     }
@@ -268,6 +356,11 @@ export function createRunnerQueue(input: {
     for (const operation of log.openOperations().filter((entry) => entry.status === "running")) {
       const checkout = checkoutPath(operation);
       let remote: string | undefined;
+      if (operation.kind === "deploy") {
+        // Scheduling at startup retries a deploy whose projects never ran.
+        append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; deploy again with slipjay deploy ${operation.environment}` });
+        continue;
+      }
       if (operation.kind === "release") {
         // A release that published reports itself on a rerun confirm, which also retries its post-release step.
         append(operation.id, { type: "failed", stage: operation.stage,
@@ -321,9 +414,14 @@ export function createRunnerQueue(input: {
   return {
     wake() {
       if (!active) start(loop);
+      wakeDeploys();
     },
     async recover() {
       await start(recoverRunning, active);
+      for (const repo of Object.keys(config.repos).map(repositoryKey)) {
+        const landed = log.lastLanded(repo);
+        if (landed) await scheduleDeploys(repo, landed.commitId).catch(() => {});
+      }
     },
     cancelled(operation) {
       if (operation.kind !== "landing") return;
@@ -335,7 +433,15 @@ export function createRunnerQueue(input: {
         await loop();
       }, active);
     },
-    async idle() { while (active) await active; },
+    async idle() {
+      for (;;) {
+        if (active) await active;
+        const lane = deploying;
+        await lane;
+        if (!active && lane === deploying) return;
+      }
+    },
+    close() { scheduler.close(); },
     kill() {
       if (!current) return null;
       const operation = log.operation(current.operation.id) ?? current.operation;

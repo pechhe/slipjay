@@ -34,7 +34,7 @@ function object(value: unknown, step = "Post-integration"): Record<string, unkno
     throw new Error(`Invalid ${step.toLowerCase()} policy`);
   return value as Record<string, unknown>;
 }
-function command(value: unknown, step = "Post-integration"): FinalizationCommand {
+export function command(value: unknown, step = "Post-integration"): FinalizationCommand {
   const row = object(value, step);
   if (typeof row.executable !== "string" || !row.executable.trim() || row.executable.includes("\x00") || !Array.isArray(row.args) || row.args.some((arg) => typeof arg !== "string" || arg.includes("\x00"))) {
     throw new Error(`Invalid ${step.toLowerCase()} command`);
@@ -45,7 +45,7 @@ function command(value: unknown, step = "Post-integration"): FinalizationCommand
   return { executable: row.executable, args: [...(row.args as string[])], cwd };
 }
 /** Variables a step passes through from SlipJay's environment; SlipJay's own and loader controls stay out. */
-function environmentKeys(row: Record<string, unknown>, step: string): string[] {
+export function environmentKeys(row: Record<string, unknown>, step: string): string[] {
   const keys = row.environmentKeys ?? [];
   if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(key) || key.startsWith("SLIPJAY_FINALIZATION_") || key.startsWith("SLIPJAY_RELEASE_") || ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "NODE_OPTIONS", "BUN_OPTIONS"].includes(key))) {
     throw new Error(`Invalid ${step.toLowerCase()} environment declaration`);

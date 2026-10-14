@@ -3,7 +3,7 @@ import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark, RUNNER_API, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
-import type { Operation, OperationEvent, ReleaseResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
+import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 
@@ -259,4 +259,30 @@ test("owner controls kill the running operation until verification ends, and pau
 
 test("runner HTTP adapter rejects public listen hosts", async () => {
   await assert.rejects(serveRunner(() => Promise.resolve(new Response()), { host: "0.0.0.0", port: 0 }), /loopback/);
+});
+
+test("deploy submissions queue a deploy, reattach to the open deploy of the same commit, supersede a queued older one and list records", async () => {
+  const f = await fixture();
+  try {
+    const deploy = (body: unknown) => f.request("/deploys", { method: "POST", body: JSON.stringify(body) });
+    const body = { repo: "Owner/Repo", environment: "staging", commitId: "a".repeat(40), submittedBy: "author" };
+    const first = await (await deploy(body)).json() as DeployResponse;
+    assert.equal(first.reattached, false);
+    assert.equal(first.operation.kind, "deploy");
+    assert.equal(first.operation.environment, "staging");
+    assert.equal(f.submissions, 1);
+    const again = await (await deploy({ ...body, repo: "owner/repo" })).json() as DeployResponse;
+    assert.equal(again.reattached, true);
+    assert.equal(again.operation.id, first.operation.id);
+    const newer = await (await deploy({ ...body, commitId: "b".repeat(40) })).json() as DeployResponse;
+    assert.equal(newer.reattached, false);
+    assert.equal(f.log.operation(first.operation.id)?.status, "superseded");
+    for (const invalid of [{ ...body, commitId: "abc" }, { ...body, environment: "Staging!" }, { ...body, submittedBy: "" }])
+      assert.equal((await deploy(invalid)).status, 400);
+    const listed = await (await f.request("/deploys?repo=Owner/Repo&environment=staging")).json() as { operations: Operation[] };
+    assert.deepEqual(listed.operations.map((op) => op.id), [newer.operation.id, first.operation.id]);
+    assert.equal((await f.request("/deploys")).status, 400);
+  } finally {
+    await f.close();
+  }
 });

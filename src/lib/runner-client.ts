@@ -8,8 +8,8 @@ import { runBoundedProcess } from "./bounded-process.ts";
 import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
 import { githubRepository } from "./issue-references.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
-import { jj, revisionExists, revisionFacts } from "./workspace-jj.ts";
+import type { DeployOperation, Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
+import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
@@ -217,7 +217,7 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
     const prefix = `[runner ${connection.name}]`;
     if (action !== "kill") return { ok: true, line: `${prefix} ${body.paused ? "paused: queued changes wait until resumed" : "resumed"}` };
     if (!body.operation) return { ok: true, line: `${prefix} nothing running` };
-    const subject = body.operation.kind === "release" ? `release ${body.operation.commitId.slice(0, 12)}` : `landing ${body.operation.changeId.slice(0, 12)}`;
+    const subject = body.operation.kind === "landing" ? `landing ${body.operation.changeId.slice(0, 12)}` : `${body.operation.kind} ${body.operation.commitId.slice(0, 12)}`;
     if (response.status === 409) return { ok: false, line: `${prefix} not killed: ${subject} ${body.reason}` };
     return { ok: true, line: body.operation.stage === "verifying" ? `${prefix} killed ${subject}`
       : `${prefix} killing ${subject}: it stops when ${body.operation.stage} finishes, before verification` };
@@ -387,5 +387,56 @@ export async function releaseThroughRunner(cwd: string, options: { candidate: st
     if (reattached) onLine(`[runner ${connection.name}] following the open release of ${options.candidate.slice(0, 12)}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
     return { operation, logUrl: runLogCommand(operation.id) };
+  } finally { connection.close(); }
+}
+
+/** The repository and integration branch of `cwd`, with the branch's commit on the remote freshly fetched. */
+async function integrationTip(cwd: string): Promise<{ repo: string; branch: string; commitId: string }> {
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  const remote = publicationRemote(context) ?? "origin";
+  const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), remote);
+  if (!repo) throw new Error("Runner deploys require a GitHub repository on the publication remote");
+  const branch = context.integrationBranch;
+  const fetched = await fetchIntegration(cwd, remote, branch, { ignoreWorkingCopy: true });
+  if (fetched.code !== 0) throw new Error(`Could not fetch ${branch}: ${(fetched.stderr || fetched.stdout).trim()}`);
+  const commitId = await jj(cwd, ["--ignore-working-copy", "log", "-r", `${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
+  return { repo, branch, commitId };
+}
+
+/**
+ * Deploy the integration branch's latest commit on the remote to `environment` now,
+ * or follow the open deploy of that commit, to its verdict.
+ */
+export async function deployThroughRunner(cwd: string, options: { environment: string; location: string;
+  env?: NodeJS.ProcessEnv; onLine?(line: string): void; signal?: AbortSignal }): Promise<{ operation: Operation; logUrl: string }> {
+  const env = options.env ?? process.env;
+  const onLine = options.onLine ?? console.log;
+  const { repo, branch, commitId } = await integrationTip(cwd);
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, "/v1/deploys", { method: "POST", signal: options.signal,
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, environment: options.environment, commitId,
+        submittedBy: `${hostname()}:${cwd}` }) });
+    const { operation: submitted, reattached } = (await response.json()) as { operation: DeployOperation; reattached: boolean };
+    onLine(`[runner ${connection.name}] ${reattached ? "following the open deploy" : "deploying"} of ${branch} ${commitId.slice(0, 12)} to ${options.environment}`);
+    const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
+    return { operation, logUrl: runLogCommand(operation.id) };
+  } finally { connection.close(); }
+}
+
+/** The repository's deploy records, newest first, optionally of one environment. */
+export async function readDeploys(cwd: string, options: { environment?: string; location: string; env?: NodeJS.ProcessEnv }): Promise<DeployOperation[]> {
+  const env = options.env ?? process.env;
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Runner deploys require a GitHub repository on the publication remote");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const query = new URLSearchParams({ repo, ...options.environment ? { environment: options.environment } : {} });
+    return ((await (await request(connection.baseUrl, token, `/v1/deploys?${query}`)).json()) as { operations: DeployOperation[] }).operations;
   } finally { connection.close(); }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { controlRunner, landThroughRunner, readRunLog, releaseThroughRunner, runnerLocation } from "../lib/runner-client.ts";
+import { controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readRunLog, releaseThroughRunner, runnerLocation } from "../lib/runner-client.ts";
 import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
@@ -178,6 +178,53 @@ async function runRelease(args: string[]): Promise<number> {
   return outcome.result.postRelease && !outcome.result.postRelease.ok ? 2 : 0;
 }
 
+/** `deploy <environment>`: deploy the integration branch's latest commit now, through the runner, and follow it. */
+async function runDeploy(args: string[]): Promise<number> {
+  if (args.length !== 1 || args[0]!.startsWith("-")) throw new Error("Usage: slipjay deploy <environment>");
+  const location = runnerLocation();
+  if (!location) throw new Error("slipjay deploy runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  const { operation, logUrl } = await deployThroughRunner(process.cwd(), { environment: args[0]!, location, onLine: (line) => console.error(line) });
+  const outcome = operation.result;
+  if (outcome?.type === "failed") console.error(`[runner] deploy failed: ${outcome.reason}`);
+  const record = outcome?.type === "deployed" ? outcome.record : outcome?.type === "failed" ? outcome.deployment : undefined;
+  console.log(JSON.stringify({ ok: outcome?.type === "deployed", status: operation.status,
+    ...outcome?.type === "failed" ? { reason: outcome.reason } : {}, ...record ? { record } : {}, log: logUrl }, null, 2));
+  return outcome?.type === "deployed" ? 0 : 1;
+}
+
+/** `deploys [--environment <name>] [--json]`: what each deploy put where, newest first. */
+async function runDeploys(args: string[]): Promise<number> {
+  let environment: string | undefined;
+  let asJson = false;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--json") asJson = true;
+    else if (args[index] === "--environment" && args[index + 1] && !args[index + 1]!.startsWith("-")) environment = args[++index];
+    else throw new Error("Usage: slipjay deploys [--environment <name>] [--json]");
+  }
+  const location = runnerLocation();
+  if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  const deploys = await readDeploys(process.cwd(), { location, ...environment ? { environment } : {} });
+  if (asJson) {
+    console.log(JSON.stringify(deploys.map((operation) => ({ id: operation.id, environment: operation.environment, commitId: operation.commitId,
+      status: operation.status, submittedBy: operation.submittedBy, submittedAt: operation.submittedAt, finishedAt: operation.finishedAt,
+      ...operation.result?.type === "deployed" ? { record: operation.result.record } : {},
+      ...operation.result?.type === "failed" ? { reason: operation.result.reason, ...operation.result.deployment ? { record: operation.result.deployment } : {} } : {},
+    })), null, 2));
+    return 0;
+  }
+  for (const operation of deploys) {
+    const record = operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
+    console.log(`${operation.submittedAt}  ${operation.environment}  ${operation.commitId.slice(0, 12)}  ${operation.status}${operation.result?.type === "failed" ? `: ${operation.result.reason}` : ""}`);
+    for (const project of record?.projects ?? []) console.log(`  ${project.name}: ${project.ok ? project.url ?? "deployed" : `failed: ${project.reason}`}`);
+    if (record) {
+      console.log(`  ${record.changes.length} change${record.changes.length === 1 ? "" : "s"} since ${record.previous?.slice(0, 12) ?? "the first deploy"}`);
+      for (const change of record.changes) console.log(`    ${change.commitId.slice(0, 12)} ${change.subject}`);
+    }
+  }
+  if (!deploys.length) console.log("No deploys yet.");
+  return 0;
+}
+
 /** `cutover [--check]`: move Slipway's state from ~/.slipway to ~/.slipjay once, or only report whether it would. */
 async function runCutover(args: string[]): Promise<number> {
   if (args.some((flag) => flag !== "--check")) throw new Error("Usage: slipjay cutover [--check]");
@@ -305,6 +352,10 @@ try {
     }
   } else if (command === "release") {
     process.exitCode = await runRelease(rest);
+  } else if (command === "deploy") {
+    process.exitCode = await runDeploy(rest);
+  } else if (command === "deploys") {
+    process.exitCode = await runDeploys(rest);
   } else if (command === "runner") {
     if (rest[0] === "log" && rest.length === 2) {
       const location = runnerLocation();
@@ -337,7 +388,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

@@ -109,3 +109,33 @@ test("file log preserves every appended event and increasing global sequence acr
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("deploys queue in their own lane, project their records, and the latest landing of a repository is known", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const commit = "d".repeat(40);
+    log.append("landing", submission());
+    log.append("landing", { type: "stage", stage: "verifying" });
+    log.append("deploy", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "staging", commitId: commit, submittedBy: "runner:schedule" });
+    const queued = log.operation("deploy")!;
+    assert.equal(queued.kind, "deploy");
+    assert.ok(queued.kind === "deploy" && queued.environment === "staging");
+    assert.equal(queued.position, 1, "a deploy never waits behind a landing");
+    assert.equal(queued.waitingFor, undefined);
+    assert.equal(log.lastLanded("owner/repo"), null);
+    log.append("landing", { type: "landed", base: "base", commitId: commit, branch: "main", remote: "origin" });
+    assert.equal(log.lastLanded("owner/repo")?.commitId, commit);
+    assert.equal(log.lastLanded("other/repo"), null);
+    const record = { environment: "staging", commitId: commit, previous: null, changes: [{ commitId: commit, subject: "Add a" }], projects: [{ name: "app", ok: true, url: "https://app.example" }] };
+    log.append("deploy", { type: "stage", stage: "deploying" });
+    log.append("deploy", { type: "deployed", record });
+    const deployed = log.operation("deploy")!;
+    assert.equal(deployed.status, "deployed");
+    assert.deepEqual(deployed.result, { type: "deployed", record });
+    assert.deepEqual(log.deployments("owner/repo").map((op) => op.id), ["deploy"]);
+    assert.deepEqual(log.deployments("owner/repo", "production"), []);
+    assert.deepEqual(log.operationsForChange("owner/repo", "k".repeat(32)).map((op) => op.id), ["landing"], "deploys are not changes");
+  } finally {
+    log.close();
+  }
+});

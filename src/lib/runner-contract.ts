@@ -23,14 +23,15 @@ export const candidateBookmark = (changeId: string): string => `slipjay/changes/
  * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
  * never recorded: a queued operation shows it while the owner has paused the runner.
  */
-export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing";
+export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing" | "deploying";
 
 /**
  * Stages the owner's kill may stop. Up to the end of verification nothing has moved
  * the integration or release branch; from `integrating` on, a kill could leave the
  * external target ahead of the remote, so it is refused. Verification's commands are
  * killed at once; an earlier stage finishes its step (a fetch, an install) and the
- * operation stops before verification starts.
+ * operation stops before verification starts. Deploys run in their own lane and are
+ * never killed: each project's command ends at its declared deadline.
  */
 export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying"];
 /** The reason a killed operation carries; it is never reported as a pass. */
@@ -39,10 +40,24 @@ export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
 export const RUNNER_CONTROL_ID = "runner";
 
 /** Terminal and live states of an operation, derived from its events. */
-export type OperationStatus = "queued" | "running" | "landed" | "released" | "failed" | "declined" | "superseded" | "cancelled";
+export type OperationStatus = "queued" | "running" | "landed" | "released" | "deployed" | "failed" | "declined" | "superseded" | "cancelled";
 
 /** A release the runner verified and published, or found already published. */
 export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
+
+/** One project's outcome in a deploy: `url` is the deployment its command reported. */
+export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string };
+
+/**
+ * What one deploy put in an environment: the commit, the commit the environment
+ * served before (null for its first deploy), the commits between them, newest first,
+ * and each project's outcome. A production problem narrows to one record.
+ */
+export type DeployRecord = {
+  environment: string; commitId: string; previous: string | null;
+  changes: { commitId: string; subject: string }[];
+  projects: DeployProjectOutcome[];
+};
 
 /** One fact appended to the log. Nothing is updated or deleted. */
 export type OperationEvent =
@@ -50,6 +65,8 @@ export type OperationEvent =
   | { type: "submitted"; kind?: "landing"; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A release of `commitId`, the integration commit a human approved. */
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
+  /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
+  | { type: "submitted"; kind: "deploy"; repo: string; environment: string; commitId: string; submittedBy: string }
   | { type: "stage"; stage: RunnerStage }
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
@@ -61,10 +78,12 @@ export type OperationEvent =
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
   /** A release's outcome; one whose post-release step failed still stands. */
   | { type: "released"; result: CompletedRelease }
+  /** Every project of the environment deployed. */
+  | { type: "deployed"; record: DeployRecord }
   /** The change touches migration trigger or artifact paths; the author lands it locally (until #11). */
   | { type: "declined"; reason: string; paths: string[] }
   /** `output` is the failing command's output verbatim (bounded as the local gate bounds it). */
-  | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string }
+  | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; deployment?: DeployRecord }
   /** A queued operation replaced by a newer submission of the same change. */
   | { type: "superseded"; by: string }
   | { type: "cancelled"; reason: string }
@@ -82,14 +101,14 @@ export type RunRecord = {
 };
 
 /** Event types that close an operation. */
-export const TERMINAL_EVENT_TYPES = ["landed", "released", "failed", "declined", "superseded", "cancelled"] as const;
+export const TERMINAL_EVENT_TYPES = ["landed", "released", "deployed", "failed", "declined", "superseded", "cancelled"] as const;
 
 type OperationFields = {
   id: string; repo: string; commitId: string; submittedBy: string;
   status: OperationStatus;
   /** Latest stage reached; `queued` until it starts. */
   stage: RunnerStage;
-  /** 1-based place in the runner's one serial queue, across repositories (1 = running or next); absent once closed. */
+  /** 1-based place in its lane's serial queue, across repositories (1 = running or next); absent once closed. */
   position?: number;
   /** While queued, the running operation it waits behind, e.g. `release 1a2b3c4d5e6f`. */
   waitingFor?: string;
@@ -104,8 +123,11 @@ export type LandingOperation = OperationFields & { kind: "landing"; changeId: st
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
 
+/** Deploys take turns in their own lane, so a slow deploy never holds a landing. */
+export type DeployOperation = OperationFields & { kind: "deploy"; environment: string };
+
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
-export type Operation = LandingOperation | ReleaseOperation;
+export type Operation = LandingOperation | ReleaseOperation | DeployOperation;
 
 /** The append-only log and its projections. One implementation, on `node:sqlite`. */
 export interface OperationLog {
@@ -118,6 +140,10 @@ export interface OperationLog {
   operationsForChange(repo: string, changeId: string): LandingOperation[];
   /** Open (queued or running) operations of a repository, oldest first: the queue. */
   openOperations(repo?: string): Operation[];
+  /** A repository's deploys, newest first, optionally of one environment. */
+  deployments(repo: string, environment?: string): DeployOperation[];
+  /** The latest landing a repository published, if any. */
+  lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
   paused(): { by: string; at: string } | null;
   close(): void;
@@ -135,6 +161,13 @@ export type ReleaseRequest = { repo: string; candidate: string; migrationsReady:
 export type ReleaseResponse = { operation: ReleaseOperation; reattached: boolean };
 
 /**
+ * POST /v1/deploys body: the full id of a commit already on the integration branch.
+ * An open deploy of the same environment is returned instead of a second.
+ */
+export type DeployRequest = { repo: string; environment: string; commitId: string; submittedBy: string };
+export type DeployResponse = { operation: DeployOperation; reattached: boolean };
+
+/**
  * POST /v1/operations response.
  * - No open operation for the change: a new one (`reattached: false`).
  * - An open one for the same commit: that one (`reattached: true`), never a second.
@@ -148,6 +181,8 @@ export type SubmitResponse = { operation: Operation; reattached: boolean; supers
  * Routes (all require `Authorization: Bearer <token>`; anything else is 401):
  * - POST /v1/operations                         SubmitRequest → SubmitResponse (200, or 409 `{ operation }`)
  * - POST /v1/releases                           ReleaseRequest → ReleaseResponse
+ * - POST /v1/deploys                            DeployRequest → DeployResponse
+ * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,
  *                                                 replaying after `seq`, then live; ends after the terminal event

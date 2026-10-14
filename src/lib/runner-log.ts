@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { LandingOperation, Operation, OperationEvent, OperationLog, RunRecord, StoredEvent } from "./runner-contract.ts";
+import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, RunRecord, StoredEvent } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -36,6 +36,12 @@ export function openOperationLog(path: string): OperationLog {
     AND operation_id NOT IN (SELECT operation_id FROM events WHERE type IN ${terminalTypes}) ORDER BY seq`);
   const changeIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
     AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.changeId') = ? ORDER BY seq DESC`);
+  const deployIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+    AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.repo') = ?
+    AND (? IS NULL OR json_extract(data, '$.environment') = ?) ORDER BY seq DESC`);
+  const landed = db.prepare(`SELECT landed.at, landed.data FROM events landed
+    JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
+    WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq DESC LIMIT 1`);
   const control = db.prepare(`SELECT seq, operation_id, at, data FROM events
     WHERE operation_id = ? AND type IN ('paused', 'resumed') ORDER BY seq DESC LIMIT 1`);
   function paused(): { by: string; at: string } | null {
@@ -45,17 +51,20 @@ export function openOperationLog(path: string): OperationLog {
   }
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
-  // One serial queue across repositories, in submission order.
+  // Two serial lanes across repositories, each in submission order: landings with
+  // releases, and deploys.
   function queue(): Operation[] {
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
-    const running = open.find((operation) => operation.status === "running");
     const held = paused() !== null;
-    open.forEach((operation, index) => {
-      operation.position = index + 1;
-      if (operation.status !== "queued") return;
-      if (held) operation.stage = "paused";
-      if (running) operation.waitingFor = label(running);
-    });
+    for (const lane of [open.filter((operation) => operation.kind !== "deploy"), open.filter((operation) => operation.kind === "deploy")]) {
+      const running = lane.find((operation) => operation.status === "running");
+      lane.forEach((operation, index) => {
+        operation.position = index + 1;
+        if (operation.status !== "queued") return;
+        if (held) operation.stage = "paused";
+        if (running) operation.waitingFor = label(running);
+      });
+    }
     return open;
   }
   // An open operation carries its queue fields; a closed one is its bare projection.
@@ -81,6 +90,17 @@ export function openOperationLog(path: string): OperationLog {
         .map((entry) => placed(entry, open));
     },
     openOperations: (repo) => queue().filter((entry) => repo === undefined || entry.repo === repo),
+    deployments: (repo, environment) => {
+      const open = queue();
+      return projectIds((deployIds.all(repo, environment ?? null, environment ?? null) as { operation_id: string }[]).map((row) => row.operation_id))
+        .filter((entry): entry is DeployOperation => entry.kind === "deploy")
+        .map((entry) => placed(entry, open));
+    },
+    lastLanded: (repo) => {
+      const row = landed.get(repo) as { at: string; data: string } | undefined;
+      const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
+      return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
+    },
     paused,
     close: () => db.close(),
   };
@@ -88,7 +108,7 @@ export function openOperationLog(path: string): OperationLog {
 
 /** How a queued operation names the one running ahead of it. */
 const label = (operation: Operation): string =>
-  operation.kind === "release" ? `release ${operation.commitId.slice(0, 12)}` : `landing ${operation.changeId.slice(0, 12)}`;
+  operation.kind === "landing" ? `landing ${operation.changeId.slice(0, 12)}` : `${operation.kind} ${operation.commitId.slice(0, 12)}`;
 
 function project(id: string, events: StoredEvent[]): Operation | null {
   const submitted = events.find((stored) => stored.event.type === "submitted");
@@ -101,7 +121,9 @@ function project(id: string, events: StoredEvent[]): Operation | null {
   };
   const operation: Operation = submitted.event.kind === "release"
     ? { ...fields, kind: "release", migrationsReady: submitted.event.migrationsReady }
-    : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark };
+    : submitted.event.kind === "deploy"
+      ? { ...fields, kind: "deploy", environment: submitted.event.environment }
+      : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {
     const event = stored.event;
@@ -126,6 +148,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
       }
       case "landed":
       case "released":
+      case "deployed":
       case "failed":
       case "declined":
       case "superseded":

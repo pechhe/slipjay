@@ -1,3 +1,4 @@
+import type { DeploymentPolicy } from "./deployment-policy.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 export type MigrationCommand = { executable: string; args: string[]; cwd: string | null };
 
@@ -31,6 +32,8 @@ export type ExecutionPolicy = {
   spares?: number;
   postIntegration?: unknown;
   postRelease?: unknown;
+  /** Environments the runner deploys; undefined when undeclared. */
+  deployments?: DeploymentPolicy;
 };
 
 export type IntegrationBranchProbes = {
@@ -47,6 +50,7 @@ export type IntegrationBranchProbes = {
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { deploymentPolicy } from "./deployment-policy.ts";
 import { postIntegrationPolicy, postReleasePolicy } from "./post-integration-policy.ts";
 import { declaredPublicationRemote } from "./source-publication-policy.ts";
 import { normalizeVerificationDeclaration } from "./verification-policy.ts";
@@ -264,6 +268,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   postIntegrationPolicy(parsed.postIntegration);
   if (parsed.postRelease !== undefined && parsed.releaseBranch == null) fail("declares postRelease without a releaseBranch");
   postReleasePolicy(parsed.postRelease);
+  const deployments = deploymentPolicy(parsed.deployments);
   generatedPathMatchers(parsed.generatedPaths);
   const sharedPaths = sharedPathList(parsed.sharedPaths);
   const spares = spareCount(parsed.spares);
@@ -279,6 +284,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     workspaceTeardown: workspaceTeardown(parsed.workspaceTeardown),
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
     ...(parsed.spares === undefined ? {} : { spares }),
+    ...(deployments ? { deployments } : {}),
   };
 }
 
