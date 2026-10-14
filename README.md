@@ -434,11 +434,17 @@ An unknown outcome or a failed pointer return records `automatic: false`. So
 be moved back is named, and the release branch stays on the release because
 production may still serve the candidate. Rollback is
 code only. The plan's `nonAdditiveMigrations` names migration artifacts that drop,
-rename, retype or delete something, or tighten what an existing table accepts (a
-heuristic, `nonAdditiveSql` in `src/lib/release.ts`), and its `next` repeats them: a
+rename, retype, delete or rewrite something, or tighten what an existing table accepts
+(a heuristic, `nonAdditiveSql` in `src/lib/release.ts`: it does not flag tables or
+columns the migration itself adds, or a CHECK dropped and added back under the same
+name as an `IN (...)` list over one column, so an enum that gained a value is additive), and its `next` repeats them: a
 failed promotion carrying one, including a rerun confirm of it, is left as it is,
-with nothing moved back, for the owner to decide, unless its migrations' first
-verify refused, so nothing was applied.
+with nothing moved back, for the owner to decide, once its migrations may have changed
+the schema: they were applied or failed part-way, were already in place, an earlier
+deploy of the same commit did any of that, or the environment declares no `migrations`
+(they may have been applied by hand). A deploy that failed before them (a build or
+health check) or whose first verify refused, with no such earlier deploy, changed
+nothing, so it rolls back and restores earlier projects as usual.
 
 1. `slipjay promote` fetches and plans: the candidate (the integration branch on
    the remote), the base (the release branch on the remote), the commits between

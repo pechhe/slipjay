@@ -56,20 +56,34 @@ function failure(result: BoundedProcessResult, timeoutMs: number): string | null
 }
 
 /**
+ * Whether a promotion's migrations may have changed the schema: an environment that
+ * declares none may have had them applied by hand; one that does changed it if its apply
+ * ran, or found them already in place (`current` with files to apply: an earlier deploy
+ * or the owner applied them), or an earlier deploy of the same commit did. A first
+ * `verify_failed` and a deploy that never reached the migrations touched nothing.
+ */
+export const schemaMayHaveChanged = (declared: boolean, migrations: DeployMigrations | undefined, earlierChanged = false): boolean =>
+  !declared || earlierChanged || migrations?.status === "applied" || migrations?.status === "apply_failed"
+  || (migrations?.status === "current" && migrations.artifacts.length > 0);
+
+/**
  * Deploy every project of one environment from an exact source view of `commitId`,
  * one after another, health-check each, and return the record. A failing project does
  * not stop the rest: the record says which projects serve the new commit. Where the
  * environment activates, traffic moves only once every project passed and its
  * declared migrations brought the database to the commit, and an activation that
- * fails moves the projects already activated back to `previousUrls`, unless `restore`
- * is false (the owner decides).
+ * fails moves the projects already activated back to `previousUrls`, unless the promotion
+ * is `nonAdditive` and its migrations may have changed the schema (the owner decides).
  */
 export async function runDeploy(input: {
   gitDirectory: string; environment: string; commitId: string; previous: string | null;
   policy: DeploymentEnvironment;
   /** The deployment each project served before, for moving traffic back. */
   previousUrls?: Record<string, string>;
-  restore?: boolean;
+  /** The promotion carries migrations that earlier code may not survive (see `nonAdditiveSql`). */
+  nonAdditive?: boolean;
+  /** An earlier deploy of this commit applied, or part-applied, its migrations. */
+  earlierSchemaChange?: boolean;
   /** The migration files the deploy carries, for its record. */
   migrationArtifacts?: string[];
   /** Where the declared `environmentKeys` are read from. */
@@ -77,7 +91,7 @@ export async function runDeploy(input: {
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
   onProgress(line: string): void;
 }): Promise<DeployRecord> {
-  const { gitDirectory, environment, commitId, previous, policy, previousUrls = {}, restore = true } = input;
+  const { gitDirectory, environment, commitId, previous, policy, previousUrls = {}, nonAdditive = false, earlierSchemaChange = false } = input;
   const changes = await changesSince(gitDirectory, previous, commitId);
   let migrations: DeployMigrations | undefined;
   const projects = await withFinalizationSource(gitDirectory, commitId, async (root) => {
@@ -141,6 +155,8 @@ export async function runDeploy(input: {
         return outcomes;
       }
     }
+    // Until the schema may have changed, earlier code still fits it, so moving back is safe.
+    const restore = !nonAdditive || !schemaMayHaveChanged(policy.migrations !== undefined, migrations, earlierSchemaChange);
     for (const [index, project] of policy.projects.entries()) {
       const outcome = outcomes[index]!;
       // Local service recovery follows the runner's migration compatibility decision too.

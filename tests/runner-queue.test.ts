@@ -1040,7 +1040,7 @@ test("a promotion migrates production after every project is healthy and before 
   };
   const order = async () => { const steps = await f.lines("order.log"); await rm(join(f.root, "order.log"), { force: true }); return steps; };
   try {
-    // Non-additive, so only a refused first verify, which applied nothing, is rolled back automatically.
+    // Non-additive, so only a deploy that changed nothing in the schema (a refused first verify, or one that never reached the migrations) is rolled back automatically.
     await f.land(f.submit(await f.candidate("schema/drop")));
     await f.queue.idle();
     const first = f.main();
@@ -1055,6 +1055,16 @@ test("a promotion migrates production after every project is healthy and before 
     assert.deepEqual(await order(), ["health app", "health hq", "health www", "verify"], "nothing applied or activated");
     await rm(join(f.root, "fail-verify"));
 
+    // A deploy that stopped at a health check never reached the migrations, so the schema is untouched and earlier code still fits it.
+    await writeFile(join(f.root, "fail-health-hq"), "");
+    const unhealthy = (await promote(first)).result;
+    assert.ok(unhealthy?.type === "failed" && unhealthy.deployment, JSON.stringify(unhealthy));
+    assert.equal(unhealthy.deployment.migrations, undefined);
+    assert.equal(unhealthy.deployment.rollback?.automatic, true, JSON.stringify(unhealthy.deployment.rollback));
+    assert.equal(f.releaseRef(), before, "nothing was applied, so the release branch returns");
+    assert.ok(!(await order()).includes("verify"), "the migrations were never reached");
+    await rm(join(f.root, "fail-health-hq"));
+
     await writeFile(join(f.root, "fail-apply"), "");
     const partial = await promote(first);
     assert.ok(partial.result?.type === "failed" && partial.result.deployment?.migrations?.status === "apply_failed", JSON.stringify(partial.result));
@@ -1063,6 +1073,16 @@ test("a promotion migrates production after every project is healthy and before 
     assert.equal(f.parents(merge).at(-1), first, "the release branch keeps the release");
     assert.deepEqual(await order(), ["health app", "health hq", "health www", "verify", "apply"]);
     await rm(join(f.root, "fail-apply"));
+
+    // A rerun that stops before the migrations still follows an earlier deploy of the commit that part-applied them.
+    await writeFile(join(f.root, "fail-health-hq"), "");
+    const rerun = (await promote(first)).result;
+    assert.ok(rerun?.type === "failed" && rerun.deployment, JSON.stringify(rerun));
+    assert.equal(rerun.deployment.migrations, undefined);
+    assert.equal(rerun.deployment.rollback?.automatic, false, JSON.stringify(rerun.deployment.rollback));
+    assert.equal(f.releaseRef(), merge, "the release branch keeps the release");
+    await rm(join(f.root, "fail-health-hq"));
+    await order();
 
     const applied = await promote(first);
     assert.ok(applied.result?.type === "deployed", JSON.stringify(applied.result));
@@ -1076,6 +1096,17 @@ test("a promotion migrates production after every project is healthy and before 
     assert.ok(current.result?.type === "deployed", JSON.stringify(current.result));
     assert.deepEqual(current.result.record.migrations, { artifacts: [], status: "current" }, "a promotion without migrations still verifies production");
     assert.deepEqual((await order()).filter((step) => !step.includes(" ")), ["verify"]);
+
+    // Applied, then an activation fails: the earlier code may not run on the migrated schema, so nothing moves back.
+    await f.land(f.submit(await f.candidate("schema/more")));
+    await f.queue.idle();
+    const merged = f.releaseRef();
+    await writeFile(join(f.root, "fail-activate-hq"), "");
+    const stuck = (await promote(f.main())).result;
+    assert.ok(stuck?.type === "failed" && stuck.deployment?.migrations?.status === "applied", JSON.stringify(stuck));
+    assert.equal(stuck.deployment.rollback?.automatic, false);
+    assert.match(stuck.reason, /not rolled back automatically, because the promotion carries non-additive migrations \(migrations\/0002\.sql\): the owner decides$/);
+    assert.notEqual(f.releaseRef(), merged, "the release branch keeps the release");
   } finally { await f.dispose(); }
 }, 300_000);
 

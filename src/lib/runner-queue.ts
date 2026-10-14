@@ -9,7 +9,7 @@ import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts
 import { createDeployScheduler } from "./deploy-scheduler.ts";
 import { createResetScheduler } from "./reset-scheduler.ts";
 import { runReset } from "./reset.ts";
-import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy } from "./deploy.ts";
+import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "./deploy.ts";
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
@@ -200,9 +200,11 @@ export function createRunnerQueue(input: {
         return url ? [[name, url]] : [];
       }));
       const manual = operation.promotion?.nonAdditiveMigrations ?? [];
+      const earlierSchemaChange = earlier.some(({ entry, record }) => entry.commitId === operation.commitId
+        && (record?.migrations?.status === "applied" || record?.migrations?.status === "apply_failed"));
       const record = await runDeploy({
         gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
-        previousUrls, restore: manual.length === 0, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
+        previousUrls, nonAdditive: manual.length > 0, earlierSchemaChange, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
         run: async (request) => {
           const runId = randomUUID();
@@ -218,7 +220,7 @@ export function createRunnerQueue(input: {
       });
       const failed = [...record.migrations?.reason ? [{ name: "migrations", reason: record.migrations.reason }] : [],
         ...record.projects.filter((project) => !project.ok)];
-      if (failed.length && operation.promotion) record.rollback = await rollBack(operation, operation.promotion, record);
+      if (failed.length && operation.promotion) record.rollback = await rollBack(operation, operation.promotion, record, policy.migrations !== undefined, earlierSchemaChange);
       verdict = failed.length
         ? { type: "failed", stage: "deploying", deployment: record,
           reason: `deploy failed: ${failed.map((project) => `${project.name} (${project.reason})`).join(", ")}${record.rollback ? `; ${record.rollback.reason}` : ""}` }
@@ -234,15 +236,15 @@ export function createRunnerQueue(input: {
   /**
    * After a promotion's production deploy failed: production already serves what it
    * served before (nothing activated, or moved back), so return the release branch to
-   * match, in the serial lane that owns branch moves. A promotion that may have applied
-   * non-additive migrations, or whose migrations failed part-way, is left as it is: the
-   * code before it may not run on the migrated schema.
+   * match, in the serial lane that owns branch moves. A promotion whose non-additive
+   * migrations may have changed the schema, or whose migrations failed part-way, is
+   * left as it is: the code before it may not run on the migrated schema.
    */
-  async function rollBack(operation: DeployOperation, { merge, nonAdditiveMigrations: manual }: PromotionFacts, record: DeployRecord): Promise<NonNullable<DeployRecord["rollback"]>> {
+  async function rollBack(operation: DeployOperation, { merge, nonAdditiveMigrations: manual }: PromotionFacts, record: DeployRecord, declaresMigrations: boolean, earlierSchemaChange: boolean): Promise<NonNullable<DeployRecord["rollback"]>> {
     if (record.migrations?.status === "apply_failed") return { automatic: false,
       reason: "not rolled back automatically, because applying the migrations failed and the database may be partly migrated: the owner decides" };
-    // A refused first verify applied nothing, so the code before the promotion still fits the schema.
-    if (manual.length && record.migrations?.status !== "verify_failed") return { automatic: false,
+    // A deploy that stopped before the migrations, or whose first verify refused, changed no schema (and no earlier deploy of the commit did): the code before the promotion still fits.
+    if (manual.length && schemaMayHaveChanged(declaresMigrations, record.migrations, earlierSchemaChange)) return { automatic: false,
       reason: `not rolled back automatically, because the promotion carries non-additive migrations (${manual.join(", ")}): the owner decides` };
     const unrecovered = record.projects.filter((project) => project.activated);
     if (unrecovered.length) return { automatic: false,

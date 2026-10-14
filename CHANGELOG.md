@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **Non-additive detection is meaningful, and rollback needs a changed schema (#46):**
+  `nonAdditiveSql` no longer flags tables the migration creates (temporary ones too),
+  columns it adds and constraints or unique indexes over only those, a CHECK dropped
+  and added back under the same name as an `IN (...)` list over one column,
+  `ON COMMIT DROP`, `DROP NOT NULL` or a generated column. It reads each clause of an
+  `ALTER TABLE`, tells tables apart by schema, flags every `UPDATE` of anything but its
+  own added columns, and now also flags row-level security, policies, triggers, replaced
+  functions, `MERGE`, upserts and `VALIDATE CONSTRAINT`. A failed promotion carrying
+  non-additive files now rolls back, and restores earlier projects, unless its migrations
+  may have changed the schema (applied, failed part-way, already in place, or run by an
+  earlier deploy of the same commit, or an environment declaring none), not only when
+  the first verify refused.
+
 ## v3.13.0
 
 - **Bind migration context to rebased source, base and Issue (#45):** the non-secret

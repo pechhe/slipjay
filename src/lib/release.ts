@@ -110,32 +110,207 @@ export type ConfirmReleaseOptions = {
 };
 
 const COMMIT_PREFIX = /^[a-f0-9]{12,64}$/;
-const SQL_COMMENTS = /--[^\n]*|\/\*[\s\S]*?\*\//g;
-const TABLE = String.raw`(?:ONLY\s+)?((?:"[^"]+"|\w+)(?:\.(?:"[^"]+"|\w+))?)`;
-const tableName = (name: string): string => name.split(".").at(-1)!.replaceAll('"', "").toLowerCase();
+const NAME = String.raw`(?:"[^"]+"|\w+)`;
+const TABLE = String.raw`(?:ONLY\s+)?(${NAME}(?:\s*\.\s*${NAME})?)`;
+const unquote = (name: string): string => name.replaceAll('"', "").toLowerCase();
+/** A table as `schema.name`, an unqualified one being in `public`. */
+const qualify = (name: string): string => {
+  const parts = (name.match(/"[^"]+"|\w+/g) ?? []).map(unquote);
+  return parts.length > 1 ? `${parts[0]}.${parts[1]}` : `public.${parts[0]}`;
+};
+const CONSTRAINT_KINDS = String.raw`CONSTRAINT|UNIQUE|PRIMARY|FOREIGN|CHECK|EXCLUDE|LIKE`;
+const COLUMN_TYPE = String.raw`::\s*\w+(?:\s+\w+)?`;
+const LITERAL = String.raw`(?:''|-?\d+(?:\.\d+)?)(?:\s*${COLUMN_TYPE})?`;
+/** What a CHECK holds, once outer parentheses are off, for the constraint to be an `IN` list over one column. */
+const IN_LIST = new RegExp(String.raw`^\(?\s*(?:${NAME}\s*\.\s*)?${NAME}\s*(?:${COLUMN_TYPE})?\s*\)?\s*(?:${COLUMN_TYPE})?\s+IN\s*\(\s*${LITERAL}(?:\s*,\s*${LITERAL})*\s*\)$`, "i");
+const SQL_WORDS = new Set(["and", "or", "not", "null", "is", "in", "like", "ilike", "between", "true", "false", "any", "all", "array", "case", "when", "then", "else", "end",
+  "distinct", "from", "similar", "to", "unknown", "where", "include", "nulls", "first", "last", "asc", "desc"]);
+
+/** `sql` as its statements, comments removed and dollar-quoted bodies (`DO $$ ... $$`) also as statements of their own. */
+function splitSql(sql: string): string[] {
+  const statements: string[] = [];
+  const bodies: string[] = [];
+  let current = "";
+  for (let at = 0; at < sql.length;) {
+    const char = sql[at]!;
+    if (sql.startsWith("--", at)) {
+      const end = sql.indexOf("\n", at);
+      at = end < 0 ? sql.length : end;
+    } else if (sql.startsWith("/*", at)) {
+      const end = sql.indexOf("*/", at + 2);
+      at = end < 0 ? sql.length : end + 2;
+      current += " ";
+    } else if (char === "'" || char === '"') {
+      let end = at + 1;
+      for (;;) {
+        const close = sql.indexOf(char, end);
+        if (close < 0) { end = sql.length; break; }
+        end = close + 1;
+        if (sql[end] !== char) break;
+        end += 1;
+      }
+      current += sql.slice(at, end);
+      at = end;
+    } else if (char === "$" && !/\w/.test(sql[at - 1] ?? " ")) {
+      const tag = /^\$(?:[A-Za-z_]\w*)?\$/.exec(sql.slice(at, at + 64))?.[0];
+      const close = tag ? sql.indexOf(tag, at + tag.length) : -1;
+      if (tag && close >= 0) {
+        bodies.push(sql.slice(at + tag.length, close));
+        current += sql.slice(at, close + tag.length);
+        at = close + tag.length;
+      } else { current += char; at += 1; }
+    } else if (char === ";") {
+      statements.push(current);
+      current = "";
+      at += 1;
+    } else { current += char; at += 1; }
+  }
+  statements.push(current);
+  return [...statements, ...bodies.flatMap(splitSql)].filter((statement) => statement.trim());
+}
+
+/** `text` split at `separator` outside parentheses and quoted names. */
+function splitTop(text: string, separator = ","): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    const char = text[at];
+    if (char === "(") depth += 1;
+    else if (char === ")") depth -= 1;
+    else if (char === '"') at = Math.max(text.indexOf('"', at + 1), at);
+    else if (char === separator && depth === 0) { parts.push(text.slice(from, at)); from = at + 1; }
+  }
+  return [...parts, text.slice(from)];
+}
+
+/** The text between the parenthesis at `open` and its match, and what follows it. */
+function balanced(text: string, open: number): { inner: string; after: string } | null {
+  let depth = 0;
+  for (let at = open; at < text.length; at += 1) {
+    if (text[at] === "(") depth += 1;
+    else if (text[at] === ")" && --depth === 0) return { inner: text.slice(open + 1, at), after: text.slice(at + 1) };
+  }
+  return null;
+}
+
+/** The columns a list names, as `"a", b DESC`; an expression names none, so it stands as `(expression)`. */
+const columnList = (list: string): string[] => splitTop(list).map((entry) => {
+  const column = /^\s*("[^"]+"|\w+)(?![\w(.:"])/.exec(entry);
+  return column ? unquote(column[1]!) : "(expression)";
+});
+
+/** The columns an expression reads, without a table qualifier: not keywords, casts, function names or literals. */
+const identifiers = (expression: string): string[] =>
+  [...expression.replace(/(?:"[^"]+"|\b\w+)\s*\.\s*(?=["\w])/g, "").replace(new RegExp(String.raw`${COLUMN_TYPE}(?:\s*\([^)]*\))?(?:\[\])?`, "g"), " ").matchAll(/"[^"]+"|\b[a-z_]\w*\b(?!\s*\()/gi)]
+    .map((match) => unquote(match[0])).filter((word) => !SQL_WORDS.has(word));
+
+/** The columns an UPDATE assigns, from the text after its SET. */
+function setTargets(rest: string): string[] {
+  let end = rest.length;
+  let depth = 0;
+  for (let at = 0; at < rest.length; at += 1) {
+    const char = rest[at];
+    if (char === "(") depth += 1;
+    else if (char === ")" && --depth < 0) { end = at; break; }
+    else if (char === '"') at = Math.max(rest.indexOf('"', at + 1), at);
+    else if (depth === 0 && !/\w/.test(rest[at - 1] ?? " ") && /^(?:WHERE|FROM|RETURNING)\b/i.test(rest.slice(at, at + 10))) { end = at; break; }
+  }
+  return splitTop(rest.slice(0, end)).flatMap((assignment) => {
+    const list = /^\s*\(([^)]*)\)\s*=/.exec(assignment);
+    if (list) return columnList(list[1]!);
+    const single = new RegExp(String.raw`^\s*(?:${NAME}\s*\.\s*)?(${NAME})\s*=`).exec(assignment);
+    return single ? [unquote(single[1]!)] : ["(unparsed)"];
+  });
+}
+
+/** `statement` with string contents and dollar-quoted bodies emptied, so keywords inside them are not read as SQL. */
+const blank = (statement: string): string =>
+  statement.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|\$(\w*)\$[\s\S]*?\$\1\$/g, (match) => match.startsWith("'") ? "''" : match.startsWith('"') ? match : "$$$$");
 
 /**
  * A heuristic for SQL that code from before the migration may not survive: removing,
- * renaming or retyping something, deleting rows, or tightening what a table that
- * already existed accepts (a constraint, a unique index, a NOT NULL column without a
- * default). Constraints on a table the same migration creates are additive. It errs
- * towards flagging (any DROP, even of a default), since a flag only withholds an
- * automatic rollback.
+ * renaming or retyping something, deleting or rewriting rows, tightening what a table
+ * that already existed accepts (a constraint, a unique index, a NOT NULL column without
+ * a default or generation) or changing what it does (row-level security, a trigger, a
+ * replaced function, an upsert, MERGE). It errs towards flagging, since a flag only
+ * withholds an automatic rollback, but not where the earlier code cannot tell the
+ * difference: tables the migration creates (temporary ones too), columns it adds (earlier
+ * code never writes them, so each holds its default) and constraints or unique indexes
+ * over only those, a CHECK dropped and added back under the same name as an `IN (...)` list
+ * over one column (an enum that gained a value; the migration cannot show the old list,
+ * and a value it removed fails the constraint if any row holds it), `ON COMMIT DROP`,
+ * `DROP NOT NULL`. Tables are told apart by schema; an unqualified one is in `public`.
+ *
+ * Returns the statements that make `sql` non-additive.
  */
-export function nonAdditiveSql(sql: string): boolean {
-  const statements = sql.replace(SQL_COMMENTS, "").split(";");
-  const created = new Set(statements.flatMap((statement) =>
-    [...statement.matchAll(new RegExp(String.raw`\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${TABLE}`, "gi"))].map((match) => tableName(match[1]!))));
-  const existing = (statement: string, pattern: string): boolean => {
-    const match = new RegExp(pattern, "i").exec(statement);
-    return Boolean(match && !created.has(tableName(match[1]!)));
+export function nonAdditiveStatements(sql: string): string[] {
+  const statements = splitSql(sql).map((text) => {
+    const code = blank(text).replace(/\bON\s+COMMIT\s+DROP\b/gi, "");
+    const alter = new RegExp(String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?${TABLE}`, "i").exec(code);
+    return { text, code, table: alter ? qualify(alter[1]!) : null, clauses: alter ? splitTop(code.slice(alter.index + alter[0].length)) : [] };
+  });
+  const created = new Set(statements.flatMap(({ code }) =>
+    [...code.matchAll(new RegExp(String.raw`\bCREATE\s+(?:(?:GLOBAL\s+|LOCAL\s+)?(?:TEMP|TEMPORARY)\s+|UNLOGGED\s+)?TABLE\s+(?!IF\s+NOT\s+EXISTS\b)${TABLE}`, "gi"))].map((match) => qualify(match[1]!))));
+  const added = new Map<string, Set<string>>();
+  const dropped = new Set<string>();
+  const checkedIn = new Set<string>();
+  for (const { table, clauses } of statements) {
+    for (const clause of table ? clauses : []) {
+      const column = new RegExp(String.raw`^\s*ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!(?:${CONSTRAINT_KINDS})\b)(${NAME})`, "i").exec(clause);
+      if (column) added.set(table!, (added.get(table!) ?? new Set()).add(unquote(column[1]!)));
+      const drop = new RegExp(String.raw`^\s*DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(${NAME})`, "i").exec(clause);
+      if (drop) dropped.add(`${table}.${unquote(drop[1]!)}`);
+      const check = new RegExp(String.raw`^\s*ADD\s+CONSTRAINT\s+(${NAME})\s+CHECK\s*\(([\s\S]*)\)\s*(?:NOT\s+VALID\s*)?$`, "i").exec(clause);
+      if (check && IN_LIST.test(check[2]!.trim())) checkedIn.add(`${table}.${unquote(check[1]!)}`);
+    }
+  }
+  const widened = new Set([...checkedIn].filter((constraint) => dropped.has(constraint)));
+  const existing = (table: string | null): boolean => table !== null && !created.has(table);
+  const addedOnly = (table: string, columns: string[]): boolean => columns.length > 0 && columns.every((column) => added.get(table)?.has(column));
+  const risky = ({ code, table, clauses }: (typeof statements)[number]): boolean => {
+    const bare = code.replace(/"[^"]*"/g, "_q");
+    if (/\b(?:TRUNCATE|RENAME|MERGE)\b|\bVALIDATE\s+CONSTRAINT\b|\bROW\s+LEVEL\s+SECURITY\b|\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:POLICY|(?:CONSTRAINT\s+)?TRIGGER)\b|\bCREATE\s+OR\s+REPLACE\s+(?:FUNCTION|PROCEDURE)\b/i.test(bare)) return true;
+    if (/\bDROP\s+(?!CONSTRAINT\b|NOT\s+NULL\b)\w+/i.test(bare)) return true;
+    if ([...code.matchAll(new RegExp(String.raw`\bDELETE\s+FROM\s+${TABLE}`, "gi"))].some((match) => existing(qualify(match[1]!)))) return true;
+    for (const update of code.matchAll(new RegExp(String.raw`\bUPDATE\s+${TABLE}(?:\s+(?:AS\s+)?(?!SET\b)${NAME})?\s+SET\b`, "gi"))) {
+      const name = qualify(update[1]!);
+      if (existing(name) && !addedOnly(name, setTargets(code.slice(update.index + update[0].length)))) return true;
+    }
+    const insert = new RegExp(String.raw`\bINSERT\s+INTO\s+${TABLE}`, "i").exec(code);
+    if (insert && existing(qualify(insert[1]!)) && /\bON\s+CONFLICT\b[\s\S]*?\bDO\s+UPDATE\b/i.test(bare)) return true;
+    const index = new RegExp(String.raw`\bCREATE\s+UNIQUE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?:${NAME}\s+)?ON\s+${TABLE}(?:\s+USING\s+\w+)?\s*\(`, "i").exec(code);
+    if (index && existing(qualify(index[1]!))) {
+      const list = balanced(code, index.index + index[0].length - 1);
+      if (!list || !addedOnly(qualify(index[1]!), columnList(list.inner))) return true;
+      const rest = identifiers(list.after.replace(/\bINCLUDE\s*\(/gi, "("));
+      if (rest.some((column) => !added.get(qualify(index[1]!))?.has(column))) return true;
+    }
+    if (!existing(table)) return false;
+    return clauses.some((clause) => {
+      const plain = clause.replace(/"[^"]*"/g, "_q");
+      const drop = new RegExp(String.raw`^\s*DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?(${NAME})`, "i").exec(clause);
+      if (drop && !widened.has(`${table}.${unquote(drop[1]!)}`)) return true;
+      if (/^\s*ALTER\s+(?:COLUMN\s+)?\w+\s+(?:SET\s+DATA\s+TYPE|TYPE|SET\s+NOT\s+NULL)\b/i.test(plain)) return true;
+      if (new RegExp(String.raw`^\s*ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(?!(?:${CONSTRAINT_KINDS})\b)`, "i").test(plain))
+        return /\bNOT\s+NULL\b/i.test(plain) && !/\b(?:DEFAULT|GENERATED)\b/i.test(plain);
+      const constraint = new RegExp(String.raw`^\s*ADD\s+(?:CONSTRAINT\s+(${NAME})\s+)?(CHECK|UNIQUE|PRIMARY\s+KEY|FOREIGN\s+KEY|EXCLUDE)\b`, "i").exec(clause);
+      if (!constraint) return false;
+      const kind = constraint[2]!.toUpperCase();
+      if (kind === "EXCLUDE") return true;
+      if (kind === "CHECK") {
+        if (constraint[1] && widened.has(`${table}.${unquote(constraint[1])}`)) return false;
+        const columns = identifiers(clause.slice(constraint[0].length));
+        return !columns.length || columns.some((column) => !added.get(table!)?.has(column));
+      }
+      const open = clause.slice(constraint[0].length).match(/^\s*\(/);
+      const list = open ? balanced(clause, constraint[0].length + open[0].length - 1) : null;
+      return !list || !addedOnly(table!, columnList(list.inner));
+    });
   };
-  return statements.some((statement) => /\b(?:DROP|TRUNCATE|RENAME)\b|\bDELETE\s+FROM\b|\bALTER\s+COLUMN\b[\s\S]*\b(?:TYPE|SET\s+NOT\s+NULL)\b/i.test(statement)
-    || existing(statement, String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?${TABLE}[\s\S]*\bADD\s+CONSTRAINT\b`)
-    || existing(statement, String.raw`\bCREATE\s+UNIQUE\s+INDEX\b[\s\S]*?\bON\s+${TABLE}`)
-    || (existing(statement, String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?${TABLE}[\s\S]*\bADD\s+(?:COLUMN\s+)?[\s\S]*\bNOT\s+NULL\b`)
-      && !/\bDEFAULT\b/i.test(statement)));
+  return statements.filter(risky).map(({ text }) => text.trim());
 }
+export const nonAdditiveSql = (sql: string): boolean => nonAdditiveStatements(sql).length > 0;
 const CANDIDATE_TRAILER = "Release-Candidate: ";
 
 class ReleaseRefusal extends Error {
