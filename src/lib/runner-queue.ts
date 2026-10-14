@@ -8,6 +8,8 @@ import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { integrateLandingCandidate } from "./landing-candidate.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
 import { createDeployScheduler } from "./deploy-scheduler.ts";
+import { createResetScheduler } from "./reset-scheduler.ts";
+import { runReset } from "./reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy } from "./deploy.ts";
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
@@ -15,7 +17,7 @@ import { RequiredVerificationError, runRequiredVerification } from "./required-v
 import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
+import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, ResetOperation, StoredEvent } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -71,7 +73,8 @@ export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = proces
 
 /**
  * One serial loop owns every repository's warm checkout and every transition of its
- * integration and release branches: landings and releases take turns in arrival order.
+ * integration and release branches: landings, releases and resets of the target
+ * landings finalize against take turns in arrival order.
  * Deploys take turns in a second lane that only reads the warm store, so a deploy
  * that waits minutes on its build never holds a landing.
  */
@@ -83,9 +86,9 @@ export function createRunnerQueue(input: {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
   cancelled(operation: Operation): void;
-  /** Stop scheduling deploys: clears timers that are waiting for an environment's interval. */
+  /** Stop scheduling deploys and resets: clears timers that are waiting for an interval. */
   close(): void;
-  /** Kill the running landing or release if it has not passed verification: `null` when idle. */
+  /** Kill the running landing, release or reset if it is still in KILLABLE_STAGES: `null` when idle. */
   kill(): { operation: Operation; killed: boolean } | null;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
@@ -125,11 +128,26 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${message(error)}` });
     }
   }
-  /** Ask the scheduler about every environment the commit declares; it decides whether one is due. */
-  async function scheduleDeploys(repo: string, commitId: string): Promise<void> {
+  /** Ask the schedulers about every environment and the reset the commit declares; they decide whether one is due. */
+  async function schedule(repo: string, commitId: string): Promise<void> {
     const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
     if (configuration?.deployments) scheduler.consider(repo, configuration.deployments.environments);
+    resetScheduler.consider(repo, configuration?.reset ?? null);
   }
+  /** Re-ask the schedulers with the policy of the repository's last landed commit, if it has one. */
+  async function scheduleLatest(repo: string, progress: (line: string) => void = () => {}): Promise<void> {
+    const landed = log.lastLanded(repo);
+    if (landed) await schedule(repo, landed.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
+  }
+  const resetScheduler = createResetScheduler({
+    log,
+    submit(repo) {
+      const landed = log.lastLanded(repo);
+      if (!landed) return;
+      log.append(newOperationId(), { type: "submitted", kind: "reset", repo, commitId: landed.commitId, submittedBy: `${executor.host}:schedule` });
+      wakeMain();
+    },
+  });
   const scheduler = createDeployScheduler({
     log,
     submit(repo, environment, commitId) {
@@ -208,8 +226,7 @@ export function createRunnerQueue(input: {
     append(operation.id, verdict);
     // Landings that arrived while this deploy ran were told to wait for it; a deploy that
     // never reached its projects is retried once the interval passes.
-    const landed = log.lastLanded(operation.repo);
-    if (landed) await scheduleDeploys(operation.repo, landed.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
+    await scheduleLatest(operation.repo, progress);
   }
   /**
    * After a promotion's production deploy failed: production already serves what it
@@ -237,8 +254,7 @@ export function createRunnerQueue(input: {
     let value: T;
     const pending = start(async () => { value = await work(); }, active);
     // Submissions that woke the queue while `work` held it are taken up after it.
-    const resume = () => { if (!active) void start(loop); };
-    pending.then(resume, resume);
+    pending.then(wakeMain, wakeMain);
     return pending.then(() => value);
   }
   /**
@@ -259,7 +275,11 @@ export function createRunnerQueue(input: {
       submittedBy: `promotion:${promotion.id}`, promotion: shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations, migrationArtifacts: result.migrationArtifacts } });
     return id;
   }
-  async function processOperation(operation: LandingOperation | ReleaseOperation): Promise<void> {
+  /** Take up the serial lane's queued operations, unless a turn is already running (it takes them up itself). */
+  function wakeMain(): void {
+    if (!active) void start(loop);
+  }
+  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation): Promise<void> {
     let stage: RunnerStage = "queued";
     const controller = new AbortController();
     current = { operation, stage, controller };
@@ -325,7 +345,10 @@ export function createRunnerQueue(input: {
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
-      // A release's post-release step runs against the integration branch just reset to the remote.
+      if (operation.kind === "reset") {
+        verdict = await reset(branch);
+        return;
+      }
       if (operation.kind === "release") {
         await release(operation);
         return;
@@ -386,7 +409,29 @@ export function createRunnerQueue(input: {
       if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
       if (verdict) append(operation.id, verdict);
       if (verdict?.type === "landed")
-        await scheduleDeploys(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
+        await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
+      // A reset, whatever its verdict, starts the next interval.
+      if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
+    }
+    /**
+     * Run the reset the integration tip declares, in its exact source: the integration
+     * branch was just set to the remote, so the tip is the newest commit any landing
+     * finalized against the target. The step's output stays in an owner-only file beside
+     * the run log, never in an event.
+     */
+    async function reset(branch: string): Promise<OperationEvent> {
+      const source = (await revisionFacts(checkout, branch)).commitId;
+      const { gitDirectory, configuration } = await readExactExecutionPolicy(join(checkout, ".git"), source);
+      const policy = configuration?.reset;
+      if (!policy) return { type: "failed", stage, reason: `${source.slice(0, 12)} declares no reset` };
+      setStage("resetting");
+      progress(`Resetting ${policy.target} from ${source.slice(0, 12)}`);
+      const reason = await runReset({ gitDirectory, source, policy, run, abortSignal: controller.signal,
+        outputPath: join(home, "logs", `${operation.id}.reset-output`), reasonPath: join(home, "logs", `${operation.id}.reset-reason`),
+        readEnvironment: environment ?? (() => process.env) });
+      // A killed probe or command comes back as a signalled result: it ends cancelled, not failed.
+      if (controller.signal.aborted) throw new OwnerKill();
+      return reason === null ? { type: "reset", target: policy.target, source } : { type: "failed", stage, reason };
     }
     /**
      * A candidate that declares a production deployment is a promotion: it must be a
@@ -417,7 +462,7 @@ export function createRunnerQueue(input: {
   async function loop(): Promise<void> {
     for (;;) {
       if (log.paused()) return;
-      const operation = log.openOperations().find((entry): entry is LandingOperation | ReleaseOperation => entry.kind !== "deploy" && entry.status === "queued");
+      const operation = log.openOperations().find((entry): entry is LandingOperation | ReleaseOperation | ResetOperation => entry.kind !== "deploy" && entry.status === "queued");
       if (!operation) return;
       await processOperation(operation);
     }
@@ -435,8 +480,13 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}${activating}; deploy again with ${again}` });
         continue;
       }
+      if (operation.kind === "reset") {
+        // The schedule waits a full interval after this one; the owner can reset again at once.
+        append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; run slipjay reset again` });
+        continue;
+      }
       if (operation.kind === "release") {
-        // A release that published reports itself on a rerun confirm, which also retries its post-release step.
+        // A release that published reports itself on a rerun confirm.
         append(operation.id, { type: "failed", stage: operation.stage,
           reason: `runner restarted during ${operation.stage}; rerun slipjay promote --confirm ${operation.commitId.slice(0, 12)}` });
         continue;
@@ -487,15 +537,12 @@ export function createRunnerQueue(input: {
   }
   return {
     wake() {
-      if (!active) start(loop);
+      wakeMain();
       wakeDeploys();
     },
     async recover() {
       await start(recoverRunning, active);
-      for (const repo of Object.keys(config.repos).map(repositoryKey)) {
-        const landed = log.lastLanded(repo);
-        if (landed) await scheduleDeploys(repo, landed.commitId).catch(() => {});
-      }
+      for (const repo of Object.keys(config.repos).map(repositoryKey)) await scheduleLatest(repo);
     },
     cancelled(operation) {
       if (operation.kind !== "landing") return;
@@ -515,7 +562,7 @@ export function createRunnerQueue(input: {
         if (!active && lane === deploying) return;
       }
     },
-    close() { scheduler.close(); },
+    close() { scheduler.close(); resetScheduler.close(); },
     kill() {
       if (!current) return null;
       const operation = log.operation(current.operation.id) ?? current.operation;

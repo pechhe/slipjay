@@ -8,16 +8,13 @@
  * `confirmRelease` runs on the runner, in its warm checkout, for the candidate
  * commit a human approved: it checks that exact commit out, runs
  * `requiredReleaseVerification`, builds the release merge, refuses unless its tree
- * is the verified tree, and publishes it. Once it has published, it runs the
- * candidate's declared `postRelease` step (see `post-release.ts`), whose failure is
- * reported in the result without undoing the release. The runner's serial queue
- * orders releases against each other and against landings.
+ * is the verified tree, and publishes it. The runner's serial queue orders releases
+ * against each other and against landings.
  *
  * jj commands ignore working copies, except checking the candidate out.
  */
 import { readExecutionPolicyAtCommit } from "./execution-policy.ts";
 import { githubRepository } from "./issue-references.ts";
-import { postReleaseRetry, runPostRelease } from "./post-release.ts";
 import { halfBuiltSpecs } from "./release-specs.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
@@ -83,39 +80,19 @@ export type ReleaseSummary = {
   halfBuiltSpecs?: HalfBuiltSpecs;
 };
 
-/** The outcome of a repository's declared `postRelease` step for one release. */
-export type PostReleaseOutcome = {
-  ok: boolean;
-  status: "running" | "failed" | "complete";
-  target?: string;
-  candidate: string;
-  /** Null only when the merge that shipped the candidate could not be read. */
-  merge: string | null;
-  /** The integration commit whose exact source the step ran in. */
-  source?: string;
-  attempt?: number;
-  reason?: string;
-  /** The command that reruns a step that did not complete. */
-  retry?: string;
-};
-
-/** Present after a confirmed release, or a confirm that retried a pending step. */
-type PostReleaseField = { postRelease?: PostReleaseOutcome };
-
 export type ReleaseResult =
   | ({ ok: true; status: "up_to_date" } & ReleaseSummary)
   | ({ ok: true; status: "planned"; subjects: string[]; next: string } & ReleaseSummary)
-  | ({ ok: true; status: "released"; merge: string; verification: unknown; releasedAt: string } & ReleaseSummary & PostReleaseField)
+  | ({ ok: true; status: "released"; merge: string; verification: unknown; releasedAt: string } & ReleaseSummary)
   /**
    * The release branch already contains the candidate (an earlier or newer
-   * release shipped it), so the confirm verified nothing; it reruns a post-release
-   * step that did not complete. `merge` is the release merge that first contained
+   * release shipped it), so the confirm verified nothing. `merge` is the release merge that first contained
    * it and `releasedBy` that merge's candidate. Without such a merge (the branch
    * was moved outside `slipjay promote`), `merge` is the release branch head and
    * `releasedBy` null. The summary describes the plan against that head, so
    * `commits` is 0.
    */
-  | ({ ok: true; status: "released_by"; merge: string; releasedBy: string | null } & ReleaseSummary & PostReleaseField)
+  | ({ ok: true; status: "released_by"; merge: string; releasedBy: string | null } & ReleaseSummary)
   | { ok: false; status: "refused"; reason: string }
   | { ok: false; status: "verification_failed"; reason: string; evidence: RequiredVerificationError["evidence"] };
 
@@ -340,26 +317,6 @@ export async function returnRelease(checkout: string, merge: string): Promise<{ 
   }
 }
 
-/**
- * Run the declared post-release step for a published release. Whatever goes wrong,
- * the release stands: a failure, even one before the step starts, becomes a
- * reported `postRelease` outcome with its retry command.
- */
-async function runPostReleaseStep(plan: ReleasePlan, merge: string, onProgress: (line: string) => void,
-  { onlyIfPending, environment }: { onlyIfPending: boolean; environment?: () => NodeJS.ProcessEnv }): Promise<PostReleaseField> {
-  try {
-    const outcome = await runPostRelease({ root: plan.root, integrationBranch: plan.integrationBranch, candidate: plan.candidate,
-      merge, onlyIfPending, onProgress, ...(environment ? { environment } : {}) });
-    if (outcome && !outcome.ok) onProgress(`[release] post-release step failed: ${outcome.reason}. Retry with \`${outcome.retry}\`.`);
-    return outcome ? { postRelease: outcome } : {};
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    const retry = postReleaseRetry(plan.candidate);
-    onProgress(`[release] post-release step failed: ${reason}. Retry with \`${retry}\`.`);
-    return { postRelease: { ok: false, status: "failed", candidate: plan.candidate, merge, reason, retry } };
-  }
-}
-
 /** The result fields describing `plan`; the Spec check runs again on every call, as a Spec's Tickets may have closed in between. */
 async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefined): Promise<ReleaseSummary> {
   const summary: ReleaseSummary = { integrationBranch: plan.integrationBranch, releaseBranch: plan.releaseBranch, remote: plan.remote,
@@ -457,8 +414,7 @@ async function requireCandidateTree(checkout: string, candidate: string): Promis
 /**
  * Verify and publish the approved `candidate` from `checkout`, which this call owns
  * for its duration (the runner's warm checkout: it checks the candidate out there).
- * A candidate the release branch already holds verifies nothing and only reruns a
- * post-release step that did not complete.
+ * A candidate the release branch already holds verifies nothing.
  */
 export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
   const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql } = options;
@@ -469,8 +425,7 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
       onProgress(`[release] ${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}`
         + (releasedBy ? `, released by ${releasedBy.slice(0, 12)}` : ""));
       onStage("finalizing");
-      return { ok: true, status: "released_by", ...await describePlan(plan, graphql), merge, releasedBy,
-        ...await runPostReleaseStep(plan, merge, onProgress, { onlyIfPending: true, environment }) };
+      return { ok: true, status: "released_by", ...await describePlan(plan, graphql), merge, releasedBy };
     }
     requireMigrationsReady(plan, migrationsReady);
     const summary = await describePlan(plan, graphql);
@@ -491,8 +446,7 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
     const merge = await buildMerge(plan);
     await publish(plan, merge);
     onStage("finalizing");
-    return { ok: true, status: "released", ...summary, merge, verification, releasedAt: new Date().toISOString(),
-      ...await runPostReleaseStep(plan, merge, onProgress, { onlyIfPending: false, environment }) };
+    return { ok: true, status: "released", ...summary, merge, verification, releasedAt: new Date().toISOString() };
   } catch (error) {
     return refusalOf(error);
   }

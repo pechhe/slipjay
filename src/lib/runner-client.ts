@@ -8,7 +8,7 @@ import { runBoundedProcess } from "./bounded-process.ts";
 import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
 import { githubRepository } from "./issue-references.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
+import type { DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
@@ -52,8 +52,10 @@ async function request(baseUrl: string, token: string, path: string, init: Reque
     ...init, headers: { ...init.headers, authorization: `Bearer ${token}` },
   });
   if (response.status === 401) throw new Error("runner refused the credential; check SLIPJAY_RUNNER_TOKEN");
-  if (!response.ok && response.status !== 409) throw new Error(`Runner request failed: HTTP ${response.status}`);
-  return response;
+  if (response.ok || response.status === 409) return response;
+  // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner.
+  const refusal = response.status === 400 ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
+  throw new Error(`Runner request failed: HTTP ${response.status}${typeof refusal === "string" ? `: ${refusal}` : ""}`);
 }
 
 export async function connectRunner(location: string, env: NodeJS.ProcessEnv = process.env): Promise<{ baseUrl: string; name: string; close(): void }> {
@@ -466,5 +468,25 @@ export async function readDeploys(cwd: string, options: { environment?: string; 
   try {
     const query = new URLSearchParams({ repo, ...options.environment ? { environment: options.environment } : {} });
     return ((await (await request(connection.baseUrl, token, `/v1/deploys?${query}`)).json()) as { operations: DeployOperation[] }).operations;
+  } finally { connection.close(); }
+}
+
+/** Reset the repository's declared target now, or follow its open reset, to its verdict. */
+export async function resetThroughRunner(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv; onLine?(line: string): void; signal?: AbortSignal }): Promise<{ operation: Operation; logUrl: string }> {
+  const env = options.env ?? process.env;
+  const onLine = options.onLine ?? console.log;
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Runner resets require a GitHub repository on the publication remote");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, "/v1/resets", { method: "POST", signal: options.signal,
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, submittedBy: `${hostname()}:${cwd}` }) });
+    const { operation: submitted, reattached } = (await response.json()) as ResetResponse;
+    onLine(`[runner ${connection.name}] ${reattached ? "following the open reset" : "resetting"} of ${repo}`);
+    const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
+    return { operation, logUrl: runLogCommand(operation.id) };
   } finally { connection.close(); }
 }

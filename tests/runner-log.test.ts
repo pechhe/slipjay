@@ -154,3 +154,22 @@ test("a repository's releases list newest first, without its deploys or other re
     log.close();
   }
 });
+
+test("a repository's resets share the landing lane, list newest first and close with their target and source", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const reset = (id: string, repo: string) => log.append(id, { type: "submitted", kind: "reset", repo, commitId: "e".repeat(40), submittedBy: "schedule" });
+    reset("first", "owner/repo");
+    log.append("landing", submission());
+    reset("other", "owner/other");
+    reset("second", "owner/repo");
+    log.append("first", { type: "stage", stage: "resetting" });
+    assert.equal(log.operation("landing")!.waitingFor, `reset ${"e".repeat(12)}`);
+    log.append("first", { type: "reset", target: "db", source: "f".repeat(40) });
+    assert.deepEqual(log.resets("owner/repo").map((op) => [op.id, op.kind, op.status, op.position]), [["second", "reset", "queued", 3], ["first", "reset", "reset", undefined]]);
+    assert.deepEqual(log.resets("owner/repo")[1]!.result, { type: "reset", target: "db", source: "f".repeat(40) });
+    assert.deepEqual(log.resets("owner/none"), []);
+  } finally {
+    log.close();
+  }
+});

@@ -8,14 +8,12 @@ import { createWorkspace } from "../../src/lib/slipjay.ts";
 /**
  * A project whose `main` is promoted to `release`, which starts at the initial
  * commit on origin. Its release check records the checkout it verified in
- * `verifiedRelease`, unless `checks` declares others. `postRelease` adds that step.
+ * `verifiedRelease`, unless `checks` declares others.
  */
 export async function releaseProject(options: {
   checks?: (verified: string) => unknown[]; migrations?: boolean; shallow?: boolean;
   /** Declare a production deployment, so a release is a promotion from a commit staging is green on. */
   promotes?: boolean;
-  /** The `postRelease` declaration, given the fixture's root and remote. */
-  postRelease?: (root: string, remote: string) => unknown;
 } = {}) {
   const f = await project({
     shallow: options.shallow,
@@ -33,7 +31,6 @@ export async function releaseProject(options: {
   const policy = JSON.parse(await readFile(policyPath, "utf8"));
   policy.requiredReleaseVerification = options.checks?.(verifiedRelease)
     ?? [{ executable: "node", args: ["-e", recordCheckout(verifiedRelease)] }];
-  if (options.postRelease) policy.postRelease = options.postRelease(f.root, f.remote);
   if (options.promotes) policy.deployments = { version: 1, environments: { production: { timeoutMs: 30_000,
     projects: [{ name: "app", command: { executable: "node", args: ["-e", ""] }, activate: { executable: "node", args: ["-e", ""] } }] } } };
   await writeFile(policyPath, JSON.stringify(policy));
@@ -62,12 +59,3 @@ export const remoteParents = (f: ReleaseFixture, commit: string) =>
   execFileSync("git", ["--git-dir", f.remote, "log", "-1", "--format=%P", commit], { encoding: "utf8" }).trim().split(" ");
 export const remoteTree = (f: ReleaseFixture, commit: string) =>
   execFileSync("git", ["--git-dir", f.remote, "rev-parse", `${commit}^{tree}`], { encoding: "utf8" }).trim();
-
-/** Resolves once `condition` holds, polling; fails after `timeoutMs`. */
-export async function until(condition: () => boolean | Promise<boolean>, what: string, timeoutMs = 120_000) {
-  const end = Date.now() + timeoutMs;
-  while (!await condition()) {
-    if (Date.now() > end) throw new Error(`Timed out waiting for ${what}`);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-}

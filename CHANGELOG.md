@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- **Development resets weekly and on demand, never at promotion (#35):** `slipjay.json`
+  declares `reset` (the former `postRelease` shape plus `intervalMs`, one hour to 30
+  days, and it needs an `integrationBranch`, not a `releaseBranch`). The runner resets
+  the target `intervalMs` after the latest reset that ran its step, or at once when the
+  repository never had one (a reset that failed before its step retries an hour later), as an operation in the serial queue with landings and
+  releases, from an exact source view of the integration tip. `slipjay reset` resets
+  now and follows it; `GET /v1/resets` lists them. A reset ends `reset` or `failed`;
+  its output goes to the owner-only `~/.slipjay/runner/logs/<operation>.reset-output`,
+  and `runner kill` stops it. The step gets `SLIPJAY_RESET_TARGET`, `_SOURCE` and
+  `_REASON_FILE` in place of the `SLIPJAY_RELEASE_*` variables. Promotion no longer runs
+  a post-release step, its result carries no `postRelease`, and `promote --confirm`
+  never exits 2; the per-target outcomes in `~/.slipjay/state/post-release` are no
+  longer read. **Upgrading:** a policy still declaring `postRelease` is refused, so
+  replace it with `reset` before installing this version (a runner on an earlier
+  version ignores `reset`).
+
 ## v3.10.0
 
 - **The runner applies a promotion's production migrations (#34):** `production` may

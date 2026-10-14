@@ -104,6 +104,21 @@ test("a policy still declaring postLandVerification is refused, not silently ign
   assert.throws(() => parseExecutionPolicy(policy({ postLandVerification: [check("bun")] })), /postLandVerification, which is no longer run/);
 });
 
+test("a reset declares its target, deadline and an interval of an hour to 30 days; postRelease is refused", () => {
+  const reset = { version: 1, target: "app-development-db:1a2b", timeoutMs: 900000, intervalMs: 7 * 86_400_000,
+    command: { executable: "bun", args: ["scripts/reset-development.ts"], cwd: "app" },
+    targetProbe: { executable: "bun", args: ["scripts/probe-development.ts"], cwd: "app" }, environmentKeys: ["NEON_API_KEY"] };
+  assert.deepEqual(parseExecutionPolicy(policy({ integrationBranch: "develop", reset })).reset, reset);
+  assert.deepEqual(parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, intervalMs: 3_600_000 } })).reset?.intervalMs, 3_600_000);
+  for (const intervalMs of [3_599_999, 30 * 86_400_000 + 1, undefined, 1.5 * 3_600_000 + 0.5])
+    assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, intervalMs } })), /Invalid reset identity, deadline or interval/, String(intervalMs));
+  assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, timeoutMs: 900001 } })), /Invalid reset/);
+  assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, environmentKeys: ["SLIPJAY_RESET_TARGET"] } })), /Invalid reset environment declaration/);
+  assert.throws(() => parseExecutionPolicy(policy({ reset })), /declares reset without an integrationBranch/);
+  assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", releaseBranch: "master", postRelease: reset })),
+    /declares postRelease, which no longer runs at promotion; declare it as reset with an intervalMs/);
+});
+
 test("an empty or absent check list is a valid landing policy", () => {
   assert.deepEqual(parseExecutionPolicy(policy({ requiredLandingVerification: [] })).requiredLandingVerification, []);
   assert.deepEqual(parseExecutionPolicy(policy({})).requiredLandingVerification, []);

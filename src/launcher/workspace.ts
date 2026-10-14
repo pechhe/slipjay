@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, runLogCommand, runnerLocation } from "../lib/runner-client.ts";
+import { controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner-client.ts";
 import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
@@ -184,9 +184,7 @@ async function runPromote(args: string[]): Promise<number> {
   console.log(JSON.stringify(printed, null, 2));
   await appendMetric("releases", { status: printed.status, candidate: confirmable.candidate,
     commits: outcome?.type === "released" ? outcome.result.commits : null, totalMs: Date.now() - startedAt });
-  if (outcome?.type !== "released" || (deploy && deploy.status !== "deployed")) return 1;
-  // A published release whose post-release step failed still stands; 2 tells the caller to retry the step.
-  return outcome.result.postRelease && !outcome.result.postRelease.ok ? 2 : 0;
+  return outcome?.type !== "released" || (deploy && deploy.status !== "deployed") ? 1 : 0;
 }
 
 /** `deploy <environment>`: deploy the integration branch's latest commit now, through the runner, and follow it. */
@@ -201,6 +199,20 @@ async function runDeploy(args: string[]): Promise<number> {
   console.log(JSON.stringify({ ok: outcome?.type === "deployed", status: operation.status,
     ...outcome?.type === "failed" ? { reason: outcome.reason } : {}, ...record ? { record } : {}, log: logUrl }, null, 2));
   return outcome?.type === "deployed" ? 0 : 1;
+}
+
+/** `reset`: reset the repository's declared target now, through the runner (or follow the open reset), to its verdict. */
+async function runReset(args: string[]): Promise<number> {
+  if (args.length) throw new Error("Usage: slipjay reset");
+  const location = runnerLocation();
+  if (!location) throw new Error("slipjay reset runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  const { operation, logUrl } = await resetThroughRunner(process.cwd(), { location, onLine: (line) => console.error(line) });
+  const outcome = operation.result;
+  if (outcome?.type === "failed") console.error(`[runner] reset failed: ${outcome.reason}`);
+  console.log(JSON.stringify({ ok: outcome?.type === "reset", status: operation.status,
+    ...outcome?.type === "reset" ? { target: outcome.target, source: outcome.source } : {},
+    ...outcome?.type === "failed" || outcome?.type === "cancelled" ? { reason: outcome.reason } : {}, log: logUrl }, null, 2));
+  return outcome?.type === "reset" ? 0 : 1;
 }
 
 /** `deploys [--environment <name>] [--json]`: what each deploy put where, newest first. */
@@ -366,6 +378,8 @@ try {
     process.exitCode = await runPromote(rest);
   } else if (command === "deploy") {
     process.exitCode = await runDeploy(rest);
+  } else if (command === "reset") {
+    process.exitCode = await runReset(rest);
   } else if (command === "deploys") {
     process.exitCode = await runDeploys(rest);
   } else if (command === "runner") {
@@ -400,7 +414,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

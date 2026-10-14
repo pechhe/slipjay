@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
@@ -26,12 +26,21 @@ const finalize = (root: string) => `const fs=require("node:fs");
 while (fs.existsSync(${JSON.stringify(join(root, "hold-finalize"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
 if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
 fs.appendFileSync(${JSON.stringify(join(root, "development.jsonl"))}, JSON.stringify({ commit: process.env.SLIPJAY_FINALIZATION_COMMIT, migrations: fs.existsSync("migrations") ? fs.readdirSync("migrations").sort() : [] }) + "\\n");`;
-// The release check records where it ran and fails while `fail-release` exists; the
-// post-release step records the release it ran for and the key the runner gave it.
+// The release check records where it ran and fails while `fail-release` exists.
 const releaseCheck = (root: string) => `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(join(root, "release-verified.log"))}, process.cwd() + "\\n");
 if (fs.existsSync(${JSON.stringify(join(root, "fail-release"))})) { process.stderr.write("release boom\\n"); process.exit(4); }
 if (fs.existsSync(${JSON.stringify(join(root, "hang-release"))})) { fs.writeFileSync(${JSON.stringify(join(root, "release-started"))}, ""); setInterval(()=>{},1000); }`;
-const postReleaseStep = (root: string) => `require("node:fs").appendFileSync(${JSON.stringify(join(root, "post-release.jsonl"))}, JSON.stringify({ merge: process.env.SLIPJAY_RELEASE_MERGE, key: process.env.FIXTURE_KEY ?? null }) + "\\n");`;
+// The reset step records what it was given and the source it ran in, and prints the declared key, which must
+// stay out of the log (the command line itself never names it). It writes `reset-started` and holds while `hold-reset` exists, and fails while `fail-reset` exists,
+// handing SlipJay a reason line with a control character and a second line. Its probe names another
+// target while `wrong-target` exists.
+const resetStep = (root: string) => `const fs=require("node:fs"); const at=(name)=>require("node:path").join(${JSON.stringify(root)}, name);
+fs.writeFileSync(at("reset-started"), "");
+while (fs.existsSync(at("hold-reset"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+fs.appendFileSync(at("reset.jsonl"), JSON.stringify({ target: process.env.SLIPJAY_RESET_TARGET, source: process.env.SLIPJAY_RESET_SOURCE, reasonFile: Boolean(process.env.SLIPJAY_RESET_REASON_FILE), key: process.env.FIXTURE_KEY ?? null, head: require("node:child_process").execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() }) + "\\n");
+console.log("postgres://owner:" + process.env.FIXTURE_KEY + "@db.example/prod restored");
+if (fs.existsSync(at("fail-reset"))) { fs.writeFileSync(process.env.SLIPJAY_RESET_REASON_FILE, "Scrub refused:\\u0007 a real-customer tenant\\nsecond-" + "line"); process.exit(3); }`;
+const resetProbe = (root: string) => `console.log(JSON.stringify({ target: require("node:fs").existsSync(${JSON.stringify(join(root, "wrong-target"))}) ? "production-db" : "fixture-development-db" }))`;
 // Each deploy project records what it deployed and prints its deployment URL; it fails while `fail-deploy-<name>` exists.
 const deployStep = (root: string, name: string) => `const fs=require("node:fs");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-deploy-${name}`))})) { console.error("${name} build failed"); process.exit(5); }
@@ -54,7 +63,7 @@ if ("${step}"==="apply") fs.writeFileSync(db, JSON.stringify(wanted));
 else process.exit(JSON.stringify(applied)===JSON.stringify(wanted)?0:2);`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
-async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }) {
+async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -99,10 +108,12 @@ async function fixture(migrations = false, release = false, deployments?: { minI
     ...(release ? {
       releaseBranch: "release",
       requiredReleaseVerification: [{ executable: "node", args: ["-e", releaseCheck(root)] }],
-      postRelease: {
-        version: 1, target: "fixture-development-db", timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
-        command: { executable: "node", args: ["-e", postReleaseStep(root)] },
-        targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
+    } : {}),
+    ...(reset ? {
+      reset: {
+        version: 1, target: "fixture-development-db", timeoutMs: 30_000, intervalMs: 3_600_000, environmentKeys: ["FIXTURE_KEY"],
+        command: { executable: "node", args: ["-e", resetStep(root)] },
+        targetProbe: { executable: "node", args: ["-e", resetProbe(root)] },
       },
     } : {}),
   }));
@@ -156,6 +167,11 @@ async function fixture(migrations = false, release = false, deployments?: { minI
     log.append(id, { type: "submitted", ...request });
     return id;
   }
+  function submitReset() {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", kind: "reset", repo: "fixture/repo", commitId: log.lastLanded("fixture/repo")?.commitId ?? "0".repeat(40), submittedBy: "test" });
+    return id;
+  }
   function submitRelease(commitId: string) {
     const id = newOperationId();
     log.append(id, { type: "submitted", kind: "release", repo: "fixture/repo", commitId, migrationsReady: false, submittedBy: "test" });
@@ -165,7 +181,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const result = (id: string) => log.operation(id)!.result;
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
-  return { root, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, lines, result,
+  return { root, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() { queue.close(); await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
@@ -308,7 +324,6 @@ test("the owner's kill stops a release's verification and publishes nothing", as
     await f.queue.idle();
     assert.deepEqual(f.result(release), { type: "cancelled", reason: OWNER_KILL_REASON });
     assert.equal(f.releaseRef(), base);
-    assert.deepEqual(await f.lines("post-release.jsonl"), []);
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -514,7 +529,7 @@ test("unknown repositories and stale submitted commits fail without publishing",
 const stagesOf = (f: Awaited<ReturnType<typeof fixture>>, id: string) =>
   f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []);
 
-test("a release takes its turn, verifies the exact candidate on the runner, publishes the release branch and runs its post-release step", async () => {
+test("a release takes its turn, verifies the exact candidate on the runner and publishes the release branch", async () => {
   const f = await fixture(false, true);
   try {
     const base = f.releaseRef();
@@ -527,14 +542,11 @@ test("a release takes its turn, verifies the exact candidate on the runner, publ
     assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
     assert.equal(f.releaseRef(), outcome.result.merge);
     assert.deepEqual(f.parents(outcome.result.merge), [base, candidate]);
-    assert.equal(outcome.result.postRelease?.ok, true, JSON.stringify(outcome.result.postRelease));
     assert.deepEqual(stagesOf(f, release), ["fetching", "installing", "verifying", "publishing", "finalizing"]);
     // The check ran once, through the executor, in the runner's warm checkout.
     assert.deepEqual(await f.lines("release-verified.log"), [join(f.home, "repos", "fixture/repo")]);
     assert.equal(f.log.operation(release)!.runs.length, 1);
     assert.equal(f.log.operation(release)!.runs[0]!.exitCode, 0);
-    assert.deepEqual((await f.lines("post-release.jsonl")).map((line) => JSON.parse(line)), [{ merge: outcome.result.merge, key: "from-runner" }],
-      "the step ran once, with the declared key from the runner's environment");
     // The landing submitted behind the release waited for it.
     assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
     const order = f.published.filter((stored) => ["released", "landed"].includes(stored.event.type)).map((stored) => stored.operationId);
@@ -553,7 +565,6 @@ test("a failed release verification publishes nothing and reports its output ver
     assert.equal(outcome.stage, "verifying");
     assert.match(outcome.output ?? "", /release boom/);
     assert.equal(f.releaseRef(), base);
-    assert.deepEqual(await f.lines("post-release.jsonl"), []);
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -571,7 +582,6 @@ test("a release of a candidate the release branch already holds verifies nothing
     assert.equal(again.result.releasedBy, newer);
     assert.equal(again.result.merge, shipped.result.merge);
     assert.equal((await f.lines("release-verified.log")).length, 1);
-    assert.equal((await f.lines("post-release.jsonl")).length, 1, "a completed post-release step is not rerun");
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -825,5 +835,78 @@ test("within the interval a landing does not deploy, and recovery fails a deploy
     await f.queue.recover();
     const outcome = f.result(production);
     assert.ok(outcome?.type === "failed" && outcome.reason.endsWith(`deploy again with slipjay promote --confirm ${f.main().slice(0, 12)}`), JSON.stringify(outcome));
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a repository's first landing resets its target at once from the integration tip, with the declared key, keeping the output out of the log", async () => {
+  const f = await fixture(false, false, undefined, true);
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const [reset] = f.log.resets("fixture/repo");
+    assert.ok(reset, "the landing scheduled a reset");
+    assert.deepEqual(reset.result, { type: "reset", target: "fixture-development-db", source: f.main() });
+    assert.equal(reset.submittedBy, `${f.executor.host}:schedule`);
+    assert.deepEqual(stagesOf(f, reset.id), ["fetching", "resetting"]);
+    assert.deepEqual(reset.runs.map((run) => run.exitCode), [0, 0], "probe and command ran through the executor");
+    assert.deepEqual((await f.lines("reset.jsonl")).map((line) => JSON.parse(line)),
+      [{ target: "fixture-development-db", source: f.main(), reasonFile: true, key: "from-runner", head: f.main() }]);
+    const output = join(f.home, "logs", `${reset.id}.reset-output`);
+    assert.match(await readFile(output, "utf8"), /owner:from-runner@/);
+    assert.equal((await stat(output)).mode & 0o777, 0o600);
+    assert.doesNotMatch(JSON.stringify(f.log.events({ operationId: reset.id })) + await f.queue.readLog(reset.id), /from-runner/);
+    // The next landing falls within the interval.
+    assert.equal((await f.land(f.submit(await f.candidate("b.txt"))))?.type, "landed");
+    assert.equal(f.log.resets("fixture/repo").length, 1);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a failed reset reports the step's reason line and keeps its output out of events; a probe that names another target runs nothing", async () => {
+  const f = await fixture(false, false, undefined, true);
+  try {
+    await writeFile(join(f.root, "fail-reset"), "");
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const [failed] = f.log.resets("fixture/repo");
+    const result = failed?.result;
+    assert.ok(result?.type === "failed", JSON.stringify(result));
+    assert.equal(result.stage, "resetting");
+    assert.equal(result.reason, `Reset command failed: Scrub refused:  a real-customer tenant; its output is in ${join(f.home, "logs", `${failed!.id}.reset-output`)}`);
+    assert.doesNotMatch(JSON.stringify(f.log.events({ operationId: failed!.id })), /from-runner|second-line/);
+    await rm(join(f.root, "fail-reset"));
+    await writeFile(join(f.root, "wrong-target"), "");
+    const mismatched = await f.land(f.submitReset());
+    assert.deepEqual(mismatched, { type: "failed", stage: "resetting", reason: "The reset target probe did not confirm fixture-development-db; the reset command did not run" });
+    assert.equal((await f.lines("reset.jsonl")).length, 1, "only the first reset's command ran");
+    await rm(join(f.root, "wrong-target"));
+    assert.equal((await f.land(f.submitReset()))?.type, "reset");
+    assert.equal(f.log.resets("fixture/repo").length, 3, "a failed reset is not retried on its own");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("the owner's kill stops a running reset: cancelled, never passed, and the schedule does not start it again", async () => {
+  const f = await fixture(false, false, undefined, true);
+  try {
+    await writeFile(join(f.root, "hold-reset"), "");
+    f.submit(await f.candidate("a.txt"));
+    f.queue.wake();
+    await until(async () => await stat(join(f.root, "reset-started")).then(() => true, () => undefined));
+    assert.equal(f.queue.kill()?.killed, true);
+    await f.queue.idle();
+    const resets = f.log.resets("fixture/repo");
+    assert.equal(resets.length, 1);
+    assert.deepEqual(resets[0]!.result, { type: "cancelled", reason: OWNER_KILL_REASON });
+    assert.deepEqual(await f.lines("reset.jsonl"), []);
+  } finally { await rm(join(f.root, "hold-reset"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("a reset of a repository that declares none fails, and recovery fails a reset interrupted by a restart", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    assert.equal(f.log.resets("fixture/repo").length, 0, "nothing schedules a reset that is not declared");
+    assert.deepEqual(await f.land(f.submitReset()), { type: "failed", stage: "fetching", reason: `${f.main().slice(0, 12)} declares no reset` });
+    const interrupted = f.submitReset();
+    f.log.append(interrupted, { type: "stage", stage: "resetting" });
+    await f.queue.recover();
+    assert.deepEqual(f.result(interrupted), { type: "failed", stage: "resetting", reason: "runner restarted during resetting; run slipjay reset again" });
   } finally { await f.dispose(); }
 }, 120_000);

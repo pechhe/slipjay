@@ -1,4 +1,5 @@
 import type { DeploymentPolicy } from "./deployment-policy.ts";
+import type { ResetPolicy } from "./post-integration-policy.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 export type MigrationCommand = { executable: string; args: string[]; cwd: string | null };
 
@@ -31,7 +32,8 @@ export type ExecutionPolicy = {
   /** How many prepared spare workspaces the pool keeps; 1 when undeclared. */
   spares?: number;
   postIntegration?: unknown;
-  postRelease?: unknown;
+  /** The target the runner resets on a schedule and on demand; undefined when undeclared. */
+  reset?: ResetPolicy;
   /** Environments the runner deploys; undefined when undeclared. */
   deployments?: DeploymentPolicy;
 };
@@ -51,7 +53,7 @@ export type IntegrationBranchProbes = {
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { deploymentPolicy } from "./deployment-policy.ts";
-import { postIntegrationPolicy, postReleasePolicy } from "./post-integration-policy.ts";
+import { postIntegrationPolicy, resetPolicy } from "./post-integration-policy.ts";
 import { declaredPublicationRemote } from "./source-publication-policy.ts";
 import { normalizeVerificationDeclaration } from "./verification-policy.ts";
 import { runWorkspaceCommand } from "./workspace-command.ts";
@@ -244,7 +246,7 @@ function releasePolicy(parsed: Record<string, unknown>): Pick<ExecutionPolicy, "
 
 /**
  * Parse a policy file's text strictly. Landing's sections are normalized; every
- * other declaration (`postIntegration`, `postRelease`, `generatedPaths`, `sourcePublication`,
+ * other declaration (`postIntegration`, `generatedPaths`, `sourcePublication`,
  * `requiredChecks`, …) is kept as declared, after validation where Peach owns it.
  */
 export function parseExecutionPolicy(raw: string, path: string = EXECUTION_POLICY_PATH): ExecutionPolicy {
@@ -266,8 +268,9 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   // Refused, not ignored: a declared check that silently stopped running would read as passing.
   if (parsed.postLandVerification !== undefined) fail("declares postLandVerification, which is no longer run; move its checks into requiredLandingVerification or remove it");
   postIntegrationPolicy(parsed.postIntegration);
-  if (parsed.postRelease !== undefined && parsed.releaseBranch == null) fail("declares postRelease without a releaseBranch");
-  postReleasePolicy(parsed.postRelease);
+  if (parsed.postRelease !== undefined) fail("declares postRelease, which no longer runs at promotion; declare it as reset with an intervalMs (see README)");
+  if (parsed.reset !== undefined && parsed.integrationBranch == null) fail("declares reset without an integrationBranch");
+  const reset = resetPolicy(parsed.reset);
   const deployments = deploymentPolicy(parsed.deployments);
   generatedPathMatchers(parsed.generatedPaths);
   const sharedPaths = sharedPathList(parsed.sharedPaths);
@@ -285,6 +288,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
     ...(parsed.spares === undefined ? {} : { spares }),
     ...(deployments ? { deployments } : {}),
+    ...(reset ? { reset } : {}),
   };
 }
 

@@ -23,24 +23,26 @@ export const candidateBookmark = (changeId: string): string => `slipjay/changes/
  * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
  * never recorded: a queued operation shows it while the owner has paused the runner.
  */
-export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing" | "deploying";
+export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
 
 /**
  * Stages the owner's kill may stop. Up to the end of verification nothing has moved
  * the integration or release branch; from `integrating` on, a kill could leave the
  * external target ahead of the remote, so it is refused. Verification's commands are
  * killed at once; an earlier stage finishes its step (a fetch, an install) and the
- * operation stops before verification starts. Deploys run in their own lane and are
- * never killed: each project's command ends at its declared deadline.
+ * operation stops before verification starts. A reset moves no branch, and the
+ * target's own script is built to survive a kill, so `resetting` is killed at once
+ * too. Deploys run in their own lane and are never killed: each project's command
+ * ends at its declared deadline.
  */
-export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying"];
+export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying", "resetting"];
 /** The reason a killed operation carries; it is never reported as a pass. */
 export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
 /** The log's operation id for runner-wide control events (pause, resume). */
 export const RUNNER_CONTROL_ID = "runner";
 
 /** Terminal and live states of an operation, derived from its events. */
-export type OperationStatus = "queued" | "running" | "landed" | "released" | "deployed" | "failed" | "declined" | "superseded" | "cancelled";
+export type OperationStatus = "queued" | "running" | "landed" | "released" | "deployed" | "reset" | "failed" | "declined" | "superseded" | "cancelled";
 
 /** A release the runner verified and published, or found already published. */
 export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
@@ -100,6 +102,8 @@ export type OperationEvent =
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
   | { type: "submitted"; kind: "deploy"; repo: string; environment: string; commitId: string; submittedBy: string; promotion?: PromotionFacts }
+  /** A reset of the repository's declared target; `commitId` is its last landed commit at submission, for reading only. */
+  | { type: "submitted"; kind: "reset"; repo: string; commitId: string; submittedBy: string }
   | { type: "stage"; stage: RunnerStage }
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
@@ -109,13 +113,12 @@ export type OperationEvent =
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
-  /**
-   * A release's outcome; one whose post-release step failed still stands. A promotion
-   * names `deploy`, the production deploy of its candidate, which the deploy lane runs.
-   */
+  /** A release's outcome. A promotion names `deploy`, the production deploy of its candidate, which the deploy lane runs. */
   | { type: "released"; result: CompletedRelease; deploy?: string }
   /** Every project of the environment deployed. */
   | { type: "deployed"; record: DeployRecord }
+  /** The declared reset step ran against `target` from the exact source of `source`, the integration tip. */
+  | { type: "reset"; target: string; source: string }
   /** The change touches migration trigger or artifact paths; the author lands it locally (until #11). */
   | { type: "declined"; reason: string; paths: string[] }
   /** `output` is the failing command's output verbatim (bounded as the local gate bounds it). */
@@ -137,7 +140,7 @@ export type RunRecord = {
 };
 
 /** Event types that close an operation. */
-export const TERMINAL_EVENT_TYPES = ["landed", "released", "deployed", "failed", "declined", "superseded", "cancelled"] as const;
+export const TERMINAL_EVENT_TYPES = ["landed", "released", "deployed", "reset", "failed", "declined", "superseded", "cancelled"] as const;
 
 type OperationFields = {
   id: string; repo: string; commitId: string; submittedBy: string;
@@ -162,8 +165,14 @@ export type ReleaseOperation = OperationFields & { kind: "release"; migrationsRe
 /** Deploys take turns in their own lane, so a slow deploy never holds a landing. */
 export type DeployOperation = OperationFields & { kind: "deploy"; environment: string; promotion?: PromotionFacts };
 
+/**
+ * Resets share the serial queue with landings and releases: a landing finalizes its
+ * migrations against the same target, so the two never run together.
+ */
+export type ResetOperation = OperationFields & { kind: "reset" };
+
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
-export type Operation = LandingOperation | ReleaseOperation | DeployOperation;
+export type Operation = LandingOperation | ReleaseOperation | DeployOperation | ResetOperation;
 
 /** The append-only log and its projections. One implementation, on `node:sqlite`. */
 export interface OperationLog {
@@ -180,6 +189,8 @@ export interface OperationLog {
   deployments(repo: string, environment?: string): DeployOperation[];
   /** A repository's release operations, newest first. */
   releases(repo: string): ReleaseOperation[];
+  /** A repository's reset operations, newest first. */
+  resets(repo: string): ResetOperation[];
   /** The latest landing a repository published, if any. */
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
@@ -206,6 +217,13 @@ export type DeployRequest = { repo: string; environment: string; commitId: strin
 export type DeployResponse = { operation: DeployOperation; reattached: boolean };
 
 /**
+ * POST /v1/resets body: reset the repository's declared target now. An open reset of
+ * the repository is returned instead of a second.
+ */
+export type ResetRequest = { repo: string; submittedBy: string };
+export type ResetResponse = { operation: ResetOperation; reattached: boolean };
+
+/**
  * POST /v1/operations response.
  * - No open operation for the change: a new one (`reattached: false`).
  * - An open one for the same commit: that one (`reattached: true`), never a second.
@@ -220,6 +238,8 @@ export type SubmitResponse = { operation: Operation; reattached: boolean; supers
  * - POST /v1/operations                         SubmitRequest → SubmitResponse (200, or 409 `{ operation }`)
  * - POST /v1/releases                           ReleaseRequest → ReleaseResponse
  * - POST /v1/deploys                            DeployRequest → DeployResponse
+ * - POST /v1/resets                             ResetRequest → ResetResponse (400 until the repository has landed here)
+ * - GET  /v1/resets?repo=<owner/name>           → `{ operations: ResetOperation[] }` newest first
  * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
  * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)

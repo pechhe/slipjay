@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, RunRecord, StoredEvent } from "./runner-contract.ts";
+import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -39,8 +39,8 @@ export function openOperationLog(path: string): OperationLog {
   const deployIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
     AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.repo') = ?
     AND (? IS NULL OR json_extract(data, '$.environment') = ?) ORDER BY seq DESC`);
-  const releaseIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
-    AND json_extract(data, '$.kind') = 'release' AND json_extract(data, '$.repo') = ? ORDER BY seq DESC`);
+  const kindIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+    AND json_extract(data, '$.kind') = ? AND json_extract(data, '$.repo') = ? ORDER BY seq DESC`);
   const landed = db.prepare(`SELECT landed.at, landed.data FROM events landed
     JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
     WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq DESC LIMIT 1`);
@@ -54,7 +54,7 @@ export function openOperationLog(path: string): OperationLog {
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
   // Two serial lanes across repositories, each in submission order: landings with
-  // releases, and deploys.
+  // releases and resets, and deploys.
   function queue(): Operation[] {
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
     const held = paused() !== null;
@@ -72,6 +72,12 @@ export function openOperationLog(path: string): OperationLog {
   // An open operation carries its queue fields; a closed one is its bare projection.
   function placed<T extends Operation>(projected: T, open: Operation[]): T {
     return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;
+  }
+  function ofKind<K extends "release" | "reset">(repo: string, kind: K): Extract<ReleaseOperation | ResetOperation, { kind: K }>[] {
+    const open = queue();
+    return projectIds((kindIds.all(kind, repo) as { operation_id: string }[]).map((row) => row.operation_id))
+      .filter((entry): entry is Extract<ReleaseOperation | ResetOperation, { kind: K }> => entry.kind === kind)
+      .map((entry) => placed(entry, open));
   }
   function operation(id: string): Operation | null {
     const projected = project(id, events({ operationId: id }));
@@ -98,12 +104,8 @@ export function openOperationLog(path: string): OperationLog {
         .filter((entry): entry is DeployOperation => entry.kind === "deploy")
         .map((entry) => placed(entry, open));
     },
-    releases: (repo) => {
-      const open = queue();
-      return projectIds((releaseIds.all(repo) as { operation_id: string }[]).map((row) => row.operation_id))
-        .filter((entry): entry is ReleaseOperation => entry.kind === "release")
-        .map((entry) => placed(entry, open));
-    },
+    releases: (repo) => ofKind(repo, "release"),
+    resets: (repo) => ofKind(repo, "reset"),
     lastLanded: (repo) => {
       const row = landed.get(repo) as { at: string; data: string } | undefined;
       const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
@@ -131,6 +133,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     ? { ...fields, kind: "release", migrationsReady: submitted.event.migrationsReady }
     : submitted.event.kind === "deploy"
       ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
+      : submitted.event.kind === "reset" ? { ...fields, kind: "reset" }
       : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {
@@ -157,6 +160,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
       case "landed":
       case "released":
       case "deployed":
+      case "reset":
       case "failed":
       case "declined":
       case "superseded":

@@ -11,13 +11,15 @@ export type PostIntegrationPolicy = {
   approvalMode: "explicit-human" | "automatic-development";
 };
 
-export type PostReleasePolicy = {
+export type ResetPolicy = {
   version: 1;
   target: string;
   command: FinalizationCommand;
   targetProbe: FinalizationCommand;
   timeoutMs: number;
   environmentKeys: string[];
+  /** How long after one reset began the runner starts the next on its own. */
+  intervalMs: number;
 };
 
 export type PostIntegrationApproval = {
@@ -47,7 +49,7 @@ export function command(value: unknown, step = "Post-integration"): Finalization
 /** Variables a step passes through from SlipJay's environment; SlipJay's own and loader controls stay out. */
 export function environmentKeys(row: Record<string, unknown>, step: string): string[] {
   const keys = row.environmentKeys ?? [];
-  if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(key) || key.startsWith("SLIPJAY_FINALIZATION_") || key.startsWith("SLIPJAY_RELEASE_") || ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "NODE_OPTIONS", "BUN_OPTIONS"].includes(key))) {
+  if (!Array.isArray(keys) || keys.some((key) => typeof key !== "string" || !/^[A-Z_][A-Z0-9_]*$/.test(key) || key.startsWith("SLIPJAY_FINALIZATION_") || key.startsWith("SLIPJAY_RESET_") || ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "NODE_OPTIONS", "BUN_OPTIONS"].includes(key))) {
     throw new Error(`Invalid ${step.toLowerCase()} environment declaration`);
   }
   return [...new Set(keys as string[])];
@@ -78,27 +80,29 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
   };
 }
 /**
- * `postRelease`: a step `slipjay promote` runs against an external target once a
- * release has published, in the integration branch's exact source (the target
- * follows it), alone in the runner's queue. The human's release confirmation is its
- * approval, and it reruns until it succeeds, so it declares no approval mode or
- * idempotency contract. A reset of a whole database takes longer than a
- * migration, so its deadline may run to 15 minutes.
+ * `reset`: a step the runner runs against an external target every `intervalMs` and
+ * on demand (`slipjay reset`), in the integration branch's exact source (the target
+ * follows it), alone in the serial queue. It rebuilds the target from scratch, so it
+ * declares no approval mode or idempotency contract. A reset of a whole database
+ * takes longer than a migration, so its deadline may run to 15 minutes; it runs at
+ * most hourly and at least monthly.
  */
-export function postReleasePolicy(value: unknown): PostReleasePolicy | null {
+export function resetPolicy(value: unknown): ResetPolicy | null {
   if (value === undefined)
     return null;
-  const row = object(value, "Post-release");
-  if (row.version !== 1 || typeof row.target !== "string" || !TARGET.test(row.target) || !Number.isInteger(row.timeoutMs) || Number(row.timeoutMs) < 1 || Number(row.timeoutMs) > 900000) {
-    throw new Error("Invalid post-release identity or deadline");
+  const row = object(value, "Reset");
+  if (row.version !== 1 || typeof row.target !== "string" || !TARGET.test(row.target) || !Number.isInteger(row.timeoutMs) || Number(row.timeoutMs) < 1 || Number(row.timeoutMs) > 900000
+    || !Number.isInteger(row.intervalMs) || Number(row.intervalMs) < 3_600_000 || Number(row.intervalMs) > 30 * 86_400_000) {
+    throw new Error("Invalid reset identity, deadline or interval");
   }
   return {
     version: 1,
     target: row.target,
-    command: command(row.command, "Post-release"),
-    targetProbe: command(row.targetProbe, "Post-release"),
+    command: command(row.command, "Reset"),
+    targetProbe: command(row.targetProbe, "Reset"),
     timeoutMs: Number(row.timeoutMs),
-    environmentKeys: environmentKeys(row, "Post-release"),
+    environmentKeys: environmentKeys(row, "Reset"),
+    intervalMs: Number(row.intervalMs),
   };
 }
 export function postIntegrationPolicyDigest(policy: PostIntegrationPolicy | null): string {

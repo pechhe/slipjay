@@ -102,6 +102,7 @@ landing.
 | --- | --- |
 | `SLIPJAY_WORKSPACE_NAME`, `SLIPJAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
+| `SLIPJAY_RESET_TARGET`, `_SOURCE`, `_REASON_FILE` | The runner's `reset` command and target probe (see [Reset](#reset)). A policy's `environmentKeys` may not start with `SLIPJAY_RESET_`. |
 
 slipjay reads `SLIPJAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
 and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
@@ -154,6 +155,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `release [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
 | `deploys [--environment <name>] [--json]` | Each deploy, newest first: environment, commit, outcome per project, and the commits it added since the previous deploy. |
+| `reset` | Have the runner reset the repository's declared `reset` target now (or follow its open reset) and print the verdict as JSON; exits 0 once it is `reset` (see [Reset](#reset)). |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `release`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
@@ -208,7 +210,8 @@ turns in the same queue (see [Release](#release)).
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
 - **Owner controls.** From any machine with the location, `slipjay runner kill` stops
   the running landing or release while it is still fetching, rebasing, installing or
-  verifying: verification's commands are killed at once (an earlier stage finishes its
+  verifying, and a reset while it is fetching or resetting: verification's and the
+  reset's commands are killed at once (an earlier stage finishes its
   current step, such as an install, then stops before verification), it ends
   `cancelled` with "killed by the owner, not run to completion" (never a pass),
   nothing moves, and the queue goes on. From
@@ -233,26 +236,26 @@ turns in the same queue (see [Release](#release)).
     `user.email`, the identity the runner commits as (use an email GitHub links to the owner);
     the runner also sets `snapshot.max-new-file-size` to 64MiB unless `jj` overrides it, so none of these depend on the host's jj config.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
-  - `logs/<operation>.log`: the run logs.
+  - `logs/<operation>.log`: the run logs. A reset's step output goes to the owner-only
+    `logs/<operation>.reset-output` beside it, never into the log.
   - `repos/<owner>/<name>`: the warm checkouts.
   - Finalization receipts and target outcomes stay in
     `~/.slipjay/state/post-integration`. Held-integration retries rely on them; move them with the runner.
-  - The `postRelease` step's latest outcome per target stays in
-    `~/.slipjay/state/post-release`, named by the target alone, so a failed step is
-    still retried by the next confirm after a move to another path.
 
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
   otherwise. A release that was running is recorded as failed with the
-  `slipjay promote --confirm` command that reruns it. A deploy that was running is
+  `slipjay promote --confirm` command that reruns it. A reset that was running is
+  recorded as failed ("run slipjay reset again"); the schedule waits a full interval
+  after it. A deploy that was running is
   recorded as failed, and the schedule deploys that commit again; a production
   deploy's failure names the `slipjay promote --confirm` that deploys it again.
 - **Moving the runner to another host.** Run Setup on the new host with the same
   repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
   stop its unit. On the old host, `slipjay runner pause`, wait until no operation is
   running and none is held (the last one landed or failed before integrating), then
-  stop its unit. Copy `operations.sqlite`, `logs/`, `~/.slipjay/state/post-integration` and
-  `~/.slipjay/state/post-release` to the new host (warm checkouts are cloned again on first use), start its unit,
+  stop its unit. Copy `operations.sqlite`, `logs/` and `~/.slipjay/state/post-integration`
+  to the new host (warm checkouts are cloned again on first use), start its unit,
   point each machine's location at it (`"runner": "ssh://<new host>"`, or
   `http://127.0.0.1:7787` on the host itself), and `slipjay runner resume`: the pause
   moved with the log.
@@ -318,6 +321,47 @@ integration branch; `production` deploys only through a promotion (see
   and each project's outcome. A deploy that failed before its projects ran (the commit
   is not on the integration branch, or the runner restarted) records only its reason.
   `slipjay deploys` reads them back. The contract is `src/lib/runner-contract.ts`.
+
+### Reset
+
+A repository can declare an external target the runner rebuilds weekly and on demand,
+for example resetting a development database from a scrubbed copy of production. It
+never runs at promotion:
+
+```json
+{ "reset": { "version": 1, "target": "app-development-db:…", "timeoutMs": 900000, "intervalMs": 604800000,
+    "command": { "executable": "bun", "args": ["scripts/reset-development.ts"], "cwd": "app" },
+    "targetProbe": { "executable": "bun", "args": ["scripts/probe-development.ts"], "cwd": "app" },
+    "environmentKeys": ["NEON_API_KEY"] } }
+```
+
+- **When.** `intervalMs` (one hour to 30 days) after the latest reset that ran its
+  step, scheduled or on demand, or at once when the repository never had one. A reset
+  that failed in its step waits for the next interval; one that failed before it (a
+  fetch, a tip that declares no reset) retries an hour later; one the owner killed
+  counts as run, so the schedule does not restart it. `slipjay reset` resets now, or follows the open reset instead of
+  submitting a second. The schedule reads `reset` at the last landed commit, and is
+  rebuilt at startup, after every landing and after every reset. A repository needs an
+  `integrationBranch` to declare it, and must have landed on the runner once.
+- **Where.** A reset takes its turn in the serial queue with landings and releases,
+  because landings finalize migrations against the same target, and `runner pause`
+  holds it like any queued operation. In its turn the runner fetches the integration
+  branch and reads `reset` at its tip; a tip that declares none fails the reset. The
+  probe, then the command, run in an exact source view of that tip (no dependencies
+  installed: the command bootstraps what it needs), with the sanitized environment
+  plus `environmentKeys` (from the runner's environment), `SLIPJAY_RESET_TARGET`,
+  `SLIPJAY_RESET_SOURCE` (the tip) and `SLIPJAY_RESET_REASON_FILE`. `targetProbe`
+  must print `{"target": …}` equal to `target` within 30 seconds, or the command does
+  not run. The command must finish within `timeoutMs` (at most 15 minutes).
+  `runner kill` stops a reset at once: it moves no branch, and the target's script is
+  built to survive a kill.
+- **Records.** A reset ends `reset` with its `target` and `source`, or `failed`. The
+  command's output can echo the secrets it was given, so it goes only to the
+  owner-only `~/.slipjay/runner/logs/<operation>.reset-output`, which the failure's
+  reason names. To say why it failed, the step may write one short line to the file
+  `SLIPJAY_RESET_REASON_FILE` names; the reason carries that line (first line only,
+  control characters removed, at most 300 characters), so it must hold no secret.
+  `GET /v1/resets?repo=<owner/name>` lists a repository's resets, newest first.
 
 ## Release
 
@@ -394,42 +438,6 @@ verify refused, so nothing was applied.
    the integration branch lacks is refused rather than merged.
 4. It pushes the release branch, refusing if the remote moved since the plan. The
    runner's operation log records the release.
-
-5. When the candidate's policy declares `postRelease`, it then runs that step
-   against an external target, for example resetting a development database from
-   the release's production one:
-
-   ```json
-   { "postRelease": { "version": 1, "target": "app-development-db:…", "timeoutMs": 1200000,
-       "command": { "executable": "bun", "args": ["scripts/reset-development.ts"], "cwd": "app" },
-       "targetProbe": { "executable": "bun", "args": ["scripts/probe-development.ts"], "cwd": "app" },
-       "environmentKeys": ["NEON_API_KEY"] } }
-   ```
-
-   It is shaped like `postIntegration`, and the candidate's declaration applies.
-   It runs on the runner, which also finalizes every runner landing against the
-   target, and the serial queue never runs it alongside one. The target follows the
-   integration branch, so the step runs in an exact source view of the runner's
-   integration branch as published (the newest commit a landing has finalized
-   against the target), not of the candidate. The view has no dependencies installed (the command bootstraps what
-   it needs). The step gets the sanitized environment plus `environmentKeys`,
-   `SLIPJAY_RELEASE_CANDIDATE`, `SLIPJAY_RELEASE_MERGE`, `SLIPJAY_RELEASE_SOURCE`
-   (that integration commit) and `SLIPJAY_RELEASE_TARGET`; the runner's environment
-   supplies `environmentKeys`. Its output goes to an owner-only log under
-   `~/.slipjay/state/post-release` on the runner, never into the result,
-   because it may echo the secrets it was given. To say why it failed, the step
-   may write one short line to the file `SLIPJAY_RELEASE_REASON_FILE` names; the
-   result's `reason` carries that line (first line only, control characters
-   removed, at most 300 characters), so it must hold no secret. Its `targetProbe` must print `{"target": …}` equal to
-   the declared `target` first. The runner's queue runs it like any other
-   operation, so no landing finalizes against that target meanwhile. `timeoutMs` may
-   be up to 15 minutes. It runs only after the release has published, never on a
-   refused or failed release, and its failure never undoes the release: the result
-   is still `"released"` with `postRelease: { "ok": false, "reason": …, "retry":
-   "slipjay promote --confirm <candidate>" }`, and the command exits 2. A later
-   `--confirm` of an already released candidate reruns a step that did not
-   complete instead of skipping it; the plan, which never reads post-release outcomes,
-   does not report it.
 
 `land` and `release --confirm` each append one line to
 `~/.slipjay/state/metrics/landings.jsonl` or `releases.jsonl` on the machine that

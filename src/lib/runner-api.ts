@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployRequest, Operation, OperationLog, ReleaseRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import type { DeployRequest, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -112,6 +112,34 @@ export function createRunnerHandler(input: {
       input.onSubmitted();
       return json({ operation: input.log.operation(id), reattached: false });
     }
+    if (request.method === "POST" && path === `${RUNNER_API}/resets`) {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!validReset(body))
+        return json({ error: "Invalid reset" }, 400);
+      const repo = repositoryKey(body.repo);
+      const open = input.log.openOperations(repo).find((op) => op.kind === "reset");
+      if (open)
+        return json({ operation: open, reattached: true });
+      // The reset runs in the integration tip's source; the last landed commit only labels the operation.
+      const landed = input.log.lastLanded(repo);
+      if (!landed)
+        return json({ error: `${repo} has not landed on this runner yet, so it has no checkout to reset from` }, 400);
+      const id = newOperationId();
+      input.log.append(id, { type: "submitted", kind: "reset", repo, commitId: landed.commitId, submittedBy: body.submittedBy });
+      input.onSubmitted();
+      return json({ operation: input.log.operation(id), reattached: false });
+    }
+    if (request.method === "GET" && path === `${RUNNER_API}/resets`) {
+      const repo = url.searchParams.get("repo");
+      if (!repo)
+        return json({ error: "repo is required" }, 400);
+      return json({ operations: input.log.resets(repositoryKey(repo)) });
+    }
     if (request.method === "GET" && path === `${RUNNER_API}/deploys`) {
       const repo = url.searchParams.get("repo");
       if (!repo)
@@ -181,6 +209,13 @@ function validRelease(body: unknown): body is ReleaseRequest {
   const value = body as Record<string, unknown>;
   return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0)
     && typeof value.candidate === "string" && /^[a-f0-9]{40,64}$/.test(value.candidate) && typeof value.migrationsReady === "boolean";
+}
+
+function validReset(body: unknown): body is ResetRequest {
+  if (typeof body !== "object" || body === null)
+    return false;
+  const value = body as Record<string, unknown>;
+  return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0);
 }
 
 function validDeploy(body: unknown): body is DeployRequest {

@@ -3,7 +3,7 @@ import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark, RUNNER_API, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
-import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
+import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 
@@ -301,6 +301,36 @@ test("release listing returns a repository's release operations newest first and
     const listed = await (await f.request("/releases?repo=Owner/Repo")).json() as { operations: Operation[] };
     assert.deepEqual(listed.operations.map((op) => [op.id, op.kind]), [["release-2", "release"], ["release-1", "release"]]);
     assert.equal((await f.request("/releases")).status, 400);
+  } finally {
+    await f.close();
+  }
+});
+
+test("reset submissions need a landed repository, reattach to its open reset and list newest first", async () => {
+  const f = await fixture();
+  try {
+    const reset = (body: unknown) => f.request("/resets", { method: "POST", body: JSON.stringify(body) });
+    const unlanded = await reset({ repo: "Owner/Repo", submittedBy: "author" });
+    assert.equal(unlanded.status, 400);
+    assert.match((await unlanded.json() as { error: string }).error, /owner\/repo has not landed on this runner yet/);
+    f.append("landing", { type: "submitted", repo: "owner/repo", changeId, commitId: "a".repeat(40), bookmark: candidateBookmark(changeId), submittedBy: "author" });
+    f.append("landing", { type: "landed", base: "base", commitId: "a".repeat(40), branch: "main", remote: "origin" });
+    const first = await (await reset({ repo: "Owner/Repo", submittedBy: "author" })).json() as ResetResponse;
+    assert.equal(first.reattached, false);
+    assert.equal(first.operation.kind, "reset");
+    assert.equal(first.operation.commitId, "a".repeat(40), "it is labelled with the last landed commit");
+    assert.equal(f.submissions, 1);
+    const again = await (await reset({ repo: "owner/repo", submittedBy: "other" })).json() as ResetResponse;
+    assert.deepEqual([again.reattached, again.operation.id], [true, first.operation.id]);
+    assert.equal(f.submissions, 1);
+    f.append(first.operation.id, { type: "failed", stage: "resetting", reason: "Reset command failed" });
+    const next = await (await reset({ repo: "owner/repo", submittedBy: "author" })).json() as ResetResponse;
+    assert.equal(next.reattached, false);
+    for (const invalid of [{ repo: "owner/repo" }, { repo: "", submittedBy: "author" }])
+      assert.equal((await reset(invalid)).status, 400);
+    const listed = await (await f.request("/resets?repo=Owner/Repo")).json() as { operations: Operation[] };
+    assert.deepEqual(listed.operations.map((op) => op.id), [next.operation.id, first.operation.id]);
+    assert.equal((await f.request("/resets")).status, 400);
   } finally {
     await f.close();
   }
