@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.11.0
 
 - **Development resets weekly and on demand, never at promotion (#35):** `slipjay.json`
   declares `reset` (the former `postRelease` shape plus `intervalMs`, one hour to 30
@@ -17,6 +17,13 @@
   longer read. **Upgrading:** a policy still declaring `postRelease` is refused, so
   replace it with `reset` before installing this version (a runner on an earlier
   version ignores `reset`).
+
+- **One promotion command (#36):** `slipjay release` is retired and refuses without
+  planning or publishing; use `slipjay promote` and its existing confirmation flags.
+- **Recover the runner checkout after a failed landing (#37):** a failed rebase
+  returns the warm checkout to the integration branch before the next operation.
+  Policy discovery falls back to the committed remote-default policy when the
+  working-copy hint cannot be parsed, so conflict markers do not strand later landings.
 
 ## v3.10.0
 
