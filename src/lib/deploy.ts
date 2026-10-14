@@ -143,7 +143,8 @@ export async function runDeploy(input: {
     }
     for (const [index, project] of policy.projects.entries()) {
       const outcome = outcomes[index]!;
-      const failed = outcome.url ? failure(await step(project.activate!, outcome.url), policy.timeoutMs) : "printed no deployment URL to activate";
+      // Local service recovery follows the runner's migration compatibility decision too.
+      const failed = outcome.url ? failure(await step(project.activate!, outcome.url, { SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: restore ? "1" : "0" }), policy.timeoutMs) : "printed no deployment URL to activate";
       if (!failed) {
         outcome.activated = true;
         input.onProgress(`[deploy ${project.name}] activated ${outcome.url}`);
@@ -156,7 +157,7 @@ export async function runDeploy(input: {
         const activated = outcomes[earlier]!;
         const before = previousUrls[moved.name];
         // A deployment that served before may need another call than a first activation (Vercel: rollback, not promote).
-        const unrestored = before ? failure(await step(moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1" }), policy.timeoutMs) : "no earlier deployment is recorded";
+        const unrestored = before ? failure(await step(moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "1" }), policy.timeoutMs) : "no earlier deployment is recorded";
         // The project stays activated on the promotion, and the record says why.
         if (unrestored) {
           activated.reason = `could not be moved back: ${unrestored}`;

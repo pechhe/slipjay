@@ -48,6 +48,7 @@ fs.appendFileSync(${JSON.stringify(join(root, "deploys.jsonl"))}, JSON.stringify
 console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DEPLOY_COMMIT.slice(0, 7) + ".example");`;
 // Production checks each deployment and then activates it, recording both; each fails while `fail-health-<name>` / `fail-activate-<name>` exists.
 const productionStep = (root: string, name: string, step: "health" | "activate") => `const fs=require("node:fs");
+if ("${step}" === "activate") fs.appendFileSync(${JSON.stringify(join(root, "rollback-authority.jsonl"))}, JSON.stringify({ project: "${name}", allowed: process.env.SLIPJAY_DEPLOY_ROLLBACK_ALLOWED, restore: process.env.SLIPJAY_DEPLOY_RESTORE ?? null }) + "\\n");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
 fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL, ...process.env.SLIPJAY_DEPLOY_RESTORE ? { restore: true } : {} }) + "\\n");
 fs.appendFileSync(${JSON.stringify(join(root, "order.log"))}, "${step} ${name}\\n");`;
@@ -97,7 +98,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
       deployments: { version: 1, environments: {
         staging: { minIntervalMs: deployments.minIntervalMs, timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
           projects: ["app", "hq"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) },
-        ...(deployments.production ? { production: { timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
+        ...(deployments.production ? { production: { timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY", "SLIPJAY_DEPLOY_ROLLBACK_ALLOWED"],
           projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] },
             healthCheck: { executable: "node", args: ["-e", productionStep(root, name, "health")] },
             activate: { executable: "node", args: ["-e", productionStep(root, name, "activate")] } })),
@@ -143,7 +144,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   });
   const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } },
-    environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner" }) });
+    environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
   const parents = (commit: string) => git(["--git-dir", origin, "log", "-1", "--format=%P", commit]).split(" ");
@@ -816,6 +817,9 @@ test("a promotion that fails its health check activates nothing and returns the 
     const incomplete = (await promote(first)).result;
     assert.ok(incomplete?.type === "failed", JSON.stringify(incomplete));
     assert.match(incomplete.reason, /; rollback incomplete: app still serves the promotion \(could not be moved back: no earlier deployment is recorded\); the release branch stays on the release$/);
+    assert.deepEqual((await f.lines("rollback-authority.jsonl")).map((line) => JSON.parse(line)), [
+      { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null },
+    ], "first activation receives runner authority despite declared spoofed environment key");
     const merge = f.releaseRef();
     assert.deepEqual(f.parents(merge).at(-1), first, "production partly serves the release, so the release branch keeps it");
     await rm(join(f.root, "fail-activate-hq"));
@@ -833,6 +837,9 @@ test("a promotion that fails its health check activates nothing and returns the 
     assert.equal(f.releaseRef(), merge, "the release branch is left where it was");
     await rm(join(f.root, "fail-health-app"));
     assert.equal((await promote(first)).status, "deployed");
+    assert.deepEqual((await f.lines("rollback-authority.jsonl")).slice(2).map((line) => JSON.parse(line)), [
+      { project: "app", allowed: "0", restore: null }, { project: "hq", allowed: "0", restore: null }, { project: "www", allowed: "0", restore: null },
+    ], "non-additive promotion denies downstream compensation despite spoofed environment value");
 
     await f.land(f.submit(await f.candidate("b.txt")));
     await f.queue.idle();
@@ -858,6 +865,10 @@ test("a promotion that fails its health check activates nothing and returns the 
       { project: "app", url: url("app", second) }, { project: "hq", url: url("hq", second) },
       { project: "app", url: url("app", first), restore: true }, { project: "hq", url: url("hq", first), restore: true },
     ], "app and hq moved to the new deployment and back to the one they served before");
+    assert.deepEqual((await f.lines("rollback-authority.jsonl")).slice(5).map((line) => JSON.parse(line)), [
+      { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null }, { project: "www", allowed: "1", restore: null },
+      { project: "app", allowed: "1", restore: "1" }, { project: "hq", allowed: "1", restore: "1" },
+    ], "ordinary activation and compensation receive runner permission, with restore separately marked");
     assert.deepEqual(moved.deployment.projects.map(({ name, activated, restored }) => [name, activated, restored ?? false]),
       [["app", false, true], ["hq", false, true], ["www", false, false]]);
     assert.equal(f.releaseRef(), before);

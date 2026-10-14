@@ -305,6 +305,10 @@ integration branch; `production` deploys only through a promotion (see
   it served before. If one activation fails, the projects already activated are
   activated again on the deployment they last served, with `SLIPJAY_DEPLOY_RESTORE=1`
   (a host may move back to an earlier deployment differently from activating a new one).
+  Every activation also receives runner-owned `SLIPJAY_DEPLOY_ROLLBACK_ALLOWED=1`
+  when compensation is permitted, or `0` when the promotion's migration policy
+  prohibits it. Downstream activation commands must honor this flag before their
+  own local compensation; declared environment keys cannot override its authority.
 - **Production migrations.** `production` may declare `migrations: { verify, apply }`,
   two commands run in the same source view and environment as its projects, after
   every project passed its check and before any activates. `verify` exits 0 when the
