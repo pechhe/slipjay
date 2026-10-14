@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { landThroughRunner } from "../../src/lib/runner-client.ts";
@@ -74,31 +74,55 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   return { root, repo, remote, verified, remoteFile, dispose: () => rm(root, { recursive: true, force: true }) };
 }
 
+/** Expose a genuine GitHub origin while JJ's Git subprocesses use the local bare fixture. Restore before disposing it. */
+export async function configureLocalGithubTransport(f: { root: string; repo: string; remote: string }): Promise<{ github: string; restore(): void }> {
+  // JJ's internal remote-list must see the real configured GitHub identity. Only
+  // Git transport subprocesses get the local rewrite; global Git rewrites would
+  // make JJ expose the resolved local URL instead. No network is used.
+  const github = "https://github.com/fixture/project.git";
+  const gitWrapper = join(f.root, "fixture-git");
+  const previousGit = jj(f.repo, ["config", "get", "git.executable-path"]);
+  const previousOrigin = execFileSync("git", ["-C", f.repo, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
+  await writeFile(gitWrapper, `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+import { appendFileSync } from "node:fs";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(join(f.root, "git-transport.jsonl"))}, JSON.stringify(args) + "\\n");
+const result = spawnSync("git", ["-c", ${JSON.stringify(`url.${f.remote}.insteadOf=${github}`)}, ...args], { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`);
+  await chmod(gitWrapper, 0o755);
+  // Source and runner clones share this test file's guarded disposable HOME.
+  jj(f.repo, ["config", "set", "--user", "git.executable-path", gitWrapper]);
+  const setOrigin = (url: string) => execFileSync("git", ["-C", f.repo, "remote", "set-url", "origin", url]);
+  const restore = () => {
+    try { setOrigin(previousOrigin); }
+    finally { jj(f.repo, ["config", "set", "--user", "git.executable-path", previousGit]); }
+  };
+  try { setOrigin(github); }
+  catch (error) { restore(); throw error; }
+  return { github, restore };
+}
+
 /**
  * Run `body` against a runner started in-process with its own home under the
  * fixture's root, stopped afterwards. `env` names it (SLIPJAY_RUNNER) and carries
  * its token, so `body` can land through the library or the CLI.
  */
 export async function withTestRunner<T>(f: { root: string; repo: string; remote: string }, body: (runner: { location: string; env: NodeJS.ProcessEnv }) => Promise<T>): Promise<T> {
-  // The client names the repository by its GitHub remote. Origin carries a GitHub-shaped
-  // alias only while the runner is up, so nothing else a test runs reaches for GitHub.
-  const github = join(f.root, "github.com", "fixture", "project.git");
-  await mkdir(dirname(github), { recursive: true });
-  await symlink(f.remote, github).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
-  // Through Git's config: jj would store the symlink's resolved path.
-  const setOrigin = (url: string) => execFileSync("git", ["-C", f.repo, "remote", "set-url", "origin", url]);
-  setOrigin(github);
-  // A runner commits as the identity its config names for the commits it rewrites.
-  const home = join(f.root, "runner");
-  await mkdir(home, { recursive: true });
-  await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: f.remote } },
-    jj: { "user.name": "Fixture", "user.email": "fixture@example.com" } }));
-  const runner = await startRunner({ home, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" }, port: 0 });
+  const transport = await configureLocalGithubTransport(f);
   try {
-    return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });
+    // A runner commits as the identity its config names for the commits it rewrites.
+    const home = join(f.root, "runner");
+    await mkdir(home, { recursive: true });
+    await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: transport.github } },
+      jj: { "user.name": "Fixture", "user.email": "fixture@example.com" } }));
+    const runner = await startRunner({ home, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" }, port: 0 });
+    try {
+      return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });
+    } finally { await runner.close(); }
   } finally {
-    await runner.close();
-    setOrigin(f.remote);
+    transport.restore();
   }
 }
 

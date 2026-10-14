@@ -6,6 +6,8 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-proc
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { migrationCommandFailure, redactMigrationOutput } from "./migration-command-evidence.ts";
 import { checkoutCwd } from "./checkout-cwd.ts";
+import { githubRepository } from "./issue-references.ts";
+import { commitIssue } from "./release-specs.ts";
 
 const matches = (roots: string[], file: string): boolean => roots.some(root => file === root || file.startsWith(root + "/"));
 const changedPaths = (summary: string): string[] => summary.split(/\r?\n/).filter(Boolean).map(line => line.replace(/^[A-Z?]\s+/, ""));
@@ -22,7 +24,7 @@ export async function migrationPaths(cwd: string, policy: MigrationFinalizationP
  * through generation, verification and integration by the caller. No second lease. */
 export async function migrationCandidate(cwd: string, context: {
   current: { root: string }; integrationBranch: string;
-  configuration: { migrationFinalization?: MigrationFinalizationPolicy | null };
+  configuration: { remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null };
 }, io: {
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;
@@ -43,6 +45,20 @@ export async function migrationCandidate(cwd: string, context: {
       const { owned, changed: semanticPaths } = await migrationPaths(cwd, policy, base.commitId, candidate.commitId, io.jj);
       if (!owned.length) return candidate;
       if (semanticPaths.some(file => matches(policy.artifactPaths, file))) throw new Error("Late-bound migration artifacts must be generated during landing, not committed in the semantic candidate");
+      const remote = context.configuration.remote ?? "origin";
+      const remoteList = await io.jj(cwd, ["git", "remote", "list"]);
+      // githubRepository normally falls back to another remote; provenance must not.
+      const selectedRemote = remoteList.split(/\r?\n/).filter(line => line.trim().split(/\s+/)[0] === remote).join("\n");
+      const repository = githubRepository(selectedRemote, remote);
+      // LandingRevision carries only the title; trailers belong to the full immutable source description.
+      const description = repository ? await io.jj(cwd, ["log", "-r", candidate.commitId, "--no-graph", "-T", "description"]) : null;
+      const issue = repository ? commitIssue(description, repository) : null;
+      // Bind the rebased semantic source before generation changes its commit ID.
+      const migrationContext = JSON.stringify({
+        version: 1, repository, baseCommit: base.commitId, candidateCommit: candidate.commitId,
+        candidateChangeId: candidate.changeId,
+        issueNumber: issue !== null && Number.isInteger(issue) && issue > 0 ? issue : null,
+      });
       // The candidate may be @- below an empty child; generation must edit it.
       const originalWorkingCopy = await io.revisionFacts(cwd, "@");
       const originalParents = await io.jj(cwd, ["log", "-r", "parents(@)", "--no-graph", "-T", 'commit_id ++ "\\n"']);
@@ -50,7 +66,7 @@ export async function migrationCandidate(cwd: string, context: {
       await io.jj(cwd, ["edit", candidate.changeId]);
       const run = async (declaration: MigrationCommand): Promise<void> => {
         const commandRoot = await checkoutCwd(context.current.root, declaration.cwd, "Migration command");
-        const environment = (options.environment ?? sanitizedProcessEnv)();
+        const environment = { ...(options.environment ?? sanitizedProcessEnv)(), SLIPJAY_MIGRATION_CONTEXT: migrationContext };
         options.onProgress?.(`[migration] ${redactMigrationOutput([declaration.executable, ...declaration.args].join(" "), context.current.root, { ...process.env, ...environment }).slice(0, 1000)}`);
         const result = await (options.runCommand ?? runBoundedProcess)({ ...declaration, cwd: commandRoot, timeoutMs: 3600000, maxOutputBytes: 65536, env: environment, redactOutput: value => redactMigrationOutput(value, context.current.root, { ...process.env, ...environment }) });
         if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error)

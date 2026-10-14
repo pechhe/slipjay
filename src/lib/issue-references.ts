@@ -1,9 +1,29 @@
 /** GitHub repository and Issue references a landing reads from remotes and descriptions. */
 
+const githubRemoteRepository = (remote: string): string | null => {
+  let path: string;
+  if (remote.includes("://")) {
+    try {
+      const url = new URL(remote);
+      if (!["http:", "https:", "ssh:", "git:"].includes(url.protocol) || url.hostname.toLowerCase() !== "github.com") return null;
+      path = url.pathname;
+    } catch { return null; }
+  } else {
+    const scp = /^(?:[^@/:\s]+@)?github\.com:([^?#\s]+)$/i.exec(remote);
+    if (!scp) return null;
+    path = scp[1]!;
+  }
+  const match = /^\/?([A-Za-z0-9-]+)\/([\w.-]+)\/?$/.exec(path);
+  if (!match) return null;
+  const repository = match[2]!.replace(/\.git$/, "");
+  if (!repository || repository === "." || repository === "..") return null;
+  return `${match[1]}/${repository}`;
+};
+
 /** `owner/name` of a GitHub remote in `jj git remote list` output, preferring `preferred`. */
 export function githubRepository(remoteList: string, preferred?: string | null): string | null {
   const remotes = remoteList.split(/\r?\n/).map((line) => line.trim().split(/\s+/)).filter((parts) => parts.length >= 2)
-    .map(([name, url]) => ({ name, repository: /github\.com[:/]([^\s/]+\/[^\s/]+?)(?:\.git)?\/?$/.exec(url!)?.[1] ?? null }))
+    .map(([name, url]) => ({ name, repository: githubRemoteRepository(url!) }))
     .filter((remote) => remote.repository);
   return (remotes.find((remote) => remote.name === preferred) ?? remotes[0])?.repository ?? null;
 }

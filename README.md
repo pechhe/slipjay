@@ -101,11 +101,32 @@ landing.
 | Name | Set for |
 | --- | --- |
 | `SLIPJAY_WORKSPACE_NAME`, `SLIPJAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
+| `SLIPJAY_MIGRATION_CONTEXT` | Late-bound migration generation and verification commands. The same trusted JSON provenance record is bound before generation; see below. |
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 | `SLIPJAY_RESET_TARGET`, `_SOURCE`, `_REASON_FILE` | The runner's `reset` command and target probe (see [Reset](#reset)). A policy's `environmentKeys` may not start with `SLIPJAY_RESET_`. |
 
 slipjay reads `SLIPJAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
 and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
+
+When migration-owned paths change, `SLIPJAY_MIGRATION_CONTEXT` contains
+`{ "version": 1, "repository": "owner/repo" | null, "baseCommit": "…",
+"candidateCommit": "…", "candidateChangeId": "…", "issueNumber": 123 | null }`.
+The base is the integration commit used for the final rebase. The candidate is
+that rebased source revision before generated artifacts, so generation and
+verification receive identical provenance even after generation changes the
+working copy's commit. The remaining command environment is resolved afresh for
+each step; SlipJay overwrites any inherited `SLIPJAY_MIGRATION_CONTEXT` without
+mutating the caller's environment object.
+
+Repository identity comes only from the configured publication remote (default
+`origin`). A missing or non-GitHub remote supplies `repository: null` and
+`issueNumber: null`; SlipJay never substitutes another remote. For a GitHub
+repository, the existing commit-description parser reads a matching `Issue:`
+trailer, closing reference or `(#N)` title reference. Missing, unrelated or invalid
+Issue references supply `issueNumber: null`. Raw remote URLs, credentials and other
+environment values are not included. This record supplies provenance to migration
+consumers; it grants no mutation authority and does not replace credentials. A
+consumer requires a SlipJay version that implements this environment contract.
 
 ## Install
 

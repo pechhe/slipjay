@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, mkdir, rename, writeFile } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
@@ -10,59 +10,63 @@ import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
-import { jj, project } from "./support/workspace-project.ts";
+import { configureLocalGithubTransport, jj, project } from "./support/workspace-project.ts";
 
 async function fixture(dropStream = false) {
   const f = await project();
-  // A GitHub-shaped local path exercises repository identification without network access.
-  const remote = join(f.root, "github.com/fixture/project.git");
-  await mkdir(join(f.root, "github.com/fixture"), { recursive: true });
-  await rename(f.remote, remote);
-  jj(f.repo, ["git", "remote", "set-url", "origin", remote]);
-  const workspace = await createWorkspace("runner client fixture", f.repo);
-  const cwd = workspace.workspacePath;
-  await writeFile(join(cwd, "change.txt"), "candidate\n");
-  jj(cwd, ["describe", "-m", "Implement candidate"]);
-  const commit = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
-  const change = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
-  const log = openOperationLog(":memory:");
-  const listeners = new Set<(event: StoredEvent) => void>();
-  const append = (id: string, event: OperationEvent) => {
-    const stored = log.append(id, event);
-    for (const listener of listeners) listener(stored);
-  };
-  let killed: { operation: Operation; killed: boolean } | null = null;
-  const handler = createRunnerHandler({ log, token: "test-token", runnerName: "test-runner",
-    readLog: async () => "test log", onSubmitted: () => {}, kill: () => killed,
-    subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  });
-  const streamRequests: number[] = [];
-  let droppedSeq = 0;
-  const route = async (request: Request) => {
-    if (new URL(request.url).pathname.endsWith("/events")) {
-      streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
-      if (dropStream && streamRequests.length === 1) {
-        const operation = log.openOperations()[0]!;
-        const stored = log.append(operation.id, { type: "progress", line: "before reconnect" });
-        droppedSeq = stored.seq;
-        return new Response(`data: ${JSON.stringify(stored)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+  const transport = await configureLocalGithubTransport(f);
+  try {
+    const workspace = await createWorkspace("runner client fixture", f.repo);
+    const cwd = workspace.workspacePath;
+    await writeFile(join(cwd, "change.txt"), "candidate\n");
+    jj(cwd, ["describe", "-m", "Implement candidate"]);
+    const commit = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    const change = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
+    const log = openOperationLog(":memory:");
+    const listeners = new Set<(event: StoredEvent) => void>();
+    const append = (id: string, event: OperationEvent) => {
+      const stored = log.append(id, event);
+      for (const listener of listeners) listener(stored);
+    };
+    let killed: { operation: Operation; killed: boolean } | null = null;
+    const handler = createRunnerHandler({ log, token: "test-token", runnerName: "test-runner",
+      readLog: async () => "test log", onSubmitted: () => {}, kill: () => killed,
+      subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    });
+    const streamRequests: number[] = [];
+    let droppedSeq = 0;
+    const route = async (request: Request) => {
+      if (new URL(request.url).pathname.endsWith("/events")) {
+        streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
+        if (dropStream && streamRequests.length === 1) {
+          const operation = log.openOperations()[0]!;
+          const stored = log.append(operation.id, { type: "progress", line: "before reconnect" });
+          droppedSeq = stored.seq;
+          return new Response(`data: ${JSON.stringify(stored)}\n\n`, { headers: { "content-type": "text/event-stream" } });
+        }
       }
-    }
-    return handler(request);
-  };
-  let server = await serveRunner(route, { host: "127.0.0.1", port: 0 });
-  // The runner is unreachable until `back()`, as during a service restart.
-  const goDown = async () => {
-    const { port } = server;
-    await server.close();
-    return async () => { server = await serveRunner(route, { host: "127.0.0.1", port }); };
-  };
-  const lines: string[] = [];
-  const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
-    onLine: (line: string) => { lines.push(line); } };
-  return { ...f, remote, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
-    setKill: (outcome: { operation: Operation; killed: boolean } | null) => { killed = outcome; },
-    dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
+      return handler(request);
+    };
+    let server = await serveRunner(route, { host: "127.0.0.1", port: 0 });
+    // The runner is unreachable until `back()`, as during a service restart.
+    const goDown = async () => {
+      const { port } = server;
+      await server.close();
+      return async () => { server = await serveRunner(route, { host: "127.0.0.1", port }); };
+    };
+    const lines: string[] = [];
+    const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
+      onLine: (line: string) => { lines.push(line); } };
+    return { ...f, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
+      setKill: (outcome: { operation: Operation; killed: boolean } | null) => { killed = outcome; },
+      dispose: async () => {
+        try { await server.close(); log.close(); }
+        finally { try { transport.restore(); } finally { await f.dispose(); } }
+      } };
+  } catch (error) {
+    try { transport.restore(); } finally { await f.dispose(); }
+    throw error;
+  }
 }
 
 const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 20 });
