@@ -80,8 +80,8 @@ export async function runDeploy(input: {
     const env = sanitizedProcessEnv();
     for (const key of policy.environmentKeys) if (declared[key] !== undefined) env[key] = declared[key];
     Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
-    const step = (command: FinalizationCommand, url?: string) => input.run({ executable: command.executable, args: command.args,
-      cwd: path.join(root, command.cwd), env: url ? { ...env, SLIPJAY_DEPLOY_URL: url } : env, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
+    const step = (command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}) => input.run({ executable: command.executable, args: command.args,
+      cwd: path.join(root, command.cwd), env: { ...env, ...url ? { SLIPJAY_DEPLOY_URL: url } : {}, ...extra }, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
     const outcomes: DeployProjectOutcome[] = [];
     for (const project of policy.projects) {
       input.onProgress(`[deploy ${project.name}] deploying ${commitId.slice(0, 12)} to ${environment}`);
@@ -123,7 +123,8 @@ export async function runDeploy(input: {
         if (!restore) continue;
         const activated = outcomes[earlier]!;
         const before = previousUrls[moved.name];
-        const unrestored = before ? failure(await step(moved.activate!, before), policy.timeoutMs) : "no earlier deployment is recorded";
+        // A deployment that served before may need another call than a first activation (Vercel: rollback, not promote).
+        const unrestored = before ? failure(await step(moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1" }), policy.timeoutMs) : "no earlier deployment is recorded";
         // The project stays activated on the promotion, and the record says why.
         if (unrestored) {
           activated.reason = `could not be moved back: ${unrestored}`;

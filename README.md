@@ -300,7 +300,8 @@ integration branch; `production` deploys only through a promotion (see
   `activate` (with `SLIPJAY_DEPLOY_URL`) move that project's traffic to its
   deployment. Otherwise nothing is activated and the environment keeps serving what
   it served before. If one activation fails, the projects already activated are
-  activated again on the deployment they last served.
+  activated again on the deployment they last served, with `SLIPJAY_DEPLOY_RESTORE=1`
+  (a host may move back to an earlier deployment differently from activating a new one).
 - **Records.** A deploy ends `deployed`, or `failed` with `deploy failed: <project> (<reason>)`.
   Once its projects ran, either way it records the commit, the commit the environment
   served before (the last deploy any project succeeded in), the commits between them,

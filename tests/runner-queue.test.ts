@@ -40,7 +40,7 @@ console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DE
 // Production checks each deployment and then activates it, recording both; each fails while `fail-health-<name>` / `fail-activate-<name>` exists.
 const productionStep = (root: string, name: string, step: "health" | "activate") => `const fs=require("node:fs");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
-fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL }) + "\\n");`;
+fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL, ...process.env.SLIPJAY_DEPLOY_RESTORE ? { restore: true } : {} }) + "\\n");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean }) {
@@ -733,7 +733,7 @@ test("a promotion that fails its health check activates nothing and returns the 
     assert.match(moved.reason, /www \(activation failed: exited 6: www activate failed\); rolled back/);
     assert.deepEqual((await activations()).slice(4), [
       { project: "app", url: url("app", second) }, { project: "hq", url: url("hq", second) },
-      { project: "app", url: url("app", first) }, { project: "hq", url: url("hq", first) },
+      { project: "app", url: url("app", first), restore: true }, { project: "hq", url: url("hq", first), restore: true },
     ], "app and hq moved to the new deployment and back to the one they served before");
     assert.deepEqual(moved.deployment.projects.map(({ name, activated, restored }) => [name, activated, restored ?? false]),
       [["app", false, true], ["hq", false, true], ["www", false, false]]);
