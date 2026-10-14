@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.7.0
+
+- **The runner's jj settings and commit identity live in its config (#30):** the
+  runner's `config.json` takes a `jj` map applied as repository config in every warm
+  checkout, and the runner refuses to start unless it names `user.name` and
+  `user.email`. **Upgrading a runner:** add them (`scripts/setup-runner.sh` writes
+  them) before restarting it. `snapshot.max-new-file-size` defaults to 64MiB.
+- **No file locks on the runner's landing and release path (#28):** the serial queue
+  alone orders landings and releases; the external-target lease shared by
+  post-integration and post-release steps is gone, so a stale lease can no longer
+  stall the runner. The client still serializes its primary-checkout move.
+- **A release publishes only the verified tree (#25):** `release --confirm` refuses
+  when the tree it verified differs from the candidate's.
+- **A landed stack leaves nothing behind (#26):** the client abandons every
+  submitted commit the runner rewrote, not just the tip.
+- **Pending post-release outcomes survive a runner move (#27):** outcomes are named
+  by the external target alone; the README's move steps copy them.
+- **An empty working copy never reports someone else's landing (#24 and the land
+  rerun fix):** a target already on the integration branch, locally or on the
+  just-fetched remote bookmark, is never submitted, and only this workspace's own
+  landed operation is reported; otherwise `land` says there is nothing to land.
+
 ## v3.6.3
 
 - **A landed or failed candidate no longer pins the submitted commit (#22):** the
