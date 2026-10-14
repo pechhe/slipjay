@@ -235,8 +235,11 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
   if (!repo) throw new Error("Runner landing requires a GitHub repository on the publication remote");
   // An integrated target is never submitted: a rerun after this workspace's change landed
   // can find only integrated history (someone else's commit) under an empty working copy.
+  // The fetched remote bookmark counts too: a local bookmark can lag it, and an empty working copy
+  // on someone else's landed change must not fall through to that change's landed operation.
   await fetchIntegration(cwd, remote, context.integrationBranch);
-  const landedChange = await revisionExists(cwd, `${preview.commitId} & ::${context.integrationBranch}`) ? await ownChangeId(context) : undefined;
+  const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
+  const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
   const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview) : preview;
   const token = await runnerToken(env);
   const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });

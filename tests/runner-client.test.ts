@@ -405,6 +405,28 @@ test("a reland after the change landed, with an empty working copy on an immutab
   } finally { await f.dispose(); }
 });
 
+test("an empty working copy on another workspace's landed change submits nothing and reports no landing, even when the local bookmark lags", async () => {
+  const f = await fixture();
+  try {
+    const base = jj(f.cwd, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
+    // Another workspace's change landed on main, rebased by the runner into a new commit.
+    const other = execFileSync("git", ["--git-dir", f.remote, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "Other change"], { encoding: "utf8" }).trim();
+    const submittedOther = execFileSync("git", ["--git-dir", f.remote, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "Other change (submitted)"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["--git-dir", f.remote, "update-ref", "refs/heads/main", other]);
+    // This workspace's own edit never happened: its working copy is empty on that change.
+    jj(f.cwd, ["abandon", f.commit]);
+    jj(f.cwd, ["git", "fetch", "--remote", "origin", "--branch", "main"]);
+    jj(f.cwd, ["new", other]);
+    const otherChange = jj(f.cwd, ["log", "-r", other, "--no-graph", "-T", "change_id"]);
+    f.append("op_other", { type: "submitted", repo: "fixture/project", changeId: otherChange, commitId: submittedOther, bookmark: candidateBookmark(otherChange), submittedBy: "elsewhere:other-workspace" });
+    f.append("op_other", { type: "landed", base, commitId: other, branch: "main", remote: "origin" });
+    // The local main lags its remote, so the landed change does not look integrated here.
+    jj(f.cwd, ["bookmark", "set", "main", "-r", base, "--allow-backwards"]);
+    await assert.rejects(landThroughRunner(f.cwd, f.options), /Nothing to land/);
+    assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+  } finally { await f.dispose(); }
+});
+
 test("a landed candidate made immutable by a re-imported remote bookmark is still dropped", async () => {
   const f = await fixture();
   try {
