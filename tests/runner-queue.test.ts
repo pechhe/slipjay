@@ -224,6 +224,37 @@ test("queued candidates land in arrival order on the previous candidate, with ru
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a rebase conflict in the policy returns the runner to integration before an independent landing", async () => {
+  const f = await fixture();
+  try {
+    const makePolicyCandidate = async (projectCode: string) => {
+      jj(f.author, ["new", "main"]);
+      const path = join(f.author, "slipjay.json");
+      const policy = JSON.parse(await readFile(path, "utf8"));
+      policy.projectCode = projectCode;
+      await writeFile(path, JSON.stringify(policy));
+      jj(f.author, ["describe", "-m", `Set project code ${projectCode}`]);
+      return f.push();
+    };
+    const first = await makePolicyCandidate("aa");
+    const conflicting = await makePolicyCandidate("bb");
+    const independent = await f.candidate("independent.txt");
+    assert.equal((await f.land(f.submit(first)))?.type, "landed");
+    const failed = f.submit(conflicting);
+    const failure = await f.land(failed);
+    assert.ok(failure?.type === "failed", JSON.stringify(failure));
+    assert.equal(failure.stage, "rebasing");
+    assert.match(failure.reason, /conflict/i);
+    const checkout = join(f.home, "repos", "fixture/repo");
+    assert.equal(jj(checkout, ["log", "-r", "@", "--no-graph", "-T", "conflict"]), "false");
+    assert.equal(jj(checkout, ["log", "-r", "parents(@)", "--no-graph", "-T", "commit_id"]), f.main());
+    assert.equal(f.candidateAtVerdict.get(failed), false);
+    assert.equal(JSON.parse(await readFile(join(checkout, "slipjay.json"), "utf8")).projectCode, "aa");
+    assert.equal((await f.land(f.submit(independent)))?.type, "landed");
+    assert.equal(f.remoteFile("independent.txt"), "independent.txt");
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("gate failure preserves main and verbatim evidence; an amended change can land again", async () => {
   const f = await fixture();
   try {
@@ -408,6 +439,10 @@ test("a failed publication holds the finalized integration; relanding publishes 
     assert.equal(f.main(), before);
     const [finalized] = await f.development();
     assert.deepEqual(finalized?.migrations, ["0001.sql"]);
+    const checkout = join(f.home, "repos", "fixture/repo");
+    assert.equal(jj(checkout, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), finalized!.commit);
+    assert.equal(jj(checkout, ["log", "-r", "parents(@)", "--no-graph", "-T", "commit_id"]), finalized!.commit);
+    assert.equal(jj(checkout, ["log", "-r", "@", "--no-graph", "-T", "conflict"]), "false");
     // Another change cannot land past the held integration, and does not discard it.
     const blocked = f.submit(other);
     const refusal = await f.land(blocked);

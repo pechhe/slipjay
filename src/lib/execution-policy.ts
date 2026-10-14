@@ -372,11 +372,29 @@ export async function readIntegrationPolicy(repo: string, { hintRoot }: { hintRo
   let fallback: { branch: string | null } | undefined;
   const undeclared = async () => (fallback ??= { branch: await resolveIntegrationBranch(probes) }).branch;
   const hint = hintRoot ? (await readExecutionPolicy(hintRoot).catch(() => null))?.integrationBranch : undefined;
-  const start = hint && await probes.exists(hint) ? hint : await undeclared();
-  if (!start) throw new Error("Could not resolve an integration bookmark (tried the declared branch, origin/HEAD, main and master)");
-  const first = await readExecutionPolicyAtCommit(repo, start);
+  let start = hint && await probes.exists(hint) ? hint : null;
+  let revision = start;
+  if (!start) {
+    const head = await probes.originHead();
+    if (head && SAFE_BRANCH.test(head)) {
+      if (await probes.exists(head)) start = revision = head;
+      else {
+        // The remote default may remain after its local bookmark was deleted.
+        // Use its exact committed policy to discover a local integration bookmark.
+        const remote = await jjRead(repo, ["log", "--no-graph", "-r", `${symbol(head)}@${symbol("origin")}`, "-T", "commit_id"]);
+        const commitId = remote.stdout.trim();
+        if (remote.code === 0 && /^[a-f0-9]{40,64}$/.test(commitId)) {
+          start = head;
+          revision = commitId;
+        }
+      }
+    }
+    if (!start) start = revision = await undeclared();
+  }
+  if (!start || !revision) throw new Error("Could not resolve an integration bookmark (tried the declared branch, origin/HEAD, main and master)");
+  const first = await readExecutionPolicyAtCommit(repo, revision);
   const target = first.policy?.integrationBranch ?? await undeclared();
-  if (target === start) return { integrationBranch: start, ...first };
+  if (target === start && revision === start) return { integrationBranch: start, ...first };
   if (!target || !await probes.exists(target)) throw new Error(`Configured integration bookmark '${target}' does not exist locally`);
   const second = await readExecutionPolicyAtCommit(repo, target);
   const confirmed = second.policy?.integrationBranch ?? await undeclared();

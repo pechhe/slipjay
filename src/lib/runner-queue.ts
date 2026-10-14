@@ -286,6 +286,7 @@ export function createRunnerQueue(input: {
     let verdict: OperationEvent | undefined;
     const checkout = checkoutPath(operation);
     let remote: string | undefined;
+    let integrationBranch: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
     // Gate and migration commands both go through the executor, so each run records where it ran.
     async function run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
@@ -329,6 +330,7 @@ export function createRunnerQueue(input: {
       let context = await workspaceContext(checkout);
       if (!context || context.current.name !== "default") throw new Error("Runner checkout must be the default jj workspace");
       for (const [key, value] of Object.entries({ ...RUNNER_JJ_DEFAULTS, ...config.jj })) await jj(checkout, ["config", "set", "--repo", key, value]);
+      integrationBranch = context.integrationBranch;
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);
@@ -407,6 +409,16 @@ export function createRunnerQueue(input: {
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
       if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+      // This checkout belongs to the runner: leave failed candidates in history,
+      // and start the next turn from the integration (including any held commit).
+      if (integrationBranch) {
+        try { await jj(checkout, ["new", integrationBranch]); }
+        catch (error) {
+          const reason = `Runner checkout could not return to ${integrationBranch}: ${message(error)}`;
+          progress(reason);
+          if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
+        }
+      }
       if (verdict) append(operation.id, verdict);
       if (verdict?.type === "landed")
         await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));

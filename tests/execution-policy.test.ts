@@ -231,6 +231,18 @@ test("a release bookmark that names another integration branch is followed to it
   }
 }, 60_000);
 
+test("a malformed working hint recovers through the remote default's committed policy when its local bookmark is deleted", async () => {
+  const f = await gitRepository({ develop: "develop", master: "develop" }, "master");
+  try {
+    jj(f.repo, ["bookmark", "delete", "master"]);
+    await writeFile(join(f.repo, "slipjay.json"), "<<<<<<< conflicted policy\n");
+    const resolved = await readIntegrationPolicy(f.repo, { hintRoot: f.repo });
+    assert.equal(resolved.integrationBranch, "develop");
+    assert.equal(resolved.commitId, jj(f.repo, ["log", "--no-graph", "-r", "develop", "-T", "commit_id"]));
+    assert.equal(jj(f.repo, ["log", "--no-graph", "-r", 'bookmarks("master")', "-T", "commit_id"]), "");
+  } finally { await f.dispose(); }
+}, 60_000);
+
 test("landing verifies with the integration bookmark's policy and ignores an uncommitted edit in the primary checkout", async () => {
   const f = await project();
   try {
