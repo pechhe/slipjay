@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.10.0
+
+- **The runner applies a promotion's production migrations (#34):** `production` may
+  declare `migrations: { verify, apply }`. Once every project deployed and passed its
+  check, and before any activates, the runner runs `verify` (0: current, 2: pending,
+  else refuse), `apply` only when pending, then `verify` again. The deploy record's
+  `migrations` lists the promotion's migration files and ends `current`, `applied`,
+  `verify_failed` (nothing applied, rolled back automatically) or `apply_failed` (left
+  for the owner). A promotion carrying migration artifacts must declare `migrations`,
+  and `--migrations-ready` is refused for it. Output is redacted before it is recorded.
+  **Upgrading:** a policy declaring `production.migrations` needs this version on the
+  runner; earlier runners refuse promotions that carry migrations.
+
 ## v3.9.0
 
 - **Production ships by one-tap promotion (#32):** a candidate whose `slipjay.json`
