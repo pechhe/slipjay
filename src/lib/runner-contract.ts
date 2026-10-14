@@ -72,10 +72,25 @@ export type DeployRecord = {
    * non-additive migrations and nothing more is undone: the owner decides.
    */
   rollback?: { automatic: boolean; releaseBranch?: string; reason: string };
+  /** Present once an environment that declares migrations reached them: see `DeployMigrations`. */
+  migrations?: DeployMigrations;
 };
 
-/** What a promotion's production deploy needs to undo it: the release merge, and the migrations that make undoing it manual. */
-export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[] };
+/**
+ * What a deploy did to its database. `artifacts` are the promotion's migration files.
+ * `current`: the database already matched the commit, so nothing was applied (a rerun);
+ * `applied`: they were pending, applied, and verified; `verify_failed`: the first
+ * verify refused, so nothing was applied; `apply_failed`: apply or the verify after it
+ * failed, so the database may be partly migrated. Either failure activates nothing.
+ */
+export type DeployMigrations = { artifacts: string[]; status: "current" | "applied" | "verify_failed" | "apply_failed"; reason?: string };
+
+/**
+ * What a promotion's production deploy needs: the release merge to undo it, the
+ * migrations that make undoing it manual, and the migration files it carries
+ * (absent from deploys recorded before the runner applied them).
+ */
+export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[]; migrationArtifacts?: string[] };
 
 /** One fact appended to the log. Nothing is updated or deleted. */
 export type OperationEvent =

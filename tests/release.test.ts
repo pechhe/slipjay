@@ -144,6 +144,39 @@ test("a release carrying migration artifacts needs --migrations-ready and names 
   }
 });
 
+test("a promotion's migrations are the runner's to apply: it needs a declared production step and refuses --migrations-ready", async () => {
+  const f = await releaseProject({ migrations: true, promotes: true });
+  try {
+    const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
+    const head = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.repo, encoding: "utf8" }).trim();
+    const commit = (message: string) => { git(["add", "-A"]); git(["commit", "-qm", message]); git(["push", "-q", "origin", "main"]); jj(f.repo, ["git", "import"]); return head(); };
+    await mkdir(join(f.repo, "migrations"), { recursive: true });
+    await writeFile(join(f.repo, "migrations", "0001.sql"), "create table t (a int);\n");
+    const undeclared = commit("Add a migration");
+    const plan = (stagingGreen: string) => releaseIntegration(f.repo, { readPromotion: async () => ({ stagingGreen, approved: [] }) });
+    const refused = await plan(undeclared);
+    assert.ok(!refused.ok && /declares no deployments production migrations/.test(refused.reason), JSON.stringify(refused));
+    assert.ok(!(await confirmRelease(f.repo, { candidate: undeclared })).ok, "the runner refuses it too");
+
+    const policyPath = join(f.repo, "slipjay.json");
+    const policy = JSON.parse(await readFile(policyPath, "utf8"));
+    const step = { executable: "node", args: ["-e", ""] };
+    policy.deployments.environments.production.migrations = { verify: step, apply: step };
+    await writeFile(policyPath, JSON.stringify(policy));
+    const declared = commit("Declare production migrations");
+    const planned = await plan(declared);
+    assert.ok(planned.ok && planned.status === "planned", JSON.stringify(planned));
+    assert.doesNotMatch(planned.next, /--migrations-ready/);
+    assert.match(planned.next, /The runner applies its migrations \(migrations\/0001\.sql\) to production before it activates/);
+    const marked = await confirmRelease(f.repo, { candidate: declared, migrationsReady: true });
+    assert.ok(!marked.ok && /confirm without --migrations-ready/.test(marked.reason), JSON.stringify(marked));
+    const released = await confirmRelease(f.repo, { candidate: declared });
+    assert.equal(released.status, "released", JSON.stringify(released));
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("a release branch with changes the integration branch lacks is refused", async () => {
   const f = await releaseProject();
   try {

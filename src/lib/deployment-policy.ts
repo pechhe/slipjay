@@ -27,7 +27,18 @@ export type DeploymentEnvironment = {
   timeoutMs: number;
   environmentKeys: string[];
   projects: DeploymentProject[];
+  /** Production only: how the runner brings the database to the deployed commit (see `DeploymentMigrations`). */
+  migrations?: DeploymentMigrations;
 };
+
+/**
+ * How a promotion migrates production, run once every project deployed and passed its
+ * check, before any activates, in the same source view and environment as the projects.
+ * `verify` exits 0 when the database matches the commit, 2 when the commit's migrations
+ * are pending (the only case `apply` runs), and anything else to refuse; after `apply`,
+ * `verify` must exit 0.
+ */
+export type DeploymentMigrations = { verify: FinalizationCommand; apply: FinalizationCommand };
 
 export type DeploymentPolicy = { version: 1; environments: Record<string, DeploymentEnvironment> };
 
@@ -70,9 +81,16 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
     // A failed promotion is rolled back by never moving traffic, so production must control it.
     if (name === "production" && !projects.every((project) => project.activate))
       throw new Error("deployments production must declare activate for every project");
+    let migrations: DeploymentMigrations | undefined;
+    if (environment.migrations !== undefined) {
+      // Staging runs on a database landing already migrates.
+      if (name !== "production") throw new Error(`deployments ${name} declares migrations; only production migrates on deploy`);
+      const declared = object(environment.migrations, "deployments production migrations");
+      migrations = { verify: command(declared.verify, "Migration verify"), apply: command(declared.apply, "Migration apply") };
+    }
     environments[name] = {
       minIntervalMs: minIntervalMs as number, timeoutMs: environment.timeoutMs as number,
-      environmentKeys: environmentKeys(environment, "Deployment"), projects,
+      environmentKeys: environmentKeys(environment, "Deployment"), projects, ...migrations ? { migrations } : {},
     };
   }
   return { version: 1, environments };

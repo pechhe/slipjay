@@ -47,6 +47,8 @@ export type ReleasePlan = {
   checks: VerificationDeclaration[];
   /** The candidate declares a production deployment: it ships by promotion, from a commit staging is green on. */
   promotes: boolean;
+  /** The candidate's production deployment declares `migrations`: the runner applies the promotion's migrations itself. */
+  appliesMigrations: boolean;
 };
 
 /**
@@ -120,7 +122,7 @@ export type ReleaseResult =
 export type ConfirmReleaseOptions = {
   /** The full candidate commit id a human approved. */
   candidate: string;
-  /** Acknowledges that the release's migration artifacts are already applied where it deploys. */
+  /** Acknowledges that the release's migration artifacts are already applied where it deploys; refused for a promotion, which applies them on the runner. */
   migrationsReady?: boolean;
   onProgress?: (line: string) => void;
   onStage?: (stage: Extract<RunnerStage, "installing" | "verifying" | "publishing" | "finalizing">) => void;
@@ -235,8 +237,9 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
     // A migration the release deletes is not additive either.
     if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
   }
+  const production = policy.deployments?.environments.production;
   return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks,
-    promotes: Boolean(policy.deployments?.environments.production) };
+    promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations) };
 }
 
 /**
@@ -370,8 +373,18 @@ async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefine
   return summary;
 }
 
-/** Refuse a release carrying migration artifacts that its approver has not marked as applied. */
+/**
+ * Refuse a release carrying migration artifacts that its approver has not marked as
+ * applied. A promotion's migrations are the runner's to apply, so it refuses the mark,
+ * and refuses migration artifacts its production deployment declares no way to apply.
+ */
 function requireMigrationsReady(plan: ReleasePlan, migrationsReady: boolean): void {
+  if (plan.promotes) {
+    if (migrationsReady) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, whose migrations the runner applies before production activates: confirm without --migrations-ready`);
+    if (plan.migrationArtifacts.length && !plan.appliesMigrations)
+      refuse(`This promotion carries migration artifacts (${plan.migrationArtifacts.join(", ")}), but slipjay.json at ${plan.candidate.slice(0, 12)} declares no deployments production migrations to apply them`);
+    return;
+  }
   if (plan.migrationArtifacts.length && !migrationsReady) {
     refuse(`This release carries migration artifacts (${plan.migrationArtifacts.join(", ")}). Apply them where ${plan.releaseBranch} deploys, then rerun with --migrations-ready.`);
   }
@@ -401,12 +414,14 @@ export async function releaseIntegration(cwd = process.cwd(), { graphql, readPro
       if (!stagingGreen) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
       if (stagingGreen !== plan.candidate) plan = await planRelease(cwd, { candidate: stagingGreen });
       delta = await promotionDelta(plan, approved);
+      requireMigrationsReady(plan, false);
     }
     const summary = { ...await describePlan(plan, graphql), ...delta ? { delta } : {} };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
     return { ok: true, status: "planned", ...summary, subjects: (delta?.commits ?? plan.commits).map((commit) => commit.subject),
       next: `After explicit human approval: slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
-        + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "")
+        + (!plan.promotes && plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "")
+        + (plan.promotes && plan.migrationArtifacts.length ? `. The runner applies its migrations (${plan.migrationArtifacts.join(", ")}) to production before it activates` : "")
         + (plan.promotes && plan.nonAdditiveMigrations.length ? `. Not additive: ${plan.nonAdditiveMigrations.join(", ")}; if production fails its health check, it is not rolled back automatically` : "") };
   } catch (error) {
     return refusalOf(error);

@@ -329,6 +329,9 @@ test("deployments declare environments with projects; unknown environments and m
     projects: [{ ...project, healthCheck: step("health"), activate: step("activate") }] } } } }));
   assert.deepEqual(checked.deployments?.environments.production?.projects[0], { ...project, command: { ...project.command, cwd: "." },
     healthCheck: { ...step("health"), cwd: "." }, activate: { ...step("activate"), cwd: "." } });
+  const migrating = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { production: { timeoutMs: 600_000,
+    projects: [{ ...project, activate: project.command }], migrations: { verify: step("verify"), apply: step("apply") } } } } }));
+  assert.deepEqual(migrating.deployments?.environments.production?.migrations, { verify: { ...step("verify"), cwd: "." }, apply: { ...step("apply"), cwd: "." } });
   for (const deployments of [
     { version: 1, environments: { qa: { timeoutMs: 1, projects: [project] } } },
     { version: 1, environments: { staging: { timeoutMs: 1, projects: [] } } },
@@ -339,5 +342,7 @@ test("deployments declare environments with projects; unknown environments and m
     { version: 1, environments: { production: { timeoutMs: 1, projects: [{ ...project, activate: project.command }, { ...project, name: "hq" }] } } },
     { version: 1, environments: { production: { timeoutMs: 1, projects: [{ ...project, activate: project.command, healthCheck: { executable: "" } }] } } },
     { version: 1, environments: { production: { timeoutMs: 1, projects: [project] } } },
+    { version: 1, environments: { staging: { timeoutMs: 1, projects: [project], migrations: { verify: project.command, apply: project.command } } } },
+    { version: 1, environments: { production: { timeoutMs: 1, projects: [{ ...project, activate: project.command }], migrations: { verify: project.command } } } },
   ]) assert.throws(() => parseExecutionPolicy(policy({ deployments })), JSON.stringify(deployments));
 });

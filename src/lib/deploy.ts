@@ -1,10 +1,11 @@
 import path from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
+import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { withFinalizationSource } from "./post-integration-source.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { DeploymentEnvironment } from "./deployment-policy.ts";
 import type { FinalizationCommand } from "./post-integration-policy.ts";
-import type { DeployProjectOutcome, DeployRecord } from "./runner-contract.ts";
+import type { DeployMigrations, DeployProjectOutcome, DeployRecord } from "./runner-contract.ts";
 
 /** How many commits a deploy record lists; a longer range says how many it left out. */
 const CHANGES_LIMIT = 200;
@@ -58,9 +59,10 @@ function failure(result: BoundedProcessResult, timeoutMs: number): string | null
  * Deploy every project of one environment from an exact source view of `commitId`,
  * one after another, health-check each, and return the record. A failing project does
  * not stop the rest: the record says which projects serve the new commit. Where the
- * environment activates, traffic moves only once every project passed, and an
- * activation that fails moves the projects already activated back to `previousUrls`,
- * unless `restore` is false (the owner decides).
+ * environment activates, traffic moves only once every project passed and its
+ * declared migrations brought the database to the commit, and an activation that
+ * fails moves the projects already activated back to `previousUrls`, unless `restore`
+ * is false (the owner decides).
  */
 export async function runDeploy(input: {
   gitDirectory: string; environment: string; commitId: string; previous: string | null;
@@ -68,6 +70,8 @@ export async function runDeploy(input: {
   /** The deployment each project served before, for moving traffic back. */
   previousUrls?: Record<string, string>;
   restore?: boolean;
+  /** The migration files the deploy carries, for its record. */
+  migrationArtifacts?: string[];
   /** Where the declared `environmentKeys` are read from. */
   readEnvironment: () => NodeJS.ProcessEnv;
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
@@ -75,6 +79,7 @@ export async function runDeploy(input: {
 }): Promise<DeployRecord> {
   const { gitDirectory, environment, commitId, previous, policy, previousUrls = {}, restore = true } = input;
   const changes = await changesSince(gitDirectory, previous, commitId);
+  let migrations: DeployMigrations | undefined;
   const projects = await withFinalizationSource(gitDirectory, commitId, async (root) => {
     const declared = input.readEnvironment();
     const env = sanitizedProcessEnv();
@@ -105,9 +110,36 @@ export async function runDeploy(input: {
     }
     if (!policy.projects.some((project) => project.activate)) return outcomes;
     for (const outcome of outcomes) outcome.activated = false;
+    const holdBack = () => input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);
     if (outcomes.some((outcome) => !outcome.ok)) {
-      input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);
+      holdBack();
       return outcomes;
+    }
+    if (policy.migrations) {
+      // Last before traffic moves, so code before the commit runs on its schema only briefly.
+      const { verify, apply } = policy.migrations;
+      const artifacts = input.migrationArtifacts ?? [];
+      // A connection error can print the database URL: redact whole streams before clipping them.
+      const redact = (value: string) => redactMigrationOutput(value, root, env);
+      const failed = (result: BoundedProcessResult) => failure({ ...result, stdout: redact(result.stdout), stderr: redact(result.stderr) }, policy.timeoutMs);
+      input.onProgress(`[migrations] verifying ${environment} against ${commitId.slice(0, 12)}`);
+      const first = await step(verify);
+      if (failure(first, policy.timeoutMs) === null) migrations = { artifacts, status: "current" };
+      else if (first.exitCode !== 2 || first.timedOut || first.signal || first.error)
+        migrations = { artifacts, status: "verify_failed", reason: `verify ${failed(first)}` };
+      else {
+        input.onProgress(`[migrations] applying pending migrations`);
+        const applied = await step(apply);
+        const after = failure(applied, policy.timeoutMs) === null ? await step(verify) : null;
+        migrations = !after ? { artifacts, status: "apply_failed", reason: `apply ${failed(applied)}` }
+          : failure(after, policy.timeoutMs) !== null ? { artifacts, status: "apply_failed", reason: `verify after apply ${failed(after)}` }
+          : { artifacts, status: "applied" };
+      }
+      input.onProgress(`[migrations] ${migrations.status}${migrations.reason ? `: ${migrations.reason}` : ""}`);
+      if (migrations.reason) {
+        holdBack();
+        return outcomes;
+      }
     }
     for (const [index, project] of policy.projects.entries()) {
       const outcome = outcomes[index]!;
@@ -138,5 +170,5 @@ export async function runDeploy(input: {
     }
     return outcomes;
   });
-  return { environment, commitId, previous, changes, projects };
+  return { environment, commitId, previous, changes, projects, ...migrations ? { migrations } : {} };
 }

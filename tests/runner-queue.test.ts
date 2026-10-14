@@ -20,8 +20,8 @@ const gate = 'const fs=require("node:fs");if (fs.existsSync("fail")) { process.s
 const command = `node -e ${gate}`;
 // Late-bound migrations: each generation writes the next numbered file; finalization
 // records which migrations the integrated commit carries, unless `fail-finalize` exists;
-// it waits while `hold-finalize` exists.
-const generate = 'const fs=require("node:fs");fs.mkdirSync("migrations",{recursive:true});const n=fs.readdirSync("migrations").length+1;fs.writeFileSync("migrations/"+String(n).padStart(4,"0")+".sql","-- "+n+"\\n");';
+// it waits while `hold-finalize` exists. A committed `schema/drop` makes generated migrations non-additive.
+const generate = 'const fs=require("node:fs");fs.mkdirSync("migrations",{recursive:true});const n=fs.readdirSync("migrations").length+1;fs.writeFileSync("migrations/"+String(n).padStart(4,"0")+".sql",(fs.existsSync("schema/drop")?"drop table t;\\n":"")+"-- "+n+"\\n");';
 const finalize = (root: string) => `const fs=require("node:fs");
 while (fs.existsSync(${JSON.stringify(join(root, "hold-finalize"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
 if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
@@ -40,10 +40,21 @@ console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DE
 // Production checks each deployment and then activates it, recording both; each fails while `fail-health-<name>` / `fail-activate-<name>` exists.
 const productionStep = (root: string, name: string, step: "health" | "activate") => `const fs=require("node:fs");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
-fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL, ...process.env.SLIPJAY_DEPLOY_RESTORE ? { restore: true } : {} }) + "\\n");`;
+fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL, ...process.env.SLIPJAY_DEPLOY_RESTORE ? { restore: true } : {} }) + "\\n");
+fs.appendFileSync(${JSON.stringify(join(root, "order.log"))}, "${step} ${name}\\n");`;
+// Production's database is \`production-db.json\`, the migrations it applied. Verify exits 0 when they are
+// the commit's \`migrations/\`, 2 when some are pending, and 1 while \`fail-verify\` exists; apply fails while
+// \`fail-apply\` exists. Failures print a database URL, which the record must not carry.
+const migrationStep = (root: string, step: "verify" | "apply") => `const fs=require("node:fs");
+const db=${JSON.stringify(join(root, "production-db.json"))}; const applied=fs.existsSync(db)?JSON.parse(fs.readFileSync(db,"utf8")):[];
+const wanted=fs.existsSync("migrations")?fs.readdirSync("migrations").sort():[];
+fs.appendFileSync(${JSON.stringify(join(root, "order.log"))}, "${step}\\n");
+if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}`))})) { console.error("postgres://owner:hunter2@db.example/prod refused"); process.exit(1); }
+if ("${step}"==="apply") fs.writeFileSync(db, JSON.stringify(wanted));
+else process.exit(JSON.stringify(applied)===JSON.stringify(wanted)?0:2);`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
-async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean }) {
+async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -80,7 +91,9 @@ async function fixture(migrations = false, release = false, deployments?: { minI
         ...(deployments.production ? { production: { timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
           projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] },
             healthCheck: { executable: "node", args: ["-e", productionStep(root, name, "health")] },
-            activate: { executable: "node", args: ["-e", productionStep(root, name, "activate")] } })) } } : {}),
+            activate: { executable: "node", args: ["-e", productionStep(root, name, "activate")] } })),
+          ...(deployments.production === "migrations" ? { migrations: { verify: { executable: "node", args: ["-e", migrationStep(root, "verify")] },
+            apply: { executable: "node", args: ["-e", migrationStep(root, "apply")] } } } : {}) } } : {}),
       } },
     } : {}),
     ...(release ? {
@@ -738,6 +751,57 @@ test("a promotion that fails its health check activates nothing and returns the 
     assert.deepEqual(moved.deployment.projects.map(({ name, activated, restored }) => [name, activated, restored ?? false]),
       [["app", false, true], ["hq", false, true], ["www", false, false]]);
     assert.equal(f.releaseRef(), before);
+  } finally { await f.dispose(); }
+}, 300_000);
+
+test("a promotion migrates production after every project is healthy and before any activates; a failed verify or apply activates nothing", async () => {
+  const f = await fixture(true, true, { minIntervalMs: 0, production: "migrations" });
+  const promote = async (commit: string) => {
+    const promotion = f.submitRelease(commit);
+    await f.land(promotion);
+    await f.queue.idle();
+    const outcome = f.result(promotion);
+    assert.ok(outcome?.type === "released" && outcome.deploy, JSON.stringify(outcome));
+    return f.log.operation(outcome.deploy)!;
+  };
+  const order = async () => { const steps = await f.lines("order.log"); await rm(join(f.root, "order.log"), { force: true }); return steps; };
+  try {
+    // Non-additive, so only a refused first verify, which applied nothing, is rolled back automatically.
+    await f.land(f.submit(await f.candidate("schema/drop")));
+    await f.queue.idle();
+    const first = f.main();
+    const before = f.releaseRef();
+    await writeFile(join(f.root, "fail-verify"), "");
+    const refused = (await promote(first)).result;
+    assert.ok(refused?.type === "failed" && refused.deployment, JSON.stringify(refused));
+    assert.deepEqual(refused.deployment.migrations, { artifacts: ["migrations/0001.sql"], status: "verify_failed",
+      reason: "verify exited 1: [REDACTED_URL] refused" }, "the database URL never reaches the record");
+    assert.match(refused.reason, /^deploy failed: migrations \(verify exited 1: \[REDACTED_URL\] refused\); rolled back: /);
+    assert.equal(f.releaseRef(), before, "nothing was applied, so the release branch returns");
+    assert.deepEqual(await order(), ["health app", "health hq", "health www", "verify"], "nothing applied or activated");
+    await rm(join(f.root, "fail-verify"));
+
+    await writeFile(join(f.root, "fail-apply"), "");
+    const partial = await promote(first);
+    assert.ok(partial.result?.type === "failed" && partial.result.deployment?.migrations?.status === "apply_failed", JSON.stringify(partial.result));
+    assert.match(partial.result.reason, /not rolled back automatically, because applying the migrations failed and the database may be partly migrated: the owner decides$/);
+    const merge = f.releaseRef();
+    assert.equal(f.parents(merge).at(-1), first, "the release branch keeps the release");
+    assert.deepEqual(await order(), ["health app", "health hq", "health www", "verify", "apply"]);
+    await rm(join(f.root, "fail-apply"));
+
+    const applied = await promote(first);
+    assert.ok(applied.result?.type === "deployed", JSON.stringify(applied.result));
+    assert.deepEqual(applied.result.record.migrations, { artifacts: ["migrations/0001.sql"], status: "applied" }, "the rerun confirm keeps the promotion's migrations");
+    assert.deepEqual(await order(), ["health app", "health hq", "health www", "verify", "apply", "verify", "activate app", "activate hq", "activate www"]);
+    assert.deepEqual(JSON.parse(await readFile(join(f.root, "production-db.json"), "utf8")), ["0001.sql"]);
+
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.queue.idle();
+    const current = await promote(f.main());
+    assert.ok(current.result?.type === "deployed", JSON.stringify(current.result));
+    assert.deepEqual(current.result.record.migrations, { artifacts: [], status: "current" }, "a promotion without migrations still verifies production");
+    assert.deepEqual((await order()).filter((step) => !step.includes(" ")), ["verify"]);
   } finally { await f.dispose(); }
 }, 300_000);
 

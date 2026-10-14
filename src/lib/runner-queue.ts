@@ -181,7 +181,7 @@ export function createRunnerQueue(input: {
       const manual = operation.promotion?.nonAdditiveMigrations ?? [];
       const record = await runDeploy({
         gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
-        previousUrls, restore: manual.length === 0,
+        previousUrls, restore: manual.length === 0, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
         run: async (request) => {
           const runId = randomUUID();
@@ -195,7 +195,8 @@ export function createRunnerQueue(input: {
           return result;
         },
       });
-      const failed = record.projects.filter((project) => !project.ok);
+      const failed = [...record.migrations?.reason ? [{ name: "migrations", reason: record.migrations.reason }] : [],
+        ...record.projects.filter((project) => !project.ok)];
       if (failed.length && operation.promotion) record.rollback = await rollBack(operation, operation.promotion, record);
       verdict = failed.length
         ? { type: "failed", stage: "deploying", deployment: record,
@@ -213,11 +214,15 @@ export function createRunnerQueue(input: {
   /**
    * After a promotion's production deploy failed: production already serves what it
    * served before (nothing activated, or moved back), so return the release branch to
-   * match, in the serial lane that owns branch moves. A promotion carrying non-additive
-   * migrations is left as it is: the code before it may not run on the migrated schema.
+   * match, in the serial lane that owns branch moves. A promotion that may have applied
+   * non-additive migrations, or whose migrations failed part-way, is left as it is: the
+   * code before it may not run on the migrated schema.
    */
   async function rollBack(operation: DeployOperation, { merge, nonAdditiveMigrations: manual }: PromotionFacts, record: DeployRecord): Promise<NonNullable<DeployRecord["rollback"]>> {
-    if (manual.length) return { automatic: false,
+    if (record.migrations?.status === "apply_failed") return { automatic: false,
+      reason: "not rolled back automatically, because applying the migrations failed and the database may be partly migrated: the owner decides" };
+    // A refused first verify applied nothing, so the code before the promotion still fits the schema.
+    if (manual.length && record.migrations?.status !== "verify_failed") return { automatic: false,
       reason: `not rolled back automatically, because the promotion carries non-additive migrations (${manual.join(", ")}): the owner decides` };
     const serving = record.projects.filter((project) => project.activated);
     if (serving.length) return { automatic: true,
@@ -251,7 +256,7 @@ export function createRunnerQueue(input: {
       ? log.deployments(promotion.repo, "production").find((entry) => entry.commitId === promotion.commitId && entry.promotion)?.promotion : undefined;
     const id = newOperationId();
     log.append(id, { type: "submitted", kind: "deploy", repo: promotion.repo, environment: "production", commitId: promotion.commitId,
-      submittedBy: `promotion:${promotion.id}`, promotion: shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations } });
+      submittedBy: `promotion:${promotion.id}`, promotion: shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations, migrationArtifacts: result.migrationArtifacts } });
     return id;
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation): Promise<void> {

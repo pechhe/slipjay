@@ -302,6 +302,16 @@ integration branch; `production` deploys only through a promotion (see
   it served before. If one activation fails, the projects already activated are
   activated again on the deployment they last served, with `SLIPJAY_DEPLOY_RESTORE=1`
   (a host may move back to an earlier deployment differently from activating a new one).
+- **Production migrations.** `production` may declare `migrations: { verify, apply }`,
+  two commands run in the same source view and environment as its projects, after
+  every project passed its check and before any activates. `verify` exits 0 when the
+  database matches the commit, 2 when the commit's migrations are pending, anything
+  else to refuse. Only on 2 does `apply` run, and `verify` must then exit 0. Either
+  failure activates nothing. The deploy's `migrations` records the promotion's
+  migration files and `status`: `current` (nothing to apply), `applied`,
+  `verify_failed` (nothing applied) or `apply_failed` (the database may be partly
+  migrated, so the promotion is not rolled back automatically). The commands'
+  output is redacted of URLs and secret-named variables before it is recorded.
 - **Records.** A deploy ends `deployed`, or `failed` with `deploy failed: <project> (<reason>)`.
   Once its projects ran, either way it records the commit, the commit the environment
   served before (the last deploy any project succeeded in), the commits between them,
@@ -345,7 +355,8 @@ code only. The plan's `nonAdditiveMigrations` names migration artifacts that dro
 rename, retype or delete something, or tighten what an existing table accepts (a
 heuristic, `nonAdditiveSql` in `src/lib/release.ts`), and its `next` repeats them: a
 failed promotion carrying one, including a rerun confirm of it, is left as it is,
-with nothing moved back, for the owner to decide.
+with nothing moved back, for the owner to decide, unless its migrations' first
+verify refused, so nothing was applied.
 
 1. `slipjay promote` fetches and plans: the candidate (the integration branch on
    the remote), the base (the release branch on the remote), the commits between
@@ -359,7 +370,8 @@ with nothing moved back, for the owner to decide.
    checks again.
 2. After explicit human approval of that candidate, `slipjay promote --confirm
    <commit>` checks locally that the candidate is published on the integration
-   branch (and, for migration artifacts, that `--migrations-ready` was given), then
+   branch (and, for a release that is not a promotion and carries migration
+   artifacts, that `--migrations-ready` was given), then
    submits it to the runner (see [Runner](#runner)); a confirm needs a runner
    location. The release takes its turn in the runner's one serial queue: a landing
    submitted behind it waits, printing `queued (position 2, behind release
@@ -425,9 +437,11 @@ ran the command: for a landing, stage durations in milliseconds (`queued` is tim
 waiting for another landing's slot) and the outcome; for a release, the outcome
 and its total time.
 
-A release whose range carries migration artifacts also needs `--migrations-ready`:
-apply those migrations where the release branch deploys first. slipjay never
-migrates a release environment itself.
+A promotion's migration artifacts are applied by the runner (see Production
+migrations under Deploys): its production deployment must declare `migrations`, and
+`--migrations-ready` is refused. A release that is not a promotion and whose range
+carries migration artifacts needs `--migrations-ready`: apply those migrations
+where the release branch deploys first; slipjay does not migrate it.
 
 ## Library
 
