@@ -74,13 +74,12 @@ test("peach-pi's policy parses with its landing shape and verification digest un
   assert.equal(digest(parsed.requiredLandingVerification), "25effc2d61517a47e37578dae699fe59599f9b43732013020df26aab978316b8");
 });
 
-test("slipjay's own policy gates a landing on fast static checks only", () => {
+test("slipjay's own policy gates a landing on static checks and the test suite", () => {
   const parsed = parseExecutionPolicy(slipjayPolicy);
   assert.equal(parsed.integrationBranch, "main");
   assert.equal(parsed.remote, "origin");
-  // The complete suite runs at release (`bun run verify:release`), never per landing.
   assert.deepEqual(parsed.requiredLandingVerification.map((step: { args: string[] }) => step.args.join(" ")),
-    ["install --frozen-lockfile", "run check", "run typecheck"]);
+    ["install --frozen-lockfile", "run check", "run typecheck", "run test"]);
 });
 
 test("a YardSmith-shaped policy keeps every declaration it makes", () => {

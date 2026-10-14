@@ -384,10 +384,10 @@ slipjay lands its own changes through `slipjay land` from an isolated JJ workspa
 Verification checks run with the working-copy revision on the exact candidate,
 including retries that started on an empty continuation child.
 
-- **Per landing**, the fast static gate runs: `bun install --frozen-lockfile`,
-  `bun run check` (Oxlint and the closure boundary) and `bun run typecheck`. No
-  test suite runs per landing.
-- **At release**, `bun run verify:release` runs the complete suite (`bun run test`)
+- **Per landing**, the gate runs `bun install --frozen-lockfile`, then
+  `bun run check` (Oxlint and the closure boundary), `bun run typecheck` and the
+  test suite (`bun run test`) concurrently.
+- **At release**, `bun run verify:release` runs the complete suite again
   against the exact commit to be tagged. It prints that commit and exits non-zero
   on failure. Tag only a commit it passed. To trace a release failure to its
   landing, bisect `<last tag>..main` and read the commit's `Issue:` trailer.
