@@ -1,7 +1,7 @@
 /**
  * A Claude Code PreToolUse guard: in a repository governed by `slipjay.json`, the
  * integration branch moves and is published only through `slipjay land`, and a
- * declared release branch only through `slipjay release`.
+ * declared release branch only through `slipjay promote`.
  * Pushing feature bookmarks for a pull request stays allowed.
  *
  * It also keeps work from being orphaned: in a secondary workspace of such a
@@ -24,7 +24,7 @@ type HookInput = { tool_name?: unknown; tool_input?: { command?: unknown } | nul
 type HookOutput = { hookSpecificOutput: { hookEventName: "PreToolUse"; permissionDecision: "deny"; permissionDecisionReason: string } };
 
 const LAND = "Use `slipjay land` (or `--direct` in a Direct checkout): it verifies, integrates and pushes.";
-const RELEASE = "Use `slipjay release`: it verifies the exact candidate and publishes the release after human approval.";
+const RELEASE = "Use `slipjay promote`: it verifies the exact candidate and publishes the release after human approval.";
 
 /** The raw `integrationBranch` of an unparseable or refused policy text, if it names one. */
 const rawBranch = (raw: string): string | null => {

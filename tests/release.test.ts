@@ -6,6 +6,7 @@ import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { confirmRelease, releaseIntegration } from "../src/lib/release.ts";
+import type { PromotionState } from "../src/lib/release.ts";
 
 test("a release plans, then verifies the exact candidate in the confirming checkout and publishes a merge with its tree", async () => {
   // A shallow primary, as YardSmith's is: the base exists only as fetched history.
@@ -35,6 +36,40 @@ test("a release plans, then verifies the exact candidate in the confirming check
     assert.equal(jj(f.repo, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), candidate);
 
     assert.equal((await releaseIntegration(f.repo)).status, "up_to_date");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("a promotion plans the newest commit staging is green on, with its paths, and re-asks only the delta past an approval that did not ship", async () => {
+  const f = await releaseProject({ promotes: true });
+  try {
+    const a = await landFile(f, "a.txt");
+    const b = await landFile(f, "b.txt");
+    const c = await landFile(f, "c.txt");
+    const plan = (state: PromotionState) => releaseIntegration(f.repo, { readPromotion: async () => state });
+    const offline = await releaseIntegration(f.repo);
+    assert.ok(!offline.ok && /reads staging from the runner/.test(offline.reason), JSON.stringify(offline));
+    const red = await plan({ stagingGreen: null, approved: [] });
+    assert.ok(!red.ok && /green on no commit/.test(red.reason), JSON.stringify(red));
+
+    const first = await plan({ stagingGreen: b, approved: [a] });
+    assert.ok(first.ok && first.status === "planned", JSON.stringify(first));
+    assert.equal(first.candidate, b, "the candidate is what staging verified, not the integration tip");
+    assert.deepEqual(first.paths.filter((path) => path.endsWith(".txt")), ["a.txt", "b.txt"]);
+    assert.equal(first.delta?.since, a);
+    assert.match(first.next, new RegExp(`slipjay promote --confirm ${b.slice(0, 12)}`));
+
+    // b was approved, its release failed and c landed: the next ask shows only c.
+    const moved = await plan({ stagingGreen: c, approved: [b, a] });
+    assert.ok(moved.ok && moved.status === "planned", JSON.stringify(moved));
+    assert.equal(moved.candidate, c);
+    assert.deepEqual(moved.delta, { since: b, commits: [{ commitId: c, subject: moved.subjects[0] }], paths: ["c.txt"], migrationArtifacts: [] });
+    assert.equal(moved.subjects.length, 1);
+    assert.ok(moved.commits > 1, "the summary still counts the whole release");
+
+    const again = await plan({ stagingGreen: c, approved: [c, b] });
+    assert.ok(again.ok && again.status === "planned" && !again.delta, "a re-ask of the same candidate shows the whole release");
   } finally {
     await f.dispose();
   }

@@ -10,6 +10,7 @@ import { githubRepository } from "./issue-references.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { DeployOperation, Operation, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
+import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
@@ -372,7 +373,7 @@ async function dropSupersededCandidate(cwd: string, root: string, candidate: Rev
  * release, and follow it to its verdict.
  */
 export async function releaseThroughRunner(cwd: string, options: { candidate: string; remote: string; migrationsReady: boolean; location: string;
-  env?: NodeJS.ProcessEnv; onLine?(line: string): void; signal?: AbortSignal }): Promise<{ operation: Operation; logUrl: string }> {
+  env?: NodeJS.ProcessEnv; onLine?(line: string): void; signal?: AbortSignal }): Promise<{ operation: Operation; deploy?: DeployOperation; logUrl: string }> {
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
   const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), options.remote);
@@ -386,7 +387,34 @@ export async function releaseThroughRunner(cwd: string, options: { candidate: st
     const { operation: submitted, reattached } = (await response.json()) as { operation: ReleaseOperation; reattached: boolean };
     if (reattached) onLine(`[runner ${connection.name}] following the open release of ${options.candidate.slice(0, 12)}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
-    return { operation, logUrl: runLogCommand(operation.id) };
+    // A promotion ends with its production deploy, which runs in the deploy lane.
+    if (operation.result?.type !== "released" || !operation.result.deploy) return { operation, logUrl: runLogCommand(operation.id) };
+    const route = `/v1/operations/${encodeURIComponent(operation.result.deploy)}`;
+    const { operation: queued } = (await (await request(connection.baseUrl, token, route, { signal: options.signal })).json()) as { operation: DeployOperation };
+    onLine(`[runner ${connection.name}] deploying ${options.candidate.slice(0, 12)} to production`);
+    const deploy = await follow(connection.baseUrl, token, queued, connection.name, onLine, env, options.signal) as DeployOperation;
+    return { operation, deploy, logUrl: runLogCommand(operation.id) };
+  } finally { connection.close(); }
+}
+
+/** For a promotion plan: the newest commit staging deployed, and the candidates already submitted for release, newest first. */
+export async function readPromotionState(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv }): Promise<PromotionState> {
+  const env = options.env ?? process.env;
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Runner promotions require a GitHub repository on the publication remote");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const read = async <T>(route: string, query: Record<string, string>): Promise<T[]> =>
+      ((await (await request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo, ...query })}`)).json()) as { operations: T[] }).operations;
+    const staging = await read<DeployOperation>("/v1/deploys", { environment: "staging" });
+    const releases = await read<ReleaseOperation>("/v1/releases", {});
+    return {
+      stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,
+      approved: releases.filter((operation) => operation.status !== "cancelled" && operation.status !== "superseded").map((operation) => operation.commitId),
+    };
   } finally { connection.close(); }
 }
 

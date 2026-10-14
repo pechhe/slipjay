@@ -244,8 +244,9 @@ turns in the same queue (see [Release](#release)).
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
   otherwise. A release that was running is recorded as failed with the
-  `slipjay release --confirm` command that reruns it. A deploy that was running is
-  recorded as failed, and the schedule deploys that commit again.
+  `slipjay promote --confirm` command that reruns it. A deploy that was running is
+  recorded as failed, and the schedule deploys that commit again; a production
+  deploy's failure names the `slipjay promote --confirm` that deploys it again.
 - **Moving the runner to another host.** Run Setup on the new host with the same
   repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
   stop its unit. On the old host, `slipjay runner pause`, wait until no operation is
@@ -268,7 +269,8 @@ turns in the same queue (see [Release](#release)).
 ### Deploys
 
 A repository can declare environments the runner deploys. `staging` follows the
-integration branch:
+integration branch; `production` deploys only through a promotion (see
+[Release](#release)), never on a schedule or by `slipjay deploy`:
 
 ```json
 { "deployments": { "version": 1, "environments": { "staging": {
@@ -301,7 +303,7 @@ integration branch:
 ## Release
 
 A repository that declares a `releaseBranch` in `slipjay.json` promotes its
-integration branch to it only through `slipjay release`:
+integration branch to it only through `slipjay promote`:
 
 ```json
 { "integrationBranch": "develop", "releaseBranch": "master",
@@ -311,9 +313,20 @@ integration branch to it only through `slipjay release`:
 `requiredReleaseVerification` takes the same command shape as
 `requiredLandingVerification`. A release branch without it is refused; declare `[]`
 to release without checks. The policy that applies is the one committed in the
-candidate.
+candidate. `slipjay release` is an alias of `slipjay promote`.
 
-1. `slipjay release` fetches and plans: the candidate (the integration branch on
+A candidate that declares a `production` deployment is a promotion. The plan reads
+the runner: its candidate is the newest commit staging deployed (not the integration
+tip), and it lists the paths the release touches. When the owner approved an earlier
+candidate that did not ship (its verification failed and a fix landed), the plan's
+`delta` and `subjects` show only the commits, paths and migration artifacts since
+that approval. The runner refuses to release a commit staging did not deploy. Once
+the release branch holds the candidate, the runner deploys production from exactly
+that commit in the deploy lane, and `--confirm` follows it: the promotion ends
+`deployed`, or `deploy failed: <project>` (exit 1). Rerunning `--confirm` deploys a
+failed promotion again and reuses one that deployed.
+
+1. `slipjay promote` fetches and plans: the candidate (the integration branch on
    the remote), the base (the release branch on the remote), the commits between
    them, the declared checks, and any files under
    `migrationFinalization.artifactPaths` in that range. It publishes nothing.
@@ -323,7 +336,7 @@ candidate.
    It only warns. Without a GitHub remote, or when `gh` cannot answer, it reads
    `{ "checked": false, "reason": … }` and the release goes ahead; `--confirm`
    checks again.
-2. After explicit human approval of that candidate, `slipjay release --confirm
+2. After explicit human approval of that candidate, `slipjay promote --confirm
    <commit>` checks locally that the candidate is published on the integration
    branch (and, for migration artifacts, that `--migrations-ready` was given), then
    submits it to the runner (see [Runner](#runner)); a confirm needs a runner
@@ -380,9 +393,9 @@ candidate.
    be up to 15 minutes. It runs only after the release has published, never on a
    refused or failed release, and its failure never undoes the release: the result
    is still `"released"` with `postRelease: { "ok": false, "reason": …, "retry":
-   "slipjay release --confirm <candidate>" }`, and the command exits 2. A later
+   "slipjay promote --confirm <candidate>" }`, and the command exits 2. A later
    `--confirm` of an already released candidate reruns a step that did not
-   complete instead of skipping it; the plan, which never contacts the runner,
+   complete instead of skipping it; the plan, which never reads post-release outcomes,
    does not report it.
 
 `land` and `release --confirm` each append one line to

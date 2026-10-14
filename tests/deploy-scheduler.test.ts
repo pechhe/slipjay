@@ -99,3 +99,13 @@ test("a deploy that is not due yet is submitted by one timer when the interval e
     assert.deepEqual(f.submitted, ["a".repeat(40), "b".repeat(40)], "one timer, one deploy");
   } finally { f.scheduler.close(); f.log.close(); }
 });
+
+test("production never follows the integration branch: a landed commit submits staging only", () => {
+  const f = fixture();
+  try {
+    f.land("a".repeat(40));
+    f.scheduler.consider("owner/repo", { staging, production: staging });
+    assert.deepEqual(f.submitted, ["a".repeat(40)], "only staging is submitted");
+    assert.equal(f.log.deployments("owner/repo", "production").length, 0);
+  } finally { f.scheduler.close(); f.log.close(); }
+});

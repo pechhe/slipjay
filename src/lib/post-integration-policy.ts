@@ -78,7 +78,7 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
   };
 }
 /**
- * `postRelease`: a step `slipjay release` runs against an external target once a
+ * `postRelease`: a step `slipjay promote` runs against an external target once a
  * release has published, in the integration branch's exact source (the target
  * follows it), alone in the runner's queue. The human's release confirmation is its
  * approval, and it reruns until it succeeds, so it declares no approval mode or

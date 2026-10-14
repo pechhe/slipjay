@@ -279,9 +279,28 @@ test("deploy submissions queue a deploy, reattach to the open deploy of the same
     assert.equal(f.log.operation(first.operation.id)?.status, "superseded");
     for (const invalid of [{ ...body, commitId: "abc" }, { ...body, environment: "Staging!" }, { ...body, submittedBy: "" }])
       assert.equal((await deploy(invalid)).status, 400);
+    const appended = f.log.events().length;
+    const production = await deploy({ ...body, environment: "production" });
+    assert.equal(production.status, 400);
+    assert.deepEqual(await production.json(), { error: "production deploys only through slipjay promote" });
+    assert.equal(f.log.events().length, appended, "a production deploy appends nothing");
     const listed = await (await f.request("/deploys?repo=Owner/Repo&environment=staging")).json() as { operations: Operation[] };
     assert.deepEqual(listed.operations.map((op) => op.id), [newer.operation.id, first.operation.id]);
     assert.equal((await f.request("/deploys")).status, 400);
+  } finally {
+    await f.close();
+  }
+});
+
+test("release listing returns a repository's release operations newest first and needs a repo", async () => {
+  const f = await fixture();
+  try {
+    f.append("release-1", { type: "submitted", kind: "release", repo: "owner/repo", commitId: "a".repeat(40), migrationsReady: true, submittedBy: "author" });
+    f.append("release-2", { type: "submitted", kind: "release", repo: "owner/repo", commitId: "b".repeat(40), migrationsReady: false, submittedBy: "author" });
+    f.append("deploy-1", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "staging", commitId: "c".repeat(40), submittedBy: "author" });
+    const listed = await (await f.request("/releases?repo=Owner/Repo")).json() as { operations: Operation[] };
+    assert.deepEqual(listed.operations.map((op) => [op.id, op.kind]), [["release-2", "release"], ["release-1", "release"]]);
+    assert.equal((await f.request("/releases")).status, 400);
   } finally {
     await f.close();
   }

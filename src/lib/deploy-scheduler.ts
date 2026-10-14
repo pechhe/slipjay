@@ -2,7 +2,7 @@ import type { DeploymentEnvironment } from "./deployment-policy.ts";
 import type { DeployOperation, OperationLog } from "./runner-contract.ts";
 
 /**
- * When the runner deploys an environment that follows the integration branch: its
+ * When the runner deploys an environment that follows the integration branch (not production): its
  * latest landed commit, once the environment's interval has passed since the last
  * attempt, and never a commit already deployed or tried. A deploy that is not due yet
  * gets one timer; the runner re-asks after every landing, every deploy and at startup,
@@ -39,7 +39,10 @@ export function createDeployScheduler(input: {
   }
   return {
     consider(repo, environments) {
-      for (const [environment, policy] of Object.entries(environments)) considerOne(repo, environment, policy);
+      for (const [environment, policy] of Object.entries(environments)) {
+        // Production moves only through promotion, never the integration branch.
+        if (environment !== "production") considerOne(repo, environment, policy);
+      }
     },
     close() {
       for (const timer of timers.values()) clearTimeout(timer);

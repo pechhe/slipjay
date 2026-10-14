@@ -12,6 +12,8 @@ import { createWorkspace } from "../../src/lib/slipjay.ts";
  */
 export async function releaseProject(options: {
   checks?: (verified: string) => unknown[]; migrations?: boolean; shallow?: boolean;
+  /** Declare a production deployment, so a release is a promotion from a commit staging is green on. */
+  promotes?: boolean;
   /** The `postRelease` declaration, given the fixture's root and remote. */
   postRelease?: (root: string, remote: string) => unknown;
 } = {}) {
@@ -32,6 +34,8 @@ export async function releaseProject(options: {
   policy.requiredReleaseVerification = options.checks?.(verifiedRelease)
     ?? [{ executable: "node", args: ["-e", recordCheckout(verifiedRelease)] }];
   if (options.postRelease) policy.postRelease = options.postRelease(f.root, f.remote);
+  if (options.promotes) policy.deployments = { version: 1, environments: { production: { timeoutMs: 30_000,
+    projects: [{ name: "app", command: { executable: "node", args: ["-e", ""] } }] } } };
   await writeFile(policyPath, JSON.stringify(policy));
   const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
   git(["commit", "-qam", "Declare the release policy"]);

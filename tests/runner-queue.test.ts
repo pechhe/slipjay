@@ -39,7 +39,7 @@ fs.appendFileSync(${JSON.stringify(join(root, "deploys.jsonl"))}, JSON.stringify
 console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DEPLOY_COMMIT.slice(0, 7) + ".example");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
-async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number }) {
+async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -70,8 +70,12 @@ async function fixture(migrations = false, release = false, deployments?: { minI
       },
     } : {}),
     ...(deployments ? {
-      deployments: { version: 1, environments: { staging: { minIntervalMs: deployments.minIntervalMs, timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
-        projects: ["app", "hq"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) } } },
+      deployments: { version: 1, environments: {
+        staging: { minIntervalMs: deployments.minIntervalMs, timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
+          projects: ["app", "hq"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) },
+        ...(deployments.production ? { production: { timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
+          projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) } } : {}),
+      } },
     } : {}),
     ...(release ? {
       releaseBranch: "release",
@@ -559,7 +563,7 @@ test("recovery fails an interrupted release with the command that reruns it", as
     f.log.append(release, { type: "stage", stage: "verifying" });
     await f.queue.recover();
     assert.deepEqual(f.result(release), { type: "failed", stage: "verifying",
-      reason: `runner restarted during verifying; rerun slipjay release --confirm ${f.main().slice(0, 12)}` });
+      reason: `runner restarted during verifying; rerun slipjay promote --confirm ${f.main().slice(0, 12)}` });
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -612,6 +616,52 @@ test("a landing deploys staging from an exact view of the landed commit and reco
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a promotion releases only a commit staging deployed, then deploys production from exactly it; a rerun confirm reuses that deploy", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  try {
+    await f.land(f.submit(await f.candidate("a.txt")));
+    await f.queue.idle();
+    const green = f.main();
+    assert.equal(f.log.deployments("fixture/repo", "staging")[0]?.status, "deployed");
+    await writeFile(join(f.root, "fail-deploy-app"), "");
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.queue.idle();
+    await rm(join(f.root, "fail-deploy-app"));
+    const red = f.main();
+    assert.equal(f.log.deployments("fixture/repo", "staging")[0]?.status, "failed");
+    const base = f.releaseRef();
+
+    const refused = f.submitRelease(red);
+    await f.land(refused);
+    const refusal = f.result(refused);
+    assert.ok(refusal?.type === "failed" && /Staging is not green on/.test(refusal.reason), JSON.stringify(refusal));
+    assert.equal(f.releaseRef(), base, "nothing was verified or published");
+    assert.deepEqual(f.log.deployments("fixture/repo", "production"), []);
+
+    const promotion = f.submitRelease(green);
+    await f.land(promotion);
+    await f.queue.idle();
+    const outcome = f.result(promotion);
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released" && outcome.deploy, JSON.stringify(outcome));
+    const [production] = f.log.deployments("fixture/repo", "production");
+    assert.equal(production?.id, outcome.deploy);
+    assert.equal(production?.submittedBy, `promotion:${promotion}`);
+    assert.ok(production?.result?.type === "deployed", JSON.stringify(production?.result));
+    assert.equal(production.result.record.commitId, green, "production deploys the staging-verified commit, not the release merge");
+    assert.deepEqual(production.result.record.projects.map((project) => project.name), ["app", "hq", "www"]);
+    assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)).filter((entry) => entry.environment === "production"),
+      ["app", "hq", "www"].map((project) => ({ project, environment: "production", commit: green, key: "from-runner", head: green })));
+
+    const rerun = f.submitRelease(green);
+    await f.land(rerun);
+    await f.queue.idle();
+    const again = f.result(rerun);
+    assert.ok(again?.type === "released" && again.result.status === "released_by", JSON.stringify(again));
+    assert.equal(again.deploy, outcome.deploy, "a deployed promotion is not deployed twice");
+    assert.equal(f.log.deployments("fixture/repo", "production").length, 1);
+  } finally { await f.dispose(); }
+}, 180_000);
+
 test("within the interval a landing does not deploy, and recovery fails a deploy interrupted by a restart", async () => {
   const f = await fixture(false, false, { minIntervalMs: 3_600_000 });
   try {
@@ -626,5 +676,11 @@ test("within the interval a landing does not deploy, and recovery fails a deploy
     await f.queue.recover();
     assert.equal(f.result(interrupted)?.type, "failed");
     assert.match(f.result(interrupted)!.type === "failed" ? (f.result(interrupted) as { reason: string }).reason : "", /runner restarted during deploying; deploy again with slipjay deploy staging/);
+    const production = newOperationId();
+    f.log.append(production, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "production", commitId: f.main(), submittedBy: "promotion:test" });
+    f.log.append(production, { type: "stage", stage: "deploying" });
+    await f.queue.recover();
+    const outcome = f.result(production);
+    assert.ok(outcome?.type === "failed" && outcome.reason.endsWith(`deploy again with slipjay promote --confirm ${f.main().slice(0, 12)}`), JSON.stringify(outcome));
   } finally { await f.dispose(); }
 }, 120_000);

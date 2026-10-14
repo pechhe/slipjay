@@ -72,14 +72,14 @@ test("slipjay.json governs the guard and the retired path beside it is ignored",
   }
 });
 
-test("a declared release branch moves only through slipjay release", async () => {
+test("a declared release branch moves only through slipjay promote", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "slipjay-landing-guard-"));
   try {
     await writeFile(path.join(root, "slipjay.json"), JSON.stringify({
       version: 1, integrationBranch: "develop", releaseBranch: "master", requiredReleaseVerification: [] }));
     const decide = (command: string) => landingGuardDecision({ tool_name: "Bash", cwd: root, tool_input: { command } });
     for (const command of ["jj git push -b master", "jj bookmark set master -r @", "git push origin develop:master"]) {
-      assert.match((await decide(command))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay release/, command);
+      assert.match((await decide(command))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay promote/, command);
     }
     assert.match((await decide("jj git push -b develop"))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay land/);
     assert.equal(await decide("jj git push -b feature"), null);

@@ -97,6 +97,8 @@ export function createRunnerHandler(input: {
       }
       if (!validDeploy(body))
         return json({ error: "Invalid deploy" }, 400);
+      if (body.environment === "production")
+        return json({ error: "production deploys only through slipjay promote" }, 400);
       const repo = repositoryKey(body.repo);
       const open = input.log.openOperations(repo).filter((op) => op.kind === "deploy" && op.environment === body.environment);
       const same = open.find((op) => op.commitId === body.commitId);
@@ -115,6 +117,12 @@ export function createRunnerHandler(input: {
       if (!repo)
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.deployments(repositoryKey(repo), url.searchParams.get("environment") ?? undefined) });
+    }
+    if (request.method === "GET" && path === `${RUNNER_API}/releases`) {
+      const repo = url.searchParams.get("repo");
+      if (!repo)
+        return json({ error: "repo is required" }, 400);
+      return json({ operations: input.log.releases(repositoryKey(repo)) });
     }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {

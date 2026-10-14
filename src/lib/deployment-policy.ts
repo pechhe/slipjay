@@ -7,7 +7,9 @@ export type DeploymentProject = { name: string; command: FinalizationCommand };
 /**
  * One environment the runner deploys. `staging` follows the integration branch: the
  * runner deploys its latest landed commit after landings, at most once per
- * `minIntervalMs`, plus on demand. Each project's command runs in an exact source view
+ * `minIntervalMs`, plus on demand. `production` does not follow the integration branch: it
+ * deploys only through a promotion (`slipjay promote`), so its `minIntervalMs` is unused.
+ * Each project's command runs in an exact source view
  * of the deployed commit, with the declared `environmentKeys` and
  * `SLIPJAY_DEPLOY_ENVIRONMENT`/`SLIPJAY_DEPLOY_COMMIT`; the last line it prints that is a
  * URL is recorded as the project's deployment.
@@ -21,8 +23,8 @@ export type DeploymentEnvironment = {
 
 export type DeploymentPolicy = { version: 1; environments: Record<string, DeploymentEnvironment> };
 
-/** Environments the runner knows how to drive; production joins with promotion (#32). */
-export const DEPLOYMENT_ENVIRONMENTS = ["staging"] as const;
+/** Environments the runner knows how to drive; production deploys only through promotion (#32). */
+export const DEPLOYMENT_ENVIRONMENTS = ["staging", "production"] as const;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 const HOUR = 3_600_000;
 

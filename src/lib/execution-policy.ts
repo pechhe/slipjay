@@ -18,7 +18,7 @@ export type ExecutionPolicy = {
   remote: string | null;
   parallelExecution: boolean;
   requiredLandingVerification: VerificationDeclaration[];
-  /** The branch `slipjay release` promotes the integration branch to. */
+  /** The branch `slipjay promote` promotes the integration branch to. */
   releaseBranch?: string;
   /** Checks the exact release candidate must pass; undefined when undeclared. */
   requiredReleaseVerification?: VerificationDeclaration[];
@@ -224,7 +224,7 @@ export function spareCount(declared: unknown): number {
 }
 
 /**
- * `slipjay release`'s declaration: the branch the integration branch is promoted to
+ * `slipjay promote`'s declaration: the branch the integration branch is promoted to
  * and the checks the exact candidate commit must pass first. A release branch with
  * no declared checks is refused at release time, so an empty list must be explicit.
  */

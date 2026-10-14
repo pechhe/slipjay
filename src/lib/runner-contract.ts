@@ -76,8 +76,11 @@ export type OperationEvent =
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
-  /** A release's outcome; one whose post-release step failed still stands. */
-  | { type: "released"; result: CompletedRelease }
+  /**
+   * A release's outcome; one whose post-release step failed still stands. A promotion
+   * names `deploy`, the production deploy of its candidate, which the deploy lane runs.
+   */
+  | { type: "released"; result: CompletedRelease; deploy?: string }
   /** Every project of the environment deployed. */
   | { type: "deployed"; record: DeployRecord }
   /** The change touches migration trigger or artifact paths; the author lands it locally (until #11). */
@@ -142,6 +145,8 @@ export interface OperationLog {
   openOperations(repo?: string): Operation[];
   /** A repository's deploys, newest first, optionally of one environment. */
   deployments(repo: string, environment?: string): DeployOperation[];
+  /** A repository's release operations, newest first. */
+  releases(repo: string): ReleaseOperation[];
   /** The latest landing a repository published, if any. */
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
@@ -183,6 +188,7 @@ export type SubmitResponse = { operation: Operation; reattached: boolean; supers
  * - POST /v1/releases                           ReleaseRequest → ReleaseResponse
  * - POST /v1/deploys                            DeployRequest → DeployResponse
  * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
+ * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,
  *                                                 replaying after `seq`, then live; ends after the terminal event

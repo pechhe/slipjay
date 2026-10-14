@@ -202,6 +202,18 @@ export function createRunnerQueue(input: {
     const landed = log.lastLanded(operation.repo);
     if (landed) await scheduleDeploys(operation.repo, landed.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
   }
+  /**
+   * The production deploy of a promoted commit: an open or finished deploy of it, or a
+   * new one. A rerun confirm of a promotion whose deploy failed deploys it again.
+   */
+  function productionDeploy(promotion: ReleaseOperation): string {
+    const existing = log.deployments(promotion.repo, "production").find((entry) => entry.commitId === promotion.commitId
+      && (entry.status === "queued" || entry.status === "running" || entry.status === "deployed"));
+    if (existing) return existing.id;
+    const id = newOperationId();
+    log.append(id, { type: "submitted", kind: "deploy", repo: promotion.repo, environment: "production", commitId: promotion.commitId, submittedBy: `promotion:${promotion.id}` });
+    return id;
+  }
   async function processOperation(operation: LandingOperation | ReleaseOperation): Promise<void> {
     let stage: RunnerStage = "queued";
     const controller = new AbortController();
@@ -331,12 +343,25 @@ export function createRunnerQueue(input: {
       if (verdict?.type === "landed")
         await scheduleDeploys(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
     }
+    /**
+     * A candidate that declares a production deployment is a promotion: it must be a
+     * commit staging deployed, and once the release branch holds it, production deploys
+     * exactly that commit in the deploy lane, so a slow deploy never holds a landing.
+     */
     async function release(operation: ReleaseOperation): Promise<void> {
+      const { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), operation.commitId);
+      const promotes = Boolean(configuration?.deployments?.environments.production);
+      if (promotes && !log.deployments(operation.repo, "staging").some((entry) => entry.commitId === operation.commitId && entry.result?.type === "deployed")) {
+        append(operation.id, { type: "failed", stage, reason: `Staging is not green on ${operation.commitId.slice(0, 12)}: production promotes only a commit staging deployed` });
+        return;
+      }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
       if (controller.signal.aborted) throw new OwnerKill();
-      if (result.status === "released" || result.status === "released_by") append(operation.id, { type: "released", result });
-      else if (result.status === "verification_failed") append(operation.id, {
+      if (result.status === "released" || result.status === "released_by") {
+        append(operation.id, { type: "released", result, ...promotes ? { deploy: productionDeploy(operation) } : {} });
+        if (promotes) wakeDeploys();
+      } else if (result.status === "verification_failed") append(operation.id, {
         type: "failed", stage: "verifying", reason: result.reason,
         command: result.evidence.command, output: result.evidence.stdoutTail + result.evidence.stderrTail,
       });
@@ -358,13 +383,15 @@ export function createRunnerQueue(input: {
       let remote: string | undefined;
       if (operation.kind === "deploy") {
         // Scheduling at startup retries a deploy whose projects never ran.
-        append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; deploy again with slipjay deploy ${operation.environment}` });
+        // Production deploys only through a promotion, whose rerun confirm deploys it again.
+        const again = operation.environment === "production" ? `slipjay promote --confirm ${operation.commitId.slice(0, 12)}` : `slipjay deploy ${operation.environment}`;
+        append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; deploy again with ${again}` });
         continue;
       }
       if (operation.kind === "release") {
         // A release that published reports itself on a rerun confirm, which also retries its post-release step.
         append(operation.id, { type: "failed", stage: operation.stage,
-          reason: `runner restarted during ${operation.stage}; rerun slipjay release --confirm ${operation.commitId.slice(0, 12)}` });
+          reason: `runner restarted during ${operation.stage}; rerun slipjay promote --confirm ${operation.commitId.slice(0, 12)}` });
         continue;
       }
       let verdict: OperationEvent = { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; land again` };

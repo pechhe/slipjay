@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, RunRecord, StoredEvent } from "./runner-contract.ts";
+import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, RunRecord, StoredEvent } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -39,6 +39,8 @@ export function openOperationLog(path: string): OperationLog {
   const deployIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
     AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.repo') = ?
     AND (? IS NULL OR json_extract(data, '$.environment') = ?) ORDER BY seq DESC`);
+  const releaseIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+    AND json_extract(data, '$.kind') = 'release' AND json_extract(data, '$.repo') = ? ORDER BY seq DESC`);
   const landed = db.prepare(`SELECT landed.at, landed.data FROM events landed
     JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
     WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq DESC LIMIT 1`);
@@ -94,6 +96,12 @@ export function openOperationLog(path: string): OperationLog {
       const open = queue();
       return projectIds((deployIds.all(repo, environment ?? null, environment ?? null) as { operation_id: string }[]).map((row) => row.operation_id))
         .filter((entry): entry is DeployOperation => entry.kind === "deploy")
+        .map((entry) => placed(entry, open));
+    },
+    releases: (repo) => {
+      const open = queue();
+      return projectIds((releaseIds.all(repo) as { operation_id: string }[]).map((row) => row.operation_id))
+        .filter((entry): entry is ReleaseOperation => entry.kind === "release")
         .map((entry) => placed(entry, open));
     },
     lastLanded: (repo) => {

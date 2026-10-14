@@ -1,5 +1,5 @@
 /**
- * A repository's declared `postRelease` step. Once `slipjay release` has published,
+ * A repository's declared `postRelease` step. Once `slipjay promote` has published,
  * it runs the step the released candidate declares, after its target probe. The
  * runner's queue runs it alone, so no landing finalizes against that target
  * meanwhile. The target follows the integration branch (landing finalizes each
@@ -8,7 +8,7 @@
  * has finalized.
  *
  * Its failure never undoes the release. The target's latest outcome is kept on the
- * runner, and a later `slipjay release --confirm` reruns it (on its own when the
+ * runner, and a later `slipjay promote --confirm` reruns it (on its own when the
  * candidate is already released) instead of skipping it.
  */
 import { createHash } from "node:crypto";
@@ -44,7 +44,7 @@ const outputPath = (targetKey: string): string => path.join(stateHome(), "post-r
 // The step may write one short line here naming why it failed; it is data, bounded to one line, never its raw output.
 const reasonPath = (targetKey: string): string => path.join(stateHome(), "post-release", `${targetKey}.reason`);
 const MAX_REASON_CHARACTERS = 300;
-export const postReleaseRetry = (candidate: string): string => `slipjay release --confirm ${candidate.slice(0, 12)}`;
+export const postReleaseRetry = (candidate: string): string => `slipjay promote --confirm ${candidate.slice(0, 12)}`;
 
 /** The first line the step wrote to its reason file, stripped of control characters and bounded; null when none. */
 async function readStepReason(file: string): Promise<string | null> {

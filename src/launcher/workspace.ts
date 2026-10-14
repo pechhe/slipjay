@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readRunLog, releaseThroughRunner, runnerLocation } from "../lib/runner-client.ts";
+import { controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, runLogCommand, runnerLocation } from "../lib/runner-client.ts";
 import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
@@ -130,20 +130,22 @@ async function removeWorkspaceAt(path: string): Promise<number> {
  * the candidate a human approved to the runner, which verifies and publishes it.
  * Progress goes to stderr; stdout is one JSON result.
  */
-async function runRelease(args: string[]): Promise<number> {
+/** `promote` (formerly `release`): plan a promotion, or confirm the candidate a human approved and follow it to production. */
+async function runPromote(args: string[]): Promise<number> {
   const options: { migrationsReady: boolean; confirm?: string } = { migrationsReady: false };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--migrations-ready") options.migrationsReady = true;
     else if (args[index] === "--confirm" && args[index + 1] && !args[index + 1]!.startsWith("-")) options.confirm = args[++index];
-    else throw new Error("Usage: slipjay release [--confirm <commit>] [--migrations-ready]");
+    else throw new Error("Usage: slipjay promote [--confirm <commit>] [--migrations-ready]");
   }
+  const location = runnerLocation();
   if (options.confirm === undefined) {
-    const plan = await releaseIntegration(process.cwd());
+    const plan = await releaseIntegration(process.cwd(),
+      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }) } : {});
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
   }
-  const location = runnerLocation();
-  if (!location) throw new Error("slipjay release --confirm runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  if (!location) throw new Error("slipjay promote --confirm runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
   const startedAt = Date.now();
   const confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady);
   if (confirmable.status !== "confirmable") {
@@ -151,7 +153,7 @@ async function runRelease(args: string[]): Promise<number> {
     return 1;
   }
   const following = new AbortController();
-  const stopFollowing = () => following.abort(new Error(`Stopped following; rerun slipjay release --confirm ${options.confirm} to reattach`));
+  const stopFollowing = () => following.abort(new Error(`Stopped following; rerun slipjay promote --confirm ${options.confirm} to reattach`));
   process.once("SIGINT", stopFollowing);
   let followed: Awaited<ReturnType<typeof releaseThroughRunner>>;
   try {
@@ -160,10 +162,19 @@ async function runRelease(args: string[]): Promise<number> {
   } finally {
     process.removeListener("SIGINT", stopFollowing);
   }
-  const { operation, logUrl } = followed;
+  const { operation, deploy, logUrl } = followed;
   const outcome = operation.result;
+  const deployed = deploy?.result?.type === "deployed" ? deploy.result.record : deploy?.result?.type === "failed" ? deploy.result.deployment : undefined;
   let printed: Record<string, unknown>;
-  if (outcome?.type === "released") printed = { ...outcome.result, log: logUrl };
+  if (outcome?.type === "released") {
+    printed = { ...outcome.result, log: logUrl };
+    if (deploy) {
+      // The promotion's verdict is its production deploy's: `deployed`, or `deploy failed: <project>`.
+      if (deploy.result?.type === "failed") console.error(`[runner] production ${deploy.result.reason}`);
+      printed.production = { status: deploy.status, ...deploy.result?.type === "failed" ? { reason: deploy.result.reason } : {},
+        ...deployed ? { record: deployed } : {}, log: runLogCommand(deploy.id) };
+    }
+  }
   else if (outcome?.type === "failed") {
     console.error(`[runner] release failed at ${outcome.stage}: ${outcome.reason}`);
     if (outcome.command) console.error(outcome.command);
@@ -173,7 +184,7 @@ async function runRelease(args: string[]): Promise<number> {
   console.log(JSON.stringify(printed, null, 2));
   await appendMetric("releases", { status: printed.status, candidate: confirmable.candidate,
     commits: outcome?.type === "released" ? outcome.result.commits : null, totalMs: Date.now() - startedAt });
-  if (outcome?.type !== "released") return 1;
+  if (outcome?.type !== "released" || (deploy && deploy.status !== "deployed")) return 1;
   // A published release whose post-release step failed still stands; 2 tells the caller to retry the step.
   return outcome.result.postRelease && !outcome.result.postRelease.ok ? 2 : 0;
 }
@@ -350,8 +361,9 @@ try {
     } finally {
       process.removeListener("SIGINT", stopFollowing);
     }
-  } else if (command === "release") {
-    process.exitCode = await runRelease(rest);
+  } else if (command === "promote" || command === "release") {
+    // `release` stays an alias until the docs that name it move to `promote`.
+    process.exitCode = await runPromote(rest);
   } else if (command === "deploy") {
     process.exitCode = await runDeploy(rest);
   } else if (command === "deploys") {
@@ -388,7 +400,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|release [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

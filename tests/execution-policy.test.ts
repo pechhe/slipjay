@@ -322,6 +322,8 @@ test("deployments declare environments with projects; unknown environments and m
     projects: [{ name: "app", command: { executable: "bun", args: ["scripts/deploy.ts", "app"], cwd: "." } }],
   } } });
   assert.equal(parseExecutionPolicy(policy({})).deployments, undefined);
+  const production = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { production: { timeoutMs: 600_000, projects: [project] } } } }));
+  assert.deepEqual(Object.keys(production.deployments?.environments ?? {}), ["production"], "production parses; its promotion path is the only deploy");
   for (const deployments of [
     { version: 1, environments: { qa: { timeoutMs: 1, projects: [project] } } },
     { version: 1, environments: { staging: { timeoutMs: 1, projects: [] } } },

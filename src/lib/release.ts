@@ -1,5 +1,5 @@
 /**
- * `slipjay release`: promote the published integration branch to the release
+ * `slipjay promote` (formerly `release`): promote the published integration branch to the release
  * branch its committed policy declares. `releaseIntegration` only plans, on the
  * author's machine: it names the candidate (the integration branch on the
  * remote), the base (the release branch on the remote), the commits between them,
@@ -40,8 +40,27 @@ export type ReleasePlan = {
   candidate: string;
   commits: Array<{ commitId: string; subject: string; description: string }>;
   migrationArtifacts: string[];
+  /** Every path the release changes. */
+  paths: string[];
   checks: VerificationDeclaration[];
+  /** The candidate declares a production deployment: it ships by promotion, from a commit staging is green on. */
+  promotes: boolean;
 };
+
+/**
+ * What changed since the candidate the owner last approved, when the candidate has
+ * moved past it without that approval shipping (a fix landed after verification
+ * failed): the next ask shows only this.
+ */
+export type PromotionDelta = {
+  since: string;
+  commits: Array<{ commitId: string; subject: string }>;
+  paths: string[];
+  migrationArtifacts: string[];
+};
+
+/** What the runner knows of a promotion: the newest commit staging is green on, and the candidates approved before, newest first. */
+export type PromotionState = { stagingGreen: string | null; approved: string[] };
 
 export type ReleaseSummary = {
   integrationBranch: string;
@@ -51,7 +70,10 @@ export type ReleaseSummary = {
   candidate: string;
   commits: number;
   migrationArtifacts: string[];
+  paths: string[];
   checks: string[];
+  /** Present when the candidate moved past an earlier approval that did not ship. */
+  delta?: PromotionDelta;
   /** Open Specs with Tickets in the range; absent when the range is empty. */
   halfBuiltSpecs?: HalfBuiltSpecs;
 };
@@ -84,7 +106,7 @@ export type ReleaseResult =
    * release shipped it), so the confirm verified nothing; it reruns a post-release
    * step that did not complete. `merge` is the release merge that first contained
    * it and `releasedBy` that merge's candidate. Without such a merge (the branch
-   * was moved outside `slipjay release`), `merge` is the release branch head and
+   * was moved outside `slipjay promote`), `merge` is the release branch head and
    * `releasedBy` null. The summary describes the plan against that head, so
    * `commits` is 0.
    */
@@ -178,7 +200,27 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   const artifactPaths = policy.migrationFinalization?.artifactPaths ?? [];
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
   const migrationArtifacts = changed.filter((file) => artifactPaths.some((path: string) => file === path || file.startsWith(`${path}/`)));
-  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, checks };
+  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, paths: changed, checks,
+    promotes: Boolean(policy.deployments?.environments.production) };
+}
+
+/**
+ * The changes since the newest of `approved` that the candidate has moved past and
+ * the release branch does not yet hold; null when there is none (a first ask, or a
+ * re-ask of the same candidate, shows the whole release).
+ */
+export async function promotionDelta(plan: ReleasePlan, approved: string[]): Promise<PromotionDelta | null> {
+  const released = `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`;
+  for (const since of approved) {
+    // Approvals the release branch already holds shipped; the newest that did not is the one to diff against.
+    if (await commitOf(plan.root, `${since} & ::${released}`)) continue;
+    if (since === plan.candidate || !await commitOf(plan.root, `${since} & ::${plan.candidate}`)) return null;
+    const delta = new Set(await commitIds(plan.root, `::${plan.candidate} ~ ::${since}`));
+    const paths = lines(await jjOut(plan.root, ["diff", "--from", since, "--to", plan.candidate, "--name-only"]));
+    return { since, commits: plan.commits.filter((commit) => delta.has(commit.commitId)).map(({ commitId, subject }) => ({ commitId, subject })),
+      paths, migrationArtifacts: plan.migrationArtifacts.filter((file) => paths.includes(file)) };
+  }
+  return null;
 }
 
 /** The release merge on the release branch that first shipped `plan.candidate`, and its candidate. */
@@ -250,7 +292,7 @@ async function runPostReleaseStep(plan: ReleasePlan, merge: string, onProgress: 
 /** The result fields describing `plan`; the Spec check runs again on every call, as a Spec's Tickets may have closed in between. */
 async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefined): Promise<ReleaseSummary> {
   const summary: ReleaseSummary = { integrationBranch: plan.integrationBranch, releaseBranch: plan.releaseBranch, remote: plan.remote,
-    base: plan.base, candidate: plan.candidate, commits: plan.commits.length, migrationArtifacts: plan.migrationArtifacts,
+    base: plan.base, candidate: plan.candidate, commits: plan.commits.length, migrationArtifacts: plan.migrationArtifacts, paths: plan.paths,
     checks: plan.checks.map((check) => [check.executable, ...check.args].join(" ")) };
   if (!plan.commits.length) return summary;
   const remotes = await jjRun(plan.root, ["git", "remote", "list"]);
@@ -272,14 +314,29 @@ const refusalOf = (error: unknown): ReleaseResult => {
   throw error;
 };
 
-/** Plan a release of the integration branch on the remote; publishes nothing. */
-export async function releaseIntegration(cwd = process.cwd(), { graphql }: { graphql?: GraphqlRunner } = {}): Promise<ReleaseResult> {
+/**
+ * Plan a release; publishes nothing. The candidate is the integration branch on the
+ * remote, unless that commit declares a production deployment: then it is the newest
+ * commit staging is green on, read through `readPromotion` (the runner), and the plan
+ * carries the delta since an earlier approval the candidate has moved past.
+ */
+export async function releaseIntegration(cwd = process.cwd(), { graphql, readPromotion }: {
+  graphql?: GraphqlRunner; readPromotion?: () => Promise<PromotionState>;
+} = {}): Promise<ReleaseResult> {
   try {
-    const plan = await planRelease(cwd);
-    const summary = await describePlan(plan, graphql);
+    let plan = await planRelease(cwd);
+    let delta: PromotionDelta | null = null;
+    if (plan.promotes) {
+      if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
+      const { stagingGreen, approved } = await readPromotion();
+      if (!stagingGreen) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
+      if (stagingGreen !== plan.candidate) plan = await planRelease(cwd, { candidate: stagingGreen });
+      delta = await promotionDelta(plan, approved);
+    }
+    const summary = { ...await describePlan(plan, graphql), ...delta ? { delta } : {} };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
-    return { ok: true, status: "planned", ...summary, subjects: plan.commits.map((commit) => commit.subject),
-      next: `After explicit human approval: slipjay release --confirm ${plan.candidate.slice(0, 12)}`
+    return { ok: true, status: "planned", ...summary, subjects: (delta?.commits ?? plan.commits).map((commit) => commit.subject),
+      next: `After explicit human approval: slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
         + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "") };
   } catch (error) {
     return refusalOf(error);

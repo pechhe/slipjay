@@ -139,3 +139,18 @@ test("deploys queue in their own lane, project their records, and the latest lan
     log.close();
   }
 });
+
+test("a repository's releases list newest first, without its deploys or other repositories' releases", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const release = (id: string, repo: string) => log.append(id, { type: "submitted", kind: "release", repo, commitId: "e".repeat(40), migrationsReady: false, submittedBy: "author" });
+    release("first", "owner/repo");
+    release("other", "owner/other");
+    log.append("deploy", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "staging", commitId: "d".repeat(40), submittedBy: "author" });
+    release("second", "owner/repo");
+    assert.deepEqual(log.releases("owner/repo").map((op) => [op.id, op.kind, op.position]), [["second", "release", 3], ["first", "release", 1]]);
+    assert.deepEqual(log.releases("owner/none"), []);
+  } finally {
+    log.close();
+  }
+});

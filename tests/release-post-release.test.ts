@@ -73,7 +73,7 @@ test("a failed post-release step keeps the release, is reported and is retried o
     assert.match(released.postRelease?.reason ?? "", /^Post-release command failed: Scrub refused: {2}a real-customer tenant; its output is in /,
       "the step's reason line, one line and without control characters, names why it failed");
     assert.doesNotMatch(released.postRelease?.reason ?? "", /reset failed|second line/, "the step's output stays out of the result");
-    assert.equal(released.postRelease?.retry, `slipjay release --confirm ${candidate.slice(0, 12)}`);
+    assert.equal(released.postRelease?.retry, `slipjay promote --confirm ${candidate.slice(0, 12)}`);
 
     await rm(join(f.root, "fail"));
     // The retry runs in the integration branch as it is now, not the released candidate.
