@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.12.0
+
+- **Watch runner queues and reconnect safely (#39):** `slipjay watch --json` streams
+  authenticated queue snapshots, stored events and heartbeats, reconnecting with a
+  replay cursor. `GET /v1/queue` exposes ordered lanes and runner timing facts;
+  `GET /v1/metrics/events` supports event streams and bounded JSON pages. The
+  `slipjay cancel <id>` command requests cancellation of queued operations.
+
 ## v3.11.0
 
 - **Development resets weekly and on demand, never at promotion (#35):** `slipjay.json`
