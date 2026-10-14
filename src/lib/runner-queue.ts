@@ -401,6 +401,9 @@ export function createRunnerQueue(input: {
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);
+      // jj's default trunk() names only main, master or trunk: published integration history on any
+      // other branch would be mutable, and the candidate cleanup below would abandon it.
+      await jj(checkout, ["config", "set", "--repo", 'revset-aliases."trunk()"', `${branch}@${remote}`]);
       const recordedHold = log.snapshot(executor.host).held.find((entry) => entry.repo === operation.repo);
       if (recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: recordedHold.commitId });
@@ -435,7 +438,8 @@ export function createRunnerQueue(input: {
         return;
       }
       await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
-      await jj(checkout, ["abandon", "-r", `mutable() ~ ::${operation.bookmark}`]);
+      // Drop earlier candidates; never the published integration, which a candidate on an older base does not contain.
+      await jj(checkout, ["abandon", "-r", `mutable() ~ ::${operation.bookmark} ~ ::${branch}@${remote}`]);
       const commits = await jj(checkout, ["log", "-r", operation.bookmark, "--no-graph", "-T", 'commit_id ++ "\\n"']);
       if (commits !== operation.commitId) throw new Error(`Candidate bookmark ${operation.bookmark} does not resolve to submitted commit ${operation.commitId}`);
       const visible = await jj(checkout, ["log", "-r", `change_id(${operation.changeId})`, "--no-graph", "-T", 'commit_id ++ "\\n"']);

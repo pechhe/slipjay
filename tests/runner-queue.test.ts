@@ -76,7 +76,7 @@ const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never",
 
 // `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
 async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, lane }: { workers?: number; other?: boolean; lane?: string } = {}) {
+  { workers, other = false, lane, branch = "main" }: { workers?: number; other?: boolean; lane?: string; branch?: string } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -84,13 +84,13 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const home = join(root, "runner");
   await mkdir(seed);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
-  git(["init", "--bare", "-b", "main", origin]);
+  git(["init", "--bare", "-b", branch, origin]);
   // Both clone and later bounded jj commands use this file's disposable HOME.
   jj(root, ["config", "set", "--user", "user.name", "Fixture"]);
   jj(root, ["config", "set", "--user", "user.email", "fixture@example.com"]);
   jj(seed, ["git", "init"]);
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
-    version: 1, integrationBranch: "main",
+    version: 1, integrationBranch: branch,
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
     requiredLandingVerification: [{ executable: "node", args: ["-e", gate] }],
     unattendedMergeToIntegration: true,
@@ -132,7 +132,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   }));
   jj(seed, ["describe", "-m", "Seed policy"]);
   jj(seed, ["git", "remote", "add", "origin", origin]);
-  jj(seed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
+  jj(seed, ["git", "push", "--remote", "origin", "--named", `${branch}=@`]);
   if (release) jj(seed, ["git", "push", "--remote", "origin", "--named", "release=main"]);
   jj(root, ["git", "clone", origin, author]);
   const otherOrigin = join(root, "other.git");
@@ -172,7 +172,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
     ...workers === undefined ? {} : { workers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
-  const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
+  const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
   const parents = (commit: string) => git(["--git-dir", origin, "log", "-1", "--format=%P", commit]).split(" ");
   const remoteFile = (file: string) => git(["--git-dir", origin, "show", `main:${file}`]);
@@ -191,7 +191,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
     return { repo, changeId, commitId, bookmark, submittedBy: "test" };
   }
   async function candidate(file: string, author = authorRoot, repo = "fixture/repo"): Promise<SubmitRequest> {
-    jj(author, ["new", "main"]);
+    jj(author, ["new", `${branch}@origin`]);
     await mkdir(join(author, file, ".."), { recursive: true });
     await writeFile(join(author, file), `${file}\n`);
     jj(author, ["describe", "-m", `Add ${file}`]);
@@ -450,6 +450,28 @@ test("another repository's landing runs beside a hanging one; a kill must name w
     await f.queue.idle();
     assert.equal(f.result(queued)?.type, "landed", JSON.stringify(f.result(queued)));
     for (const file of [pids, otherPids]) for (const pid of JSON.parse(await readFile(file, "utf8")) as number[]) try { process.kill(pid, "SIGKILL"); } catch {}
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a candidate on an older base lands without abandoning the integration published since, on a branch jj does not call trunk", async () => {
+  const f = await fixture(false, false, undefined, false, { branch: "rollover" });
+  try {
+    const stale = await f.candidate("stale.txt");
+    const first = await f.land(f.submit(await f.candidate("first.txt")));
+    const second = await f.land(f.submit(await f.candidate("second.txt")));
+    assert.ok(first?.type === "landed" && second?.type === "landed", JSON.stringify([first, second]));
+    // `jj git clone` names the remote's default branch trunk(); a fork whose default is another
+    // branch (pechhe/t3code integrates on rollover) has no such alias, so jj calls only main trunk.
+    const checkout = join(f.home, "repos", "fixture/repo");
+    jj(checkout, ["config", "unset", "--repo", 'revset-aliases."trunk()"']);
+    // `stale` was made before both: the runner's cleanup must keep them, and land it on top.
+    const landed = await f.land(f.submit(stale));
+    assert.ok(landed?.type === "landed", JSON.stringify(landed));
+    assert.equal(landed.base, second.commitId);
+    assert.deepEqual(f.parents(second.commitId), [first.commitId]);
+    assert.equal(jj(checkout, ["log", "-r", "rollover", "--no-graph", "-T", "commit_id"]), f.main());
+    // A later landing still finds its integration branch.
+    assert.equal((await f.land(f.submit(await f.candidate("after.txt"))))?.type, "landed");
   } finally { await f.dispose(); }
 }, 120_000);
 
