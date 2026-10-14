@@ -169,7 +169,7 @@ async function runPromote(args: string[]): Promise<number> {
   if (outcome?.type === "released") {
     printed = { ...outcome.result, log: logUrl };
     if (deploy) {
-      // The promotion's verdict is its production deploy's: `deployed`, or `deploy failed: <project>`.
+      // The promotion's verdict is its production deploy's: `deployed`, or `deploy failed: <project> (<reason>)`, with any rollback.
       if (deploy.result?.type === "failed") console.error(`[runner] production ${deploy.result.reason}`);
       printed.production = { status: deploy.status, ...deploy.result?.type === "failed" ? { reason: deploy.result.reason } : {},
         ...deployed ? { record: deployed } : {}, log: runLogCommand(deploy.id) };

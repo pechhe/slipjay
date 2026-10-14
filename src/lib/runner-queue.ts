@@ -10,12 +10,12 @@ import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts
 import { createDeployScheduler } from "./deploy-scheduler.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy } from "./deploy.ts";
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
-import { confirmRelease } from "./release.ts";
+import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey, RUNNER_JJ_DEFAULTS } from "./runner-contract.ts";
+import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { DeployOperation, Executor, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
+import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, StoredEvent } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -171,11 +171,17 @@ export function createRunnerQueue(input: {
       await ensureOnIntegrationBranch(gitDirectory, repository.url, branch, operation.commitId);
       const policy = exact.configuration?.deployments?.environments[operation.environment];
       if (!policy) throw new Error(`${operation.commitId.slice(0, 12)} declares no ${operation.environment} deployment`);
-      // The environment served a commit once any of its projects deployed it.
-      const previous = log.deployments(operation.repo, operation.environment).find((entry) => entry.id !== operation.id
-        && (entry.result?.type === "deployed" || (entry.result?.type === "failed" && entry.result.deployment?.projects.some((project) => project.ok))))?.commitId ?? null;
+      // The environment served a commit once any of its projects served it.
+      const earlier = log.deployments(operation.repo, operation.environment).filter((entry) => entry.id !== operation.id).map((entry) => ({ entry, record: recordOf(entry) }));
+      const previous = earlier.find(({ record }) => record?.projects.some(servedDeploy))?.entry.commitId ?? null;
+      const previousUrls = Object.fromEntries(policy.projects.flatMap(({ name }) => {
+        const url = earlier.flatMap(({ record }) => record?.projects ?? []).find((project) => project.name === name && servedDeploy(project))?.url;
+        return url ? [[name, url]] : [];
+      }));
+      const manual = operation.promotion?.nonAdditiveMigrations ?? [];
       const record = await runDeploy({
         gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
+        previousUrls, restore: manual.length === 0,
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
         run: async (request) => {
           const runId = randomUUID();
@@ -189,9 +195,11 @@ export function createRunnerQueue(input: {
           return result;
         },
       });
-      const failed = record.projects.filter((project) => !project.ok).map((project) => project.name);
+      const failed = record.projects.filter((project) => !project.ok);
+      if (failed.length && operation.promotion) record.rollback = await rollBack(operation, operation.promotion, record);
       verdict = failed.length
-        ? { type: "failed", stage: "deploying", reason: `deploy failed: ${failed.join(", ")}`, deployment: record }
+        ? { type: "failed", stage: "deploying", deployment: record,
+          reason: `deploy failed: ${failed.map((project) => `${project.name} (${project.reason})`).join(", ")}${record.rollback ? `; ${record.rollback.reason}` : ""}` }
         : { type: "deployed", record };
     } catch (error) {
       verdict = { type: "failed", stage: "deploying", reason: message(error) };
@@ -203,15 +211,47 @@ export function createRunnerQueue(input: {
     if (landed) await scheduleDeploys(operation.repo, landed.commitId).catch((error: unknown) => progress(`Could not schedule deploys: ${message(error)}`));
   }
   /**
-   * The production deploy of a promoted commit: an open or finished deploy of it, or a
-   * new one. A rerun confirm of a promotion whose deploy failed deploys it again.
+   * After a promotion's production deploy failed: production already serves what it
+   * served before (nothing activated, or moved back), so return the release branch to
+   * match, in the serial lane that owns branch moves. A promotion carrying non-additive
+   * migrations is left as it is: the code before it may not run on the migrated schema.
    */
-  function productionDeploy(promotion: ReleaseOperation): string {
+  async function rollBack(operation: DeployOperation, { merge, nonAdditiveMigrations: manual }: PromotionFacts, record: DeployRecord): Promise<NonNullable<DeployRecord["rollback"]>> {
+    if (manual.length) return { automatic: false,
+      reason: `not rolled back automatically, because the promotion carries non-additive migrations (${manual.join(", ")}): the owner decides` };
+    const serving = record.projects.filter((project) => project.activated);
+    if (serving.length) return { automatic: true,
+      reason: `rollback incomplete: ${serving.map((project) => `${project.name} still serves the promotion (${project.reason ?? "no earlier deployment"})`).join(", ")}; the release branch stays on the release` };
+    const returned = await serially(() => returnRelease(checkoutPath(operation), merge));
+    return returned.returned
+      ? { automatic: true, releaseBranch: returned.releaseBranch, reason: `rolled back: production serves what it served before, and the release branch is back on ${returned.releaseBranch.slice(0, 12)}` }
+      : { automatic: true, reason: `rolled back: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
+  }
+  /** Run `work` in the serial lane, after the running turn, and resume the queue after it. */
+  function serially<T>(work: () => Promise<T>): Promise<T> {
+    let value: T;
+    const pending = start(async () => { value = await work(); }, active);
+    // Submissions that woke the queue while `work` held it are taken up after it.
+    const resume = () => { if (!active) void start(loop); };
+    pending.then(resume, resume);
+    return pending.then(() => value);
+  }
+  /**
+   * The production deploy of a promoted commit: an open or finished deploy of it, or a
+   * new one carrying what undoing it needs. A rerun confirm of a promotion whose deploy
+   * failed deploys it again.
+   */
+  function productionDeploy(promotion: ReleaseOperation, result: CompletedRelease): string {
     const existing = log.deployments(promotion.repo, "production").find((entry) => entry.commitId === promotion.commitId
       && (entry.status === "queued" || entry.status === "running" || entry.status === "deployed"));
     if (existing) return existing.id;
+    // A rerun confirm of a candidate the release branch already holds plans no commits, so
+    // the facts come from the deploy that first carried them.
+    const shipped = result.status === "released_by"
+      ? log.deployments(promotion.repo, "production").find((entry) => entry.commitId === promotion.commitId && entry.promotion)?.promotion : undefined;
     const id = newOperationId();
-    log.append(id, { type: "submitted", kind: "deploy", repo: promotion.repo, environment: "production", commitId: promotion.commitId, submittedBy: `promotion:${promotion.id}` });
+    log.append(id, { type: "submitted", kind: "deploy", repo: promotion.repo, environment: "production", commitId: promotion.commitId,
+      submittedBy: `promotion:${promotion.id}`, promotion: shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations } });
     return id;
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation): Promise<void> {
@@ -359,7 +399,7 @@ export function createRunnerQueue(input: {
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.status === "released" || result.status === "released_by") {
-        append(operation.id, { type: "released", result, ...promotes ? { deploy: productionDeploy(operation) } : {} });
+        append(operation.id, { type: "released", result, ...promotes ? { deploy: productionDeploy(operation, result) } : {} });
         if (promotes) wakeDeploys();
       } else if (result.status === "verification_failed") append(operation.id, {
         type: "failed", stage: "verifying", reason: result.reason,
@@ -385,7 +425,9 @@ export function createRunnerQueue(input: {
         // Scheduling at startup retries a deploy whose projects never ran.
         // Production deploys only through a promotion, whose rerun confirm deploys it again.
         const again = operation.environment === "production" ? `slipjay promote --confirm ${operation.commitId.slice(0, 12)}` : `slipjay deploy ${operation.environment}`;
-        append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; deploy again with ${again}` });
+        // A restart can stop a deploy between activations; it is not rolled back.
+        const activating = operation.promotion ? "; projects it activated before the restart keep serving it" : "";
+        append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}${activating}; deploy again with ${again}` });
         continue;
       }
       if (operation.kind === "release") {
@@ -486,5 +528,9 @@ export function createRunnerQueue(input: {
     },
   };
 }
+
+/** What a finished deploy put in its environment: every project, or the ones a failed deploy reached. */
+const recordOf = (operation: DeployOperation): DeployRecord | undefined =>
+  operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
 
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }

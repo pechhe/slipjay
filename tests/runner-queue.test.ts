@@ -37,6 +37,10 @@ const deployStep = (root: string, name: string) => `const fs=require("node:fs");
 if (fs.existsSync(${JSON.stringify(join(root, `fail-deploy-${name}`))})) { console.error("${name} build failed"); process.exit(5); }
 fs.appendFileSync(${JSON.stringify(join(root, "deploys.jsonl"))}, JSON.stringify({ project: "${name}", environment: process.env.SLIPJAY_DEPLOY_ENVIRONMENT, commit: process.env.SLIPJAY_DEPLOY_COMMIT, key: process.env.FIXTURE_KEY ?? null, head: require("node:child_process").execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() }) + "\\n");
 console.log("building"); console.log("https://${name}-" + process.env.SLIPJAY_DEPLOY_COMMIT.slice(0, 7) + ".example");`;
+// Production checks each deployment and then activates it, recording both; each fails while `fail-health-<name>` / `fail-activate-<name>` exists.
+const productionStep = (root: string, name: string, step: "health" | "activate") => `const fs=require("node:fs");
+if (fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
+fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL }) + "\\n");`;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean }) {
@@ -74,7 +78,9 @@ async function fixture(migrations = false, release = false, deployments?: { minI
         staging: { minIntervalMs: deployments.minIntervalMs, timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
           projects: ["app", "hq"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) },
         ...(deployments.production ? { production: { timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
-          projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) } } : {}),
+          projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] },
+            healthCheck: { executable: "node", args: ["-e", productionStep(root, name, "health")] },
+            activate: { executable: "node", args: ["-e", productionStep(root, name, "activate")] } })) } } : {}),
       } },
     } : {}),
     ...(release ? {
@@ -592,7 +598,7 @@ test("a landing deploys staging from an exact view of the landed commit and reco
     const latest = deploys[0]!;
     assert.equal(latest.commitId, f.main(), "the latest landing is deployed");
     assert.ok(latest.result?.type === "failed" && latest.result.deployment);
-    assert.equal(latest.result.reason, "deploy failed: hq");
+    assert.equal(latest.result.reason, "deploy failed: hq (exited 5: hq build failed)");
     // The landing of b deployed app but not hq: staging served b, so c's changes start there.
     assert.equal(latest.result.deployment.previous, deploys[1]!.commitId);
     assert.notEqual(deploys[1]!.commitId, firstRecord.commitId);
@@ -651,6 +657,10 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.deepEqual(production.result.record.projects.map((project) => project.name), ["app", "hq", "www"]);
     assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)).filter((entry) => entry.environment === "production"),
       ["app", "hq", "www"].map((project) => ({ project, environment: "production", commit: green, key: "from-runner", head: green })));
+    const urls = ["app", "hq", "www"].map((project) => ({ project, url: `https://${project}-${green.slice(0, 7)}.example` }));
+    assert.deepEqual((await f.lines("health.jsonl")).map((line) => JSON.parse(line)), urls, "each deployment is checked");
+    assert.deepEqual((await f.lines("activate.jsonl")).map((line) => JSON.parse(line)), urls, "then activated");
+    assert.ok(production.result.record.projects.every((project) => project.activated === true));
 
     const rerun = f.submitRelease(green);
     await f.land(rerun);
@@ -661,6 +671,75 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.equal(f.log.deployments("fixture/repo", "production").length, 1);
   } finally { await f.dispose(); }
 }, 180_000);
+
+test("a promotion that fails its health check activates nothing and returns the release branch; one whose activation fails moves the activated projects back", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  const activations = async () => (await f.lines("activate.jsonl")).map((line) => JSON.parse(line) as { project: string; url: string });
+  const url = (project: string, commit: string) => `https://${project}-${commit.slice(0, 7)}.example`;
+  const promote = async (commit: string) => {
+    const promotion = f.submitRelease(commit);
+    await f.land(promotion);
+    await f.queue.idle();
+    const outcome = f.result(promotion);
+    assert.ok(outcome?.type === "released" && outcome.deploy, JSON.stringify(outcome));
+    return f.log.operation(outcome.deploy)!;
+  };
+  try {
+    await f.land(f.submit(await f.candidate("a.txt")));
+    await f.queue.idle();
+    const first = f.main();
+    // The first promotion has no earlier deployment to move app back to.
+    await writeFile(join(f.root, "fail-activate-hq"), "");
+    const incomplete = (await promote(first)).result;
+    assert.ok(incomplete?.type === "failed", JSON.stringify(incomplete));
+    assert.match(incomplete.reason, /; rollback incomplete: app still serves the promotion \(could not be moved back: no earlier deployment is recorded\); the release branch stays on the release$/);
+    const merge = f.releaseRef();
+    assert.deepEqual(f.parents(merge).at(-1), first, "production partly serves the release, so the release branch keeps it");
+    await rm(join(f.root, "fail-activate-hq"));
+
+    // A rerun confirm of a promotion that carried a non-additive migration keeps that restriction.
+    const original = newOperationId();
+    f.log.append(original, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "production", commitId: first, submittedBy: "promotion:test",
+      promotion: { merge, nonAdditiveMigrations: ["migrations/0002.sql"] } });
+    f.log.append(original, { type: "failed", stage: "deploying", reason: "an earlier failure" });
+    await writeFile(join(f.root, "fail-health-app"), "");
+    const held = await promote(first);
+    assert.deepEqual(held.kind === "deploy" && held.promotion, { merge, nonAdditiveMigrations: ["migrations/0002.sql"] });
+    assert.ok(held.result?.type === "failed" && held.result.deployment?.rollback?.automatic === false, JSON.stringify(held.result));
+    assert.match(held.result.reason, /not rolled back automatically, because the promotion carries non-additive migrations \(migrations\/0002\.sql\): the owner decides$/);
+    assert.equal(f.releaseRef(), merge, "the release branch is left where it was");
+    await rm(join(f.root, "fail-health-app"));
+    assert.equal((await promote(first)).status, "deployed");
+
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.queue.idle();
+    const second = f.main();
+    const before = f.releaseRef();
+    await writeFile(join(f.root, "fail-health-hq"), "");
+    const unhealthy = await promote(second);
+    const failure = unhealthy.result;
+    assert.ok(failure?.type === "failed" && failure.deployment, JSON.stringify(failure));
+    assert.match(failure.reason, /^deploy failed: hq \(health check failed: exited 6: hq health failed\); rolled back: production serves what it served before, and the release branch is back on /);
+    assert.deepEqual(failure.deployment.rollback, { automatic: true, releaseBranch: before, reason: failure.deployment.rollback?.reason });
+    assert.equal(f.releaseRef(), before, "the release branch matches what production serves");
+    assert.equal((await activations()).length, 4, "nothing was activated");
+    assert.ok(failure.deployment.projects.every((project) => project.activated === false));
+
+    await rm(join(f.root, "fail-health-hq"));
+    await writeFile(join(f.root, "fail-activate-www"), "");
+    const partial = await promote(second);
+    const moved = partial.result;
+    assert.ok(moved?.type === "failed" && moved.deployment, JSON.stringify(moved));
+    assert.match(moved.reason, /www \(activation failed: exited 6: www activate failed\); rolled back/);
+    assert.deepEqual((await activations()).slice(4), [
+      { project: "app", url: url("app", second) }, { project: "hq", url: url("hq", second) },
+      { project: "app", url: url("app", first) }, { project: "hq", url: url("hq", first) },
+    ], "app and hq moved to the new deployment and back to the one they served before");
+    assert.deepEqual(moved.deployment.projects.map(({ name, activated, restored }) => [name, activated, restored ?? false]),
+      [["app", false, true], ["hq", false, true], ["www", false, false]]);
+    assert.equal(f.releaseRef(), before);
+  } finally { await f.dispose(); }
+}, 300_000);
 
 test("within the interval a landing does not deploy, and recovery fails a deploy interrupted by a restart", async () => {
   const f = await fixture(false, false, { minIntervalMs: 3_600_000 });

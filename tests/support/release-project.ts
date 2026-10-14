@@ -35,7 +35,7 @@ export async function releaseProject(options: {
     ?? [{ executable: "node", args: ["-e", recordCheckout(verifiedRelease)] }];
   if (options.postRelease) policy.postRelease = options.postRelease(f.root, f.remote);
   if (options.promotes) policy.deployments = { version: 1, environments: { production: { timeoutMs: 30_000,
-    projects: [{ name: "app", command: { executable: "node", args: ["-e", ""] } }] } } };
+    projects: [{ name: "app", command: { executable: "node", args: ["-e", ""] }, activate: { executable: "node", args: ["-e", ""] } }] } } };
   await writeFile(policyPath, JSON.stringify(policy));
   const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
   git(["commit", "-qam", "Declare the release policy"]);

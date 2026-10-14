@@ -293,7 +293,15 @@ integration branch; `production` deploys only through a promotion (see
   `timeoutMs` (at most 30 minutes). The last line it prints that is a URL is recorded
   as that project's deployment. A deploy is never killed by `runner kill`, but it
   honours `runner pause`.
-- **Records.** A deploy ends `deployed`, or `failed` with `deploy failed: <projects>`.
+- **Health and activation.** A project may declare `healthCheck`, run after its
+  deploy with `SLIPJAY_DEPLOY_URL` set to the deployment; a failing check fails the
+  project. An environment whose projects all declare `activate` deploys without
+  taking traffic: only once every project deployed and passed its check does each
+  `activate` (with `SLIPJAY_DEPLOY_URL`) move that project's traffic to its
+  deployment. Otherwise nothing is activated and the environment keeps serving what
+  it served before. If one activation fails, the projects already activated are
+  activated again on the deployment they last served.
+- **Records.** A deploy ends `deployed`, or `failed` with `deploy failed: <project> (<reason>)`.
   Once its projects ran, either way it records the commit, the commit the environment
   served before (the last deploy any project succeeded in), the commits between them,
   and each project's outcome. A deploy that failed before its projects ran (the commit
@@ -323,8 +331,20 @@ candidate that did not ship (its verification failed and a fix landed), the plan
 that approval. The runner refuses to release a commit staging did not deploy. Once
 the release branch holds the candidate, the runner deploys production from exactly
 that commit in the deploy lane, and `--confirm` follows it: the promotion ends
-`deployed`, or `deploy failed: <project>` (exit 1). Rerunning `--confirm` deploys a
-failed promotion again and reuses one that deployed.
+`deployed`, or `deploy failed: <project> (<reason>)` (exit 1). Rerunning `--confirm`
+deploys a failed promotion again and reuses one that deployed.
+
+A promotion's production deploy that fails is rolled back automatically: production
+keeps (or is moved back to) what it served before, the release branch returns to
+the commit before the release merge (unless a later release moved it), and the
+deploy's `rollback` and reason say so. So `production` must declare `activate` for
+every project. A project that could not be moved back is named, and the release
+branch stays on the release, since production still partly serves it. Rollback is
+code only. The plan's `nonAdditiveMigrations` names migration artifacts that drop,
+rename, retype or delete something, or tighten what an existing table accepts (a
+heuristic, `nonAdditiveSql` in `src/lib/release.ts`), and its `next` repeats them: a
+failed promotion carrying one, including a rerun confirm of it, is left as it is,
+with nothing moved back, for the owner to decide.
 
 1. `slipjay promote` fetches and plans: the candidate (the integration branch on
    the remote), the base (the release branch on the remote), the commits between

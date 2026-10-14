@@ -45,8 +45,16 @@ export type OperationStatus = "queued" | "running" | "landed" | "released" | "de
 /** A release the runner verified and published, or found already published. */
 export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
 
-/** One project's outcome in a deploy: `url` is the deployment its command reported. */
-export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string };
+/**
+ * One project's outcome in a deploy: `url` is the deployment its command reported, and
+ * `ok` that it deployed and passed its health check. In an environment that activates,
+ * `activated` says whether the project's traffic moved to it; one moved and then moved
+ * back (another project's activation failed) is `restored`.
+ */
+export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string; activated?: boolean; restored?: boolean };
+
+/** Whether a project of a deploy served it: it deployed, and took traffic where the environment activates. */
+export const servedDeploy = (project: DeployProjectOutcome): boolean => project.ok && project.activated !== false;
 
 /**
  * What one deploy put in an environment: the commit, the commit the environment
@@ -57,7 +65,17 @@ export type DeployRecord = {
   environment: string; commitId: string; previous: string | null;
   changes: { commitId: string; subject: string }[];
   projects: DeployProjectOutcome[];
+  /**
+   * A promotion that does not serve: `automatic` when production stays on what it served
+   * before and the release branch returns to the commit before the release merge
+   * (`releaseBranch`, absent if it could not); otherwise the promotion carries
+   * non-additive migrations and nothing more is undone: the owner decides.
+   */
+  rollback?: { automatic: boolean; releaseBranch?: string; reason: string };
 };
+
+/** What a promotion's production deploy needs to undo it: the release merge, and the migrations that make undoing it manual. */
+export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[] };
 
 /** One fact appended to the log. Nothing is updated or deleted. */
 export type OperationEvent =
@@ -66,7 +84,7 @@ export type OperationEvent =
   /** A release of `commitId`, the integration commit a human approved. */
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
-  | { type: "submitted"; kind: "deploy"; repo: string; environment: string; commitId: string; submittedBy: string }
+  | { type: "submitted"; kind: "deploy"; repo: string; environment: string; commitId: string; submittedBy: string; promotion?: PromotionFacts }
   | { type: "stage"; stage: RunnerStage }
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
@@ -127,7 +145,7 @@ export type LandingOperation = OperationFields & { kind: "landing"; changeId: st
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
 
 /** Deploys take turns in their own lane, so a slow deploy never holds a landing. */
-export type DeployOperation = OperationFields & { kind: "deploy"; environment: string };
+export type DeployOperation = OperationFields & { kind: "deploy"; environment: string; promotion?: PromotionFacts };
 
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
 export type Operation = LandingOperation | ReleaseOperation | DeployOperation;

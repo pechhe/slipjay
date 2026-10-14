@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { confirmRelease, releaseIntegration } from "../src/lib/release.ts";
+import { confirmRelease, nonAdditiveSql, releaseIntegration, returnRelease } from "../src/lib/release.ts";
 import type { PromotionState } from "../src/lib/release.ts";
 
 test("a release plans, then verifies the exact candidate in the confirming checkout and publishes a merge with its tree", async () => {
@@ -117,13 +117,15 @@ test("a candidate that is not published on the integration branch is refused", a
   }
 });
 
-test("a release carrying migration artifacts needs --migrations-ready", async () => {
+test("a release carrying migration artifacts needs --migrations-ready and names the ones that are not additive", async () => {
   const f = await releaseProject({ migrations: true });
   try {
     // Landing generates migrations itself, so this fixture commits one straight to main.
     const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
     await mkdir(join(f.repo, "migrations"), { recursive: true });
-    await writeFile(join(f.repo, "migrations", "0001.sql"), "create table t ();\n");
+    await writeFile(join(f.repo, "migrations", "0001.sql"), "create table t (a int); -- drop nothing\n");
+    await writeFile(join(f.repo, "migrations", "0002.sql"), "alter table t alter column a set data type text;\n");
+    await writeFile(join(f.repo, "migrations", "0003.sql"), "/* DROP TABLE t; */ alter table t add column b int;\n");
     git(["add", "migrations"]);
     git(["commit", "-qm", "Add a migration"]);
     git(["push", "-q", "origin", "main"]);
@@ -131,7 +133,8 @@ test("a release carrying migration artifacts needs --migrations-ready", async ()
     const candidate = execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.repo, encoding: "utf8" }).trim();
     const plan = await releaseIntegration(f.repo);
     assert.ok(plan.ok && plan.status === "planned");
-    assert.deepEqual(plan.migrationArtifacts, ["migrations/0001.sql"]);
+    assert.deepEqual(plan.migrationArtifacts, ["migrations/0001.sql", "migrations/0002.sql", "migrations/0003.sql"]);
+    assert.deepEqual(plan.nonAdditiveMigrations, ["migrations/0002.sql"], "commented-out SQL does not count");
     const refused = await confirmRelease(f.repo, { candidate });
     assert.ok(!refused.ok && /--migrations-ready/.test(refused.reason), JSON.stringify(refused));
     const released = await confirmRelease(f.repo, { candidate, migrationsReady: true });
@@ -162,4 +165,35 @@ test("a release branch with changes the integration branch lacks is refused", as
   } finally {
     await f.dispose();
   }
+});
+
+test("a returned release moves the release branch back to before its merge, only while it still holds that merge", async () => {
+  const f = await releaseProject();
+  try {
+    const candidate = await landFile(f, "a.txt");
+    const base = remoteRef(f, "release");
+    const released = await confirmRelease(f.repo, { candidate });
+    assert.ok(released.status === "released", JSON.stringify(released));
+    assert.deepEqual(await returnRelease(f.repo, released.merge), { returned: true, releaseBranch: base });
+    assert.equal(remoteRef(f, "release"), base);
+    const again = await returnRelease(f.repo, released.merge);
+    assert.ok(!again.returned && /has moved on/.test(again.reason), JSON.stringify(again));
+    assert.equal(remoteRef(f, "release"), base);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("SQL is non-additive when it removes, retypes or deletes, or tightens a table that already existed", () => {
+  for (const sql of [
+    'ALTER TABLE "t" DROP COLUMN "a";', "alter table t rename to u;", "DELETE FROM t WHERE a IS NULL;", "TRUNCATE t;",
+    'ALTER TABLE "t" ALTER COLUMN "a" SET DATA TYPE text;', 'ALTER TABLE "t" ALTER COLUMN "a" SET NOT NULL;',
+    "ALTER TABLE t ADD CONSTRAINT positive CHECK (a > 0);", 'CREATE UNIQUE INDEX "t_a" ON "public"."t" USING btree ("a");',
+    'ALTER TABLE "t" ADD COLUMN "b" integer NOT NULL;',
+  ]) assert.equal(nonAdditiveSql(sql), true, sql);
+  for (const sql of [
+    'CREATE TABLE "u" ("id" text PRIMARY KEY NOT NULL, "t_id" text);\n--> statement-breakpoint\nALTER TABLE "u" ADD CONSTRAINT "u_t_fk" FOREIGN KEY ("t_id") REFERENCES "public"."t"("id");\nCREATE UNIQUE INDEX "u_t" ON "u" ("t_id");',
+    'ALTER TABLE "t" ADD COLUMN "b" integer DEFAULT 0 NOT NULL;', 'ALTER TABLE "t" ADD COLUMN "c" text;', "CREATE INDEX t_a ON t (a);",
+    "/* DROP TABLE t; */ select 1; -- truncate t",
+  ]) assert.equal(nonAdditiveSql(sql), false, sql);
 });

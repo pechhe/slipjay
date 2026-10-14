@@ -1,14 +1,22 @@
 import { command, environmentKeys } from "./post-integration-policy.ts";
 import type { FinalizationCommand } from "./post-integration-policy.ts";
 
-/** One deployed project of an environment: its name in deploy records and the command that deploys it. */
-export type DeploymentProject = { name: string; command: FinalizationCommand };
+/**
+ * One deployed project of an environment: its name in deploy records and the command that
+ * deploys it. `healthCheck` then runs against the deployment (`SLIPJAY_DEPLOY_URL`); a
+ * failing check fails the project. An environment whose projects declare `activate`
+ * deploys without taking traffic: only once every project deployed and passed its check
+ * does `activate` move each one's traffic to its deployment (`SLIPJAY_DEPLOY_URL`), and
+ * if one activation fails, the projects already moved are activated back on the
+ * deployment they served before.
+ */
+export type DeploymentProject = { name: string; command: FinalizationCommand; healthCheck?: FinalizationCommand; activate?: FinalizationCommand };
 
 /**
  * One environment the runner deploys. `staging` follows the integration branch: the
  * runner deploys its latest landed commit after landings, at most once per
  * `minIntervalMs`, plus on demand. `production` does not follow the integration branch: it
- * deploys only through a promotion (`slipjay promote`), so its `minIntervalMs` is unused.
+ * deploys only through a promotion (`slipjay promote`), so its `minIntervalMs` is unused, and must activate, so a failed promotion can be rolled back.
  * Each project's command runs in an exact source view
  * of the deployed commit, with the declared `environmentKeys` and
  * `SLIPJAY_DEPLOY_ENVIRONMENT`/`SLIPJAY_DEPLOY_COMMIT`; the last line it prints that is a
@@ -51,9 +59,17 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
     const projects = environment.projects.map((project): DeploymentProject => {
       const entry = object(project, `deployments ${name} project`);
       if (typeof entry.name !== "string" || !NAME.test(entry.name)) throw new Error(`deployments ${name} has a project without a valid name`);
-      return { name: entry.name, command: command(entry.command, "Deployment") };
+      return { name: entry.name, command: command(entry.command, "Deployment"),
+        ...entry.healthCheck === undefined ? {} : { healthCheck: command(entry.healthCheck, "Health check") },
+        ...entry.activate === undefined ? {} : { activate: command(entry.activate, "Activation") } };
     });
     if (new Set(projects.map((project) => project.name)).size !== projects.length) throw new Error(`deployments ${name} names a project twice`);
+    // Activation is all or nothing: a project that took traffic on deploy could not be held back.
+    if (projects.some((project) => project.activate) && !projects.every((project) => project.activate))
+      throw new Error(`deployments ${name} declares activate for some projects but not all`);
+    // A failed promotion is rolled back by never moving traffic, so production must control it.
+    if (name === "production" && !projects.every((project) => project.activate))
+      throw new Error("deployments production must declare activate for every project");
     environments[name] = {
       minIntervalMs: minIntervalMs as number, timeoutMs: environment.timeoutMs as number,
       environmentKeys: environmentKeys(environment, "Deployment"), projects,

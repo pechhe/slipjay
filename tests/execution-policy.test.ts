@@ -322,8 +322,13 @@ test("deployments declare environments with projects; unknown environments and m
     projects: [{ name: "app", command: { executable: "bun", args: ["scripts/deploy.ts", "app"], cwd: "." } }],
   } } });
   assert.equal(parseExecutionPolicy(policy({})).deployments, undefined);
-  const production = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { production: { timeoutMs: 600_000, projects: [project] } } } }));
+  const production = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { production: { timeoutMs: 600_000, projects: [{ ...project, activate: project.command }] } } } }));
   assert.deepEqual(Object.keys(production.deployments?.environments ?? {}), ["production"], "production parses; its promotion path is the only deploy");
+  const step = (name: string) => ({ executable: "bun", args: ["scripts/deploy.ts", "app", name] });
+  const checked = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { production: { timeoutMs: 600_000,
+    projects: [{ ...project, healthCheck: step("health"), activate: step("activate") }] } } } }));
+  assert.deepEqual(checked.deployments?.environments.production?.projects[0], { ...project, command: { ...project.command, cwd: "." },
+    healthCheck: { ...step("health"), cwd: "." }, activate: { ...step("activate"), cwd: "." } });
   for (const deployments of [
     { version: 1, environments: { qa: { timeoutMs: 1, projects: [project] } } },
     { version: 1, environments: { staging: { timeoutMs: 1, projects: [] } } },
@@ -331,5 +336,8 @@ test("deployments declare environments with projects; unknown environments and m
     { version: 1, environments: { staging: { timeoutMs: 1, projects: [{ ...project, command: { executable: "bun", args: [], cwd: "../x" } }] } } },
     { version: 1, environments: { staging: { projects: [project] } } },
     { version: 2, environments: {} },
+    { version: 1, environments: { production: { timeoutMs: 1, projects: [{ ...project, activate: project.command }, { ...project, name: "hq" }] } } },
+    { version: 1, environments: { production: { timeoutMs: 1, projects: [{ ...project, activate: project.command, healthCheck: { executable: "" } }] } } },
+    { version: 1, environments: { production: { timeoutMs: 1, projects: [project] } } },
   ]) assert.throws(() => parseExecutionPolicy(policy({ deployments })), JSON.stringify(deployments));
 });

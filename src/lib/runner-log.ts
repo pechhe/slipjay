@@ -130,7 +130,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
   const operation: Operation = submitted.event.kind === "release"
     ? { ...fields, kind: "release", migrationsReady: submitted.event.migrationsReady }
     : submitted.event.kind === "deploy"
-      ? { ...fields, kind: "deploy", environment: submitted.event.environment }
+      ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
       : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {

@@ -40,6 +40,8 @@ export type ReleasePlan = {
   candidate: string;
   commits: Array<{ commitId: string; subject: string; description: string }>;
   migrationArtifacts: string[];
+  /** The SQL migration artifacts that are not additive (see `nonAdditiveSql`): a failed promotion carrying one is not rolled back automatically. */
+  nonAdditiveMigrations: string[];
   /** Every path the release changes. */
   paths: string[];
   checks: VerificationDeclaration[];
@@ -70,6 +72,7 @@ export type ReleaseSummary = {
   candidate: string;
   commits: number;
   migrationArtifacts: string[];
+  nonAdditiveMigrations: string[];
   paths: string[];
   checks: string[];
   /** Present when the candidate moved past an earlier approval that did not ship. */
@@ -128,6 +131,32 @@ export type ConfirmReleaseOptions = {
 };
 
 const COMMIT_PREFIX = /^[a-f0-9]{12,64}$/;
+const SQL_COMMENTS = /--[^\n]*|\/\*[\s\S]*?\*\//g;
+const TABLE = String.raw`(?:ONLY\s+)?((?:"[^"]+"|\w+)(?:\.(?:"[^"]+"|\w+))?)`;
+const tableName = (name: string): string => name.split(".").at(-1)!.replaceAll('"', "").toLowerCase();
+
+/**
+ * A heuristic for SQL that code from before the migration may not survive: removing,
+ * renaming or retyping something, deleting rows, or tightening what a table that
+ * already existed accepts (a constraint, a unique index, a NOT NULL column without a
+ * default). Constraints on a table the same migration creates are additive. It errs
+ * towards flagging (any DROP, even of a default), since a flag only withholds an
+ * automatic rollback.
+ */
+export function nonAdditiveSql(sql: string): boolean {
+  const statements = sql.replace(SQL_COMMENTS, "").split(";");
+  const created = new Set(statements.flatMap((statement) =>
+    [...statement.matchAll(new RegExp(String.raw`\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?${TABLE}`, "gi"))].map((match) => tableName(match[1]!))));
+  const existing = (statement: string, pattern: string): boolean => {
+    const match = new RegExp(pattern, "i").exec(statement);
+    return Boolean(match && !created.has(tableName(match[1]!)));
+  };
+  return statements.some((statement) => /\b(?:DROP|TRUNCATE|RENAME)\b|\bDELETE\s+FROM\b|\bALTER\s+COLUMN\b[\s\S]*\b(?:TYPE|SET\s+NOT\s+NULL)\b/i.test(statement)
+    || existing(statement, String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?${TABLE}[\s\S]*\bADD\s+CONSTRAINT\b`)
+    || existing(statement, String.raw`\bCREATE\s+UNIQUE\s+INDEX\b[\s\S]*?\bON\s+${TABLE}`)
+    || (existing(statement, String.raw`\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?${TABLE}[\s\S]*\bADD\s+(?:COLUMN\s+)?[\s\S]*\bNOT\s+NULL\b`)
+      && !/\bDEFAULT\b/i.test(statement)));
+}
 const CANDIDATE_TRAILER = "Release-Candidate: ";
 
 class ReleaseRefusal extends Error {
@@ -200,7 +229,13 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   const artifactPaths = policy.migrationFinalization?.artifactPaths ?? [];
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
   const migrationArtifacts = changed.filter((file) => artifactPaths.some((path: string) => file === path || file.startsWith(`${path}/`)));
-  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, paths: changed, checks,
+  const nonAdditiveMigrations: string[] = [];
+  for (const file of migrationArtifacts.filter((name) => name.endsWith(".sql"))) {
+    const shown = await jjRun(root, ["file", "show", "-r", candidate, "--", `root-file:${symbol(file)}`]);
+    // A migration the release deletes is not additive either.
+    if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
+  }
+  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks,
     promotes: Boolean(policy.deployments?.environments.production) };
 }
 
@@ -270,6 +305,39 @@ async function publish(plan: ReleasePlan, merge: string): Promise<void> {
 }
 
 /**
+ * Undo a published release whose production deploy failed: move the release branch from
+ * `merge` back to its first parent, the release branch before it. Refused, moving
+ * nothing, when the release branch has moved on since (a later release).
+ */
+export async function returnRelease(checkout: string, merge: string): Promise<{ returned: true; releaseBranch: string } | { returned: false; reason: string }> {
+  try {
+    const { policy } = await readExecutionPolicyAtCommit(checkout, merge);
+    const releaseBranch = policy?.releaseBranch;
+    const remote = policy?.remote;
+    if (!releaseBranch || !remote) refuse(`slipjay.json at ${merge.slice(0, 12)} declares no release branch and remote`);
+    const fetched = await fetch(checkout, remote, releaseBranch);
+    if (fetched.code !== 0) refuse(`Could not fetch ${releaseBranch}: ${fetched.stderr.trim()}`);
+    const published = `${symbol(releaseBranch)}@${symbol(remote)}`;
+    const head = await commitOf(checkout, published);
+    if (head !== merge) refuse(`${releaseBranch} has moved on to ${head?.slice(0, 12) ?? "nothing"} since the release merge ${merge.slice(0, 12)}`);
+    const [before] = lines(await jjOut(checkout, ["log", "--no-graph", "-r", merge, "-T", 'parents.map(|c| c.commit_id()).join("\\n")']));
+    if (!before) refuse(`The release merge ${merge.slice(0, 12)} has no parent`);
+    await jjRun(checkout, ["bookmark", "track", published]);
+    await jjOut(checkout, ["bookmark", "set", releaseBranch, "--allow-backwards", "-r", before]);
+    // jj pushes only if the remote still holds the merge it fetched.
+    const pushed = await jjRun(checkout, ["git", "push", "--remote", remote, "--bookmark", releaseBranch]);
+    await fetch(checkout, remote, releaseBranch);
+    if (await commitOf(checkout, published) !== before) {
+      await jjRun(checkout, ["bookmark", "set", releaseBranch, "--allow-backwards", "-r", published]);
+      refuse(`Push of ${releaseBranch} failed: ${(pushed.stderr || pushed.stdout).trim()}`);
+    }
+    return { returned: true, releaseBranch: before };
+  } catch (error) {
+    return { returned: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * Run the declared post-release step for a published release. Whatever goes wrong,
  * the release stands: a failure, even one before the step starts, becomes a
  * reported `postRelease` outcome with its retry command.
@@ -292,7 +360,8 @@ async function runPostReleaseStep(plan: ReleasePlan, merge: string, onProgress: 
 /** The result fields describing `plan`; the Spec check runs again on every call, as a Spec's Tickets may have closed in between. */
 async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefined): Promise<ReleaseSummary> {
   const summary: ReleaseSummary = { integrationBranch: plan.integrationBranch, releaseBranch: plan.releaseBranch, remote: plan.remote,
-    base: plan.base, candidate: plan.candidate, commits: plan.commits.length, migrationArtifacts: plan.migrationArtifacts, paths: plan.paths,
+    base: plan.base, candidate: plan.candidate, commits: plan.commits.length, migrationArtifacts: plan.migrationArtifacts,
+    nonAdditiveMigrations: plan.nonAdditiveMigrations, paths: plan.paths,
     checks: plan.checks.map((check) => [check.executable, ...check.args].join(" ")) };
   if (!plan.commits.length) return summary;
   const remotes = await jjRun(plan.root, ["git", "remote", "list"]);
@@ -337,7 +406,8 @@ export async function releaseIntegration(cwd = process.cwd(), { graphql, readPro
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
     return { ok: true, status: "planned", ...summary, subjects: (delta?.commits ?? plan.commits).map((commit) => commit.subject),
       next: `After explicit human approval: slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
-        + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "") };
+        + (plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "")
+        + (plan.promotes && plan.nonAdditiveMigrations.length ? `. Not additive: ${plan.nonAdditiveMigrations.join(", ")}; if production fails its health check, it is not rolled back automatically` : "") };
   } catch (error) {
     return refusalOf(error);
   }
