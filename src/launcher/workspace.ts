@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner-client.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner-client.ts";
 import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
@@ -377,6 +377,34 @@ try {
     process.exitCode = 2;
   } else if (command === "promote") {
     process.exitCode = await runPromote(rest);
+  } else if (command === "watch") {
+    if (rest.length !== 1 || rest[0] !== "--json") throw new Error("Usage: slipjay watch --json");
+    const location = runnerLocation();
+    if (!location)
+      throw new Error("No runner location: set SLIPJAY_RUNNER or runner in ~/.slipjay/config.json");
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+      await watchThroughRunner(
+        location,
+        (envelope) => console.log(JSON.stringify(envelope)),
+        controller.signal,
+      );
+    } finally {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    }
+  } else if (command === "cancel") {
+    if (rest.length !== 1 || rest[0]!.startsWith("-"))
+      throw new Error("Usage: slipjay cancel <id>");
+    const location = runnerLocation();
+    if (!location)
+      throw new Error("No runner location: set SLIPJAY_RUNNER or runner in ~/.slipjay/config.json");
+    const outcome = await cancelThroughRunner(location, rest[0]!);
+    console.log(JSON.stringify(outcome.result));
+    if (!outcome.ok) process.exitCode = 1;
   } else if (command === "deploy") {
     process.exitCode = await runDeploy(rest);
   } else if (command === "reset") {
@@ -415,7 +443,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

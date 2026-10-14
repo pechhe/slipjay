@@ -490,3 +490,58 @@ export async function resetThroughRunner(cwd: string, options: { location: strin
     return { operation, logUrl: runLogCommand(operation.id) };
   } finally { connection.close(); }
 }
+
+/** Owns a fresh authenticated transport for each watch reconnect, including SSH forwards. */
+export async function watchThroughRunner(
+  location: string,
+  emit: (envelope: import("./runner-watch.ts").WatchEnvelope) => void,
+  signal: AbortSignal,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  const { watchRunner } = await import("./runner-watch.ts");
+  const token = await runnerToken(env);
+  await watchRunner({
+    signal,
+    emit,
+    retry: (abort) => delay(2000, undefined, { signal: abort }),
+    async connect() {
+      const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+      return {
+        close: connection.close,
+        snapshot: async (abort) =>
+          (await request(connection.baseUrl, token, "/v1/queue", { signal: AbortSignal.any([abort, AbortSignal.timeout(15_000)]) })).json() as Promise<import("./runner-contract.ts").QueueSnapshot>,
+        async stream(cursor, abort) {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 15_000);
+          try { return await request(connection.baseUrl, token, `/v1/metrics/events?since=${cursor}`, {
+            signal: AbortSignal.any([abort, controller.signal]), headers: { accept: "text/event-stream" },
+          }); } finally { clearTimeout(timer); }
+        },
+      };
+    },
+  });
+}
+
+export async function cancelThroughRunner(
+  location: string,
+  id: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ ok: boolean; result: unknown }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(
+      connection.baseUrl,
+      token,
+      `/v1/operations/${encodeURIComponent(id)}/cancel`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ by: hostname() }),
+      },
+    );
+    return { ok: response.ok, result: await response.json() };
+  } finally {
+    connection.close();
+  }
+}

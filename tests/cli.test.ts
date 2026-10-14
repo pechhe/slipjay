@@ -144,3 +144,12 @@ test("release is retired without planning or confirming, while promote keeps its
   assert.match(promote.stderr, /Usage: slipjay promote/);
   assert.doesNotMatch(promote.stderr, /retired/);
 });
+
+test("watch and cancel reject unsupported arguments before connecting", async () => {
+  for (const args of [["watch"], ["watch", "--json", "extra"], ["cancel"], ["cancel", "--bogus"]]) {
+    const result = await slipjay(homedir(), args);
+    assert.equal(result.code, 1);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /Usage: slipjay (watch --json|cancel <id>)/);
+  }
+});

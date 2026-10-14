@@ -14,10 +14,10 @@ import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy } from "./depl
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { KILLABLE_STAGES, OWNER_KILL_REASON, repositoryKey, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, repositoryKey, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, ResetOperation, StoredEvent } from "./runner-contract.ts";
+import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, ResetOperation } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -80,7 +80,6 @@ export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = proces
  */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
-  publish(event: StoredEvent): void;
   environment?: () => NodeJS.ProcessEnv;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
@@ -92,13 +91,12 @@ export function createRunnerQueue(input: {
   kill(): { operation: Operation; killed: boolean } | null;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, publish, environment } = input;
+  const { log, executor, home, config, environment } = input;
   let active: Promise<void> | undefined;
   let current: { operation: Operation; stage: RunnerStage; controller: AbortController } | undefined;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
   function append(id: string, event: OperationEvent): void {
     const stored = log.append(id, event);
-    publish(stored);
     mkdirSync(dirname(logPath(id)), { recursive: true });
     appendFileSync(logPath(id), `${JSON.stringify(stored)}\n`);
   }
@@ -204,7 +202,7 @@ export function createRunnerQueue(input: {
         run: async (request) => {
           const runId = randomUUID();
           const started = Date.now();
-          append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host });
+          append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs });
           const result = await executor.run(request).catch((error: unknown) => {
             append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
             throw error;
@@ -292,7 +290,7 @@ export function createRunnerQueue(input: {
     async function run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
-      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host });
+      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs });
       const abortSignal = request.abortSignal ? AbortSignal.any([request.abortSignal, controller.signal]) : controller.signal;
       const result = await executor.run({ ...request, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
@@ -304,10 +302,13 @@ export function createRunnerQueue(input: {
     // Finalization, then publication, of an integrated commit (completeLanding).
     async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string): Promise<void> {
       setStage("finalizing");
-      const tail = await completeLanding(checkout, context, commitId, { ...(environment ? { environment } : {}), onPublishing: () => setStage("publishing") });
+      const tail = await completeLanding(checkout, context, commitId, { ...(environment ? { environment } : {}), onPublishing: () => setStage("publishing") })
+        .catch((error: unknown) => { throw new HeldIntegration(commitId, stage === "publishing" ? "publishing" : "finalizing", message(error)); });
       if (!tail.postIntegration.ok)
         throw new HeldIntegration(commitId, "finalizing", `Post-integration ${tail.postIntegration.status}: ${tail.postIntegration.reason ?? "no reason recorded"}`, tail.postIntegration.output);
       if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed");
+      if (log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === commitId))
+        append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId });
     }
     const setStage = (next: RunnerStage) => {
       // A kill that landed between runs stops the operation before it moves a branch.
@@ -334,11 +335,16 @@ export function createRunnerQueue(input: {
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);
+      const recordedHold = log.snapshot(executor.host).held.find((entry) => entry.repo === operation.repo);
+      if (recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
+        append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: recordedHold.commitId });
       // A commit integrated by an earlier turn but never published (a failed push, or
       // a restart after finalization) may already be applied to the external target.
       // Finish it before anything moves the bookmark: dropping it would orphan that state.
       if (await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
         const held = (await revisionFacts(checkout, branch)).commitId;
+        if (!log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === held))
+          append(operation.id, { type: "integration_held", repo: operation.repo, commitId: held, reason: "An earlier integration is not yet published" });
         progress(`Finishing ${held.slice(0, 12)}, integrated by an earlier landing but not yet published`);
         await finishIntegration(context, held);
         setStage("fetching");
@@ -398,7 +404,10 @@ export function createRunnerQueue(input: {
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
-      else if (error instanceof HeldIntegration) verdict = { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) };
+      else if (error instanceof HeldIntegration) {
+        append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message });
+        verdict = { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) };
+      }
       else if (error instanceof RequiredVerificationError) verdict = {
         type: "failed", stage: "verifying", reason: error.message,
         command: error.evidence.command, output: error.evidence.stdoutTail + error.evidence.stderrTail,
@@ -504,8 +513,13 @@ export function createRunnerQueue(input: {
         continue;
       }
       let verdict: OperationEvent = { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; land again` };
+      let integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
+      const retainUnresolved = () => {
+        if (integrated && !log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === integrated!.commitId))
+          append(operation.id, { type: "integration_held", repo: operation.repo, commitId: integrated.commitId, reason: "Publication of the retained integration is unconfirmed after restart" });
+      };
+      retainUnresolved();
       try {
-        let integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
         if (configuredRepository(config, operation.repo)) {
           const context = await workspaceContext(checkout);
           if (context) remote = context.configuration.remote ?? "origin";
@@ -521,6 +535,7 @@ export function createRunnerQueue(input: {
               const [base = ""] = (await jj(checkout, ["log", "-r", `${held}-`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n");
               integrated = { type: "integrated", base, commitId: held };
               append(operation.id, integrated);
+              retainUnresolved();
             }
           }
           if (integrated) {
@@ -529,6 +544,7 @@ export function createRunnerQueue(input: {
             const fetched = await fetchIntegration(checkout, remote, branch);
             if (fetched.code !== 0) throw new Error(fetched.stderr || fetched.stdout);
             if (await revisionExists(checkout, `${integrated.commitId} & ::${branch}@${remote}`)) {
+              append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: integrated.commitId });
               verdict = { type: "landed", base: integrated.base, commitId: integrated.commitId, branch, remote };
             }
           }
@@ -538,6 +554,32 @@ export function createRunnerQueue(input: {
       }
       if (remote) await cleanup(operation, checkout, remote);
       append(operation.id, verdict);
+    }
+  }
+  // Reconcile warm repositories even when their failed operation is already terminal.
+  // Failure to observe the remote is not evidence that an existing hold recovered.
+  async function reconcileHeld(): Promise<void> {
+    for (const repo of Object.keys(config.repos).map(repositoryKey)) {
+      const checkout = repoCheckout(repo);
+      try {
+        const context = await workspaceContext(checkout);
+        if (!context) continue;
+        const branch = context.integrationBranch;
+        const remote = context.configuration.remote ?? "origin";
+        let known = log.snapshot(executor.host).held.find((entry) => entry.repo === repo);
+        // Local evidence survives even when a remote outage prevents confirmation.
+        const ahead = await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
+        if (ahead) {
+          const commitId = (await revisionFacts(checkout, branch)).commitId;
+          if (known?.commitId !== commitId)
+            append(RUNNER_CONTROL_ID, { type: "integration_held", repo, commitId, reason: "Publication of the retained integration is unconfirmed after restart" });
+        }
+        const fetched = await fetchIntegration(checkout, remote, branch);
+        if (fetched.code !== 0) continue;
+        known = log.snapshot(executor.host).held.find((entry) => entry.repo === repo);
+        if (known && await revisionExists(checkout, `${known.commitId} & ::${branch}@${remote}`))
+          append(RUNNER_CONTROL_ID, { type: "integration_recovered", repo, commitId: known.commitId });
+      } catch { /* An unavailable checkout cannot prove recovery; retain recorded holds. */ }
     }
   }
   function start(work: () => Promise<void>, previous?: Promise<void>): Promise<void> {
@@ -553,7 +595,7 @@ export function createRunnerQueue(input: {
       wakeDeploys();
     },
     async recover() {
-      await start(recoverRunning, active);
+      await start(async () => { await recoverRunning(); await reconcileHeld(); }, active);
       for (const repo of Object.keys(config.repos).map(repositoryKey)) await scheduleLatest(repo);
     },
     cancelled(operation) {

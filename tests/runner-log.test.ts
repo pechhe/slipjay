@@ -173,3 +173,61 @@ test("a repository's resets share the landing lane, list newest first and close 
     log.close();
   }
 });
+
+test("atomic watch snapshot includes both lanes, cursor, holds and subscriptions", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const seen: number[] = [];
+    const unsubscribe = log.subscribe((event) => seen.push(event.seq));
+    log.append("landing", submission("owner/a"));
+    log.append("deploy", { type: "submitted", kind: "deploy", repo: "owner/b", commitId: "d", environment: "staging", submittedBy: "owner" });
+    const stage = log.append("landing", { type: "stage", stage: "verifying" });
+    log.append("held", { type: "integration_held", repo: "owner/a", commitId: "h", reason: "push refused" });
+    const last = log.append("control", { type: "paused", by: "owner" });
+    const snapshot = log.snapshot("runner", new Date("2026-10-14T10:00:00Z"));
+    assert.equal(snapshot.seq, last.seq);
+    assert.equal(snapshot.lanes.serial[0]?.stageStartedAt, stage.at);
+    assert.equal(snapshot.lanes.deploy[0]?.id, "deploy");
+    assert.equal(snapshot.held[0]?.commitId, "h");
+    assert.equal(snapshot.paused, null); // runner control has a reserved operation id
+    assert.deepEqual(snapshot.lastSuite, { status: "unavailable" });
+    unsubscribe(); log.append("other", submission()); assert.equal(seen.length, 5);
+  } finally { log.close(); }
+});
+
+test("snapshot hold SQL preserves repository lifecycle and ignores obsolete recovery", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const hold = (repo: string, commitId: string, reason = "blocked") => log.append("control", { type: "integration_held", repo, commitId, reason });
+    const recover = (repo: string, commitId: string) => log.append("control", { type: "integration_recovered", repo, commitId });
+    const first = hold("a", "A");
+    hold("b", "other");
+    hold("a", "A", "retry");
+    recover("a", "wrong");
+    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "A", since: first.at, reason: "retry", retries: 1 });
+    assert.equal(log.snapshot("runner").held.length, 2);
+    recover("a", "A");
+    assert.deepEqual(log.snapshot("runner").held.map((entry) => entry.repo), ["b"]);
+    const again = hold("a", "A");
+    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "A", since: again.at, reason: "blocked", retries: 0 });
+    const newer = hold("a", "B");
+    recover("a", "A");
+    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "B", since: newer.at, reason: "blocked", retries: 0 });
+    hold("a", "B");
+    assert.equal(log.snapshot("runner").held.find((entry) => entry.repo === "a")?.retries, 1);
+    recover("a", "B");
+    assert.deepEqual(log.snapshot("runner").held.map((entry) => entry.repo), ["b"]);
+  } finally { log.close(); }
+});
+
+test("snapshot latest staging attempt includes failure after success and a failure-only repository", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const deploy = (id: string, repo: string) => log.append(id, { type: "submitted", kind: "deploy", repo, environment: "staging", commitId: id, submittedBy: "owner" });
+    deploy("success-A", "a");
+    log.append("success-A", { type: "deployed", record: { environment: "staging", commitId: "success-A", previous: null, changes: [], projects: [] } });
+    deploy("failed-B", "a"); log.append("failed-B", { type: "failed", stage: "deploying", reason: "failed" });
+    deploy("only-failed", "b"); log.append("only-failed", { type: "failed", stage: "deploying", reason: "also failed" });
+    assert.deepEqual(log.snapshot("runner").lastStagingDeploys.map((op) => [op.id, op.status, op.result?.type]), [["failed-B", "failed", "failed"], ["only-failed", "failed", "failed"]]);
+  } finally { log.close(); }
+});

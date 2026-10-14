@@ -76,7 +76,7 @@ test("HTTP runner refuses missing and wrong credentials, reports health and reje
       assert.equal(response.status, 401);
       assert.equal(typeof (await response.json() as { error: string }).error, "string");
     }
-    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 0, paused: false });
+    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 0, paused: false, held: [] });
     for (const field of ["repo", "changeId", "commitId", "bookmark", "submittedBy"]) {
       const response = await f.submit({ ...submission(), [field]: " " });
       assert.equal(response.status, 400);
@@ -131,7 +131,7 @@ test("submissions create, reattach, supersede queued work and conflict with runn
     const changes = await (await f.request(`/changes/${changeId}?repo=Owner/Repo`)).json() as { operations: Operation[] };
     assert.deepEqual(changes.operations.map((op) => op.id), [replacement.operation.id, first.operation.id]);
     assert.equal((await f.request(`/changes/${changeId}`)).status, 400);
-    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 1, paused: false });
+    assert.deepEqual(await (await f.request("/health")).json(), { ok: true, runner: "test-runner", queued: 1, paused: false, held: [] });
   } finally {
     await f.close();
   }
@@ -334,4 +334,98 @@ test("reset submissions need a landed repository, reattach to its open reset and
   } finally {
     await f.close();
   }
+});
+
+test("global event feed sees API appends and exports bounded cursor ranges", async () => {
+  const f = await fixture();
+  try {
+    const snapshot = await (await f.request("/queue")).json() as { version: number; seq: number };
+    assert.equal(snapshot.version, 1);
+    const response = await f.request(`/metrics/events?since=${snapshot.seq}`, { headers: { accept: "text/event-stream" } });
+    const reader = response.body!.getReader();
+    const created = await (await f.submit()).json() as SubmitResponse;
+    const first = new TextDecoder().decode((await reader.read()).value);
+    assert.match(first, /event: stored/); assert.match(first, /submitted/);
+    const cancelled = await f.request(`/operations/${created.operation.id}/cancel`, { method: "POST", body: JSON.stringify({ by: "owner-mac" }) });
+    assert.equal(cancelled.status, 200);
+    const second = new TextDecoder().decode((await reader.read()).value);
+    assert.match(second, /owner-mac/);
+    await reader.cancel();
+    const exported = await (await f.request("/metrics/events?since=0&limit=1")).json() as { events: StoredEvent[]; hasMore: boolean; nextSeq: number };
+    assert.equal(exported.events.length, 1); assert.equal(exported.hasMore, true); assert.equal(exported.nextSeq, exported.events[0]!.seq);
+    for (const query of ["since=-1", "since=1.2", "limit=0", "limit=1001", "since=9007199254740992"]) assert.equal((await f.request(`/metrics/events?${query}`)).status, 400);
+  } finally { await f.close(); }
+});
+
+test("global feed closes a slow consumer and releases its durable subscription", async () => {
+  const log = openOperationLog(":memory:");
+  let active = 0;
+  const subscribe = log.subscribe.bind(log);
+  log.subscribe = (listener) => { active++; const stop = subscribe(listener); return () => { active--; stop(); }; };
+  try {
+    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => null, subscribe });
+    const request = () => new Request("http://localhost/v1/metrics/events?since=0", { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" } });
+    const response = await handler(request());
+    assert.equal(active, 1);
+    for (let n = 0; n < 1001; n++) log.append("control", { type: "paused", by: "owner" });
+    assert.equal(active, 0);
+    const replay = await handler(request());
+    const reader = replay.body!.getReader();
+    let count = 0;
+    while (!(await reader.read()).done) count++;
+    assert.equal(count, 1000);
+    assert.equal(active, 0);
+    const controller = new AbortController();
+    const live = await handler(new Request("http://localhost/v1/metrics/events?since=1001", { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" }, signal: controller.signal }));
+    assert.equal(active, 1); controller.abort(); assert.equal(active, 0);
+    await live.body!.cancel();
+    await response.body!.cancel();
+  } finally { log.close(); }
+});
+
+test("snapshot cursor replays the append between snapshot and stream and the subscription handover", async () => {
+  const log = openOperationLog(":memory:");
+  const subscribe = log.subscribe.bind(log);
+  let injected = false;
+  log.subscribe = (listener) => {
+    const stop = subscribe(listener);
+    if (!injected) { injected = true; log.append("control", { type: "paused", by: "during-subscribe" }); }
+    return stop;
+  };
+  try {
+    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => null, subscribe });
+    const snapshot = log.snapshot("r");
+    log.append("control", { type: "paused", by: "between" });
+    const response = await handler(new Request(`http://localhost/v1/metrics/events?since=${snapshot.seq}`, { headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" } }));
+    const reader = response.body!.getReader();
+    const decode = async () => JSON.parse(new TextDecoder().decode((await reader.read()).value).split("data: ")[1]!) as StoredEvent;
+    const first = await decode(); const second = await decode();
+    assert.equal(first.seq, 1); assert.equal(second.seq, 2);
+    log.append("control", { type: "resumed", by: "live" });
+    assert.equal((await decode()).seq, 3);
+    await reader.cancel();
+    assert.equal((await handler(new Request("http://localhost/v1/metrics/events?since=99", { headers: { authorization: `Bearer ${token}` } }))).status, 409);
+  } finally { log.close(); }
+});
+
+test("cancel rechecks state after a delayed request body", async () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => null, subscribe: log.subscribe });
+    for (const stage of ["verifying", "publishing"] as const) {
+      log.append(stage, { type: "submitted", ...submission() });
+      let release!: () => void;
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => { reading = resolve; });
+      const delayed = new Promise<void>((resolve) => { release = resolve; });
+      const request = new Request(`http://localhost/v1/operations/${stage}/cancel`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
+      Object.defineProperty(request, "text", { value: async () => { reading(); await delayed; return JSON.stringify({ by: "owner" }); } });
+      const pending = handler(request);
+      await started;
+      log.append(stage, { type: "stage", stage });
+      release();
+      assert.equal((await pending).status, 409);
+      assert.equal(log.events({ operationId: stage }).some((event) => event.event.type === "cancelled"), false);
+    }
+  } finally { log.close(); }
 });

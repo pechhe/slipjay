@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { createRunnerHandler } from "./runner-api.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, runnerConfigProblem } from "./runner-contract.ts";
-import type { RunnerConfig, StoredEvent } from "./runner-contract.ts";
+import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
 import { createRunnerQueue, localExecutor } from "./runner-queue.ts";
@@ -27,16 +27,14 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   if (problem) throw new Error(`${problem}; rerun scripts/setup-runner.sh or add it to ${join(home, "config.json")}`);
   mkdirSync(home, { recursive: true });
   const log = openOperationLog(join(home, "operations.sqlite"));
-  const listeners = new Set<(event: StoredEvent) => void>();
   const queue = createRunnerQueue({
     log, home, config, executor: localExecutor(config.name ?? hostname(), env),
-    publish: (event) => { for (const listener of listeners) listener(event); },
     environment: () => env,
   });
   await queue.recover();
   const server = await serveRunner(createRunnerHandler({
     log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
-    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    subscribe: log.subscribe,
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   // Queued operations from before a restart resume here.
   queue.wake();

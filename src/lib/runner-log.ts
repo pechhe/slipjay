@@ -1,7 +1,8 @@
+import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent } from "./runner-contract.ts";
+import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -20,12 +21,13 @@ export function openOperationLog(path: string): OperationLog {
     type TEXT NOT NULL,
     data TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type)`);
+  const listeners = new Set<(event: StoredEvent) => void>();
   const insert = db.prepare("INSERT INTO events (operation_id, at, type, data) VALUES (?, ?, ?, ?)");
   const select = db.prepare(`SELECT seq, operation_id, at, data FROM events
-    WHERE seq > ? AND (? IS NULL OR operation_id = ?) ORDER BY seq`);
+    WHERE seq > ? AND (? IS NULL OR operation_id = ?) ORDER BY seq LIMIT ?`);
   const events: OperationLog["events"] = (options = {}) => {
     const id = options.operationId ?? null;
-    return (select.all(options.afterSeq ?? 0, id, id) as EventRow[]).map((row) => ({
+    return (select.all(options.afterSeq ?? 0, id, id, options.limit ?? -1) as EventRow[]).map((row) => ({
       seq: row.seq, operationId: row.operation_id, at: row.at,
       event: JSON.parse(row.data) as OperationEvent,
     }));
@@ -83,11 +85,53 @@ export function openOperationLog(path: string): OperationLog {
     const projected = project(id, events({ operationId: id }));
     return projected ? placed(projected, queue()) : null;
   }
+  const snapshotRows = db.prepare(`SELECT seq, operation_id, at, data FROM events WHERE operation_id IN (
+    SELECT operation_id FROM events WHERE type = 'submitted' ORDER BY seq DESC LIMIT 100
+  ) OR operation_id IN (SELECT operation_id FROM events WHERE type = 'submitted'
+    AND operation_id NOT IN (SELECT operation_id FROM events WHERE type IN ${terminalTypes})) ORDER BY seq`);
+  const heldRows = db.prepare(`WITH latest AS (
+    SELECT *, ROW_NUMBER() OVER (PARTITION BY json_extract(data, '$.repo') ORDER BY seq DESC) AS rank
+    FROM events WHERE type = 'integration_held'
+  ) SELECT h.seq, h.at, h.data,
+    (SELECT MAX(b.seq) FROM events b WHERE b.seq < h.seq
+      AND b.type IN ('integration_held', 'integration_recovered')
+      AND json_extract(b.data, '$.repo') = json_extract(h.data, '$.repo')
+      AND ((b.type = 'integration_held' AND json_extract(b.data, '$.commitId') != json_extract(h.data, '$.commitId')) OR (b.type = 'integration_recovered' AND json_extract(b.data, '$.commitId') = json_extract(h.data, '$.commitId')))) AS boundary
+    FROM latest h WHERE h.rank = 1 AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type = 'integration_recovered' AND r.seq > h.seq AND json_extract(r.data, '$.repo') = json_extract(h.data, '$.repo') AND json_extract(r.data, '$.commitId') = json_extract(h.data, '$.commitId'))`);
+  const heldHistory = db.prepare(`SELECT MIN(at) AS since, COUNT(*) - 1 AS retries FROM events
+    WHERE type = 'integration_held' AND seq > ? AND seq <= ?
+    AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.commitId') = ?`);
+  function held(): HeldIntegrationState[] {
+    return (heldRows.all() as { seq: number; at: string; data: string; boundary: number | null }[]).map((row) => {
+      const event = JSON.parse(row.data) as Extract<OperationEvent, { type: 'integration_held' }>;
+      const history = heldHistory.get(row.boundary ?? 0, row.seq, event.repo, event.commitId) as { since: string; retries: number };
+      return { repo: event.repo, commitId: event.commitId, reason: event.reason, ...history };
+    });
+  }
   return {
     append(operationId, event) {
       const at = new Date().toISOString();
       const result = insert.run(operationId, at, event.type, JSON.stringify(event));
-      return { seq: Number(result.lastInsertRowid), operationId, at, event };
+      const stored = { seq: Number(result.lastInsertRowid), operationId, at, event };
+      for (const listener of [...listeners]) listener(stored);
+      return stored;
+    },
+    subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
+    latestSeq: () => Number((db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq),
+    snapshot(runner, now = new Date()) {
+      db.exec("BEGIN");
+      try {
+        const seq = Number((db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq);
+        const all = (snapshotRows.all() as EventRow[]).map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
+        const open = queue().map((op) => projectWatchOperation(op, all, now));
+        const repos = (db.prepare("SELECT DISTINCT json_extract(data, '$.repo') AS repo FROM events WHERE type = 'submitted'").all() as { repo: string }[]).map((row) => row.repo);
+        return { version: 1, runner, seq, observedAt: now.toISOString(),
+          lanes: { serial: open.filter((op) => op.kind !== "deploy"), deploy: open.filter((op) => op.kind === "deploy") },
+          paused: paused(), held: held(),
+          recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10),
+          lastStagingDeploys: repos.flatMap((repo) => { const latest = projectIds((db.prepare(`SELECT e.operation_id FROM events e WHERE e.type = 'submitted' AND json_extract(e.data, '$.kind') = 'deploy' AND json_extract(e.data, '$.repo') = ? AND json_extract(e.data, '$.environment') = 'staging' AND EXISTS (SELECT 1 FROM events d WHERE d.operation_id = e.operation_id AND d.type IN ${terminalTypes}) ORDER BY e.seq DESC LIMIT 1`).all(repo) as { operation_id: string }[]).map((row) => row.operation_id)).find((op) => op.kind === "deploy"); return latest?.kind === "deploy" ? [latest] : []; }),
+          lastSuite: { status: "unavailable" } };
+      } finally { db.exec("COMMIT"); }
     },
     events,
     operation,
@@ -112,7 +156,7 @@ export function openOperationLog(path: string): OperationLog {
       return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
     },
     paused,
-    close: () => db.close(),
+    close: () => { listeners.clear(); db.close(); },
   };
 }
 
@@ -145,7 +189,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
           operation.status = "running";
         break;
       case "run_started": {
-        const run: RunRecord = { runId: event.runId, command: event.command, host: event.host, startedAt: stored.at };
+        const run: RunRecord = { runId: event.runId, command: event.command, host: event.host, startedAt: stored.at, ...(event.timeoutMs === undefined ? {} : { timeoutMs: event.timeoutMs }) };
         runs.set(event.runId, run);
         operation.runs.push(run);
         break;

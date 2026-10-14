@@ -463,3 +463,29 @@ test("an older commit's running operation is followed without moving its candida
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
   } finally { await f.dispose(); }
 });
+
+test("cancel uses the authenticated transport and attributes the hostname, preserving refusal", async () => {
+  const { cancelThroughRunner } = await import("../src/lib/runner-client.ts");
+  const { hostname } = await import("node:os");
+  const bodies: unknown[] = [];
+  const server = await serveRunner(
+    async (request) => {
+      assert.equal(request.headers.get("authorization"), "Bearer fixture-token");
+      if (new URL(request.url).pathname === "/v1/health")
+        return Response.json({ runner: "fixture" });
+      bodies.push(await request.json());
+      return Response.json({ error: "operation is not queued" }, { status: 409 });
+    },
+    { host: "127.0.0.1", port: 0 },
+  );
+  try {
+    const result = await cancelThroughRunner(server.url, "running", {
+      SLIPJAY_RUNNER_TOKEN: "fixture-token",
+    });
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.result, { error: "operation is not queued" });
+    assert.deepEqual(bodies, [{ by: hostname() }]);
+  } finally {
+    await server.close();
+  }
+});

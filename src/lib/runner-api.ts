@@ -23,7 +23,21 @@ export function createRunnerHandler(input: {
     const url = new URL(request.url);
     const path = url.pathname;
     if (request.method === "GET" && path === `${RUNNER_API}/health`)
-      return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null });
+      return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null, held: input.log.snapshot(input.runnerName).held });
+    if (request.method === "GET" && path === `${RUNNER_API}/queue`) return json(input.log.snapshot(input.runnerName));
+    if (request.method === "GET" && path === `${RUNNER_API}/metrics/events`) {
+      const raw = url.searchParams.get("since") ?? "0";
+      const bound = url.searchParams.get("limit") ?? "1000";
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || !/^\d+$/.test(bound) || Number(bound) < 1 || Number(bound) > 1000)
+        return json({ error: "Invalid cursor or limit" }, 400);
+      const since = Number(raw);
+      if (since > input.log.latestSeq()) return json({ error: "Cursor is ahead of runner log" }, 409);
+      if (request.headers.get("accept")?.includes("text/event-stream")) return globalEventStream(input.log, since, request.signal);
+      const events = input.log.events({ afterSeq: since, limit: Number(bound) + 1 });
+      const hasMore = events.length > Number(bound);
+      if (hasMore) events.pop();
+      return json({ events, nextSeq: events.at(-1)?.seq ?? since, hasMore });
+    }
     const control = path.match(new RegExp(`^${RUNNER_API}/runner/(kill|pause|resume)$`));
     if (request.method === "POST" && control) {
       let body: unknown;
@@ -167,13 +181,18 @@ export function createRunnerHandler(input: {
     if (!operation)
       return json({ error: "Unknown operation" }, 404);
     switch (route[2]) {
-      case "cancel":
-        if (operation.status !== "queued")
-          return json({ operation }, 409);
-        input.log.append(id, { type: "cancelled", reason: "cancelled by the author" });
+      case "cancel": {
+        let body: unknown = {};
+        try { const text = await request.text(); if (text) body = JSON.parse(text); } catch { return json({ error: "Invalid JSON body" }, 400); }
+        if (!body || typeof body !== "object" || Array.isArray(body) || ("by" in body && (typeof body.by !== "string" || !body.by.trim() || body.by.length > 200))) return json({ error: "Invalid cancel actor" }, 400);
+        const current = input.log.operation(id);
+        if (!current) return json({ error: "Unknown operation" }, 404);
+        if (current.status !== "queued") return json({ operation: current }, 409);
+        input.log.append(id, { type: "cancelled", reason: "cancelled by the author", ...("by" in body ? { by: body.by as string } : {}) });
         // Appended first, so the queue never starts it; nobody follows a cancel they asked for.
-        input.onCancelled?.(operation);
+        input.onCancelled?.(current);
         return json({ operation: input.log.operation(id) });
+      }
       case "log": {
         const log = await input.readLog(id);
         return log === null ? json({ error: "Log not found" }, 404) : new Response(log, { headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -293,5 +312,49 @@ function eventStream(input: Parameters<typeof createRunnerHandler>[0], id: strin
       cleanup();
     },
   });
+  return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+}
+
+/** Durable cursors only: heartbeats do not append events or advance the cursor. */
+function globalEventStream(log: OperationLog, since: number, signal: AbortSignal): Response {
+  let cleanup = () => {};
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      let closed = false;
+      let lastSeq = since;
+      let replaying = true;
+      const buffered: StoredEvent[] = [];
+      let timer: ReturnType<typeof setInterval> | undefined;
+      let unsubscribe = () => {};
+      const finish = () => { if (closed) return; closed = true; cleanup(); controller.close(); };
+      let cleaned = false;
+      cleanup = () => { if (cleaned) return; cleaned = true; unsubscribe(); if (timer) clearInterval(timer); signal.removeEventListener("abort", finish); };
+      const send = (stored: StoredEvent) => {
+        if (closed || stored.seq <= lastSeq) return;
+        // A slow reader reconnects and replays from its own last consumed cursor.
+        if ((controller.desiredSize ?? 0) <= 0) { finish(); return; }
+        lastSeq = stored.seq;
+        controller.enqueue(encoder.encode(`event: stored\ndata: ${JSON.stringify(stored)}\n\n`));
+      };
+      unsubscribe = log.subscribe((stored) => {
+        if (closed) return;
+        if (replaying) { if (buffered.length >= 1000) finish(); else buffered.push(stored); }
+        else send(stored);
+      });
+      for (const stored of log.events({ afterSeq: since, limit: 1001 })) send(stored);
+      replaying = false;
+      for (const stored of buffered) send(stored);
+      if (!closed) {
+        timer = setInterval(() => {
+          if ((controller.desiredSize ?? 0) <= 0) { finish(); return; }
+          controller.enqueue(encoder.encode(`event: heartbeat\ndata: ${JSON.stringify({ at: new Date().toISOString(), seq: lastSeq })}\n\n`));
+        }, 15_000);
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) finish();
+      } else cleanup();
+    },
+    cancel() { cleanup(); },
+  }, { highWaterMark: 1000 });
   return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
 }

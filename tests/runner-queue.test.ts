@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../src/lib/runner-contract.ts";
-import type { StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
+import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 
@@ -129,14 +129,20 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const published: StoredEvent[] = [];
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
-  const executor = localExecutor();
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } },
-    jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } }, publish: (event) => {
-    published.push(event);
+  const requestedTimeouts: { command: string; timeoutMs: number }[] = [];
+  const local = localExecutor();
+  const executor: Executor = { host: local.host, run: (request) => {
+    requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs });
+    return local.run(request);
+  } };
+  const unsubscribe = log.subscribe((event) => {
+    if (event.event.type !== "submitted") published.push(event);
     const operation = log.operation(event.operationId);
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
-  },
+  });
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin } },
+    jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", "main"]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
@@ -181,8 +187,8 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const result = (id: string) => log.operation(id)!.result;
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
-  return { root, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
-    async dispose() { queue.close(); await queue.idle(); log.close(); await rm(root, { recursive: true, force: true }); } };
+  return { root, requestedTimeouts, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
+    async dispose() { queue.close(); await queue.idle(); unsubscribe(); log.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
 test("queued candidates land in arrival order on the previous candidate, with runner gate records and streamed logs", async () => {
@@ -210,6 +216,7 @@ test("queued candidates land in arrival order on the previous candidate, with ru
       assert.equal(operation.runs.length, 1);
       assert.equal(operation.runs[0]!.host, f.executor.host);
       assert.equal(operation.runs[0]!.command, command);
+      assert.equal(operation.runs[0]!.timeoutMs, f.requestedTimeouts.find((request) => request.command === command)!.timeoutMs);
       assert.equal(operation.runs[0]!.exitCode, 0);
       assert.deepEqual(f.log.events({ operationId: id }).filter((stored) => stored.event.type === "stage").map((stored) => stored.event.type === "stage" && stored.event.stage), ["fetching", "rebasing", "installing", "verifying", "integrating", "finalizing", "publishing"]);
       assert.equal(f.queue.logPath(id), join(f.home, "logs", `${id}.log`));
@@ -443,22 +450,45 @@ test("a failed publication holds the finalized integration; relanding publishes 
     assert.equal(jj(checkout, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), finalized!.commit);
     assert.equal(jj(checkout, ["log", "-r", "parents(@)", "--no-graph", "-T", "commit_id"]), finalized!.commit);
     assert.equal(jj(checkout, ["log", "-r", "@", "--no-graph", "-T", "conflict"]), "false");
+    const [hold] = f.log.snapshot(f.executor.host).held;
+    assert.ok(hold);
+    assert.equal(hold.repo, "fixture/repo");
+    assert.equal(hold.commitId, finalized!.commit);
+    assert.equal(hold.retries, 0);
+    assert.match(hold.reason, /remote unavailable/);
+    assert.equal(f.log.openOperations().length, 0);
+    // Recovery must inspect warm checkouts even when every operation is terminal.
+    f.log.append(RUNNER_CONTROL_ID, { type: "integration_recovered", repo: hold.repo, commitId: hold.commitId });
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
+    await f.queue.recover();
+    const [rediscovered] = f.log.snapshot(f.executor.host).held;
+    assert.equal(rediscovered?.commitId, hold.commitId);
+    assert.equal(rediscovered?.retries, 0);
     // Another change cannot land past the held integration, and does not discard it.
     const blocked = f.submit(other);
     const refusal = await f.land(blocked);
     assert.equal(refusal?.type, "failed", JSON.stringify(refusal));
     assert.equal(refusal?.type === "failed" && refusal.stage, "publishing");
+    const [retried] = f.log.snapshot(f.executor.host).held;
+    assert.equal(retried?.since, rediscovered!.since);
+    assert.equal(retried?.commitId, hold.commitId);
+    assert.equal(retried?.retries, 1);
     await rm(join(f.root, "reject-push"));
     const reland = f.submit(request);
     const landed = await f.land(reland);
     assert.deepEqual(landed, { type: "landed", base: before, commitId: finalized!.commit, branch: "main", remote: "origin" });
     assert.equal(f.main(), finalized!.commit);
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
     assert.equal(generations(f, [held, blocked, reland]), 1);
     assert.equal((await f.development()).length, 1);
+    // A stale hold may have recovered externally; ordinary fetch must observe it.
+    f.log.append(RUNNER_CONTROL_ID, { type: "integration_held", repo: "fixture/repo", commitId: finalized!.commit,
+      reason: "Recorded before external publication was observed" });
     const after = f.submit(other);
     const second = await f.land(after);
     assert.equal(second?.type, "landed", JSON.stringify(second));
     assert.equal(second?.type === "landed" && second.base, finalized!.commit);
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
   } finally { await f.dispose(); }
 }, 240_000);
 
@@ -473,6 +503,14 @@ test("a failed finalization reports its output, holds the integration and retrie
     if (failure?.type !== "failed") throw new Error("Expected finalization failure");
     assert.equal(failure.stage, "finalizing");
     assert.match(failure.output ?? "", /development migrate failed/);
+    const [hold] = f.log.snapshot(f.executor.host).held;
+    assert.ok(hold);
+    assert.equal(hold.repo, "fixture/repo");
+    assert.equal(hold.retries, 0);
+    assert.match(hold.reason, /Post-integration/);
+    assert.equal(f.log.openOperations().length, 0);
+    await f.queue.recover();
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, [hold]);
     assert.equal(f.main(), before);
     await rm(join(f.root, "fail-finalize"));
     const next = f.submit(await f.candidate("next.txt"));
@@ -481,6 +519,7 @@ test("a failed finalization reports its output, holds the integration and retrie
     const [finalized] = await f.development();
     assert.deepEqual(finalized?.migrations, ["0001.sql"]);
     assert.equal(landed.base, finalized!.commit);
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
     assert.equal(f.remoteFile("migrations/0001.sql"), "-- 1");
   } finally { await f.dispose(); }
 }, 240_000);
@@ -508,6 +547,27 @@ test("recovery recognizes an integrated commit published before the runner stopp
     const landed = f.result(original);
     assert.equal(landed?.type, "landed", JSON.stringify(landed));
     if (landed?.type !== "landed") throw new Error("Expected publication");
+    const interrupted = f.submit(request);
+    f.log.append(interrupted, { type: "stage", stage: "publishing" });
+    f.log.append(interrupted, { type: "integrated", base: landed.base, commitId: landed.commitId });
+    const checkout = join(f.home, "repos", "fixture/repo");
+    jj(checkout, ["git", "remote", "set-url", "origin", join(f.root, "unavailable-origin.git")]);
+    try {
+      await f.queue.recover();
+      assert.deepEqual(f.result(interrupted), { type: "failed", stage: "publishing", reason: "runner restarted during publishing; land again" });
+      const [hold] = f.log.snapshot(f.executor.host).held;
+      assert.ok(hold);
+      assert.equal(hold.repo, "fixture/repo");
+      assert.equal(hold.commitId, landed.commitId);
+      assert.match(hold.reason, /unconfirmed/);
+      assert.equal(f.log.openOperations().length, 0);
+      await f.queue.recover();
+      assert.deepEqual(f.log.snapshot(f.executor.host).held, [hold]);
+    } finally {
+      jj(checkout, ["git", "remote", "set-url", "origin", f.origin]);
+    }
+    await f.queue.recover();
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
     const recovering = f.submit(request);
     f.log.append(recovering, { type: "stage", stage: "publishing" });
     f.log.append(recovering, { type: "integrated", base: landed.base, commitId: landed.commitId });
@@ -648,6 +708,11 @@ test("a landing deploys staging from an exact view of the landed commit and reco
     assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)), ["app", "hq"].map((project) =>
       ({ project, environment: "staging", commit: f.main(), key: "from-runner", head: f.main() })), "each project ran in the exact commit with the declared key");
     assert.deepEqual(first.runs.map((run) => run.exitCode), [0, 0]);
+    for (const run of first.runs) {
+      const request = f.requestedTimeouts.find((request) => request.command === run.command);
+      assert.equal(run.timeoutMs, request?.timeoutMs);
+      assert.equal(run.timeoutMs, 30_000);
+    }
     await writeFile(join(f.root, "fail-deploy-hq"), "");
     await f.land(f.submit(await f.candidate("b.txt")));
     await f.land(f.submit(await f.candidate("c.txt")));

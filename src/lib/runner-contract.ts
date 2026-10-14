@@ -108,7 +108,7 @@ export type OperationEvent =
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
-  | { type: "run_started"; runId: string; command: string; host: string }
+  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number }
   | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
@@ -125,17 +125,19 @@ export type OperationEvent =
   | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; deployment?: DeployRecord }
   /** A queued operation replaced by a newer submission of the same change. */
   | { type: "superseded"; by: string }
-  | { type: "cancelled"; reason: string }
+  | { type: "cancelled"; reason: string; by?: string }
   /** Runner-wide, under RUNNER_CONTROL_ID: the queue takes no next operation until resumed. */
   | { type: "paused"; by: string }
-  | { type: "resumed"; by: string };
+  | { type: "resumed"; by: string }
+  | { type: "integration_held"; repo: string; commitId: string; reason: string }
+  | { type: "integration_recovered"; repo: string; commitId: string };
 
 /** A stored event: `seq` is global and strictly increasing across operations. */
 export type StoredEvent = { seq: number; operationId: string; at: string; event: OperationEvent };
 
 /** One executed command of an operation, projected from its run events. */
 export type RunRecord = {
-  runId: string; command: string; host: string; startedAt: string;
+  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number;
   finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number;
 };
 
@@ -178,8 +180,11 @@ export type Operation = LandingOperation | ReleaseOperation | DeployOperation | 
 export interface OperationLog {
   /** Append one event; returns it stored. Appends are serialized by the caller's single process. */
   append(operationId: string, event: OperationEvent): StoredEvent;
+  subscribe(listener: (event: StoredEvent) => void): () => void;
+  snapshot(runner: string, now?: Date): QueueSnapshot;
+  latestSeq(): number;
   /** Events after `afterSeq` (exclusive), optionally for one operation, in seq order. */
-  events(options?: { operationId?: string; afterSeq?: number }): StoredEvent[];
+  events(options?: { operationId?: string; afterSeq?: number; limit?: number }): StoredEvent[];
   operation(id: string): Operation | null;
   /** Every operation of a change, newest first. */
   operationsForChange(repo: string, changeId: string): LandingOperation[];
@@ -293,3 +298,17 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
 
 /** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */
 export const repositoryKey = (name: string): string => name.toLowerCase();
+
+export type HeldIntegrationState = { repo: string; commitId: string; since: string; reason: string; retries: number };
+export type WatchOperation = Operation & {
+  stageStartedAt?: string;
+  timing: { state: "unknown" | "normal" | "amber" | "red"; medianMs: number | null; amberAfterMs: number | null; samples: number; commandDeadlineAt: string | null };
+  kill: { allowed: boolean; reason: string | null };
+};
+export type QueueSnapshot = {
+  version: 1; runner: string; seq: number; observedAt: string;
+  lanes: { serial: WatchOperation[]; deploy: WatchOperation[] };
+  paused: { by: string; at: string } | null; held: HeldIntegrationState[];
+  recentReleases: ReleaseOperation[]; lastStagingDeploys: DeployOperation[];
+  lastSuite: { status: "unavailable" };
+};

@@ -490,3 +490,29 @@ Every Vitest file runs under its own disposable `HOME`
 that would otherwise write the real `~/.slipjay` or `~/.pi`. The cutover tests build
 pre-v1.0.0 state in that disposable `HOME` and never touch the real one. Run a single file with
 `bunx vp test tests/<file>.test.ts`.
+
+
+## Watching the runner
+
+`slipjay watch --json` uses the configured authenticated runner connection, including
+SSH forwarding. stdout contains only version-1 JSONL envelopes: `snapshot` with the
+`QueueSnapshot`, `event` with a stored global event, `heartbeat` with `at` and `seq`,
+and `connection` with `connecting`, `connected` or `disconnected` and the replay
+`cursor`. The first envelope is a snapshot; its `seq` establishes the initial cursor.
+Events and heartbeats refresh the runner-owned queue projection. Reconnect creates
+a new transport and refreshes the snapshot without advancing that
+cursor; only emitted events advance it, so intervening events replay without repeats.
+Heartbeats prove connection liveness even during a quiet command and never advance
+the replay cursor. Interrupting watch closes its readers and SSH transport.
+
+`GET /v1/queue` returns both ordered lanes and their paused and held facts, recent
+release outcomes and the latest completed staging attempt per repository, including failed attempts and their recorded result. Timing includes `amberAfterMs`, twice the recorded stage median, and the active command deadline; absent evidence returns a null threshold. Missing timing evidence and the hourly
+suite producer are explicitly unavailable; consumers must not infer a stuck command
+from silence alone. The canonical authenticated export endpoint is
+`GET /v1/metrics/events?since=<seq>`: request `Accept: text/event-stream` for stored
+events and heartbeats, or JSON for bounded finite `{events,nextSeq,hasMore}` pages.
+Continue finite export from `nextSeq` while `hasMore` is true.
+
+`slipjay cancel <id>` requests queued-only cancellation and records the local
+hostname as its actor. Running operations are refused; cancellation does not relax
+the runner's kill safety.
