@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.8.0
+
+- **The runner deploys staging (#31):** `slipjay.json` can declare
+  `deployments.environments.staging` with one command per project. After each
+  landing the runner deploys the latest landed commit once `minIntervalMs` (default
+  one hour) has passed since the last deploy, otherwise on one timer, in its own lane
+  from an exact source view of that commit. Each deploy is recorded `deployed` or
+  `failed` with each project's outcome and URL and the commits it added.
+  `slipjay deploy <environment>` deploys now and follows it; `slipjay deploys` lists
+  them. See the README's Deploys section.
+- **SlipJay's own landing gate runs its tests:** `bun run test` joins check and
+  typecheck, so a broken test fixture is caught before it lands.
+
 ## v3.7.0
 
 - **The runner's jj settings and commit identity live in its config (#30):** the
