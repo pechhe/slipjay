@@ -2,6 +2,12 @@
 
 ## v3.12.0
 
+- **Activation commands learn whether rollback is allowed (#35):** a production
+  `activate` step gets `SLIPJAY_DEPLOY_ROLLBACK_ALLOWED` (`1`, or `0` when the
+  promotion applied non-additive migrations). A project that reverts itself when its
+  own activation fails, such as services on a host, must not do so on `0`; the
+  restore call SlipJay makes for earlier projects always carries `1`.
+
 - **Native Mac menu bar (#40):** a signed SwiftUI app shows both runner lanes,
   held integrations, timing warnings and release outcomes. It sends deduplicated
   release and needs-attention notifications and uses the existing CLI for controls
