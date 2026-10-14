@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { readFile, stat, mkdir } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { stat, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
@@ -16,12 +15,15 @@ import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, repositoryKey, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
+import { parseFailureOutput } from "./failure-classification.ts";
+import { redactVerificationOutput } from "./verification-failure.ts";
+import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, ResetOperation } from "./runner-contract.ts";
+import type { CompletedRelease, DeployOperation, DeployRecord, Executor, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose } from "./runner-contract.ts";
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
-import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
+import { jj, run as workspaceRun, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 
 /**
  * An integration the runner could not finalize or publish. It stays on the runner's
@@ -96,9 +98,12 @@ export function createRunnerQueue(input: {
   let current: { operation: Operation; stage: RunnerStage; controller: AbortController } | undefined;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
   function append(id: string, event: OperationEvent): void {
-    const stored = log.append(id, event);
-    mkdirSync(dirname(logPath(id)), { recursive: true });
-    appendFileSync(logPath(id), `${JSON.stringify(stored)}\n`);
+    log.append(id, event);
+  }
+  function runFinished(runId: string, result: BoundedProcessResult, started: number, request: BoundedProcessRequest, privateOutput = false): OperationEvent {
+    return { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
+      durationMs: Date.now() - started, outputBytes: Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
+      killed: result.cancelled, ...(privateOutput ? {} : parseFailureOutput(redactMigrationOutput(`${result.stdout}\n${result.stderr}`, request.cwd, request.env))) };
   }
   const repoCheckout = (repo: string) => join(home, "repos", repo);
   const checkoutPath = (operation: Operation) => repoCheckout(operation.repo);
@@ -202,12 +207,12 @@ export function createRunnerQueue(input: {
         run: async (request) => {
           const runId = randomUUID();
           const started = Date.now();
-          append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs });
+          append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs, purpose: "deploy" });
           const result = await executor.run(request).catch((error: unknown) => {
             append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
             throw error;
           });
-          append(operation.id, { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, durationMs: Date.now() - started });
+          append(operation.id, runFinished(runId, result, started, request));
           return result;
         },
       });
@@ -281,6 +286,12 @@ export function createRunnerQueue(input: {
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation): Promise<void> {
     let stage: RunnerStage = "queued";
+    let stageStarted = Date.now();
+    let installSource: "fresh" | "existing" | undefined;
+    let rebaseConflict = false;
+    let conflictFiles: string[] = [];
+    const stageDetail = (): OperationEvent => ({ type: "stage_detail", stage, durationMs: Date.now() - stageStarted,
+      ...(stage === "installing" ? { installSource } : {}), ...(stage === "rebasing" ? { conflict: rebaseConflict, files: conflictFiles } : {}) });
     const controller = new AbortController();
     current = { operation, stage, controller };
     let verdict: OperationEvent | undefined;
@@ -289,16 +300,20 @@ export function createRunnerQueue(input: {
     let integrationBranch: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
     // Gate and migration commands both go through the executor, so each run records where it ran.
-    async function run(request: BoundedProcessRequest): Promise<BoundedProcessResult> {
+    async function run(request: BoundedProcessRequest, purpose?: RunPurpose): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
-      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs });
+      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs, purpose: purpose ?? (stage === "resetting" ? "reset" : "gate") });
       const abortSignal = request.abortSignal ? AbortSignal.any([request.abortSignal, controller.signal]) : controller.signal;
-      const result = await executor.run({ ...request, abortSignal }).catch((error: unknown) => {
+      const runEnvironment = stage === "resetting" ? request.env : sanitizedProcessEnv(request.env);
+      if ((purpose === "migration_generate" || purpose === "migration_verify") && request.env?.SLIPJAY_MIGRATION_CONTEXT)
+        runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
+      const result = await executor.run({ ...request, env: runEnvironment,
+        redactOutput: stage === "resetting" ? request.redactOutput : (value) => redactVerificationOutput(value, checkout), abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
         throw error;
       });
-      append(operation.id, { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut, durationMs: Date.now() - started });
+      append(operation.id, runFinished(runId, result, started, request, stage === "resetting"));
       return result;
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
@@ -306,15 +321,22 @@ export function createRunnerQueue(input: {
       setStage("finalizing");
       const tail = await completeLanding(checkout, context, commitId, { ...(environment ? { environment } : {}), onPublishing: () => setStage("publishing") })
         .catch((error: unknown) => { throw new HeldIntegration(commitId, stage === "publishing" ? "publishing" : "finalizing", message(error)); });
+      if (tail.timings) {
+        const { finalizingStartedAt, publishingStartedAt, finishedAt } = tail.timings;
+        append(operation.id, { type: "stage_detail", stage: "finalizing", durationMs: 0, migrateDurationMs: Math.max(0, (publishingStartedAt ?? finishedAt) - finalizingStartedAt) });
+        if (publishingStartedAt !== undefined) append(operation.id, { type: "stage_detail", stage: "publishing", durationMs: 0, pushDurationMs: Math.max(0, finishedAt - publishingStartedAt), remoteMoved: !tail.publication.ok && /remote.*(?:mov|chang|refus)|(?:mov|chang).*remote/i.test(tail.publication.reason ?? "") });
+      }
       if (!tail.postIntegration.ok)
         throw new HeldIntegration(commitId, "finalizing", `Post-integration ${tail.postIntegration.status}: ${tail.postIntegration.reason ?? "no reason recorded"}`, tail.postIntegration.output);
       if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed");
       if (log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === commitId))
-        append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId });
+        append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId, retried: true });
     }
     const setStage = (next: RunnerStage) => {
       // A kill that landed between runs stops the operation before it moves a branch.
       if (controller.signal.aborted) throw new OwnerKill();
+      if (stage !== "queued") append(operation.id, stageDetail());
+      stageStarted = Date.now();
       stage = next;
       current = { operation, stage, controller };
       append(operation.id, { type: "stage", stage });
@@ -378,23 +400,45 @@ export function createRunnerQueue(input: {
       if (visible.split("\n").filter(Boolean).length !== 1 || visible !== operation.commitId)
         throw new Error(`Submitted change ${operation.changeId} must have exactly one visible commit matching ${operation.commitId}`);
       await jj(checkout, ["edit", operation.commitId]);
+      const description = await jj(checkout, ["log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
+      const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
+      const identity = log.events({ operationId: operation.id }).findLast((row) => row.event.type === "identity")?.event;
+      append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") });
+      await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
       const integrated = await integrateLandingCandidate(checkout, {
         environment, onProgress: progress,
         onStage: (next) => { if (next !== "cleaning") setStage(next); },
         runCommand: run,
         adapter: {
-          verify: () => runRequiredVerification({
-            root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
-            environment, onProgress: progress, run,
-          }),
+          verify: async ({ base, candidate }) => {
+            append(operation.id, { type: "verification_base", base });
+            await recordShape(checkout, candidateContext.integrationBranch, candidate, candidateContext.configuration.migrationFinalization);
+            const verification = await runRequiredVerification({
+              root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
+              environment, onProgress: progress, run,
+            });
+            if (verification.status === "passed") append(operation.id, { type: "verification_passed", base, candidate });
+            return verification;
+          },
         },
       }, {
         ...landingIO,
+        async assertStackConflictFree(cwd, branch, changeId) {
+          try {
+            await landingIO.assertStackConflictFree(cwd, branch, changeId);
+          } catch (error) {
+            rebaseConflict = true;
+            conflictFiles = (await jj(cwd, ["resolve", "--list", "-r", changeId]).catch(() => "")).split("\n").filter(Boolean).map((line) => line.split(/\s+/)[0]!);
+            throw error;
+          }
+        },
         landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, operation.commitId) }),
         ensureLandingDescription: async (_cwd, _context, target) => target,
         async prepareCandidateDependencies(cwd, candidate, target, onProgress) {
+          await recordShape(cwd, candidate.integrationBranch, target.commitId, candidate.configuration.migrationFinalization);
           setStage("installing");
+          installSource = await stat(join(cwd, "node_modules")).then(() => "existing" as const, () => "fresh" as const);
           await landingIO.prepareCandidateDependencies(cwd, candidate, target, onProgress);
         },
       });
@@ -416,6 +460,7 @@ export function createRunnerQueue(input: {
       };
       else verdict = { type: "failed", stage, reason: message(error) };
     } finally {
+      if (stage !== "queued") append(operation.id, stageDetail());
       current = undefined;
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
@@ -436,6 +481,22 @@ export function createRunnerQueue(input: {
       // A reset, whatever its verdict, starts the next interval.
       if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
     }
+    async function recordShape(cwd: string, branch: string, commit: string, migration: import("./execution-policy.ts").MigrationFinalizationPolicy | null | undefined): Promise<void> {
+      const diff = await jj(cwd, ["diff", "--from", branch, "--to", commit, "--git"]);
+      const paths = [...new Set([...diff.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map((match) => match[2]!))];
+      const insertions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
+      const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
+      const roots = (prefix: string) => [...new Set(paths.flatMap((path) => path.startsWith(`${prefix}/`) ? [path.split("/")[1]!] : []))];
+      const migrationPaths = [...migration?.triggerPaths ?? [], ...migration?.artifactPaths ?? []];
+      const gitDirectory = await jj(cwd, ["git", "root"]);
+      const tree = await workspaceRun("git", ["--git-dir", gitDirectory, "rev-parse", `${commit}^{tree}`], { cwd });
+      if (tree.code !== 0) throw new Error("Could not observe candidate tree for change shape");
+      append(operation.id, { type: "change_shape", files: paths.length, insertions, deletions, packages: roots("packages"), apps: roots("apps"),
+        migrationBearing: paths.some((path) => migrationPaths.some((root) => path === root || path.startsWith(`${root}/`))),
+        testFiles: paths.filter((path) => /(?:test|spec)\.[cm]?[jt]sx?$/.test(path)),
+        fileSet: createHash("sha256").update(tree.stdout.trim()).digest("hex"),
+        sizeBucket: insertions + deletions <= 100 ? "small" : insertions + deletions <= 1000 ? "medium" : "large" });
+    }
     /**
      * Run the reset the integration tip declares, in its exact source: the integration
      * branch was just set to the remote, so the tip is the newest commit any landing
@@ -443,6 +504,7 @@ export function createRunnerQueue(input: {
      * the run log, never in an event.
      */
     async function reset(branch: string): Promise<OperationEvent> {
+      await mkdir(join(home, "logs"), { recursive: true, mode: 0o700 });
       const source = (await revisionFacts(checkout, branch)).commitId;
       const { gitDirectory, configuration } = await readExactExecutionPolicy(join(checkout, ".git"), source);
       const policy = configuration?.reset;
@@ -628,11 +690,8 @@ export function createRunnerQueue(input: {
     },
     logPath,
     async readLog(id) {
-      try { return await readFile(logPath(id), "utf8"); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      }
+      const events = log.events({ operationId: id }).filter((row) => row.event.type !== "submitted");
+      return events.length ? events.map((stored) => `${JSON.stringify(stored)}\n`).join("") : null;
     },
   };
 }

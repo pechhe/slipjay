@@ -1,0 +1,58 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8ivq0n_4d5705fdc1bc36d167cba563",
+    "at": "2026-10-14T19:48:25.080Z",
+    "event": {
+      "type": "submitted",
+      "repo": "owner/repo",
+      "changeId": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "commitId": "commit-1",
+      "bookmark": "slipjay/changes/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "submittedBy": "author"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8ivq0n_4d5705fdc1bc36d167cba563",
+    "at": "2026-10-14T19:48:25.081Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "runner",
+    "at": "2026-10-14T19:48:25.097Z",
+    "event": {
+      "type": "paused",
+      "by": "owner"
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8ivq0n_4d5705fdc1bc36d167cba563",
+    "at": "2026-10-14T19:48:25.102Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "paused_out",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8ivq0n_4d5705fdc1bc36d167cba563",
+    "at": "2026-10-14T19:48:25.102Z",
+    "event": {
+      "type": "cancelled",
+      "reason": "cancelled by the author",
+      "by": "author"
+    }
+  }
+]

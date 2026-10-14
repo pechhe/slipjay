@@ -1,0 +1,107 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8iqu7w_c914dea37796a01a74da7783",
+    "at": "2026-10-14T19:44:37.245Z",
+    "event": {
+      "type": "submitted",
+      "repo": "owner/repo",
+      "changeId": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "commitId": "commit-1",
+      "bookmark": "slipjay/changes/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "submittedBy": "author"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8iqu7w_c914dea37796a01a74da7783",
+    "at": "2026-10-14T19:44:37.246Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "op_00mv8iqu7w_c914dea37796a01a74da7783",
+    "at": "2026-10-14T19:44:37.271Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "superseded",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8iqu7w_c914dea37796a01a74da7783",
+    "at": "2026-10-14T19:44:37.271Z",
+    "event": {
+      "type": "superseded",
+      "by": "op_00mv8iqu8m_ec529b2f64b404542d1eb160"
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8iqu8m_ec529b2f64b404542d1eb160",
+    "at": "2026-10-14T19:44:37.271Z",
+    "event": {
+      "type": "submitted",
+      "repo": "owner/repo",
+      "changeId": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "commitId": "commit-2",
+      "bookmark": "slipjay/changes/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "submittedBy": "author"
+    }
+  },
+  {
+    "seq": 6,
+    "operationId": "op_00mv8iqu8m_ec529b2f64b404542d1eb160",
+    "at": "2026-10-14T19:44:37.271Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 7,
+    "operationId": "missing-log",
+    "at": "2026-10-14T19:44:37.279Z",
+    "event": {
+      "type": "submitted",
+      "repo": "owner/repo",
+      "changeId": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "commitId": "missing",
+      "bookmark": "slipjay/changes/zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "submittedBy": "author"
+    }
+  },
+  {
+    "seq": 8,
+    "operationId": "missing-log",
+    "at": "2026-10-14T19:44:37.279Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 2,
+      "depth": 2,
+      "waitingFor": "op_00mv8iqu8m_ec529b2f64b404542d1eb160",
+      "paused": false
+    }
+  },
+  {
+    "seq": 9,
+    "operationId": "op_00mv8iqu8m_ec529b2f64b404542d1eb160",
+    "at": "2026-10-14T19:44:37.281Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  }
+]

@@ -12,7 +12,7 @@ import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { configureLocalGithubTransport, jj, project } from "./support/workspace-project.ts";
 
-async function fixture(dropStream = false) {
+async function fixture(dropStream = false, racedSubmission = false) {
   const f = await project();
   const transport = await configureLocalGithubTransport(f);
   try {
@@ -36,7 +36,7 @@ async function fixture(dropStream = false) {
     const streamRequests: number[] = [];
     let droppedSeq = 0;
     const route = async (request: Request) => {
-      if (new URL(request.url).pathname.endsWith("/events")) {
+      if (request.method === "GET" && new URL(request.url).pathname.endsWith("/events")) {
         streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
         if (dropStream && streamRequests.length === 1) {
           const operation = log.openOperations()[0]!;
@@ -45,7 +45,12 @@ async function fixture(dropStream = false) {
           return new Response(`data: ${JSON.stringify(stored)}\n\n`, { headers: { "content-type": "text/event-stream" } });
         }
       }
-      return handler(request);
+      const response = await handler(request);
+      if (racedSubmission && request.method === "POST" && new URL(request.url).pathname.endsWith("/operations")) {
+        const body = await response.json() as { operation: Operation; reattached: boolean };
+        return Response.json({ ...body, reattached: true });
+      }
+      return response;
     };
     let server = await serveRunner(route, { host: "127.0.0.1", port: 0 });
     // The runner is unreachable until `back()`, as during a service restart.
@@ -70,6 +75,19 @@ async function fixture(dropStream = false) {
 }
 
 const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 20 });
+
+test("following a server-side submission race records reattachment", async () => {
+  const f = await fixture(false, true);
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    const fact = f.log.events({ operationId: op.id }).find((row) => row.event.type === "client" && row.event.fact.kind === "land_follow")?.event;
+    assert.equal(fact?.type === "client" && fact.fact.kind === "land_follow" && fact.fact.reattached, true);
+    f.append(op.id, { type: "cancelled", reason: "fixture done" });
+    await running;
+  } finally { await f.dispose(); }
+}, 60_000);
 
 test("owner controls say what they did", async () => {
   const f = await fixture();

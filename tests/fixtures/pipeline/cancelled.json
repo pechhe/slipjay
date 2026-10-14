@@ -1,0 +1,82 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8ivq1s_6d0d72993776612e1bdb45c8",
+    "at": "2026-10-14T19:48:25.120Z",
+    "event": {
+      "type": "submitted",
+      "repo": "owner/repo",
+      "changeId": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "commitId": "commit-1",
+      "bookmark": "slipjay/changes/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "submittedBy": "author"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8ivq1s_6d0d72993776612e1bdb45c8",
+    "at": "2026-10-14T19:48:25.120Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "op_00mv8ivq1s_6d0d72993776612e1bdb45c8",
+    "at": "2026-10-14T19:48:25.126Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "cancelled",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8ivq1s_6d0d72993776612e1bdb45c8",
+    "at": "2026-10-14T19:48:25.126Z",
+    "event": {
+      "type": "cancelled",
+      "reason": "cancelled by the author"
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8ivq27_9cdd66ded2cc21ab3c6dff02",
+    "at": "2026-10-14T19:48:25.135Z",
+    "event": {
+      "type": "submitted",
+      "repo": "owner/repo",
+      "changeId": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "commitId": "commit-1",
+      "bookmark": "slipjay/changes/kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk",
+      "submittedBy": "author"
+    }
+  },
+  {
+    "seq": 6,
+    "operationId": "op_00mv8ivq27_9cdd66ded2cc21ab3c6dff02",
+    "at": "2026-10-14T19:48:25.135Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 7,
+    "operationId": "op_00mv8ivq27_9cdd66ded2cc21ab3c6dff02",
+    "at": "2026-10-14T19:48:25.137Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  }
+]

@@ -12,10 +12,3 @@ export function landingTimingLine(timing: Timing): string {
   const parts = stageDurations(timing).map(([stage, ms]) => `${stage} ${seconds(ms)}`);
   return `[land] ${[...parts, `total ${seconds(timing.finishedAt - timing.startedAt)}`].join(" · ")}`;
 }
-
-/** The same figures as `landingTimingLine`, as one metrics record in milliseconds. */
-export function landingTimingRecord(timing: Timing, ok: boolean): { ok: boolean; totalMs: number; stagesMs: Record<string, number> } {
-  const stagesMs: Record<string, number> = {};
-  for (const [stage, ms] of stageDurations(timing)) stagesMs[stage] = (stagesMs[stage] ?? 0) + ms;
-  return { ok, totalMs: timing.finishedAt - timing.startedAt, stagesMs };
-}

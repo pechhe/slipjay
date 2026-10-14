@@ -1,0 +1,1250 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:53.027Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "uvuprzwszqyvolmxnuqnrzwxomlqwosl",
+      "commitId": "395c70627ead57a0b44e20bff8062b3e68289397",
+      "bookmark": "slipjay/changes/uvuprzwszqyvolmxnuqnrzwxomlqwosl",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:53.029Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:53.030Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:53.951Z",
+    "event": {
+      "type": "identity",
+      "submitterKind": "unknown",
+      "submitterId": "test",
+      "workspace": "unknown",
+      "machine": "test"
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.000Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "c744b2f396661249bed8847ce2bfa14146ffa43ffeb27f06f575cf6107e085ed",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 6,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.022Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 992
+    }
+  },
+  {
+    "seq": 7,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.023Z",
+    "event": {
+      "type": "stage",
+      "stage": "rebasing"
+    }
+  },
+  {
+    "seq": 8,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.155Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "c744b2f396661249bed8847ce2bfa14146ffa43ffeb27f06f575cf6107e085ed",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 9,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.155Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "rebasing",
+      "durationMs": 132,
+      "conflict": false,
+      "files": []
+    }
+  },
+  {
+    "seq": 10,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.156Z",
+    "event": {
+      "type": "stage",
+      "stage": "installing"
+    }
+  },
+  {
+    "seq": 11,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.177Z",
+    "event": {
+      "type": "progress",
+      "line": "[deps] preparing frozen candidate dependencies"
+    }
+  },
+  {
+    "seq": 12,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.304Z",
+    "event": {
+      "type": "progress",
+      "line": "[migration] node -e const fs=require(\"node:fs\");fs.mkdirSync(\"migrations\",{recursive:true});const n=fs.readdirSync(\"migrations\").length+1;fs.writeFileSync(\"migrations/\"+String(n).padStart(4,\"0\")+\".sql\",(fs.existsSync(\"schema/drop\")?\"drop table t;\\n\":\"\")+\"-- \"+n+\"\\n\");"
+    }
+  },
+  {
+    "seq": 13,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.305Z",
+    "event": {
+      "type": "run_started",
+      "runId": "36e316e3-a890-4ea8-bfd2-f0fd26958ec5",
+      "command": "node -e const fs=require(\"node:fs\");fs.mkdirSync(\"migrations\",{recursive:true});const n=fs.readdirSync(\"migrations\").length+1;fs.writeFileSync(\"migrations/\"+String(n).padStart(4,\"0\")+\".sql\",(fs.existsSync(\"schema/drop\")?\"drop table t;\\n\":\"\")+\"-- \"+n+\"\\n\");",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "migration_generate"
+    }
+  },
+  {
+    "seq": 14,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.387Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "36e316e3-a890-4ea8-bfd2-f0fd26958ec5",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 80,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 15,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.498Z",
+    "event": {
+      "type": "progress",
+      "line": "[migration] node -e "
+    }
+  },
+  {
+    "seq": 16,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.498Z",
+    "event": {
+      "type": "run_started",
+      "runId": "e3e5cf45-e453-40db-9e1f-2003e2cdfbde",
+      "command": "node -e ",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "migration_verify"
+    }
+  },
+  {
+    "seq": 17,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.572Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "e3e5cf45-e453-40db-9e1f-2003e2cdfbde",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 74,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 18,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.709Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "installing",
+      "durationMs": 553,
+      "installSource": "fresh"
+    }
+  },
+  {
+    "seq": 19,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.710Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  },
+  {
+    "seq": 20,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.710Z",
+    "event": {
+      "type": "verification_base",
+      "base": "47ebc07a23d01c10322e582d44ee643cb6db2635"
+    }
+  },
+  {
+    "seq": 21,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.760Z",
+    "event": {
+      "type": "change_shape",
+      "files": 2,
+      "insertions": 2,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "442a3a81bceac2e184ed93eac265fc1706306ac4220fea5a34413852f66a498e",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 22,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.762Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }"
+    }
+  },
+  {
+    "seq": 23,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.762Z",
+    "event": {
+      "type": "run_started",
+      "runId": "d0eef4b9-490b-4e60-aeb0-f2a5366ab12c",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "gate"
+    }
+  },
+  {
+    "seq": 24,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.826Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "d0eef4b9-490b-4e60-aeb0-f2a5366ab12c",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 64,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 25,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.828Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] passed in 0.1s"
+    }
+  },
+  {
+    "seq": 26,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.829Z",
+    "event": {
+      "type": "verification_passed",
+      "base": "47ebc07a23d01c10322e582d44ee643cb6db2635",
+      "candidate": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69"
+    }
+  },
+  {
+    "seq": 27,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.969Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "verifying",
+      "durationMs": 259
+    }
+  },
+  {
+    "seq": 28,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:54.970Z",
+    "event": {
+      "type": "stage",
+      "stage": "integrating"
+    }
+  },
+  {
+    "seq": 29,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.170Z",
+    "event": {
+      "type": "integrated",
+      "base": "47ebc07a23d01c10322e582d44ee643cb6db2635",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69"
+    }
+  },
+  {
+    "seq": 30,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.171Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "integrating",
+      "durationMs": 201
+    }
+  },
+  {
+    "seq": 31,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.171Z",
+    "event": {
+      "type": "stage",
+      "stage": "finalizing"
+    }
+  },
+  {
+    "seq": 32,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.463Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 292
+    }
+  },
+  {
+    "seq": 33,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.464Z",
+    "event": {
+      "type": "stage",
+      "stage": "publishing"
+    }
+  },
+  {
+    "seq": 34,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.583Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 0,
+      "migrateDurationMs": 291
+    }
+  },
+  {
+    "seq": 35,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.584Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 0,
+      "pushDurationMs": 120,
+      "remoteMoved": false
+    }
+  },
+  {
+    "seq": 36,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.586Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 0,
+      "durationMs": 0,
+      "published": false
+    }
+  },
+  {
+    "seq": 37,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.586Z",
+    "event": {
+      "type": "integration_held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "reason": "Push of main to origin failed: Changes to push to origin:\n  bookmark: main [move forward from 47ebc07a23d0 to 4efecdda7ba2]\nremote: remote unavailable        \nWarning: The remote rejected the following updates:\n  refs/heads/main (reason: pre-receive hook declined)\nHint: Try checking if you have permission to push to all the bookmarks.\nError: Failed to push some bookmarks. The local integration is kept; rerun land to retry the push.\nThe runner holds 4efecdda7ba2, integrated but not published, and retries it before the next landing."
+    }
+  },
+  {
+    "seq": 38,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.586Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 122
+    }
+  },
+  {
+    "seq": 39,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.796Z",
+    "event": {
+      "type": "progress",
+      "line": "Candidate bookmark cleanup failed: jj --color=never git push failed: Changes to push to origin:\n  bookmark: slipjay/changes/uvuprzwszqyvolmxnuqnrzwxomlqwosl [delete from 395c70627ead]\nremote: remote unavailable        \nWarning: The remote rejected the following updates:\n  refs/heads/slipjay/changes/uvuprzwszqyvolmxnuqnrzwxomlqwosl (reason: pre-receive hook declined)\nHint: Try checking if you have permission to push to all the bookmarks.\nError: Failed to push some bookmarks"
+    }
+  },
+  {
+    "seq": 40,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.872Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "held",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 41,
+    "operationId": "op_00mv8j5bnm_af2dc181b3d119d4a34ca649",
+    "at": "2026-10-14T19:55:55.872Z",
+    "event": {
+      "type": "failed",
+      "stage": "publishing",
+      "reason": "Push of main to origin failed: Changes to push to origin:\n  bookmark: main [move forward from 47ebc07a23d0 to 4efecdda7ba2]\nremote: remote unavailable        \nWarning: The remote rejected the following updates:\n  refs/heads/main (reason: pre-receive hook declined)\nHint: Try checking if you have permission to push to all the bookmarks.\nError: Failed to push some bookmarks. The local integration is kept; rerun land to retry the push.\nThe runner holds 4efecdda7ba2, integrated but not published, and retries it before the next landing."
+    }
+  },
+  {
+    "seq": 42,
+    "operationId": "runner",
+    "at": "2026-10-14T19:55:55.962Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 0,
+      "durationMs": 376,
+      "published": true
+    }
+  },
+  {
+    "seq": 43,
+    "operationId": "runner",
+    "at": "2026-10-14T19:55:55.962Z",
+    "event": {
+      "type": "integration_recovered",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69"
+    }
+  },
+  {
+    "seq": 44,
+    "operationId": "runner",
+    "at": "2026-10-14T19:55:56.088Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 0,
+      "durationMs": 0,
+      "published": false
+    }
+  },
+  {
+    "seq": 45,
+    "operationId": "runner",
+    "at": "2026-10-14T19:55:56.088Z",
+    "event": {
+      "type": "integration_held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "reason": "Publication of the retained integration is unconfirmed after restart"
+    }
+  },
+  {
+    "seq": 46,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.144Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "yqqsmlvqvnxnukrrprpqwwxmnzroznou",
+      "commitId": "850c93afab982820c438e2370c509914c0a32379",
+      "bookmark": "slipjay/changes/yqqsmlvqvnxnukrrprpqwwxmnzroznou",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 47,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.144Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 48,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.144Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 49,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.380Z",
+    "event": {
+      "type": "progress",
+      "line": "Finishing 4efecdda7ba2, integrated by an earlier landing but not yet published"
+    }
+  },
+  {
+    "seq": 50,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.381Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 237
+    }
+  },
+  {
+    "seq": 51,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.381Z",
+    "event": {
+      "type": "stage",
+      "stage": "finalizing"
+    }
+  },
+  {
+    "seq": 52,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.441Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 60
+    }
+  },
+  {
+    "seq": 53,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.442Z",
+    "event": {
+      "type": "stage",
+      "stage": "publishing"
+    }
+  },
+  {
+    "seq": 54,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.561Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 0,
+      "migrateDurationMs": 60
+    }
+  },
+  {
+    "seq": 55,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.562Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 0,
+      "pushDurationMs": 120,
+      "remoteMoved": false
+    }
+  },
+  {
+    "seq": 56,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.563Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 1,
+      "durationMs": 475,
+      "published": false
+    }
+  },
+  {
+    "seq": 57,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.563Z",
+    "event": {
+      "type": "integration_held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "reason": "Push of main to origin failed: Changes to push to origin:\n  bookmark: main [move forward from 47ebc07a23d0 to 4efecdda7ba2]\nremote: remote unavailable        \nWarning: The remote rejected the following updates:\n  refs/heads/main (reason: pre-receive hook declined)\nHint: Try checking if you have permission to push to all the bookmarks.\nError: Failed to push some bookmarks. The local integration is kept; rerun land to retry the push.\nThe runner holds 4efecdda7ba2, integrated but not published, and retries it before the next landing."
+    }
+  },
+  {
+    "seq": 58,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.563Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 121
+    }
+  },
+  {
+    "seq": 59,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.809Z",
+    "event": {
+      "type": "progress",
+      "line": "Candidate bookmark cleanup failed: jj --color=never git push failed: Changes to push to origin:\n  bookmark: slipjay/changes/yqqsmlvqvnxnukrrprpqwwxmnzroznou [delete from 850c93afab98]\nremote: remote unavailable        \nWarning: The remote rejected the following updates:\n  refs/heads/slipjay/changes/yqqsmlvqvnxnukrrprpqwwxmnzroznou (reason: pre-receive hook declined)\nHint: Try checking if you have permission to push to all the bookmarks.\nError: Failed to push some bookmarks"
+    }
+  },
+  {
+    "seq": 60,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.888Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "held",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 61,
+    "operationId": "op_00mv8j5e27_56bea700997aab905b1d7af4",
+    "at": "2026-10-14T19:55:56.888Z",
+    "event": {
+      "type": "failed",
+      "stage": "publishing",
+      "reason": "Push of main to origin failed: Changes to push to origin:\n  bookmark: main [move forward from 47ebc07a23d0 to 4efecdda7ba2]\nremote: remote unavailable        \nWarning: The remote rejected the following updates:\n  refs/heads/main (reason: pre-receive hook declined)\nHint: Try checking if you have permission to push to all the bookmarks.\nError: Failed to push some bookmarks. The local integration is kept; rerun land to retry the push.\nThe runner holds 4efecdda7ba2, integrated but not published, and retries it before the next landing."
+    }
+  },
+  {
+    "seq": 62,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:56.898Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "uvuprzwszqyvolmxnuqnrzwxomlqwosl",
+      "commitId": "395c70627ead57a0b44e20bff8062b3e68289397",
+      "bookmark": "slipjay/changes/uvuprzwszqyvolmxnuqnrzwxomlqwosl",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 63,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:56.899Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 64,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:56.899Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 65,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.189Z",
+    "event": {
+      "type": "progress",
+      "line": "Finishing 4efecdda7ba2, integrated by an earlier landing but not yet published"
+    }
+  },
+  {
+    "seq": 66,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.189Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 290
+    }
+  },
+  {
+    "seq": 67,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.189Z",
+    "event": {
+      "type": "stage",
+      "stage": "finalizing"
+    }
+  },
+  {
+    "seq": 68,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.265Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 76
+    }
+  },
+  {
+    "seq": 69,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.266Z",
+    "event": {
+      "type": "stage",
+      "stage": "publishing"
+    }
+  },
+  {
+    "seq": 70,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.395Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 0,
+      "migrateDurationMs": 76
+    }
+  },
+  {
+    "seq": 71,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.396Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 0,
+      "pushDurationMs": 130,
+      "remoteMoved": false
+    }
+  },
+  {
+    "seq": 72,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.398Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 2,
+      "durationMs": 1310,
+      "published": true
+    }
+  },
+  {
+    "seq": 73,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.398Z",
+    "event": {
+      "type": "integration_recovered",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retried": true
+    }
+  },
+  {
+    "seq": 74,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.398Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 132
+    }
+  },
+  {
+    "seq": 75,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.398Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 76,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.557Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 159
+    }
+  },
+  {
+    "seq": 77,
+    "operationId": "op_00mv8j5en6_62edd5613113881f237fe988",
+    "at": "2026-10-14T19:55:57.843Z",
+    "event": {
+      "type": "landed",
+      "base": "47ebc07a23d01c10322e582d44ee643cb6db2635",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "branch": "main",
+      "remote": "origin"
+    }
+  },
+  {
+    "seq": 78,
+    "operationId": "runner",
+    "at": "2026-10-14T19:55:57.877Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 0,
+      "durationMs": 0,
+      "published": false
+    }
+  },
+  {
+    "seq": 79,
+    "operationId": "runner",
+    "at": "2026-10-14T19:55:57.877Z",
+    "event": {
+      "type": "integration_held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "reason": "Recorded before external publication was observed"
+    }
+  },
+  {
+    "seq": 80,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:57.877Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "yqqsmlvqvnxnukrrprpqwwxmnzroznou",
+      "commitId": "850c93afab982820c438e2370c509914c0a32379",
+      "bookmark": "slipjay/changes/yqqsmlvqvnxnukrrprpqwwxmnzroznou",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 81,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:57.877Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 82,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:57.878Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 83,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.084Z",
+    "event": {
+      "type": "held",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "retries": 0,
+      "durationMs": 207,
+      "published": true
+    }
+  },
+  {
+    "seq": 84,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.084Z",
+    "event": {
+      "type": "integration_recovered",
+      "repo": "fixture/repo",
+      "commitId": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69"
+    }
+  },
+  {
+    "seq": 85,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.519Z",
+    "event": {
+      "type": "identity",
+      "submitterKind": "unknown",
+      "submitterId": "test",
+      "workspace": "unknown",
+      "machine": "test"
+    }
+  },
+  {
+    "seq": 86,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.569Z",
+    "event": {
+      "type": "change_shape",
+      "files": 3,
+      "insertions": 1,
+      "deletions": 1,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "dc54ddbea76d753eaffc75100532c97edbb999f9d6fa54cdc9c2bb48050cf82a",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 87,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.591Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 713
+    }
+  },
+  {
+    "seq": 88,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.592Z",
+    "event": {
+      "type": "stage",
+      "stage": "rebasing"
+    }
+  },
+  {
+    "seq": 89,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.809Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "91d828799c127d1742185635c3d650944f3c2129ead5586f21e4e3b3afdb4267",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 90,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.809Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "rebasing",
+      "durationMs": 217,
+      "conflict": false,
+      "files": []
+    }
+  },
+  {
+    "seq": 91,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.809Z",
+    "event": {
+      "type": "stage",
+      "stage": "installing"
+    }
+  },
+  {
+    "seq": 92,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.831Z",
+    "event": {
+      "type": "progress",
+      "line": "[deps] preparing frozen candidate dependencies"
+    }
+  },
+  {
+    "seq": 93,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.985Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "installing",
+      "durationMs": 176,
+      "installSource": "fresh"
+    }
+  },
+  {
+    "seq": 94,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.986Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  },
+  {
+    "seq": 95,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:58.986Z",
+    "event": {
+      "type": "verification_base",
+      "base": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69"
+    }
+  },
+  {
+    "seq": 96,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.036Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "91d828799c127d1742185635c3d650944f3c2129ead5586f21e4e3b3afdb4267",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 97,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.037Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }"
+    }
+  },
+  {
+    "seq": 98,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.037Z",
+    "event": {
+      "type": "run_started",
+      "runId": "ba559c63-27e0-46a2-b255-dc3f7e2e878c",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "gate"
+    }
+  },
+  {
+    "seq": 99,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.099Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "ba559c63-27e0-46a2-b255-dc3f7e2e878c",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 62,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 100,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.100Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] passed in 0.1s"
+    }
+  },
+  {
+    "seq": 101,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.101Z",
+    "event": {
+      "type": "verification_passed",
+      "base": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "candidate": "45e5d23d5d640ba6f16537e07459ff8b51740150"
+    }
+  },
+  {
+    "seq": 102,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.242Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "verifying",
+      "durationMs": 256
+    }
+  },
+  {
+    "seq": 103,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.243Z",
+    "event": {
+      "type": "stage",
+      "stage": "integrating"
+    }
+  },
+  {
+    "seq": 104,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.432Z",
+    "event": {
+      "type": "integrated",
+      "base": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "commitId": "45e5d23d5d640ba6f16537e07459ff8b51740150"
+    }
+  },
+  {
+    "seq": 105,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.433Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "integrating",
+      "durationMs": 190
+    }
+  },
+  {
+    "seq": 106,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.433Z",
+    "event": {
+      "type": "stage",
+      "stage": "finalizing"
+    }
+  },
+  {
+    "seq": 107,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.635Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 202
+    }
+  },
+  {
+    "seq": 108,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.636Z",
+    "event": {
+      "type": "stage",
+      "stage": "publishing"
+    }
+  },
+  {
+    "seq": 109,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.765Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 0,
+      "migrateDurationMs": 201
+    }
+  },
+  {
+    "seq": 110,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.766Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 0,
+      "pushDurationMs": 130,
+      "remoteMoved": false
+    }
+  },
+  {
+    "seq": 111,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:55:59.767Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 131
+    }
+  },
+  {
+    "seq": 112,
+    "operationId": "op_00mv8j5fed_02274fdfa00e3e1ca13b0add",
+    "at": "2026-10-14T19:56:00.048Z",
+    "event": {
+      "type": "landed",
+      "base": "4efecdda7ba2b78e1ee845402bf8b3e6452c1e69",
+      "commitId": "45e5d23d5d640ba6f16537e07459ff8b51740150",
+      "branch": "main",
+      "remote": "origin"
+    }
+  }
+]

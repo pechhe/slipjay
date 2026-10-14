@@ -1,0 +1,115 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8irync_86db3cbbaaf6c1d1aacad7c2",
+    "at": "2026-10-14T19:45:29.640Z",
+    "event": {
+      "type": "submitted",
+      "repo": "unknown/repo",
+      "changeId": "lwkxqzruzpknzkllksptrzuouwnnwswo",
+      "commitId": "9e5b2157d1107e5e97ce6217f73d25692fd0ef0f",
+      "bookmark": "slipjay/changes/lwkxqzruzpknzkllksptrzuouwnnwswo",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8irync_86db3cbbaaf6c1d1aacad7c2",
+    "at": "2026-10-14T19:45:29.640Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "op_00mv8irynd_0de59e4d4daf529a561c8050",
+    "at": "2026-10-14T19:45:29.641Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "lwkxqzruzpknzkllksptrzuouwnnwswo",
+      "commitId": "ffffffffffffffffffffffffffffffffffffffff",
+      "bookmark": "slipjay/changes/lwkxqzruzpknzkllksptrzuouwnnwswo",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8irynd_0de59e4d4daf529a561c8050",
+    "at": "2026-10-14T19:45:29.641Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 2,
+      "depth": 2,
+      "waitingFor": "op_00mv8irync_86db3cbbaaf6c1d1aacad7c2",
+      "paused": false
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8irync_86db3cbbaaf6c1d1aacad7c2",
+    "at": "2026-10-14T19:45:29.642Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "infrastructure",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 6,
+    "operationId": "op_00mv8irync_86db3cbbaaf6c1d1aacad7c2",
+    "at": "2026-10-14T19:45:29.642Z",
+    "event": {
+      "type": "failed",
+      "stage": "queued",
+      "reason": "Repository unknown/repo is not configured on this runner"
+    }
+  },
+  {
+    "seq": 7,
+    "operationId": "op_00mv8irynd_0de59e4d4daf529a561c8050",
+    "at": "2026-10-14T19:45:29.648Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 8,
+    "operationId": "op_00mv8irynd_0de59e4d4daf529a561c8050",
+    "at": "2026-10-14T19:45:30.663Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 1015
+    }
+  },
+  {
+    "seq": 9,
+    "operationId": "op_00mv8irynd_0de59e4d4daf529a561c8050",
+    "at": "2026-10-14T19:45:31.075Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "infrastructure",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 10,
+    "operationId": "op_00mv8irynd_0de59e4d4daf529a561c8050",
+    "at": "2026-10-14T19:45:31.075Z",
+    "event": {
+      "type": "failed",
+      "stage": "fetching",
+      "reason": "Candidate bookmark slipjay/changes/lwkxqzruzpknzkllksptrzuouwnnwswo does not resolve to submitted commit ffffffffffffffffffffffffffffffffffffffff"
+    }
+  }
+]

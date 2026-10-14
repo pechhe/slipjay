@@ -172,6 +172,8 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). |
 | `start [--integration] [--issue <n>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`); `--refill` then starts a background spare refill (a claimed spare is always refilled); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`) and sends all install output to stderr. |
 | `preview` | Diffstat of what a landing would integrate. |
+| `record-preview <port>` | Record a host's started workspace preview in the runner ledger. |
+| `metrics [--since <ISO date>]` | Pipeline outcomes, causes, stage and queue percentiles, held integrations, attempts and flake candidates from the runner ledger. |
 | `land [--direct]` | Send the current workspace (or, with `--direct`, the primary checkout) to the runner, which verifies, integrates and publishes it (see [Runner](#runner)); without a runner location it refuses. Afterwards it removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
 | `promote [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
@@ -475,11 +477,47 @@ verify refused, so nothing was applied.
 4. It pushes the release branch, refusing if the remote moved since the plan. The
    runner's operation log records the release.
 
-`land` and `promote --confirm` each append one line to
-`~/.slipjay/state/metrics/landings.jsonl` or `releases.jsonl` on the machine that
-ran the command: for a landing, stage durations in milliseconds (`queued` is time
-waiting for another landing's slot) and the outcome; for a release, the outcome
-and its total time.
+The runner's append-only SQLite operation log is the pipeline ledger. `land` keeps
+its timing line on stderr; `landings.jsonl` and `releases.jsonl` are no longer written.
+`slipjay metrics [--since <ISO date>]` reads that ledger and prints outcomes, cause
+classes, median and p90 stage and command durations, active and paused queue waits,
+held integrations, attempts per change, and flake candidates. The default range
+starts at midnight UTC today. Older operations retain their original evidence;
+missing instrumentation is not synthesized as a measured fact.
+
+Cause rules in `src/lib/failure-classification.ts` carry their version on every
+`classified` event: `gate` for a failed verification, `conflict` for a rebase
+conflict, `infrastructure` for fetch/install/executor problems or a timeout before
+test execution, `policy` for declined paths, `killed` for the owner's kill,
+`paused_out` for cancellation during a pause, `held` for incomplete finalization
+or publication after integration, and `superseded` or `cancelled`. A gate failure
+on a new base links an earlier verified attempt of the unchanged submission.
+Recurrence is projected from evidence, never written back into historical facts.
+A flake candidate needs the same named test and command to fail in different
+changes in the selected window. It is confirmed when a later successful run of
+the same command in the same repository uses an unchanged source tree from a
+failed run. Candidate and confirmation are reported separately.
+
+The authenticated `GET /v1/metrics/events?since=<seq>&limit=<1..1000>` exports
+events in global sequence order, returning `events`, `nextSeq` and `hasMore`.
+`POST /v1/operations/:id/events` accepts only bounded client facts with a caller's
+event `id`; repeating that id returns the original event. Clients cannot post
+runner stages, results or classifications. Workspace starts and pool claims use
+attributed client operations, created by `POST /v1/client-operations`; `land`
+records following and reattachment on its landing operation. Hosts may call the
+public `recordClientFacts` library export for preview and transport observations,
+or `slipjay record-preview <port>` after starting a workspace preview. These
+observations never enter the landing queue.
+
+SSH forwarding failures in an assigned workspace are retained as pending delivery
+fields in its existing metadata until the same runner address can be reached.
+Delivery reuses a stable event ID and its client-operation ID after an interrupted
+acknowledgement. Pending facts keep the workspace from being removed. The runner
+log remains the ledger; metadata is cleared after acknowledgement. A command run
+without isolated workspace metadata reports when durable retention is unavailable.
+Migration generation and migration verification carry distinct typed `purpose`
+values on their command runs; source-tree evidence is taken after generation,
+immediately before the gate.
 
 A promotion's migration artifacts are applied by the runner (see Production
 migrations under Deploys): its production deployment must declare `migrations`, and

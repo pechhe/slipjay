@@ -58,4 +58,5 @@ export type { ExecutionPolicy } from "./execution-policy.ts";
 export type { PostIntegrationInput, PostIntegrationResult } from "./post-integration-finalization.ts";
 export type { BoundedProcessRequest, BoundedProcessResult, ProcessBroker } from "./bounded-process.ts";
 
-export { landThroughRunner, runnerLocation } from "./runner-client.ts";
+export { landThroughRunner, runnerLocation, recordClientFacts, readMetricsEvents } from "./runner-client.ts";
+export type { CauseClass, ClassifiedFact, ClientFact, OperationEvent, StoredEvent } from "./runner-contract.ts";

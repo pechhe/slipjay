@@ -1,0 +1,590 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:11.326Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "nlxkvquvskoysnrtrrmnmowlupuvqlyy",
+      "commitId": "2bdc5aa5c7650aaec63b5e98ed7d7c6ac35ae116",
+      "bookmark": "slipjay/changes/nlxkvquvskoysnrtrrmnmowlupuvqlyy",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:11.327Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:11.327Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.589Z",
+    "event": {
+      "type": "identity",
+      "submitterKind": "unknown",
+      "submitterId": "test",
+      "workspace": "unknown",
+      "machine": "test"
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.637Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "9168908899985b52466c38166c41ec2e4031c689de8a10ddf476a375903be23c",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 6,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.660Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 1333
+    }
+  },
+  {
+    "seq": 7,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.661Z",
+    "event": {
+      "type": "stage",
+      "stage": "rebasing"
+    }
+  },
+  {
+    "seq": 8,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.810Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "9168908899985b52466c38166c41ec2e4031c689de8a10ddf476a375903be23c",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 9,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.811Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "rebasing",
+      "durationMs": 150,
+      "conflict": false,
+      "files": []
+    }
+  },
+  {
+    "seq": 10,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.811Z",
+    "event": {
+      "type": "stage",
+      "stage": "installing"
+    }
+  },
+  {
+    "seq": 11,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.835Z",
+    "event": {
+      "type": "progress",
+      "line": "[deps] preparing frozen candidate dependencies"
+    }
+  },
+  {
+    "seq": 12,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.988Z",
+    "event": {
+      "type": "progress",
+      "line": "[migration] node -e const fs=require(\"node:fs\");fs.mkdirSync(\"migrations\",{recursive:true});const n=fs.readdirSync(\"migrations\").length+1;fs.writeFileSync(\"migrations/\"+String(n).padStart(4,\"0\")+\".sql\",(fs.existsSync(\"schema/drop\")?\"drop table t;\\n\":\"\")+\"-- \"+n+\"\\n\");"
+    }
+  },
+  {
+    "seq": 13,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:12.989Z",
+    "event": {
+      "type": "run_started",
+      "runId": "5e55a2f9-f036-4aa6-9d63-fd9ff9ee9809",
+      "command": "node -e const fs=require(\"node:fs\");fs.mkdirSync(\"migrations\",{recursive:true});const n=fs.readdirSync(\"migrations\").length+1;fs.writeFileSync(\"migrations/\"+String(n).padStart(4,\"0\")+\".sql\",(fs.existsSync(\"schema/drop\")?\"drop table t;\\n\":\"\")+\"-- \"+n+\"\\n\");",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "migration_generate"
+    }
+  },
+  {
+    "seq": 14,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.048Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "5e55a2f9-f036-4aa6-9d63-fd9ff9ee9809",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 59,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 15,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.188Z",
+    "event": {
+      "type": "progress",
+      "line": "[migration] node -e "
+    }
+  },
+  {
+    "seq": 16,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.189Z",
+    "event": {
+      "type": "run_started",
+      "runId": "e98967a8-6aa6-461e-a4ec-89a29c98798c",
+      "command": "node -e ",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "migration_verify"
+    }
+  },
+  {
+    "seq": 17,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.253Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "e98967a8-6aa6-461e-a4ec-89a29c98798c",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 64,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 18,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.384Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "installing",
+      "durationMs": 573,
+      "installSource": "fresh"
+    }
+  },
+  {
+    "seq": 19,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.385Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  },
+  {
+    "seq": 20,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.385Z",
+    "event": {
+      "type": "verification_base",
+      "base": "ad62368d88c16fa382d22615f9e5b7aadd5b2283"
+    }
+  },
+  {
+    "seq": 21,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.432Z",
+    "event": {
+      "type": "change_shape",
+      "files": 2,
+      "insertions": 2,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "8e19e52dc21f52fdf2443014e13c313ef76fe69796b81460dab0ce5d8473390c",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 22,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.433Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }"
+    }
+  },
+  {
+    "seq": 23,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.434Z",
+    "event": {
+      "type": "run_started",
+      "runId": "b32dd1a2-caa8-4678-901f-eff3e8e0171f",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "gate"
+    }
+  },
+  {
+    "seq": 24,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.493Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "b32dd1a2-caa8-4678-901f-eff3e8e0171f",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 59,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 25,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.494Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] passed in 0.1s"
+    }
+  },
+  {
+    "seq": 26,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.494Z",
+    "event": {
+      "type": "verification_passed",
+      "base": "ad62368d88c16fa382d22615f9e5b7aadd5b2283",
+      "candidate": "1b9da92b93acc583612a6cff600e5997fbb62d1e"
+    }
+  },
+  {
+    "seq": 27,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.622Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "verifying",
+      "durationMs": 237
+    }
+  },
+  {
+    "seq": 28,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.623Z",
+    "event": {
+      "type": "stage",
+      "stage": "integrating"
+    }
+  },
+  {
+    "seq": 29,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.867Z",
+    "event": {
+      "type": "integrated",
+      "base": "ad62368d88c16fa382d22615f9e5b7aadd5b2283",
+      "commitId": "1b9da92b93acc583612a6cff600e5997fbb62d1e"
+    }
+  },
+  {
+    "seq": 30,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.868Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "integrating",
+      "durationMs": 245
+    }
+  },
+  {
+    "seq": 31,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:13.869Z",
+    "event": {
+      "type": "stage",
+      "stage": "finalizing"
+    }
+  },
+  {
+    "seq": 32,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:14.141Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 272
+    }
+  },
+  {
+    "seq": 33,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:14.141Z",
+    "event": {
+      "type": "stage",
+      "stage": "publishing"
+    }
+  },
+  {
+    "seq": 34,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:14.299Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 0,
+      "migrateDurationMs": 272
+    }
+  },
+  {
+    "seq": 35,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:14.300Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 0,
+      "pushDurationMs": 158,
+      "remoteMoved": false
+    }
+  },
+  {
+    "seq": 36,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:14.302Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 161
+    }
+  },
+  {
+    "seq": 37,
+    "operationId": "op_00mv8irkim_f9297c7761f12e9a80105be1",
+    "at": "2026-10-14T19:45:14.619Z",
+    "event": {
+      "type": "landed",
+      "base": "ad62368d88c16fa382d22615f9e5b7aadd5b2283",
+      "commitId": "1b9da92b93acc583612a6cff600e5997fbb62d1e",
+      "branch": "main",
+      "remote": "origin"
+    }
+  },
+  {
+    "seq": 38,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:15.292Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "psntplpxzupxzswkvsyomzppplylmyxq",
+      "commitId": "743c5a07c16b8ad92684da1e51cdda355444d25c",
+      "bookmark": "slipjay/changes/psntplpxzupxzswkvsyomzppplylmyxq",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 39,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:15.292Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 40,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:15.293Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 41,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.067Z",
+    "event": {
+      "type": "identity",
+      "submitterKind": "unknown",
+      "submitterId": "test",
+      "workspace": "unknown",
+      "machine": "test"
+    }
+  },
+  {
+    "seq": 42,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.116Z",
+    "event": {
+      "type": "change_shape",
+      "files": 3,
+      "insertions": 1,
+      "deletions": 1,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "0046bf31fea217465ddc04151e7de16a65a3b6b518b8ebef22d79b384884ca9e",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 43,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.137Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 844
+    }
+  },
+  {
+    "seq": 44,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.138Z",
+    "event": {
+      "type": "stage",
+      "stage": "rebasing"
+    }
+  },
+  {
+    "seq": 45,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.351Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": true,
+      "testFiles": [],
+      "fileSet": "bf3e223e7e8097785030bc55c4fdb4801046cf2b4005c0c6415218ce244ffda2",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 46,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.352Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "rebasing",
+      "durationMs": 214,
+      "conflict": false,
+      "files": []
+    }
+  },
+  {
+    "seq": 47,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.352Z",
+    "event": {
+      "type": "stage",
+      "stage": "installing"
+    }
+  },
+  {
+    "seq": 48,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.374Z",
+    "event": {
+      "type": "progress",
+      "line": "[deps] preparing frozen candidate dependencies"
+    }
+  },
+  {
+    "seq": 49,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.440Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "installing",
+      "durationMs": 88,
+      "installSource": "fresh"
+    }
+  },
+  {
+    "seq": 50,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.771Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "policy",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 51,
+    "operationId": "op_00mv8irnkr_cf1227db896da762ab3ff215",
+    "at": "2026-10-14T19:45:16.771Z",
+    "event": {
+      "type": "failed",
+      "stage": "installing",
+      "reason": "Late-bound migration artifacts must be generated during landing, not committed in the semantic candidate"
+    }
+  }
+]

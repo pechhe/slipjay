@@ -3,13 +3,27 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { candidateBookmark } from "../src/lib/runner-contract.ts";
+import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
 import type { OperationEvent } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 
 function submission(repo = "owner/repo", changeId = "k".repeat(32), commitId = "commit"): OperationEvent {
   return { type: "submitted", repo, changeId, commitId, bookmark: candidateBookmark(changeId), submittedBy: "author" };
 }
+
+test("a successful retry is counted separately from observing external publication", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append("failed", { type: "integration_held", repo: "owner/repo", commitId: "first", reason: "push failed" });
+    log.append("retry", { type: "integration_recovered", repo: "owner/repo", commitId: "first", retried: true });
+    const retried = log.events({ operationId: "retry" }).find((row) => row.event.type === "held")?.event;
+    assert.equal(retried?.type === "held" && retried.retries, 1);
+    log.append("failed", { type: "integration_held", repo: "owner/repo", commitId: "second", reason: "publication unknown" });
+    log.append("runner", { type: "integration_recovered", repo: "owner/repo", commitId: "second" });
+    const observed = log.events({ operationId: "runner" }).find((row) => row.event.type === "held")?.event;
+    assert.equal(observed?.type === "held" && observed.retries, 0);
+  } finally { log.close(); }
+});
 
 test("operation log projects stages, command runs and the latest terminal result", () => {
   const log = openOperationLog(":memory:");
@@ -31,7 +45,7 @@ test("operation log projects stages, command runs and the latest terminal result
       status: "landed", stage: "publishing", submittedAt: submitted.at, finishedAt: landed.at,
       runs: [
         { runId: "run-1", command: "bun run check", host: "localhost", startedAt: started.at, finishedAt: finished.at, exitCode: 0, signal: null, timedOut: false, durationMs: 50 },
-        { runId: "run-2", command: "git push", host: "remote", startedAt: log.events({ operationId: id })[5]!.at },
+        { runId: "run-2", command: "git push", host: "remote", startedAt: log.events({ operationId: id }).find((row) => row.event.type === "run_started" && row.event.runId === "run-2")!.at },
       ],
       result: landed.event, lastSeq: landed.seq,
     });
@@ -39,7 +53,12 @@ test("operation log projects stages, command runs and the latest terminal result
     assert.equal(log.operation(id)?.status, "failed");
     assert.deepEqual(log.operation(id)?.result, failed.event);
     assert.equal(log.operation(id)?.finishedAt, failed.at);
-    assert.deepEqual(log.events({ operationId: id, afterSeq: landed.seq }), [failed]);
+    const terminalEvents = log.events({ operationId: id, afterSeq: landed.seq });
+    assert.deepEqual(terminalEvents.map((row) => row.event.type), ["classified", "failed"]);
+    assert.deepEqual(terminalEvents[0]?.event, {
+      type: "classified", ruleVersion: 1, cause: "infrastructure", command: "git push", failingTests: [], diagnostics: [],
+    });
+    assert.deepEqual(terminalEvents[1], failed);
     assert.deepEqual(log.openOperations(), []);
   } finally {
     log.close();
@@ -99,11 +118,14 @@ test("file log preserves every appended event and increasing global sequence acr
     assert.ok(second.seq > first.seq);
     log.close();
     log = openOperationLog(path);
-    assert.deepEqual(log.events(), [first, second]);
+    const persisted = log.events();
+    assert.deepEqual(persisted.map((row) => row.event.type), ["submitted", "queue_snapshot", "submitted", "queue_snapshot"]);
+    assert.deepEqual(log.events(), persisted, "derived and direct events survive reopening");
     const third = log.append("one", { type: "superseded", by: "two" });
     assert.ok(third.seq > second.seq);
-    assert.deepEqual(log.events(), [first, second, third]);
-    assert.deepEqual(log.events({ operationId: "one" }), [first, third]);
+    assert.deepEqual(log.events().slice(0, persisted.length), persisted);
+    assert.deepEqual(log.events().slice(-2).map((row) => row.event.type), ["classified", "superseded"]);
+    assert.deepEqual(log.events({ operationId: "one" }).map((row) => row.event.type), ["submitted", "queue_snapshot", "classified", "superseded"]);
   } finally {
     log.close();
     rmSync(directory, { recursive: true, force: true });
@@ -191,7 +213,7 @@ test("atomic watch snapshot includes both lanes, cursor, holds and subscriptions
     assert.equal(snapshot.held[0]?.commitId, "h");
     assert.equal(snapshot.paused, null); // runner control has a reserved operation id
     assert.deepEqual(snapshot.lastSuite, { status: "unavailable" });
-    unsubscribe(); log.append("other", submission()); assert.equal(seen.length, 5);
+    unsubscribe(); log.append("other", submission()); assert.equal(seen.length, 8);
   } finally { log.close(); }
 });
 
@@ -246,4 +268,96 @@ test("snapshot retains a completed production outcome for a new watcher", () => 
     assert.equal(outcome?.id, "production");
     assert.equal(outcome?.result?.type === "failed" && outcome.result.deployment?.rollback?.automatic, true);
   } finally { log.close(); }
+});
+
+test("terminal classifications record versioned killed, paused, superseded and held causes", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    log.append("killed", submission());
+    log.append("killed", { type: "cancelled", reason: OWNER_KILL_REASON });
+    log.append("paused", submission("owner/repo", "z".repeat(32)));
+    log.append("paused", { type: "cancelled", reason: "cancelled while the runner was paused" });
+    log.append("superseded", submission("owner/repo", "y".repeat(32)));
+    log.append("superseded", { type: "superseded", by: "newer" });
+    log.append("held", submission("owner/repo", "x".repeat(32)));
+    log.append("held", { type: "integrated", base: "base", commitId: "commit" });
+    log.append("held", { type: "failed", stage: "publishing", reason: "publication was not confirmed" });
+
+    const cause = (id: string) => log.events({ operationId: id }).find((row) => row.event.type === "classified")?.event;
+    for (const [id, expected] of [["killed", "killed"], ["paused", "paused_out"], ["superseded", "superseded"], ["held", "held"]] as const) {
+      assert.deepEqual(cause(id), {
+        type: "classified", ruleVersion: 1, cause: expected, failingTests: [], diagnostics: [],
+      });
+    }
+  } finally { log.close(); }
+});
+
+test("a same-commit retry records when an earlier base passed and the new base failed", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const old = log.append("old-base", submission());
+    log.append("old-base", { type: "verification_base", base: "base-old" });
+    log.append("old-base", { type: "run_started", runId: "old-run", command: "vp test run", host: "runner" });
+    log.append("old-base", { type: "run_finished", runId: "old-run", exitCode: 0, signal: null, timedOut: false, durationMs: 10, testBodyRan: true });
+    log.append("old-base", { type: "verification_passed", base: "base-old", candidate: "commit" });
+    log.append("old-base", { type: "integrated", base: "base-old", commitId: "commit" });
+    log.append("old-base", { type: "failed", stage: "publishing", reason: "publication held" });
+    const current = log.append("new-base", submission());
+    assert.ok(current.seq > old.seq);
+    log.append("new-base", { type: "verification_base", base: "base-new" });
+    log.append("new-base", { type: "stage", stage: "verifying" });
+    log.append("new-base", { type: "run_started", runId: "new-run", command: "vp test run", host: "runner" });
+    log.append("new-base", { type: "run_finished", runId: "new-run", exitCode: 1, signal: null, timedOut: false, durationMs: 12, testBodyRan: true });
+    log.append("new-base", { type: "failed", stage: "verifying", reason: "test failed", command: "vp test run", output: " FAIL tests/plan.test.ts > rejects route" });
+    assert.deepEqual(log.events({ operationId: "new-base" }).find((row) => row.event.type === "classified")?.event, {
+      type: "classified", ruleVersion: 1, cause: "gate", command: "vp test run",
+      failingTests: ["tests/plan.test.ts > rejects route"], diagnostics: [],
+      interaction: { earlierOperation: "old-base", fromBase: "base-old", toBase: "base-new" },
+    });
+  } finally { log.close(); }
+});
+
+test("an incomplete earlier verification run does not establish a passing interaction", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append("interrupted", submission());
+    log.append("interrupted", { type: "verification_base", base: "base-old" });
+    log.append("interrupted", { type: "run_started", runId: "check-1", command: "vp test run", host: "runner" });
+    log.append("interrupted", { type: "run_finished", runId: "check-1", exitCode: 0, signal: null, timedOut: false, durationMs: 10, testBodyRan: true });
+    log.append("interrupted", { type: "run_started", runId: "check-2", command: "bun run check:changed", host: "runner" });
+    log.append("interrupted", { type: "failed", stage: "verifying", reason: "runner restarted during verification" });
+
+    log.append("retry", submission());
+    log.append("retry", { type: "verification_base", base: "base-new" });
+    log.append("retry", { type: "run_started", runId: "retry-run", command: "vp test run", host: "runner" });
+    log.append("retry", { type: "run_finished", runId: "retry-run", exitCode: 1, signal: null, timedOut: false, durationMs: 12, testBodyRan: true });
+    log.append("retry", { type: "failed", stage: "verifying", reason: "test failed", command: "vp test run", output: " FAIL tests/plan.test.ts > rejects route" });
+
+    const classified = log.events({ operationId: "retry" }).find((row) => row.event.type === "classified")?.event;
+    assert.deepEqual(classified, {
+      type: "classified", ruleVersion: 1, cause: "gate", command: "vp test run",
+      failingTests: ["tests/plan.test.ts > rejects route"], diagnostics: [],
+    });
+  } finally { log.close(); }
+});
+
+test("held facts retain retry count, elapsed time and publication outcome", () => {
+  const log = openOperationLog(":memory:");
+  const originalNow = Date.now;
+  try {
+    const first = log.append("control", { type: "integration_held", repo: "owner/repo", commitId: "commit", reason: "push refused" });
+    Date.now = () => Date.parse(first.at) + 5_000;
+    log.append("control", { type: "integration_held", repo: "owner/repo", commitId: "commit", reason: "push still refused" });
+    const retry = log.events().filter((row) => row.event.type === "held").at(-1)?.event;
+    assert.deepEqual(retry, { type: "held", repo: "owner/repo", commitId: "commit", retries: 1, durationMs: 5_000, published: false });
+
+    Date.now = () => Date.parse(first.at) + 8_000;
+    log.append("control", { type: "integration_recovered", repo: "owner/repo", commitId: "commit" });
+    const published = log.events().filter((row) => row.event.type === "held").at(-1)?.event;
+    assert.deepEqual(published, { type: "held", repo: "owner/repo", commitId: "commit", retries: 1, durationMs: 8_000, published: true });
+  } finally {
+    Date.now = originalNow;
+    log.close();
+  }
 });

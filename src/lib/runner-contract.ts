@@ -96,7 +96,26 @@ export type DeployMigrations = { artifacts: string[]; status: "current" | "appli
 export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[]; migrationArtifacts?: string[] };
 
 /** One fact appended to the log. Nothing is updated or deleted. */
+export type CauseClass = "gate" | "conflict" | "infrastructure" | "policy" | "killed" | "paused_out" | "held" | "superseded" | "cancelled";
+export type ClientFact =
+  | { kind: "workspace_start"; workspace: string; machine: string; startedAt: string }
+  | { kind: "pool_claim"; workspace: string; hit: boolean; spareCount: number; durationMs: number }
+  | { kind: "land_follow"; reattached: boolean }
+  | { kind: "ssh_forward_failure"; reason: string; observedAt: string }
+  | { kind: "preview_start"; workspace: string; port: number };
+export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
+export type RunPurpose = "gate" | "migration_generate" | "migration_verify" | "deploy" | "reset";
 export type OperationEvent =
+  | { type: "client_operation"; repo: string; workspace: string; machine: string }
+  | { type: "identity"; ticket?: number; spec?: number; submitterKind: "person" | "agent" | "unknown"; submitterId: string; harness?: string; sessionId?: string; workspace: string; machine: string }
+  | { type: "queue_snapshot"; position: number; depth: number; waitingFor: string | null; paused: boolean }
+  | { type: "stage_detail"; stage: RunnerStage; durationMs: number; conflict?: boolean; files?: string[]; installSource?: "cloned" | "fresh" | "existing"; base?: string; remoteMoved?: boolean; migrateDurationMs?: number; pushDurationMs?: number }
+  | { type: "change_shape"; files: number; insertions: number; deletions: number; packages: string[]; apps: string[]; migrationBearing: boolean; testFiles: string[]; fileSet: string; sizeBucket: "small" | "medium" | "large" }
+  | ClassifiedFact
+  | { type: "held"; repo: string; commitId: string; retries: number; durationMs: number; published: boolean }
+  | { type: "client"; id: string; fact: ClientFact }
+  | { type: "verification_base"; base: string }
+  | { type: "verification_passed"; base: string; candidate: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */
   | { type: "submitted"; kind?: "landing"; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A release of `commitId`, the integration commit a human approved. */
@@ -109,8 +128,8 @@ export type OperationEvent =
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
-  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number }
-  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number }
+  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose }
+  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
@@ -131,15 +150,15 @@ export type OperationEvent =
   | { type: "paused"; by: string }
   | { type: "resumed"; by: string }
   | { type: "integration_held"; repo: string; commitId: string; reason: string }
-  | { type: "integration_recovered"; repo: string; commitId: string };
+  | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean };
 
 /** A stored event: `seq` is global and strictly increasing across operations. */
 export type StoredEvent = { seq: number; operationId: string; at: string; event: OperationEvent };
 
 /** One executed command of an operation, projected from its run events. */
 export type RunRecord = {
-  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number;
-  finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number;
+  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose;
+  finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean;
 };
 
 /** Event types that close an operation. */
@@ -205,7 +224,7 @@ export interface OperationLog {
 }
 
 /** POST /v1/operations body. The commit must already be on the remote as `bookmark`. */
-export type SubmitRequest = { repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string };
+export type SubmitRequest = { repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
 
 /**
  * POST /v1/releases body: the full id of a candidate already published on the

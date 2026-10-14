@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { landedHome, stateHome } from "./workspace-paths.ts";
+export const hasPendingRunnerFacts = (metadata: Record<string, unknown> | null): boolean => Array.isArray(metadata?.pendingRunnerFacts) && metadata.pendingRunnerFacts.length > 0;
 /** Retirement policy shared by Peach and vanilla Pi. There is no archive period:
  * a delivered checkout is eligible at landing, once callers prove identity,
  * ancestry, publication and exclusive access. */
@@ -12,6 +13,7 @@ export function cleanupRetentionReason(
   metadata: Record<string, unknown> | null,
 ): string | null {
   if (!state || state.phase !== "landed") return "not-landed";
+  if (hasPendingRunnerFacts(metadata)) return "pending-runner-facts";
   if (state.workspaceName !== context.current.name
     || state.workspacePath !== context.current.root
     || state.integrationRoot !== context.integration.root

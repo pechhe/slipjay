@@ -9,7 +9,13 @@ test("stage median and current command timeout use recorded evidence", () => {
     const submit = { type: "submitted" as const, repo: "a", changeId: "c", commitId: "x", bookmark: "b", submittedBy: "author" };
     log.append("old", submit); log.append("old", { type: "stage", stage: "verifying" }); log.append("old", { type: "stage", stage: "publishing" });
     log.append("new", submit); log.append("new", { type: "stage", stage: "verifying" });
-    const rows = log.events().map((row, index) => ({ ...row, at: new Date(index * 1000).toISOString() }));
+    const rows = log.events().map((row) => {
+      const operationStart = row.operationId === "old" ? 0 : 3_000;
+      const time = row.event.type === "stage"
+        ? row.operationId === "old" ? row.event.stage === "verifying" ? 1_000 : 2_000 : 4_000
+        : operationStart;
+      return { ...row, at: new Date(time).toISOString() };
+    });
     const operation = log.operation("new")!;
     const projected = projectWatchOperation(operation, rows, new Date(8000));
     assert.equal(projected.timing.medianMs, 1000); assert.equal(projected.timing.amberAfterMs, 2000); assert.equal(projected.timing.state, "amber");

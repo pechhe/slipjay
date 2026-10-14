@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployRequest, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import type { ClientFact, DeployRequest, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -22,6 +22,21 @@ export function createRunnerHandler(input: {
       return json({ error: "Unauthorized" }, 401);
     const url = new URL(request.url);
     const path = url.pathname;
+    if (request.method === "POST" && path === `${RUNNER_API}/client-operations`) {
+      const body = await boundedJson(request);
+      if (!body || !boundedString(body.repo) || !/^[\w.-]+\/[\w.-]+$/.test(body.repo) || !boundedString(body.workspace) || !boundedString(body.machine)) return json({ error: "Invalid client operation" }, 400);
+      const id = newOperationId();
+      input.log.append(id, { type: "client_operation", repo: repositoryKey(body.repo), workspace: body.workspace, machine: body.machine });
+      return json({ id });
+    }
+    const clientRoute = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)/events$`));
+    if (request.method === "POST" && clientRoute) {
+      const id = decodeURIComponent(clientRoute[1]!);
+      if (!input.log.operation(id) && !input.log.events({ operationId: id }).some((row) => row.event.type === "client_operation")) return json({ error: "Unknown operation" }, 404);
+      const body = await boundedJson(request);
+      if (!body || !boundedString(body.id) || !validClientFact(body.fact)) return json({ error: "Invalid client event" }, 400);
+      return json({ event: input.log.append(id, { type: "client", id: body.id, fact: body.fact }) });
+    }
     if (request.method === "GET" && path === `${RUNNER_API}/health`)
       return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null, held: input.log.snapshot(input.runnerName).held });
     if (request.method === "GET" && path === `${RUNNER_API}/queue`) return json(input.log.snapshot(input.runnerName));
@@ -80,6 +95,7 @@ export function createRunnerHandler(input: {
       if (existing)
         input.log.append(existing.id, { type: "superseded", by: id });
       input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
+      if (body.identity) input.log.append(id, body.identity);
       input.onSubmitted();
       return json({ operation: input.log.operation(id), reattached: false, ...existing ? { superseded: existing.id } : {} });
     }
@@ -209,10 +225,54 @@ export function createRunnerHandler(input: {
   };
 }
 
+const boundedString = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 300;
+async function boundedJson(request: Request): Promise<Record<string, unknown> | null> {
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 8192) { await reader.cancel(); return null; }
+      chunks.push(value);
+    }
+    const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  } catch { return null; }
+  finally { reader.releaseLock(); }
+}
+function validClientFact(value: unknown): value is ClientFact {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const fact = value as Record<string, unknown>;
+  const duration = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 30 * 86400_000;
+  const integer = (value: unknown, max: number) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
+  const keys: Record<string, string[]> = { workspace_start: ["kind", "workspace", "machine", "startedAt"], pool_claim: ["kind", "workspace", "hit", "spareCount", "durationMs"], land_follow: ["kind", "reattached"], ssh_forward_failure: ["kind", "reason", "observedAt"], preview_start: ["kind", "workspace", "port"] };
+  if (typeof fact.kind !== "string" || !keys[fact.kind] || Object.keys(fact).some((key) => !keys[fact.kind as string]!.includes(key))) return false;
+  switch (fact.kind) {
+    case "workspace_start": return boundedString(fact.workspace) && boundedString(fact.machine) && typeof fact.startedAt === "string" && /^\d{4}-\d\d-\d\dT/.test(fact.startedAt) && Number.isFinite(Date.parse(fact.startedAt));
+    case "pool_claim": return boundedString(fact.workspace) && typeof fact.hit === "boolean" && integer(fact.spareCount, 8) && duration(fact.durationMs);
+    case "land_follow": return typeof fact.reattached === "boolean";
+    case "ssh_forward_failure": return boundedString(fact.reason) && typeof fact.observedAt === "string" && /^\d{4}-\d\d-\d\dT/.test(fact.observedAt) && Number.isFinite(Date.parse(fact.observedAt));
+    case "preview_start": return boundedString(fact.workspace) && integer(fact.port, 65535) && fact.port !== 0;
+    default: return false;
+  }
+}
+
 function validSubmission(body: unknown): body is SubmitRequest {
   if (typeof body !== "object" || body === null)
     return false;
   const value = body as Record<string, unknown>;
+  if (value.identity !== undefined) {
+    if (!value.identity || typeof value.identity !== "object" || Array.isArray(value.identity)) return false;
+    const identity = value.identity as Record<string, unknown>;
+    if (identity.type !== "identity" || !["person", "agent", "unknown"].includes(String(identity.submitterKind)) || !["submitterId", "workspace", "machine"].every((key) => boundedString(identity[key]))) return false;
+    if (["harness", "sessionId"].some((key) => identity[key] !== undefined && !boundedString(identity[key]))) return false;
+    if (["ticket", "spec"].some((key) => identity[key] !== undefined && (!Number.isSafeInteger(identity[key]) || Number(identity[key]) <= 0))) return false;
+    if (Object.keys(identity).some((key) => !["type", "submitterKind", "submitterId", "workspace", "machine", "harness", "sessionId", "ticket", "spec"].includes(key))) return false;
+  }
   if (!["repo", "changeId", "commitId", "bookmark", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0))
     return false;
   return /^[k-z]{12,64}$/.test(value.changeId as string) && value.bookmark === candidateBookmark(value.changeId as string);

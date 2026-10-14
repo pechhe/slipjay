@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner-client.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, readMetricsEvents } from "../lib/runner-client.ts";
+import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
+import { hostname } from "node:os";
 import { confirmableCandidate } from "../lib/release.ts";
 import { startRunner } from "../lib/runner-service.ts";
 
@@ -26,11 +28,10 @@ import {
 } from "../lib/slipjay.ts";
 import { legacyStateHome } from "../lib/workspace-paths.ts";
 import { landingGuardDecision } from "../lib/landing-guard.ts";
-import { landingTimingLine, landingTimingRecord } from "../lib/landing-timing.ts";
-import { appendMetric } from "../lib/metrics.ts";
+import { landingTimingLine } from "../lib/landing-timing.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, writeSync } from "node:fs";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 
 /** Disk use of a checkout, for spotting retained workspaces worth reclaiming. */
@@ -145,7 +146,6 @@ async function runPromote(args: string[]): Promise<number> {
     return plan.ok ? 0 : 1;
   }
   if (!location) throw new Error("slipjay promote --confirm runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
-  const startedAt = Date.now();
   const confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady);
   if (confirmable.status !== "confirmable") {
     console.log(JSON.stringify(confirmable, null, 2));
@@ -181,8 +181,6 @@ async function runPromote(args: string[]): Promise<number> {
     printed = { ok: false, status: "failed", stage: outcome.stage, reason: outcome.reason, log: logUrl };
   } else printed = { ok: false, status: operation.status, ...outcome?.type === "cancelled" ? { reason: outcome.reason } : {}, log: logUrl };
   console.log(JSON.stringify(printed, null, 2));
-  await appendMetric("releases", { status: printed.status, candidate: confirmable.candidate,
-    commits: outcome?.type === "released" ? outcome.result.commits : null, totalMs: Date.now() - startedAt });
   return outcome?.type !== "released" || (deploy && deploy.status !== "deployed") ? 1 : 0;
 }
 
@@ -329,8 +327,15 @@ try {
       process.exitCode = await startForJson(rest);
     } else {
       const root = options.integration ? await integrationRoot(process.cwd()) : process.cwd();
+      const startedAt = new Date().toISOString();
+      const started = Date.now();
+      const spareCount = (await readySpares(root)).length;
       const task = options.task || `Issue #${options.issueNumber}`;
       const result = await createWorkspace(task, root, options.issueNumber ? { issueNumber: options.issueNumber } : {});
+      await recordClientFacts(result.workspacePath, [
+        { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
+        ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started }] : []),
+      ]).catch((error: unknown) => console.error(`Runner client facts not recorded: ${error instanceof Error ? error.message : String(error)}`));
       // Prepare the next session's spare in the background, so its start can claim it.
       // A claimed spare is replaced in the background too, so a burst of starts finds the pool refilled.
       const refill = options.refill || result.pooled ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
@@ -354,7 +359,6 @@ try {
     if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
     const timing: { startedAt: number; stages: [string, number][] } = { startedAt: Date.now(), stages: [] };
     // The landing may remove this very directory, after which process.cwd() throws.
-    const landedFrom = basename(process.cwd());
     const following = new AbortController();
     const stopFollowing = () => following.abort(new Error("Stopped following; rerun slipjay land to reattach"));
     process.once("SIGINT", stopFollowing);
@@ -366,7 +370,6 @@ try {
       // stderr, so stdout stays the JSON result.
       const finished = { ...timing, finishedAt: Date.now() };
       console.error(landingTimingLine(finished));
-      await appendMetric("landings", { workspace: landedFrom, verdict: runner.operation.status, ...landingTimingRecord(finished, runner.ok) });
       console.log(JSON.stringify({ ok: runner.ok, verdict: runner.operation.status, log: runner.logUrl }));
       if (!runner.ok) process.exitCode = 1;
     } finally {
@@ -377,6 +380,19 @@ try {
     process.exitCode = 2;
   } else if (command === "promote") {
     process.exitCode = await runPromote(rest);
+  } else if (command === "metrics") {
+    if (rest.length && (rest.length !== 2 || rest[0] !== "--since")) throw new Error("Usage: slipjay metrics [--since <ISO date>]");
+    const since = rest[1] ?? new Date().toISOString().slice(0, 10);
+    if (!Number.isFinite(Date.parse(since))) throw new Error("Invalid metrics date");
+    const location = runnerLocation();
+    if (!location) throw new Error("Metrics requires a runner location");
+    console.log(formatPipelineMetrics(pipelineMetrics(await readMetricsEvents(location), since)));
+  } else if (command === "record-preview") {
+    const port = Number(rest[0]);
+    if (rest.length !== 1 || !Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("Usage: slipjay record-preview <port>");
+    const context = await workspaceContext();
+    if (!context) throw new Error("Preview record requires a workspace");
+    await recordClientFacts(process.cwd(), [{ kind: "preview_start", workspace: context.current.name, port }]);
   } else if (command === "watch") {
     if (rest.length !== 1 || rest[0] !== "--json") throw new Error("Usage: slipjay watch --json");
     const location = runnerLocation();
@@ -443,7 +459,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|kill|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

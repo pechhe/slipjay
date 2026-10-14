@@ -5,3 +5,4 @@ node_modules/
 .vite/
 
 /.build/
+/artifacts/pipeline-capture*/

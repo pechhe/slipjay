@@ -8,6 +8,7 @@ import { cleanupLandedWorkspace, createWorkspace, pruneEmptyWorkspaces, removeWo
 import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
 import { runWorkspaceTeardown } from "../src/lib/workspace-teardown.ts";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
+import { metadataPath, workspaceMetadata } from "../src/lib/workspace-state.ts";
 
 /** A teardown that records the cwd it ran in and whether the checkout still had its files. */
 const recording = (log: string) => ({
@@ -22,6 +23,21 @@ async function landed(f: { root: string; repo: string; remote: string }, cwd: st
   // Kept after landing, so the cleanup under test is what removes it.
   assert.equal((await landThroughTestRunner(f, cwd, { keep: true })).ok, true);
 }
+
+test("pending transport facts keep a workspace until delivery is acknowledged", async () => {
+  const f = await project();
+  try {
+    const ws = await createWorkspace("pending facts", f.repo);
+    const metadata = await workspaceMetadata(ws.current.name);
+    await writeFile(metadataPath(ws.current.name), JSON.stringify({ ...metadata, pendingRunnerFacts: [{ id: "pending" }] }));
+    await assert.rejects(removeWorkspace(f.repo, ws.current.name), /pending runner facts/);
+    assert.equal(existsSync(ws.workspacePath), true);
+    assert.deepEqual((await workspaceMetadata(ws.current.name))?.pendingRunnerFacts, [{ id: "pending" }]);
+    await writeFile(metadataPath(ws.current.name), JSON.stringify({ ...metadata, pendingRunnerFacts: [] }));
+    await removeWorkspace(f.repo, ws.current.name);
+    assert.equal(existsSync(ws.workspacePath), false);
+  } finally { await f.dispose(); }
+}, 120_000);
 
 test("cleanup runs the declared teardown in the workspace before deleting it", async () => {
   const f = await project();

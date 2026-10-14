@@ -7,7 +7,7 @@ import { revisionExists, run, workingCopyCommit, workspaceContext, workspaceHasU
 import { workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import { generatedPathMatchers, readExecutionPolicy } from "./execution-policy.ts";
-import { cleanupRetentionReason } from "./workspace-delivery-lifecycle.ts";
+import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-delivery-lifecycle.ts";
 import { callerPids, describeHolders, workspaceHolders } from "./workspace-holders.ts";
 import { archiveIntegratedWorkspaceEvidence } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
@@ -248,6 +248,7 @@ export async function forgetWorkspace(integrationRoot: string, workspaceName: st
  */
 export async function retireWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks = {}, options: { expectedCommitId?: string } = {}): Promise<void> {
   const metadata = await workspaceMetadata(workspace.name);
+  if (hasPendingRunnerFacts(metadata)) throw new Error(`jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`);
   await runWorkspaceTeardown(integrationRoot, workspace, { timeoutMs: hooks.teardownTimeoutMs });
   // The last look before the point of no return, after the teardown: a working copy that moved
   // since it was judged (an edit snapshots into a new commit) is never forgotten, or its commit would be orphaned.

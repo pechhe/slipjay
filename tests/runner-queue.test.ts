@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +14,8 @@ import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 // A committed `hang` file names where to record the pids of the gate, of a child in its
 // process group, and of a tool it starts in its own group (as YardSmith's task runners
 // do); then it never ends.
-const gate = 'const fs=require("node:fs");if (fs.existsSync("fail")) { process.stderr.write("boom\\n"); process.exit(3); }'
+const gateFailureOutput = "boom\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\n";
+const gate = `const fs=require("node:fs");if (fs.existsSync("fail")) { process.stderr.write(${JSON.stringify(gateFailureOutput)}); process.exit(3); }`
   + 'if (fs.existsSync("hang")) { const spawn=(detached)=>require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached,stdio:"ignore"});'
   + 'const child=spawn(false), tool=spawn(true);'
   + 'fs.writeFileSync(fs.readFileSync("hang","utf8").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }';
@@ -39,6 +41,7 @@ fs.writeFileSync(at("reset-started"), "");
 while (fs.existsSync(at("hold-reset"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
 fs.appendFileSync(at("reset.jsonl"), JSON.stringify({ target: process.env.SLIPJAY_RESET_TARGET, source: process.env.SLIPJAY_RESET_SOURCE, reasonFile: Boolean(process.env.SLIPJAY_RESET_REASON_FILE), key: process.env.FIXTURE_KEY ?? null, head: require("node:child_process").execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() }) + "\\n");
 console.log("postgres://owner:" + process.env.FIXTURE_KEY + "@db.example/prod restored");
+console.error("Error: private-" + "customer-record-fixture");
 if (fs.existsSync(at("fail-reset"))) { fs.writeFileSync(process.env.SLIPJAY_RESET_REASON_FILE, "Scrub refused:\\u0007 a real-customer tenant\\nsecond-" + "line"); process.exit(3); }`;
 const resetProbe = (root: string) => `console.log(JSON.stringify({ target: require("node:fs").existsSync(${JSON.stringify(join(root, "wrong-target"))}) ? "production-db" : "fixture-development-db" }))`;
 // Each deploy project records what it deployed and prints its deployment URL; it fails while `fail-deploy-<name>` exists.
@@ -137,10 +140,11 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const published: StoredEvent[] = [];
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
-  const requestedTimeouts: { command: string; timeoutMs: number }[] = [];
+  const requestedTimeouts: { command: string; timeoutMs: number; migrationContext?: string }[] = [];
   const local = localExecutor();
   const executor: Executor = { host: local.host, run: (request) => {
-    requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs });
+    requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs,
+      ...(request.env?.SLIPJAY_MIGRATION_CONTEXT ? { migrationContext: request.env.SLIPJAY_MIGRATION_CONTEXT } : {}) });
     return local.run(request);
   } };
   const unsubscribe = log.subscribe((event) => {
@@ -196,7 +200,15 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
   return { root, requestedTimeouts, candidateAtVerdict, development, land, origin, author, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
-    async dispose() { queue.close(); await queue.idle(); unsubscribe(); log.close(); await rm(root, { recursive: true, force: true }); } };
+    async dispose() {
+      queue.close(); await queue.idle(); unsubscribe();
+      const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
+      if (capture) {
+        await mkdir(capture, { recursive: true });
+        await writeFile(join(capture, `${root.slice(root.lastIndexOf("/") + 1)}.json`), JSON.stringify(log.events()).split(root).join("[FIXTURE]"));
+      }
+      log.close(); await rm(root, { recursive: true, force: true });
+    } };
 }
 
 test("queued candidates land in arrival order on the previous candidate, with runner gate records and streamed logs", async () => {
@@ -226,6 +238,18 @@ test("queued candidates land in arrival order on the previous candidate, with ru
       assert.equal(operation.runs[0]!.command, command);
       assert.equal(operation.runs[0]!.timeoutMs, f.requestedTimeouts.find((request) => request.command === command)!.timeoutMs);
       assert.equal(operation.runs[0]!.exitCode, 0);
+      const evidence = f.log.events({ operationId: id }).map((row) => row.event);
+      const shape = evidence.findLast((event) => event.type === "change_shape");
+      assert.ok(shape?.type === "change_shape");
+      assert.equal(shape.files, 1);
+      assert.equal(shape.insertions, 1);
+      assert.equal(shape.migrationBearing, false);
+      assert.match(shape.fileSet, /^[a-f0-9]{64}$/);
+      assert.ok(evidence.some((event) => event.type === "queue_snapshot" && event.depth >= event.position));
+      assert.ok(evidence.some((event) => event.type === "verification_base" && event.base === (id === a ? first.base : second.base)));
+      assert.ok(evidence.some((event) => event.type === "stage_detail" && event.stage === "verifying" && event.durationMs >= 0));
+      assert.equal(operation.runs[0]!.killed, false);
+      assert.ok(Number.isFinite(operation.runs[0]!.outputBytes));
       assert.deepEqual(f.log.events({ operationId: id }).filter((stored) => stored.event.type === "stage").map((stored) => stored.event.type === "stage" && stored.event.stage), ["fetching", "rebasing", "installing", "verifying", "integrating", "finalizing", "publishing"]);
       assert.equal(f.queue.logPath(id), join(f.home, "logs", `${id}.log`));
       const lines = (await f.queue.readLog(id))!.trim().split("\n").map((line) => JSON.parse(line) as StoredEvent);
@@ -282,7 +306,7 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
     if (failure?.type !== "failed") throw new Error("Expected failed gate");
     assert.equal(failure.stage, "verifying");
     assert.equal(failure.command, command);
-    assert.equal(failure.output, "boom\n");
+    assert.equal(failure.output, gateFailureOutput);
     assert.equal(f.log.operation(failed)!.runs[0]!.exitCode, 3);
     assert.equal(f.main(), before);
     await rm(join(f.author, "fail"));
@@ -402,11 +426,24 @@ test("a migration-bearing change lands with one generated migration, finalized b
     assert.equal(landed?.type, "landed", JSON.stringify(landed));
     if (landed?.type !== "landed") throw new Error("Expected landing");
     assert.equal(f.main(), landed.commitId);
+    const shape = f.log.events({ operationId: id }).findLast((row) => row.event.type === "change_shape")?.event;
+    assert.ok(shape?.type === "change_shape");
+    const verifiedTree = execFileSync("git", ["--git-dir", f.origin, "rev-parse", `${landed.commitId}^{tree}`], { encoding: "utf8" }).trim();
+    assert.equal(shape.fileSet, createHash("sha256").update(verifiedTree).digest("hex"), "source evidence includes generated migration artifacts verified by the gate");
+    assert.equal(shape.migrationBearing, true);
     assert.equal(f.remoteFile("migrations/0001.sql"), "-- 1");
     assert.deepEqual(await f.development(), [{ commit: landed.commitId, migrations: ["0001.sql"] }]);
     assert.deepEqual(f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []), ["fetching", "rebasing", "installing", "verifying", "integrating", "finalizing", "publishing"]);
     // Generation, its verification and the gate are all runner runs.
     assert.equal(f.log.operation(id)!.runs.length, 3);
+    assert.deepEqual(f.log.operation(id)!.runs.map((run) => run.purpose), ["migration_generate", "migration_verify", "gate"]);
+    const contexts = f.requestedTimeouts.flatMap((request) => request.migrationContext ? [JSON.parse(request.migrationContext) as { baseCommit: string; candidateChangeId: string; candidateCommit: string }] : []);
+    assert.equal(contexts.length, 2, "both migration commands retain authoritative provenance through the runner");
+    assert.deepEqual(contexts[0], contexts[1]);
+    assert.equal(contexts[0]!.baseCommit, landed.base);
+    const operation = f.log.operation(id)!;
+    assert.equal(contexts[0]!.candidateChangeId, operation.kind === "landing" && operation.changeId);
+    assert.notEqual(contexts[0]!.candidateCommit, landed.commitId, "provenance remains bound to the semantic source before generation");
     assert.ok(f.log.operation(id)!.runs.every((run) => run.host === f.executor.host && run.exitCode === 0));
     // A committed artifact is refused: landing generates them.
     const before = f.main();
@@ -1072,6 +1109,8 @@ test("a repository's first landing resets its target at once from the integratio
     const [reset] = f.log.resets("fixture/repo");
     assert.ok(reset, "the landing scheduled a reset");
     assert.deepEqual(reset.result, { type: "reset", target: "fixture-development-db", source: f.main() });
+    assert.doesNotMatch(JSON.stringify(f.log.events({ operationId: reset.id })), /private-customer-record-fixture/);
+    assert.match(await readFile(join(f.home, "logs", `${reset.id}.reset-output`), "utf8"), /private-customer-record-fixture/);
     assert.equal(reset.submittedBy, `${f.executor.host}:schedule`);
     assert.deepEqual(stagesOf(f, reset.id), ["fetching", "resetting"]);
     assert.deepEqual(reset.runs.map((run) => run.exitCode), [0, 0], "probe and command ran through the executor");

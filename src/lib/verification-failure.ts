@@ -29,7 +29,7 @@ const POSITION = /[\w./-]+\.[a-z]+(?::\d+:\d+|\(\d+,\d+\))/;
 
 const clip = (line: string): string => (line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS - 1)}…` : line);
 
-function outputLines(result: VerificationFailureResult): string[] {
+export function outputLines(result: VerificationFailureResult): string[] {
   return `${result.stdout ?? ""}\n${result.stderr ?? ""}`
     .replace(ANSI_ESCAPE, "")
     .split(/\r?\n/)
@@ -38,7 +38,7 @@ function outputLines(result: VerificationFailureResult): string[] {
 }
 
 /** Failing test identities from Vitest, Bun test and node:test (TAP or spec) output. */
-function failingTests(lines: string[]): string[] {
+export function failingTests(lines: string[]): string[] {
   const found: string[] = [];
   let bunFile: string | null = null;
   let tapLocation: string | null = null;
@@ -46,6 +46,10 @@ function failingTests(lines: string[]): string[] {
     const trimmed = line.trim();
     let match: RegExpExecArray | null;
     if ((match = /^FAIL\s+(.+)$/.exec(trimmed))) found.push(match[1]!);
+    else if ((match = /^×\s+(.+?)(?:\s+[\d.]+m?s)?$/.exec(trimmed))) {
+      const name = match[1]!;
+      if (!found.some((identity) => identity === name || identity.endsWith(` > ${name}`))) found.push(name);
+    }
     else if (/^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(trimmed)) bunFile = trimmed.slice(0, -1);
     else if ((match = /^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$/.exec(trimmed))) found.push(bunFile ? `${bunFile} > ${match[1]!}` : match[1]!);
     else if ((match = /^not ok \d+ - (.+)$/.exec(trimmed))) {
@@ -57,7 +61,8 @@ function failingTests(lines: string[]): string[] {
       tapLocation = null;
     }
   }
-  return [...new Set(found)];
+  const unique = [...new Set(found)];
+  return unique.filter((identity) => !unique.some((other) => other.length > identity.length && other.endsWith(` > ${identity}`)));
 }
 
 /** The first error block: its message line and the few lines that explain it. */
@@ -74,14 +79,14 @@ function firstError(lines: string[]): string[] {
 }
 
 /** First compiler/linter diagnostics, with a preceding position line when the message has none. */
-function diagnostics(lines: string[]): string[] {
+export function diagnostics(lines: string[], limit = MAX_DIAGNOSTICS): string[] {
   const found: string[] = [];
   for (const [index, line] of lines.entries()) {
     if (!DIAGNOSTIC.test(line) || SCRIPT_EXIT.test(line.trim()) || /^\s*(?:Tests?|Test Files)\b/.test(line)) continue;
     const previous = lines[index - 1]?.trim() ?? "";
     const withPosition = !POSITION.test(line) && POSITION.test(previous) ? `${previous} ${line.trim()}` : line.trim();
     found.push(withPosition);
-    if (found.length >= MAX_DIAGNOSTICS) break;
+    if (found.length >= limit) break;
   }
   return found;
 }

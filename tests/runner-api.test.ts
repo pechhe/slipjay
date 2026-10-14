@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
@@ -46,7 +49,15 @@ async function fixture() {
     get submissions() { return submissions; },
     set onSubscribe(callback: (() => void) | undefined) { onSubscribe = callback; },
     set killOutcome(outcome: typeof killOutcome) { killOutcome = outcome; },
-    async close() { await server.close(); log.close(); },
+    async close() {
+      await server.close();
+      const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
+      if (capture) {
+        await mkdir(capture, { recursive: true });
+        await writeFile(join(capture, `api-${randomUUID()}.json`), JSON.stringify(log.events()));
+      }
+      log.close();
+    },
   };
 }
 
@@ -93,6 +104,65 @@ test("HTTP runner refuses missing and wrong credentials, reports health and reje
   } finally {
     await f.close();
   }
+});
+
+test("client operations are attributed to their repository and never enter the work queue", async () => {
+  const f = await fixture();
+  try {
+    const response = await f.request("/client-operations", {
+      method: "POST", body: JSON.stringify({ repo: "Owner/Repo", workspace: "workspace-a", machine: "mac-a" }),
+    });
+    assert.equal(response.status, 200);
+    const { id } = await response.json() as { id: string };
+    assert.ok(id);
+    assert.deepEqual(f.log.events({ operationId: id }).map((row) => row.event), [
+      { type: "client_operation", repo: "owner/repo", workspace: "workspace-a", machine: "mac-a" },
+    ]);
+    assert.equal(f.log.operation(id), null);
+    assert.deepEqual(f.log.openOperations(), []);
+    assert.equal((await f.request("/health")).status, 200);
+  } finally { await f.close(); }
+});
+
+test("client events are idempotent and reject unknown facts, extra fields and oversized bodies", async () => {
+  const f = await fixture();
+  try {
+    const clientResponse = await f.request("/client-operations", {
+      method: "POST", body: JSON.stringify({ repo: "owner/repo", workspace: "workspace-a", machine: "mac-a" }),
+    });
+    const { id } = await clientResponse.json() as { id: string };
+    const post = (body: unknown) => f.request(`/operations/${id}/events`, { method: "POST", body: JSON.stringify(body) });
+    const payload = { id: "fact-1", fact: { kind: "land_follow", reattached: true } };
+    const first = await post(payload);
+    const duplicate = await post(payload);
+    assert.equal(first.status, 200);
+    assert.equal(duplicate.status, 200);
+    assert.deepEqual(await duplicate.json(), await first.clone().json());
+    assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "client" && row.event.id === "fact-1").length, 1);
+
+    for (const fact of [
+      { kind: "unknown_fact", value: 1 },
+      { kind: "land_follow", reattached: true, extra: "refused" },
+    ]) assert.equal((await post({ id: "bad", fact })).status, 400);
+    const oversized = JSON.stringify({ id: "too-large", fact: { kind: "ssh_forward_failure", reason: "x".repeat(9_000) } });
+    assert.ok(new TextEncoder().encode(oversized).byteLength > 8_192);
+    assert.equal((await f.request(`/operations/${id}/events`, { method: "POST", body: oversized })).status, 400);
+    assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "client").length, 1);
+  } finally { await f.close(); }
+});
+
+test("client operation and event routes still require bearer authentication", async () => {
+  const f = await fixture();
+  try {
+    const noAuth = (path: string, body: unknown) => fetch(`${f.server.url}${RUNNER_API}${path}`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    assert.equal((await noAuth("/client-operations", { repo: "owner/repo", workspace: "workspace", machine: "machine" })).status, 401);
+    const { id } = await (await f.request("/client-operations", {
+      method: "POST", body: JSON.stringify({ repo: "owner/repo", workspace: "workspace", machine: "machine" }),
+    })).json() as { id: string };
+    assert.equal((await noAuth(`/operations/${id}/events`, { id: "fact", fact: { kind: "land_follow", reattached: true } })).status, 401);
+  } finally { await f.close(); }
 });
 
 test("submissions create, reattach, supersede queued work and conflict with running work", async () => {
@@ -206,6 +276,18 @@ test("SSE deduplicates events received between subscribing and replay", async ()
   } finally {
     await f.close();
   }
+});
+
+test("cancelling queued work during a pause records paused_out", async () => {
+  const f = await fixture();
+  try {
+    const { operation } = await submitted(await f.submit());
+    assert.equal((await f.request("/runner/pause", { method: "POST", body: JSON.stringify({ by: "owner" }) })).status, 200);
+    assert.equal((await f.request(`/operations/${operation.id}/cancel`, { method: "POST", body: JSON.stringify({ by: "author" }) })).status, 200);
+    assert.equal(f.log.events({ operationId: operation.id }).findLast((row) => row.event.type === "classified")?.event.type, "classified");
+    const fact = f.log.events({ operationId: operation.id }).findLast((row) => row.event.type === "classified")?.event;
+    assert.equal(fact?.type === "classified" && fact.cause, "paused_out");
+  } finally { await f.close(); }
 });
 
 test("cancel closes only queued work and closed changes can be submitted again", async () => {

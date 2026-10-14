@@ -1,6 +1,7 @@
 import type { MigrationCommand, MigrationFinalizationPolicy } from "./execution-policy.ts";
 import type { LandingRevision } from "./landing-steps.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
+export type MigrationRunPurpose = "migration_generate" | "migration_verify";
 
 /** Late-bound migration source belongs to the shared, serialized landing path. */
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
@@ -31,7 +32,7 @@ export async function migrationCandidate(cwd: string, context: {
 }, options: {
   onProgress?: (line: string) => void;
   environment?: () => NodeJS.ProcessEnv;
-  runCommand?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
+  runCommand?: (request: BoundedProcessRequest, purpose?: MigrationRunPurpose) => Promise<BoundedProcessResult>;
 } = {}): Promise<{
   finalize(candidate: LandingRevision, base: LandingRevision): Promise<LandingRevision>;
   rollback(): Promise<void>;
@@ -64,18 +65,19 @@ export async function migrationCandidate(cwd: string, context: {
       const originalParents = await io.jj(cwd, ["log", "-r", "parents(@)", "--no-graph", "-T", 'commit_id ++ "\\n"']);
       generated = { semantic: candidate, originalWorkingCopy, originalParents: originalParents.trim(), finalized: null, base };
       await io.jj(cwd, ["edit", candidate.changeId]);
-      const run = async (declaration: MigrationCommand): Promise<void> => {
+      const run = async (declaration: MigrationCommand, purpose: MigrationRunPurpose): Promise<void> => {
         const commandRoot = await checkoutCwd(context.current.root, declaration.cwd, "Migration command");
         const environment = { ...(options.environment ?? sanitizedProcessEnv)(), SLIPJAY_MIGRATION_CONTEXT: migrationContext };
         options.onProgress?.(`[migration] ${redactMigrationOutput([declaration.executable, ...declaration.args].join(" "), context.current.root, { ...process.env, ...environment }).slice(0, 1000)}`);
-        const result = await (options.runCommand ?? runBoundedProcess)({ ...declaration, cwd: commandRoot, timeoutMs: 3600000, maxOutputBytes: 65536, env: environment, redactOutput: value => redactMigrationOutput(value, context.current.root, { ...process.env, ...environment }) });
+        const runCommand: NonNullable<typeof options.runCommand> = options.runCommand ?? runBoundedProcess;
+        const result = await runCommand({ ...declaration, cwd: commandRoot, timeoutMs: 3600000, maxOutputBytes: 65536, env: environment, redactOutput: value => redactMigrationOutput(value, context.current.root, { ...process.env, ...environment }) }, purpose);
         if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error)
           throw migrationCommandFailure([declaration.executable, ...declaration.args].join(" "), result, context.current.root, { ...process.env, ...environment });
       };
       try {
-        await run(policy.generate);
+        await run(policy.generate, "migration_generate");
         await io.jj(cwd, ["status"]);
-        await run(policy.verify);
+        await run(policy.verify, "migration_verify");
         const finalized = await io.revisionFacts(cwd, candidate.changeId);
         const resultPaths = changedPaths(await io.jj(cwd, ["diff", "--from", base.commitId, "--to", finalized.commitId, "--summary"]));
         if (!resultPaths.some(file => matches(policy.artifactPaths, file))) {

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { homedir, hostname } from "node:os";
@@ -7,16 +8,83 @@ import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "./bounded-process.ts";
 import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
 import { githubRepository } from "./issue-references.ts";
+import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent } from "./runner-contract.ts";
+import type { ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
-import { readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
+import { metadataPath, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 import type { SweepResult } from "./workspace-sweep.ts";
-import { writeWorkspaceJson } from "./workspace-transaction.ts";
+import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
+
+type PendingRunnerFact = {
+  id: string; fact: Extract<ClientFact, { kind: "ssh_forward_failure" }>;
+  operationId?: string; repo: string; workspace: string; machine: string; runnerBinding: string;
+};
+
+// A transport address is hashed so even a credential-bearing URL cannot enter metadata.
+const runnerBinding = (location: string): string => createHash("sha256").update(new URL(location).href).digest("hex");
+const pendingFacts = (metadata: { [key: string]: unknown }): PendingRunnerFact[] =>
+  Array.isArray(metadata.pendingRunnerFacts) ? metadata.pendingRunnerFacts as PendingRunnerFact[] : [];
+
+async function updatePendingFacts(context: WorkspaceContext, update: (pending: PendingRunnerFact[]) => PendingRunnerFact[]): Promise<boolean> {
+  return withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
+    const metadata = await workspaceMetadata(context.current.name);
+    if (!metadata || context.current.name === "default") return false;
+    await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, pendingRunnerFacts: update(pendingFacts(metadata)) });
+    return true;
+  }, { waitMs: 1000 });
+}
+
+async function retainForwardFailure(cwd: string, location: string, error: unknown, env: NodeJS.ProcessEnv): Promise<void> {
+  try {
+    const context = await workspaceContext(cwd);
+    if (!context || context.current.name === "default") throw new Error("no isolated workspace");
+    const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+    if (!repo) throw new Error("unknown repository");
+    const reason = redactMigrationOutput(error instanceof Error ? error.message : String(error), cwd, { ...process.env, ...env })
+      .replace(/[\x00-\x1f\x7f]/g, " ").slice(0, 300);
+    const pending: PendingRunnerFact = { id: randomUUID(), fact: { kind: "ssh_forward_failure", reason, observedAt: new Date().toISOString() },
+      repo, workspace: context.current.name, machine: hostname(), runnerBinding: runnerBinding(location) };
+    if (!await updatePendingFacts(context, (facts) => [...facts, pending])) throw new Error("missing workspace metadata");
+  } catch {
+    console.error("SSH forwarding failure could not be durably recorded in existing isolated workspace metadata.");
+  }
+}
+
+async function flushForwardFailures(cwd: string, location: string, baseUrl: string, token: string): Promise<void> {
+  // Delivery is best effort. A telemetry transport failure cannot block the caller's successful connection.
+  try {
+    const context = await workspaceContext(cwd);
+    if (!context || context.current.name === "default") return;
+    const metadata = await workspaceMetadata(context.current.name);
+    if (!metadata) return;
+    for (const pending of pendingFacts(metadata).filter((fact) => fact.runnerBinding === runnerBinding(location))) {
+      let operationId = pending.operationId;
+      if (!operationId) {
+        const response = await request(baseUrl, token, "/v1/client-operations", { method: "POST", signal: AbortSignal.timeout(5000),
+          headers: { "content-type": "application/json" }, body: JSON.stringify({ repo: pending.repo, workspace: pending.workspace, machine: pending.machine }) });
+        if (!response.ok) throw new Error("Runner refused client operation");
+        const body = await response.json() as { id: string };
+        if (typeof body.id !== "string" || !body.id) throw new Error("Runner returned no client operation");
+        operationId = body.id;
+        let retained = false;
+        await updatePendingFacts(context, (facts) => facts.map((fact) => {
+          if (fact.id !== pending.id) return fact;
+          retained = true;
+          operationId = fact.operationId ?? operationId;
+          return { ...fact, operationId };
+        }));
+        if (!retained) continue;
+      }
+      await postClientFact(baseUrl, token, operationId!, pending.fact, pending.id);
+      await updatePendingFacts(context, (facts) => facts.filter((fact) => fact.id !== pending.id));
+    }
+  } catch { /* Keep unacknowledged facts for the next successful connection. */ }
+}
 
 export function runnerLocation(env: NodeJS.ProcessEnv = process.env): string | null {
   if (env.SLIPJAY_RUNNER) return env.SLIPJAY_RUNNER;
@@ -58,7 +126,7 @@ async function request(baseUrl: string, token: string, path: string, init: Reque
   throw new Error(`Runner request failed: HTTP ${response.status}${typeof refusal === "string" ? `: ${refusal}` : ""}`);
 }
 
-export async function connectRunner(location: string, env: NodeJS.ProcessEnv = process.env): Promise<{ baseUrl: string; name: string; close(): void }> {
+export async function connectRunner(location: string, env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): Promise<{ baseUrl: string; name: string; close(): void }> {
   const token = await runnerToken(env);
   const url = new URL(location);
   let baseUrl = location;
@@ -89,13 +157,14 @@ export async function connectRunner(location: string, env: NodeJS.ProcessEnv = p
         if (spawnError || ssh.exitCode !== null || Date.now() >= deadline) throw new Error(`SSH runner connection failed: ${spawnError?.message ?? stderr}`);
         await delay(100);
       }
-    } catch (error) { close(); throw error; }
+    } catch (error) { close(); await retainForwardFailure(cwd, location, error, env); throw error; }
     baseUrl = `http://127.0.0.1:${port}`;
   } else if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("Runner location must use http://, https:// or ssh://");
   }
   try {
     const health = await (await request(baseUrl, token, "/v1/health", { signal: AbortSignal.timeout(15_000) })).json() as { runner: string };
+    await flushForwardFailures(cwd, location, baseUrl, token);
     return { baseUrl, name: health.runner, close };
   } catch (error) { close(); throw error; }
 }
@@ -245,12 +314,13 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
   const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview) : preview;
   const token = await runnerToken(env);
-  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
   const { baseUrl, name } = connection;
   const operationsFor = async (changeId: string) => (await (await request(baseUrl, token, `/v1/changes/${changeId}?repo=${encodeURIComponent(repo)}`,
     { signal: options.signal })).json() as { operations: Operation[] }).operations;
   try {
     let operation: Operation | undefined;
+    let reattached = true;
     let older = false;
     if (landedChange !== undefined) {
       // Only this workspace's own landed change finishes housekeeping here.
@@ -285,10 +355,17 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", bookmark]);
       const response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
         headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, changeId: target.changeId, commitId: target.commitId, bookmark,
-          submittedBy: `${hostname()}:${context.current.name}` }) });
-      operation = ((await response.json()) as { operation: Operation }).operation;
+          submittedBy: `${hostname()}:${context.current.name}`, identity: {
+            type: "identity", submitterKind: env.CODEX_THREAD_ID || env.CLAUDE_SESSION_ID ? "agent" : "unknown",
+            submitterId: `${hostname()}:${context.current.name}`, workspace: context.current.name, machine: hostname(),
+            ...(env.CODEX_THREAD_ID ? { harness: "codex", sessionId: env.CODEX_THREAD_ID } : env.CLAUDE_SESSION_ID ? { harness: "claude", sessionId: env.CLAUDE_SESSION_ID } : {}),
+          } }) });
+      const submitted = await response.json() as { operation: Operation; reattached?: boolean };
+      operation = submitted.operation;
+      reattached = submitted.reattached === true || response.status === 409;
       older = response.status === 409;
     }
+    await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // A fetch of every bookmark while the candidate was on the remote imports it untracked,
     // which makes the submitted commit immutable: the author could neither fix a failure
@@ -342,6 +419,52 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     }
     if (older) onLine(`[runner ${name}] followed an older commit; land again to submit your current commit`);
     return { ok: !older && result?.type === "landed", operation, logUrl, ...(sweep ? { sweep } : {}) };
+  } finally { connection.close(); }
+}
+
+async function postClientFact(baseUrl: string, token: string, id: string, fact: ClientFact, eventId: string = randomUUID()): Promise<void> {
+  const response = await request(baseUrl, token, `/v1/operations/${encodeURIComponent(id)}/events`, { method: "POST",
+    signal: AbortSignal.timeout(5000), headers: { "content-type": "application/json" }, body: JSON.stringify({ id: eventId, fact }) });
+  if (!response.ok) throw new Error(`Runner refused client event (${response.status})`);
+  const acknowledgement = await response.json() as { event?: StoredEvent };
+  if (acknowledgement.event?.event.type !== "client" || acknowledgement.event.event.id !== eventId)
+    throw new Error("Runner returned no acknowledgement for the client event");
+}
+
+/** Client-only facts belong to an attributed operation in the runner's ledger. */
+export async function recordClientFacts(cwd: string, facts: ClientFact[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const location = runnerLocation(env);
+  if (!location) return;
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error("Client event requires a SlipJay checkout");
+  const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Client event requires a GitHub repository");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
+  try {
+    const response = await request(connection.baseUrl, token, "/v1/client-operations", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo, workspace: context.current.name, machine: hostname() }) });
+    if (!response.ok) throw new Error(`Runner refused client operation (${response.status})`);
+    const { id } = await response.json() as { id: string };
+    for (const fact of facts) await postClientFact(connection.baseUrl, token, id, fact);
+  } finally { connection.close(); }
+}
+
+export async function readMetricsEvents(location: string, env: NodeJS.ProcessEnv = process.env): Promise<StoredEvent[]> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const events: StoredEvent[] = [];
+    let cursor = 0;
+    for (;;) {
+      const response = await request(connection.baseUrl, token, `/v1/metrics/events?since=${cursor}`);
+      if (!response.ok) throw new Error(`Runner metrics failed (${response.status})`);
+      const page = await response.json() as { events: StoredEvent[]; nextSeq: number; hasMore: boolean };
+      events.push(...page.events);
+      if (!page.hasMore) return events;
+      if (page.nextSeq <= cursor) throw new Error("Runner metrics cursor did not advance");
+      cursor = page.nextSeq;
+    }
   } finally { connection.close(); }
 }
 

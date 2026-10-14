@@ -1,0 +1,595 @@
+[
+  {
+    "seq": 1,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:03.877Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "monoznmvqxvpzuzzyypkpppmwwwltnyy",
+      "commitId": "70599a852d11cf93187a7ed8cf007310fd94b0da",
+      "bookmark": "slipjay/changes/monoznmvqxvpzuzzyypkpppmwwwltnyy",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 2,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:03.878Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 1,
+      "depth": 1,
+      "waitingFor": null,
+      "paused": false
+    }
+  },
+  {
+    "seq": 3,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:04.327Z",
+    "event": {
+      "type": "submitted",
+      "repo": "fixture/repo",
+      "changeId": "swwspznomkwtxwwxuvksptrmsruuozry",
+      "commitId": "b50ff8dd1cd2dabfd78423f93aacc874df975145",
+      "bookmark": "slipjay/changes/swwspznomkwtxwwxuvksptrmsruuozry",
+      "submittedBy": "test"
+    }
+  },
+  {
+    "seq": 4,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:04.328Z",
+    "event": {
+      "type": "queue_snapshot",
+      "position": 2,
+      "depth": 2,
+      "waitingFor": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+      "paused": false
+    }
+  },
+  {
+    "seq": 5,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:04.328Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 6,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.772Z",
+    "event": {
+      "type": "identity",
+      "submitterKind": "unknown",
+      "submitterId": "test",
+      "workspace": "unknown",
+      "machine": "test"
+    }
+  },
+  {
+    "seq": 7,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.817Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "33ddd929b36a72181a3c34399c13d9821338f8e05b5a3b266777cd5102487773",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 8,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.843Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 1515
+    }
+  },
+  {
+    "seq": 9,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.843Z",
+    "event": {
+      "type": "stage",
+      "stage": "rebasing"
+    }
+  },
+  {
+    "seq": 10,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.993Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "33ddd929b36a72181a3c34399c13d9821338f8e05b5a3b266777cd5102487773",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 11,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.993Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "rebasing",
+      "durationMs": 150,
+      "conflict": false,
+      "files": []
+    }
+  },
+  {
+    "seq": 12,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:05.994Z",
+    "event": {
+      "type": "stage",
+      "stage": "installing"
+    }
+  },
+  {
+    "seq": 13,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.014Z",
+    "event": {
+      "type": "progress",
+      "line": "[deps] preparing frozen candidate dependencies"
+    }
+  },
+  {
+    "seq": 14,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.148Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "installing",
+      "durationMs": 154,
+      "installSource": "fresh"
+    }
+  },
+  {
+    "seq": 15,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.149Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  },
+  {
+    "seq": 16,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.149Z",
+    "event": {
+      "type": "verification_base",
+      "base": "5ed1a4f6ef3bddce1a4484e83d09d100f72d00d4"
+    }
+  },
+  {
+    "seq": 17,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.195Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "33ddd929b36a72181a3c34399c13d9821338f8e05b5a3b266777cd5102487773",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 18,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.196Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }"
+    }
+  },
+  {
+    "seq": 19,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.197Z",
+    "event": {
+      "type": "run_started",
+      "runId": "0b0f307f-9f86-4cc3-aad8-5f0a521cf235",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "gate"
+    }
+  },
+  {
+    "seq": 20,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.596Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "0b0f307f-9f86-4cc3-aad8-5f0a521cf235",
+      "exitCode": null,
+      "signal": "SIGTERM",
+      "timedOut": false,
+      "durationMs": 399,
+      "outputBytes": 0,
+      "killed": true,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 21,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:06.598Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "verifying",
+      "durationMs": 449
+    }
+  },
+  {
+    "seq": 22,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:07.002Z",
+    "event": {
+      "type": "classified",
+      "ruleVersion": 1,
+      "cause": "killed",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "failingTests": [],
+      "diagnostics": []
+    }
+  },
+  {
+    "seq": 23,
+    "operationId": "op_00mv8irerp_1cc0e4a5026f77ba7d866399",
+    "at": "2026-10-14T19:45:07.002Z",
+    "event": {
+      "type": "cancelled",
+      "reason": "killed by the owner, not run to completion"
+    }
+  },
+  {
+    "seq": 24,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.009Z",
+    "event": {
+      "type": "stage",
+      "stage": "fetching"
+    }
+  },
+  {
+    "seq": 25,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.665Z",
+    "event": {
+      "type": "identity",
+      "submitterKind": "unknown",
+      "submitterId": "test",
+      "workspace": "unknown",
+      "machine": "test"
+    }
+  },
+  {
+    "seq": 26,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.714Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "51344f1ce8fd885713fa35b9157483db426edea08a0de041ed8ee0d26541f471",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 27,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.739Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "fetching",
+      "durationMs": 730
+    }
+  },
+  {
+    "seq": 28,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.740Z",
+    "event": {
+      "type": "stage",
+      "stage": "rebasing"
+    }
+  },
+  {
+    "seq": 29,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.877Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "51344f1ce8fd885713fa35b9157483db426edea08a0de041ed8ee0d26541f471",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 30,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.878Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "rebasing",
+      "durationMs": 138,
+      "conflict": false,
+      "files": []
+    }
+  },
+  {
+    "seq": 31,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.878Z",
+    "event": {
+      "type": "stage",
+      "stage": "installing"
+    }
+  },
+  {
+    "seq": 32,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:07.899Z",
+    "event": {
+      "type": "progress",
+      "line": "[deps] preparing frozen candidate dependencies"
+    }
+  },
+  {
+    "seq": 33,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.025Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "installing",
+      "durationMs": 147,
+      "installSource": "fresh"
+    }
+  },
+  {
+    "seq": 34,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.026Z",
+    "event": {
+      "type": "stage",
+      "stage": "verifying"
+    }
+  },
+  {
+    "seq": 35,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.026Z",
+    "event": {
+      "type": "verification_base",
+      "base": "5ed1a4f6ef3bddce1a4484e83d09d100f72d00d4"
+    }
+  },
+  {
+    "seq": 36,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.076Z",
+    "event": {
+      "type": "change_shape",
+      "files": 1,
+      "insertions": 1,
+      "deletions": 0,
+      "packages": [],
+      "apps": [],
+      "migrationBearing": false,
+      "testFiles": [],
+      "fileSet": "51344f1ce8fd885713fa35b9157483db426edea08a0de041ed8ee0d26541f471",
+      "sizeBucket": "small"
+    }
+  },
+  {
+    "seq": 37,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.077Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }"
+    }
+  },
+  {
+    "seq": 38,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.077Z",
+    "event": {
+      "type": "run_started",
+      "runId": "e069295b-b0a5-43e1-ad19-7955c8c56a98",
+      "command": "node -e const fs=require(\"node:fs\");if (fs.existsSync(\"fail\")) { process.stderr.write(\"boom\\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\\n\"); process.exit(3); }if (fs.existsSync(\"hang\")) { const spawn=(detached)=>require(\"node:child_process\").spawn(process.execPath,[\"-e\",\"setInterval(()=>{},1000)\"],{detached,stdio:\"ignore\"});const child=spawn(false), tool=spawn(true);fs.writeFileSync(fs.readFileSync(\"hang\",\"utf8\").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }",
+      "host": "slipjay-test",
+      "timeoutMs": 3600000,
+      "purpose": "gate"
+    }
+  },
+  {
+    "seq": 39,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.143Z",
+    "event": {
+      "type": "run_finished",
+      "runId": "e069295b-b0a5-43e1-ad19-7955c8c56a98",
+      "exitCode": 0,
+      "signal": null,
+      "timedOut": false,
+      "durationMs": 66,
+      "outputBytes": 0,
+      "killed": false,
+      "failingTests": [],
+      "diagnostics": [],
+      "testBodyRan": false
+    }
+  },
+  {
+    "seq": 40,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.144Z",
+    "event": {
+      "type": "progress",
+      "line": "[verify 1/1] passed in 0.1s"
+    }
+  },
+  {
+    "seq": 41,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.144Z",
+    "event": {
+      "type": "verification_passed",
+      "base": "5ed1a4f6ef3bddce1a4484e83d09d100f72d00d4",
+      "candidate": "b50ff8dd1cd2dabfd78423f93aacc874df975145"
+    }
+  },
+  {
+    "seq": 42,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.276Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "verifying",
+      "durationMs": 250
+    }
+  },
+  {
+    "seq": 43,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.276Z",
+    "event": {
+      "type": "stage",
+      "stage": "integrating"
+    }
+  },
+  {
+    "seq": 44,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.519Z",
+    "event": {
+      "type": "integrated",
+      "base": "5ed1a4f6ef3bddce1a4484e83d09d100f72d00d4",
+      "commitId": "b50ff8dd1cd2dabfd78423f93aacc874df975145"
+    }
+  },
+  {
+    "seq": 45,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.520Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "integrating",
+      "durationMs": 244
+    }
+  },
+  {
+    "seq": 46,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.520Z",
+    "event": {
+      "type": "stage",
+      "stage": "finalizing"
+    }
+  },
+  {
+    "seq": 47,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.575Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 55
+    }
+  },
+  {
+    "seq": 48,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.576Z",
+    "event": {
+      "type": "stage",
+      "stage": "publishing"
+    }
+  },
+  {
+    "seq": 49,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.717Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "finalizing",
+      "durationMs": 0,
+      "migrateDurationMs": 54
+    }
+  },
+  {
+    "seq": 50,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.718Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 0,
+      "pushDurationMs": 142,
+      "remoteMoved": false
+    }
+  },
+  {
+    "seq": 51,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:08.719Z",
+    "event": {
+      "type": "stage_detail",
+      "stage": "publishing",
+      "durationMs": 143
+    }
+  },
+  {
+    "seq": 52,
+    "operationId": "op_00mv8irf47_7b2f85314f0c46396470a7d2",
+    "at": "2026-10-14T19:45:09.250Z",
+    "event": {
+      "type": "landed",
+      "base": "5ed1a4f6ef3bddce1a4484e83d09d100f72d00d4",
+      "commitId": "b50ff8dd1cd2dabfd78423f93aacc874df975145",
+      "branch": "main",
+      "remote": "origin"
+    }
+  }
+]

@@ -1,4 +1,5 @@
 import { projectWatchOperation } from "./runner-watch-projection.ts";
+import { classifyFailure } from "./failure-classification.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
@@ -108,14 +109,57 @@ export function openOperationLog(path: string): OperationLog {
       return { repo: event.repo, commitId: event.commitId, reason: event.reason, ...history };
     });
   }
-  return {
-    append(operationId, event) {
+  function append(operationId: string, event: OperationEvent): StoredEvent {
+      if (event.type === "integration_held" || event.type === "integration_recovered") {
+        const history = events().filter((row) => (row.event.type === "integration_held" || row.event.type === "integration_recovered") && row.event.repo === event.repo && row.event.commitId === event.commitId);
+        const boundary = history.findLastIndex((row) => row.event.type === "integration_recovered");
+        const holds = history.slice(boundary + 1).filter((row) => row.event.type === "integration_held");
+        const since = holds[0]?.at ?? new Date().toISOString();
+        const retries = event.type === "integration_held" ? holds.length : Math.max(0, holds.length - 1) + (event.retried ? 1 : 0);
+        append(operationId, { type: "held", repo: event.repo, commitId: event.commitId, retries, durationMs: Math.max(0, Date.now() - Date.parse(since)), published: event.type === "integration_recovered" });
+      }
+      if (event.type === "client") {
+        const duplicate = events({ operationId }).find((row) => row.event.type === "client" && row.event.id === event.id);
+        if (duplicate) return duplicate;
+      }
+      if (["failed", "declined", "cancelled", "superseded"].includes(event.type)) {
+        const history = events({ operationId });
+        const current = operation(operationId);
+        const run = current?.runs.findLast((entry) => event.type === "failed" && entry.command === event.command) ?? current?.runs.at(-1);
+        const finished = history.findLast((row) => row.event.type === "run_finished" && row.event.runId === run?.runId)?.event;
+        const classification = classifyFailure(event as Extract<OperationEvent, { type: "failed" | "declined" | "cancelled" | "superseded" }>, {
+          paused: paused() !== null, held: history.some((row) => row.event.type === "integrated" || row.event.type === "integration_held"),
+          ...(run ? { run: { ...run, ...(finished?.type === "run_finished" ? { testBodyRan: finished.testBodyRan } : {}) } } : {}),
+        });
+        if (classification.cause === "gate" && current?.kind === "landing") {
+          const base = history.findLast((row) => row.event.type === "verification_base")?.event;
+          for (const earlier of projectIds((changeIds.all(current.repo, current.changeId) as { operation_id: string }[]).map((row) => row.operation_id))) {
+            if (earlier.id === operationId || earlier.submittedAt > current.submittedAt) continue;
+            const old = events({ operationId: earlier.id });
+            const oldBase = old.findLast((row) => row.event.type === "verification_base")?.event;
+            const passed = earlier.status === "landed" || old.some((row) => row.event.type === "verification_passed");
+            if (passed && base?.type === "verification_base" && oldBase?.type === "verification_base" && base.base !== oldBase.base && earlier.commitId === current.commitId) {
+              classification.interaction = { earlierOperation: earlier.id, fromBase: oldBase.base, toBase: base.base };
+              break;
+            }
+          }
+        }
+        append(operationId, classification);
+      }
       const at = new Date().toISOString();
-      const result = insert.run(operationId, at, event.type, JSON.stringify(event));
-      const stored = { seq: Number(result.lastInsertRowid), operationId, at, event };
+      const data = JSON.stringify(event);
+      const result = insert.run(operationId, at, event.type, data);
+      const stored = { seq: Number(result.lastInsertRowid), operationId, at, event: JSON.parse(data) as OperationEvent };
       for (const listener of [...listeners]) listener(stored);
+      if (event.type === "submitted") {
+        const current = operation(operationId)!;
+        const lane = queue().filter((entry) => (entry.kind === "deploy") === (current.kind === "deploy"));
+        append(operationId, { type: "queue_snapshot", position: current.position ?? 1, depth: lane.length, waitingFor: current.waitingFor ?? (lane.at(-2)?.id ?? null), paused: paused() !== null });
+      }
       return stored;
-    },
+  }
+  return {
+    append,
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     latestSeq: () => Number((db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq),
     snapshot(runner, now = new Date()) {
@@ -190,7 +234,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
           operation.status = "running";
         break;
       case "run_started": {
-        const run: RunRecord = { runId: event.runId, command: event.command, host: event.host, startedAt: stored.at, ...(event.timeoutMs === undefined ? {} : { timeoutMs: event.timeoutMs }) };
+        const run: RunRecord = { runId: event.runId, command: event.command, host: event.host, startedAt: stored.at, ...(event.timeoutMs === undefined ? {} : { timeoutMs: event.timeoutMs }), ...(event.purpose ? { purpose: event.purpose } : {}) };
         runs.set(event.runId, run);
         operation.runs.push(run);
         break;
@@ -198,7 +242,8 @@ function project(id: string, events: StoredEvent[]): Operation | null {
       case "run_finished": {
         const run = runs.get(event.runId);
         if (run) {
-          Object.assign(run, { finishedAt: stored.at, exitCode: event.exitCode, signal: event.signal, timedOut: event.timedOut, durationMs: event.durationMs });
+          const { type: _type, runId: _runId, ...details } = event;
+          Object.assign(run, { finishedAt: stored.at, ...details });
         }
         break;
       }
