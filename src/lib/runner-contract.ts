@@ -111,7 +111,7 @@ export type CommandEvidence = { status: "unavailable"; reason: "capacity" } | {
 };
 export type CommandArtifact = { status: "unavailable"; reason: "private-output" | "capture-failed" } | {
   status: "retained"; version: 1; sha256: string; bytes: number; complete: boolean;
-  retention: "preserved-no-automatic-deletion";
+  retention: "runner-retention-policy";
 };
 export type ArtifactChunk = { version: 1; operationId: string; runId: string; sha256: string; bytes: number; offset: number; nextOffset: number | null; dataBase64: string };
 export type OperationEvent =
@@ -133,6 +133,8 @@ export type OperationEvent =
   | { type: "verification_base"; base: string }
   | { type: "verification_passed"; base: string; candidate: string }
   | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
+  /** Retained source, manifest and command artifacts were deleted under the runner's retention policy. */
+  | { type: "evidence_expired"; policy: "published" | "unadopted" }
   /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */
   | { type: "submission_request"; repairClaimId?: string; handoffSha256?: string; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */
@@ -209,6 +211,8 @@ export type LandingOutcome = {
   identity?: Extract<OperationEvent, { type: "identity" }>;
   requestId?: string;
   sourceRetention?: Extract<OperationEvent, { type: "source_retained" }>;
+  /** When set, retained source, manifest and artifacts no longer exist; the ledger's own record remains. */
+  evidenceExpired?: { at: string; policy: "published" | "unadopted" };
   attempt?: Extract<OperationEvent, { type: "attempt_prepared" }>;
   publication: { state: "not-attempted" | "unconfirmed" | "published"; base?: string; commitId?: string };
   failure?: { reason: string; stage?: RunnerStage; command?: string; excerpt?: string; excerptTruncated: boolean };

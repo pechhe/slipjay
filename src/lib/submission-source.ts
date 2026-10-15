@@ -49,8 +49,8 @@ export async function retainSubmissionSource(input: {
     identity: request.identity ?? null,
     ...(request.repair ? { repair: { operationId: request.repair.operationId, claimId: request.repair.claimId } } : {}),
     ...(request.handoff ? { handoff: { ...sanitizedHandoff(request.handoff, input.env ?? process.env), authority: "author-reported", inputSha256: handoffDigest(request.handoff) } } : {}),
-    gaps: [...request.handoff ? [] : ["Spec revision/snapshot and intent not supplied", "Helper, focused-check and independent-review evidence not supplied"], "Fresh-worker repair claim and reproduction contract incomplete"],
-    retention: "Preserved with the runner ledger; no automatic source or manifest deletion" });
+    gaps: [...request.handoff ? [] : ["Spec revision/snapshot and intent not supplied", "Helper, focused-check and independent-review evidence not supplied"]],
+    retention: "Runner retention policy: kept while open, unconfirmed or under a repair claim; deleted 14 days after its change published, otherwise 30 days after its outcome" });
   if (Buffer.byteLength(manifest) > 131072) throw new Error("Sanitized submission manifest exceeds retention capacity");
   const path = manifestPath(home, operationId);
   const previous = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });

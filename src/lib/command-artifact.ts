@@ -50,7 +50,7 @@ export async function retainCommandArtifact(input: {
       }
     }
     finally { await rm(temporary, { force: true }).catch(() => {}); }
-    return { status: "retained", version: 1, sha256: digest(bytes), bytes: bytes.length, complete, retention: "preserved-no-automatic-deletion" };
+    return { status: "retained", version: 1, sha256: digest(bytes), bytes: bytes.length, complete, retention: "runner-retention-policy" };
   } catch { return { status: "unavailable", reason: "capture-failed" }; }
 }
 

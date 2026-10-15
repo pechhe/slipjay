@@ -6,6 +6,8 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
   const identity = events.find((event) => event.type === "identity");
   const request = events.find((event) => event.type === "submission_request");
   const retained = events.find((event) => event.type === "source_retained");
+  const expiredRow = history.find((row) => row.operationId === operation.id && row.event.type === "evidence_expired");
+  const expired = expiredRow?.event.type === "evidence_expired" ? { at: expiredRow.at, policy: expiredRow.event.policy } : undefined;
   const attempt = events.findLast((event) => event.type === "attempt_prepared");
   const integrated = events.findLast((event) => event.type === "integrated");
   const intent = events.findLast((event) => event.type === "publication_intent");
@@ -29,10 +31,10 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     invalidated: run.attempt !== undefined && invalidated.has(run.attempt),
   }));
   const gaps = ["Only recorded commands are listed; skipped or unstarted units are not inventoried",
-    "Spec snapshot, helper/check/review manifest and exclusive repair authority are incomplete"];
+    ...events.some((event) => (event.type === "submitted" || event.type === "submission_request") && "handoffSha256" in event && event.handoffSha256) ? [] : ["No author handoff (Spec snapshot, helper, check or review evidence) was supplied"]];
   if (runs.some((run) => run.artifact?.status !== "retained")) gaps.push("Some commands have no retained output artifact");
   if (runs.some((run) => run.artifact?.status === "retained" && !run.artifact.complete)) gaps.push("Some retained command artifacts contain incomplete output; inspect their truncation metadata");
-  gaps.push("Bounded automatic artifact/source cleanup and repair/adoption retention rules are incomplete");
+  if (expired) gaps.push(`Retained source, handoff manifest and command artifacts expired under the ${expired.policy} retention policy at ${expired.at}; only ledger records remain`);
   if (runs.some((run) => run.commandEvidence?.status !== "recorded")) gaps.push("Some commands lack structured executable/argument/working-directory evidence");
   if (runs.some((run) => run.commandEvidence?.status === "recorded" && (run.commandEvidence.redacted || run.commandEvidence.cwd === null)))
     gaps.push("Some command context is redacted or outside the checkout; it cannot be replayed verbatim");
@@ -51,7 +53,7 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
   return { version: 1, operationId: operation.id, repo: operation.repo, changeId: operation.changeId, sourceCommitId: operation.commitId,
     status: operation.status, stage: operation.stage, terminal: Boolean(result), asOfSeq: operation.lastSeq,
     submittedAt: operation.submittedAt, ...(operation.finishedAt ? { finishedAt: operation.finishedAt } : {}),
-    ...(identity ? { identity } : {}), ...(request ? { requestId: request.requestId } : {}), ...(retained ? { sourceRetention: retained } : {}),
+    ...(identity ? { identity } : {}), ...(request ? { requestId: request.requestId } : {}), ...(retained ? { sourceRetention: retained } : {}), ...(expired ? { evidenceExpired: expired } : {}),
     ...(attempt ? { attempt } : {}), publication, ...(failure ? { failure } : {}), ...(classification ? { classification } : {}), runs,
     evidence: { coverage: "partial", gaps, logCommand: `slipjay runner log ${operation.id}`, logPath: `/v1/operations/${encodeURIComponent(operation.id)}/log` },
     recovery: { kind: recovery, automaticRetry: false } };

@@ -46,7 +46,7 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
     const file = (await readdir(join(f.home, "submissions")))[0]!;
     const manifest = JSON.parse(await readFile(join(f.home, "submissions", file), "utf8")) as { gaps: string[]; source: string };
     assert.equal(manifest.source, f.request.commitId);
-    assert.equal(manifest.gaps.length, 1);
+    assert.equal(manifest.gaps.length, 0);
     const stored = JSON.stringify(manifest);
     assert.equal(stored.includes("Repair without author chat"), true);
     assert.equal(stored.includes("do-not-retain"), false);

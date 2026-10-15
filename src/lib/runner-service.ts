@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { readSubmissionManifest, retainSubmissionSource } from "./submission-source.ts";
 import { readCommandArtifact } from "./command-artifact.ts";
+import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
@@ -59,5 +60,11 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   // Queued operations from before a restart resume here.
   queue.wake();
-  return { url: server.url, close: async () => { await server.close(); queue.close(); await queue.idle(); log.close(); } };
+  // Retained evidence is bounded: expire it at start and every six hours. One pass at a time.
+  let pruning: Promise<unknown> = Promise.resolve();
+  const prune = () => { pruning = pruning.then(() => pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] })).catch(() => {}); };
+  prune();
+  const retention = setInterval(prune, 6 * 60 * 60 * 1000);
+  retention.unref();
+  return { url: server.url, close: async () => { clearInterval(retention); await pruning; await server.close(); queue.close(); await queue.idle(); log.close(); } };
 }

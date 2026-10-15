@@ -25,6 +25,7 @@ export function repairEligibility(log: OperationLog, operation: LandingOperation
   if (log.operationsForChange(operation.repo, operation.changeId)[0]?.id !== operation.id) return "A newer attempt owns this logical change";
   if (operation.status !== "failed" || operation.outcome?.publication.state !== "not-attempted") return "Reconcile publication or owner controls before source repair";
   if (operation.outcome.sourceRetention?.commitId !== operation.commitId) return "No durable retained source acknowledgement";
+  if (operation.outcome.evidenceExpired) return "Retained source expired under the runner's retention policy";
   if (!["gate", "conflict"].includes(operation.outcome.classification?.cause ?? "")) return "Only a confirmed pre-publication gate or conflict failure accepts a coding repair claim";
   if (operation.runs.some((run) => ["migration_generate", "migration_verify", "finalization"].includes(run.purpose ?? ""))) return "Migration/finalisation evidence requires existing reconciliation";
   return null;

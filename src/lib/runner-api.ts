@@ -275,6 +275,8 @@ export function createRunnerHandler(input: {
       const operationId = decodeURIComponent(artifact[1]!), runId = decodeURIComponent(artifact[2]!);
       const operation = input.log.operation(operationId);
       if (!operation) return json({ error: "Unknown operation" }, 404);
+      const lapsed = operation.kind === "landing" ? operation.outcome?.evidenceExpired : undefined;
+      if (lapsed) return json({ error: `Command artifact expired under the runner's ${lapsed.policy} retention policy at ${lapsed.at}` }, 410);
       const reference = operation.runs.find((run) => run.runId === runId)?.artifact;
       if (!reference || reference.status !== "retained") return json({ error: "Command artifact unavailable", reason: reference?.status === "unavailable" ? reference.reason : "not-recorded" }, 410);
       const rawOffset = url.searchParams.get("offset") ?? "0", rawLimit = url.searchParams.get("limit") ?? "16384";
@@ -291,6 +293,9 @@ export function createRunnerHandler(input: {
     const operation = input.log.operation(id);
     if (!operation)
       return json({ error: "Unknown operation" }, 404);
+    const expired = operation.kind === "landing" ? operation.outcome?.evidenceExpired : undefined;
+    if (expired && (route[2] === "source" || route[2] === "handoff"))
+      return json({ error: `Retained evidence expired under the runner's ${expired.policy} retention policy at ${expired.at}` }, 410);
     switch (route[2]) {
       case "source":
         if (operation.kind !== "landing") return json({ error: "Source recovery supports landing operations only" }, 409);

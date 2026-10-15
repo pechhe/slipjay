@@ -629,9 +629,8 @@ Private finalization/reset/deployment output is withheld. Capture failure record
 `unavailable`, preserving the original gate verdict and available diagnostics.
 Files are flushed before their ledger reference is appended; a repeated run identity
 cannot overwrite different bytes. Crash-orphaned files may remain without a ledger
-reference and cannot be retrieved through the API. Artifacts currently stay with the
-runner ledger, without automatic deletion or a total-store retention guarantee;
-bounded cleanup and repair/adoption retention remain outstanding in #57.
+reference and cannot be retrieved through the API. Artifacts follow the retention
+schedule below.
 
 `slipjay land --handoff <json-file>` optionally supplies version-1 author evidence
 alongside the exact source. The file is at most 64KiB. All fields below are required;
@@ -676,8 +675,8 @@ JSON through authenticated `GET /v1/operations/:id/handoff` (`{ manifest }`). It
 checks the ledger digest before serving; missing/tampered evidence returns 410,
 non-landing operations return 409 and unsupported runners may return 404/501.
 Read failure exits nonzero. This read never creates a repair claim or resubmits.
-Retained manifests remain partial handoffs: exclusive repair fencing, full
-reproduction prerequisites and bounded lifetime cleanup are still outstanding.
+A manifest records what the author supplied; it does not certify that a fresh worker
+has every reproduction prerequisite, and its gaps say what is missing.
 
 `slipjay runner source <operation> <bundle-file>` downloads a self-contained Git
 bundle of the exact retained source, including ancestry, into a **new** local file.
@@ -695,7 +694,8 @@ has a five-minute request deadline. Unsupported export is 501, unavailable/capac
 missing retained evidence is 410, non-landing is 409 and unknown operations are 404.
 An interrupted export can be requested again without retrying the landing. Normal
 completion/failure/disconnect removes the derived server bundle; a process crash may
-leave a temporary file. The retained private source ref and manifest are preserved.
+leave a temporary file. The retained private source ref and manifest follow the
+retention schedule below.
 
 The public `importSourceBundle(bundle, assignedCheckout, operationId, sourceCommitId)`
 validates the bundle's exact operation ref and imports immutable objects into an
@@ -749,6 +749,18 @@ A released/revoked claimant cannot submit source, and releasing does not silentl
 restore the original author's write authority. A new claimant must acquire a new
 capability on the latest repairable failed attempt. Publication closes the claim.
 No automatic repair session or model is started.
+
+**Retention.** A landing attempt's retained source ref, handoff manifest and command
+artifacts are kept while it is queued or running, while its publication is
+unconfirmed, and while its logical change has an active repair claim. Otherwise they
+are deleted 14 days after the attempt's outcome once any attempt of its change has
+published, or 30 days after it when none has. The runner checks at start and every six
+hours, and records an `evidence_expired` event: `outcome` then names the policy and
+time, and `source`, `handoff` and `artifact` return 410 saying the evidence expired. The
+ledger's own events, run records and failure excerpts are never deleted. Unreferenced
+source objects leave the private store through Git's own gc expiry, so a submission
+retained at the same moment keeps its objects. Claim a failure within 30 days to keep
+its evidence.
 
 `slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
 without following or submitting it. The authenticated API route is
