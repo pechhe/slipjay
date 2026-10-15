@@ -628,7 +628,19 @@ invalidation flags. An invalidated pass remains historical evidence, not a passi
 current attempt. Missing run completions are `incomplete`; signals do not establish
 OOM. `evidence.coverage` is always `partial` until complete artifact and handoff
 contracts exist: gaps explicitly include absent exact argument/cwd records,
-unstarted/skipped units, artifacts and repair authority.
+unstarted/skipped units, artifacts and repair authority. Missing structured command
+context is reported per historical or capacity-limited run.
+
+New run-start events include structured `commandEvidence`: executable, argument
+array (including empty arguments), checkout-relative cwd, environment variable names
+and a configuration fingerprint. No environment values or stdin are retained.
+Known credential values, secret flags and URLs are redacted before recording, and
+the display command uses the same sanitized context. A redacted argument is not
+replayable input; a cwd outside the checkout is `null`. The fingerprint covers the
+sanitized command and execution limits, excluding environment values, and is not
+proof of identical credentials or runtime configuration. Context is bounded to 256
+arguments, 32 KiB of executable/arguments and 256 environment names/8 KiB of names;
+excess capacity reports `unavailable` without silently clipping individual arguments.
 
 `publication.state` is `published` only for that operation's landed verdict. An
 integration/publication intent, held integration, or failure at the integration tail

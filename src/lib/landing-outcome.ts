@@ -30,8 +30,10 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
   }));
   const gaps = ["Only recorded commands are listed; skipped or unstarted units are not inventoried",
     "Complete per-command output artifacts, hashes and retention are unavailable",
-    "Command display strings are not an exact executable/argument/working-directory contract",
     "Spec snapshot, helper/check/review manifest and exclusive repair authority are incomplete"];
+  if (runs.some((run) => run.commandEvidence?.status !== "recorded")) gaps.push("Some commands lack structured executable/argument/working-directory evidence");
+  if (runs.some((run) => run.commandEvidence?.status === "recorded" && (run.commandEvidence.redacted || run.commandEvidence.cwd === null)))
+    gaps.push("Some command context is redacted or outside the checkout; it cannot be replayed verbatim");
   if (!retained) gaps.push("No retained-source acknowledgement was recorded");
   if (runs.some((run) => run.diagnosticCapture !== "selected")) gaps.push("Some commands have incomplete or unavailable selected diagnostics");
   if (runs.some((run) => run.outcome === "incomplete")) gaps.push("Some command completions are unknown");

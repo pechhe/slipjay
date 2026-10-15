@@ -20,6 +20,7 @@ import { RequiredVerificationError, runRequiredVerification } from "./required-v
 import { admissionLane, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
+import { commandEvidence } from "./command-evidence.ts";
 import { redactVerificationOutput } from "./verification-failure.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
@@ -270,7 +271,8 @@ export function createRunnerQueue(input: {
         run: async (request) => {
           const runId = randomUUID();
           const started = Date.now();
-          append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs, purpose: "deploy" });
+          const context = commandEvidence(request, checkoutPath(operation));
+          append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs, purpose: "deploy", commandEvidence: context });
           const result = await executor.run(request).catch((error: unknown) => {
             append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
             throw error;
@@ -420,8 +422,9 @@ export function createRunnerQueue(input: {
     async function run(request: BoundedProcessRequest, purpose?: RunPurpose): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
-      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs,
-        purpose: purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate"), ...(prefix ? { attempt: prefix.attempt } : {}) });
+      const context = commandEvidence(request, checkout);
+      append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs,
+        purpose: purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate"), ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
       const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : [], ...request.abortSignal ? [request.abortSignal] : []]);
       const privateRun = stage === "resetting" || stage === "finalizing";
       const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };

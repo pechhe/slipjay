@@ -338,6 +338,15 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
     assert.equal(failure.command, command);
     assert.equal(failure.output, gateFailureOutput);
     assert.equal(f.log.operation(failed)!.runs[0]!.exitCode, 3);
+    const context = f.log.operation(failed)!.runs[0]!.commandEvidence;
+    assert.equal(context?.status, "recorded");
+    if (context?.status !== "recorded") throw new Error("Expected structured gate command");
+    assert.equal(context.executable, "node");
+    assert.deepEqual(context.args, ["-e", gate]);
+    assert.equal(context.cwd, ".");
+    assert.equal(context.redacted, false);
+    assert.ok(context.environmentNames.includes("PATH"));
+    assert.doesNotMatch(JSON.stringify(context), /SLIPJAY_RUNNER_TOKEN/);
     assert.equal(f.main(), before);
     await rm(join(f.author, "fail"));
     await writeFile(join(f.author, "fixed.txt"), "fixed\n");
@@ -1102,10 +1111,13 @@ test("a landing deploys staging from an exact view of the landed commit and reco
     assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)), ["app", "hq"].map((project) =>
       ({ project, environment: "staging", commit: f.main(), key: "from-runner", head: f.main() })), "each project ran in the exact commit with the declared key");
     assert.deepEqual(first.runs.map((run) => run.exitCode), [0, 0]);
+    const deployCommands = new Set(["app", "hq"].map((name) => ["node", "-e", deployStep(f.root, name)].join(" ")));
+    const deployRequests = f.requestedTimeouts.filter((request) => deployCommands.has(request.command));
+    assert.equal(deployRequests.length, 2);
+    assert.deepEqual(deployRequests.map((request) => request.timeoutMs), [30_000, 30_000]);
     for (const run of first.runs) {
-      const request = f.requestedTimeouts.find((request) => request.command === run.command);
-      assert.equal(run.timeoutMs, request?.timeoutMs);
       assert.equal(run.timeoutMs, 30_000);
+      assert.equal(run.commandEvidence?.status, "recorded");
     }
     await writeFile(join(f.root, "fail-deploy-hq"), "");
     await f.land(f.submit(await f.candidate("b.txt")));

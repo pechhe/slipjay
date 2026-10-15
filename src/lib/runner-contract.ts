@@ -105,6 +105,10 @@ export type ClientFact =
   | { kind: "preview_start"; workspace: string; port: number };
 export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
 export type RunPurpose = "gate" | "dependencies" | "finalization" | "migration_generate" | "migration_verify" | "deploy" | "reset";
+export type CommandEvidence = { status: "unavailable"; reason: "capacity" } | {
+  status: "recorded"; executable: string; args: string[]; cwd: string | null; environmentNames: string[];
+  redacted: boolean; configurationSha256: string;
+};
 export type OperationEvent =
   | { type: "attempt_started"; attempt: number; source: string; checkout: string }
   | { type: "attempt_prepared"; attempt: number; source: string; base: string; candidate: string; predecessor?: { operationId: string; attempt: number; candidate: string }; overlap: boolean; checkout: string }
@@ -135,7 +139,7 @@ export type OperationEvent =
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
-  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number }
+  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence }
   | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable" }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
@@ -164,7 +168,7 @@ export type StoredEvent = { seq: number; operationId: string; at: string; event:
 
 /** One executed command of an operation, projected from its run events. */
 export type RunRecord = {
-  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number;
+  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence;
   finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable";
 };
 
