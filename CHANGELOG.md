@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## v3.17.0
+
+- **Landing attribution and recovery (#58, #59):** a renamed integration bookmark
+  is fetched before it is needed, and multi-commit landings keep the feature's
+  title. Merge candidates no longer republish their merged-in history.
+- **Runner watch and menu status (#52, #53, #54):** operation age is available
+  alongside live command age, lifecycle fixtures come from the TypeScript runner
+  contract, and the menu reports Production failures, queued outcomes and stale
+  disconnected state. Pending notifications expire after 24 hours and accepted
+  notification identities retain the most recent 2048 entries.
 - **Deployment recovery stays bounded (#55):** failures before project commands
   retry no sooner than an hour, including environments with a zero deployment
   interval. A queued deployment cancelled by its owner is not restarted on schedule;
