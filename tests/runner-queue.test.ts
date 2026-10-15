@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -86,7 +86,7 @@ const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never",
 
 // `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
 async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, lane, branch = "main" }: { workers?: number; other?: boolean; lane?: string; branch?: string } = {}) {
+  { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false }: { workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -102,7 +102,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: branch,
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLandingVerification: [{ executable: "node", args: ["-e", gate] }],
+    requiredLandingVerification: [{ executable: "node", args: ["-e", prefixGate?.(root) ?? gate] }],
     unattendedMergeToIntegration: true,
     ...(migrations ? {
       migrationFinalization: {
@@ -161,13 +161,14 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   // While `reject-push` exists the remote refuses every push, as an outage would.
   await writeFile(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -e ${JSON.stringify(join(root, "reject-push"))} ]; then echo "remote unavailable" >&2; exit 1; fi\n`);
   await chmod(join(origin, "hooks", "pre-receive"), 0o755);
-  const log = openOperationLog(":memory:", { ...workers === undefined ? {} : { workers }, ...lane ? { lane: () => lane } : {} });
+  const logPath = durable ? join(root, "events.sqlite") : ":memory:";
+  const log = openOperationLog(logPath, { ...workers === undefined ? {} : { workers }, ...lane ? { lane: () => lane } : {} });
   const published: StoredEvent[] = [];
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
   const requestedTimeouts: { command: string; timeoutMs: number; migrationContext?: string }[] = [];
   const local = localExecutor();
-  const executor: Executor = { host: local.host, run: (request) => {
+  const executor: Executor = { host: local.host, combinedLimits: verificationDepth === 2, run: (request) => {
     requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs,
       ...(request.env?.SLIPJAY_MIGRATION_CONTEXT ? { migrationContext: request.env.SLIPJAY_MIGRATION_CONTEXT } : {}) });
     return local.run(request);
@@ -178,7 +179,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
   });
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {} },
+  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {} },
     ...workers === undefined ? {} : { workers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
@@ -227,7 +228,7 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
   const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
-  return { root, requestedTimeouts, candidateAtVerdict, development, land, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
+  return { root, logPath, requestedTimeouts, candidateAtVerdict, development, land, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
@@ -557,9 +558,9 @@ test("a migration-bearing change lands with one generated migration, finalized b
     assert.equal(f.remoteFile("migrations/0001.sql"), "-- 1");
     assert.deepEqual(await f.development(), [{ commit: landed.commitId, migrations: ["0001.sql"] }]);
     assert.deepEqual(f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []), ["fetching", "rebasing", "installing", "verifying", "integrating", "finalizing", "publishing"]);
-    // Generation, its verification and the gate are all runner runs.
-    assert.equal(f.log.operation(id)!.runs.length, 3);
-    assert.deepEqual(f.log.operation(id)!.runs.map((run) => run.purpose), ["migration_generate", "migration_verify", "gate"]);
+    // Generation, verification, the target probe and finalization all share the executor.
+    assert.equal(f.log.operation(id)!.runs.length, 5);
+    assert.deepEqual(f.log.operation(id)!.runs.map((run) => run.purpose), ["migration_generate", "migration_verify", "gate", "finalization", "finalization"]);
     const contexts = f.requestedTimeouts.flatMap((request) => request.migrationContext ? [JSON.parse(request.migrationContext) as { baseCommit: string; candidateChangeId: string; candidateCommit: string }] : []);
     assert.equal(contexts.length, 2, "both migration commands retain authoritative provenance through the runner");
     assert.deepEqual(contexts[0], contexts[1]);
@@ -703,6 +704,39 @@ test("recovery fails interrupted verification and leaves queued operations for w
     assert.equal(f.log.operation(queued)!.status, "queued");
     f.queue.wake(); await f.queue.idle();
     assert.equal(f.result(queued)?.type, "landed", JSON.stringify(f.result(queued)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("restart recovery closes both interrupted lanes once, preserves a pause and leaves unrelated queued work recoverable", async () => {
+  const f = await fixture(false, true, undefined, false, { other: true });
+  try {
+    const integration = f.main();
+    const releaseBase = f.releaseRef();
+    const candidate = await f.candidate("interrupted.txt");
+    const landing = f.submit(candidate);
+    const release = f.submitRelease(integration);
+    const other = f.submit(await f.candidate("queued.txt", f.otherAuthor, "fixture/other"));
+    f.log.append(landing, { type: "stage", stage: "verifying" });
+    f.log.append(release, { type: "stage", stage: "verifying" });
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    await f.queue.recover();
+    await f.queue.recover();
+    for (const id of [landing, release]) {
+      assert.equal(f.result(id)?.type, "failed");
+      assert.equal(f.log.events({ operationId: id }).filter(({ event }) => TERMINAL_EVENT_TYPES.includes(event.type as never)).length, 1);
+    }
+    assert.equal(f.main(), integration);
+    assert.equal(f.releaseRef(), releaseBase);
+    assert.equal(f.log.operation(other)!.stage, "paused");
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(other)!.status, "queued");
+    // Recovery never invents a source retry or publication for either interrupted operation.
+    assert.equal(jj(f.author, ["--ignore-working-copy", "log", "-r", candidate.commitId, "--no-graph", "-T", "commit_id"]), candidate.commitId);
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "owner" });
+    assert.equal((await f.land(other))?.type, "landed");
+    assert.equal(f.result(landing)?.type, "failed");
+    assert.equal(f.result(release)?.type, "failed");
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -1509,4 +1543,365 @@ test("a reset of a repository that declares none fails, and recovery fails a res
     await f.queue.recover();
     assert.deepEqual(f.result(interrupted), { type: "failed", stage: "resetting", reason: "runner restarted during resetting; run slipjay reset again" });
   } finally { await f.dispose(); }
+}, 120_000);
+
+const exactPrefixGate = (root: string) => `const fs=require('node:fs'), path=require('node:path');
+const at=(name)=>path.join(${JSON.stringify(root)},name);
+if(fs.existsSync('b.txt')) {
+ if(!fs.existsSync('a.txt')) { console.error('B did not contain its exact predecessor A'); process.exit(4); }
+ fs.writeFileSync(at('b-verified'),process.cwd());
+ if(fs.existsSync(at('fail-combination'))) { console.error('A+B conflict'); process.exit(5); }
+} else if(fs.existsSync('a.txt')) {
+ fs.writeFileSync(at('a-started'),process.cwd());
+ while(fs.existsSync(at('hold-a'))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);
+ if(fs.existsSync(at('fail-a'))) process.exit(6);
+}`;
+
+test("depth-two exact prefixes let B finish first but publish exact A then B", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    await writeFile(join(f.root, "hold-a"), "");
+    const base = f.main();
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(async () => f.result(b) ?? await readFile(join(f.root, "b-verified"), "utf8").catch(() => undefined));
+    assert.equal(f.result(b), undefined, JSON.stringify(f.result(b)));
+    await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || undefined);
+    assert.equal(f.main(), base, "B does not occupy the canonical publisher while A verifies");
+    const prepared = (id: string) => f.log.events({ operationId: id }).map((row) => row.event).find((event) => event.type === "attempt_prepared");
+    const pa = prepared(a), pb = prepared(b);
+    assert.ok(pa?.type === "attempt_prepared" && pb?.type === "attempt_prepared");
+    assert.equal(pa.base, base); assert.equal(pb.base, pa.candidate);
+    assert.deepEqual(pb.predecessor, { operationId: a, attempt: 1, candidate: pa.candidate });
+    await rm(join(f.root, "hold-a"));
+    await f.queue.idle();
+    assert.equal(f.result(a)?.type, "landed", JSON.stringify(f.result(a)));
+    assert.equal(f.result(b)?.type, "landed", JSON.stringify(f.result(b)));
+    assert.equal(f.main(), pb.candidate);
+    assert.deepEqual(f.parents(pb.candidate), [pa.candidate]);
+    assert.deepEqual(f.published.filter((row) => row.event.type === "landed").map((row) => row.operationId), [a, b]);
+    assert.notEqual(pa.checkout, pb.checkout, "verifiers use independent repositories");
+    assert.equal(f.remoteFile("a.txt"), "a.txt");
+    assert.equal(f.remoteFile("b.txt"), "b.txt");
+  } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two exact prefix catches a combination failure before B publication", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    await writeFile(join(f.root, "hold-a"), "");
+    await writeFile(join(f.root, "fail-combination"), "");
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(() => f.result(b));
+    assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
+    assert.match(JSON.stringify(f.result(b)), /A\+B conflict/);
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    const landed = f.result(a);
+    assert.ok(landed?.type === "landed");
+    assert.equal(f.main(), landed.commitId);
+    assert.ok(f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_invalidated"));
+  } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+for (const outcome of ["failure", "kill", "hold", "remote-move"] as const) test(`depth-two exact prefix invalidates B after predecessor ${outcome}`, async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    const base = f.main();
+    await writeFile(join(f.root, "hold-a"), "");
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+    assert.equal(f.result(b), undefined, JSON.stringify(f.result(b)));
+    if (outcome === "failure") await writeFile(join(f.root, "fail-a"), "");
+    if (outcome === "hold") await writeFile(join(f.root, "reject-push"), "");
+    if (outcome === "remote-move") {
+      // Another valid writer advanced the remote after the prefix was frozen.
+      const commit = execFileSync("git", ["--git-dir", f.origin, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "external move"],
+        { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "f@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "f@example.com" } }).trim();
+      execFileSync("git", ["--git-dir", f.origin, "update-ref", "refs/heads/main", commit, base]);
+    }
+    if (outcome === "kill") assert.equal(f.queue.kill(a).status, "killed");
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(a)?.type, outcome === "kill" ? "cancelled" : outcome === "remote-move" ? "landed" : "failed", JSON.stringify(f.result(a)));
+    assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
+    assert.ok(!f.log.events({ operationId: b }).some((row) => row.event.type === "integrated"));
+    assert.ok(f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_invalidated"));
+    if (outcome === "hold") assert.equal(f.log.snapshot(f.executor.host).held.length, 1);
+    if (outcome === "remote-move") assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "attempt_prepared").length, 2, "one immutable automatic rebuild");
+    if (outcome !== "remote-move") assert.equal(f.main(), base);
+    // Every prepared candidate remains retained in the verifier after terminal outcome.
+    for (const id of [a, b]) {
+      const prepared = f.log.events({ operationId: id }).map((row) => row.event).find((event) => event.type === "attempt_prepared");
+      assert.ok(prepared?.type === "attempt_prepared");
+      assert.equal(jj(prepared.checkout, ["log", "-r", prepared.candidate, "--no-graph", "-T", "commit_id"]), prepared.candidate);
+    }
+  } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two migration finalization is a barrier and a hold invalidates its waiting dependent", async () => {
+  const f = await fixture(true, false, undefined, false, { verificationDepth: 2 });
+  try {
+    await writeFile(join(f.root, "hold-finalize"), "");
+    await writeFile(join(f.root, "fail-finalize"), "");
+    const a = f.submit(await f.candidate("schema/a.ts"));
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(a)?.stage === "finalizing" || f.result(a) || undefined);
+    assert.equal(f.result(a), undefined, JSON.stringify(f.result(a)));
+    assert.ok(!f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_prepared" || row.event.type === "verification_passed"));
+    await rm(join(f.root, "hold-finalize")); await f.queue.idle();
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
+    assert.equal(f.log.snapshot(f.executor.host).held.length, 1);
+    assert.ok(!f.log.events({ operationId: b }).some((row) => row.event.type === "integrated"));
+  } finally { await rm(join(f.root, "hold-finalize"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two waiting dependent can be killed without waiting for or killing its predecessor", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    await writeFile(join(f.root, "hold-a"), "");
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+    assert.equal(f.result(b), undefined, JSON.stringify(f.result(b)));
+    assert.equal(f.queue.kill(b).status, "killed");
+    await until(() => f.result(b));
+    assert.equal(f.result(b)?.type, "cancelled");
+    assert.equal(f.result(a), undefined);
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(a)?.type, "landed", JSON.stringify(f.result(a)));
+  } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two paused queue does not rebuild a stale head or admit another operation", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    const base = f.main();
+    await writeFile(join(f.root, "hold-a"), "");
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    const c = f.submit(await f.candidate("c.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+    assert.equal(f.result(b), undefined, JSON.stringify(f.result(b)));
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "fixture-owner" });
+    const moved = execFileSync("git", ["--git-dir", f.origin, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "external move"],
+      { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "f@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "f@example.com" } }).trim();
+    execFileSync("git", ["--git-dir", f.origin, "update-ref", "refs/heads/main", moved, base]);
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    assert.equal(f.result(b)?.type, "failed");
+    assert.equal(f.log.operation(c)?.status, "queued");
+    assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "attempt_prepared").length, 1);
+    assert.ok(f.log.paused());
+    assert.equal(f.main(), moved);
+  } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two publication refuses an author rewrite after preparation", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    const base = f.main();
+    await writeFile(join(f.root, "hold-a"), "");
+    const original = await f.candidate("a.txt");
+    const a = f.submit(original);
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+    assert.equal(f.result(b), undefined, JSON.stringify(f.result(b)));
+    jj(f.author, ["edit", original.commitId]);
+    await writeFile(join(f.author, "rewritten.txt"), "changed after preparation\n");
+    await f.push();
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    assert.match(JSON.stringify(f.result(a)), /Submitted source changed/);
+    assert.equal(f.result(b)?.type, "failed");
+    assert.equal(f.main(), base);
+    assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "attempt_prepared").length, 1);
+  } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two restart uses exact publication intent when integration was not yet recorded", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2 });
+  try {
+    const request = await f.candidate("a.txt");
+    const first = f.submit(request);
+    const result = await f.land(first);
+    assert.ok(result?.type === "landed", JSON.stringify(result));
+    const interrupted = f.submit(request);
+    f.log.append(interrupted, { type: "stage", stage: "integrating" });
+    f.log.append(interrupted, { type: "publication_intent", attempt: 1, base: result.base, candidate: result.commitId });
+    await f.queue.recover();
+    assert.equal(f.result(interrupted)?.type, "landed", JSON.stringify(f.result(interrupted)));
+    assert.deepEqual(f.log.events({ operationId: interrupted }).filter((row) => row.event.type === "integrated").map((row) => row.event),
+      [{ type: "integrated", base: result.base, commitId: result.commitId }]);
+    assert.equal(f.main(), result.commitId);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+
+test("depth-two queued reset fences later landing admission and uses the preceding published source", async () => {
+  const f = await fixture(false, false, undefined, true, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    await writeFile(join(f.root, "hold-a"), "");
+    await writeFile(join(f.root, "hold-reset"), "");
+    const a = f.submit(await f.candidate("a.txt"));
+    const reset = f.submitReset();
+    const b = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(async () => await stat(join(f.root, "a-started")).then(() => true, () => undefined));
+    assert.equal(f.log.operation(reset)?.status, "queued");
+    assert.equal(f.log.operation(b)?.status, "queued");
+    await rm(join(f.root, "hold-a"));
+    await until(async () => await stat(join(f.root, "reset-started")).then(() => true, () => undefined));
+    const landed = f.result(a);
+    assert.ok(landed?.type === "landed", JSON.stringify(landed));
+    assert.equal(f.log.operation(b)?.status, "queued");
+    assert.ok(!f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_started"));
+    await rm(join(f.root, "hold-reset")); await f.queue.idle();
+    assert.equal(f.result(reset)?.type, "reset", JSON.stringify(f.result(reset)));
+    assert.equal(f.result(b)?.type, "landed", JSON.stringify(f.result(b)));
+    assert.equal(JSON.parse((await f.lines("reset.jsonl"))[0]!).source, landed.commitId);
+    assert.ok(seqOf(f, b, "stage") > seqOf(f, reset, "reset"));
+  } finally {
+    await rm(join(f.root, "hold-a"), { force: true });
+    await rm(join(f.root, "hold-reset"), { force: true });
+    await f.dispose();
+  }
+}, 120_000);
+
+test("depth-two second remote move exhausts the one-rebuild bound and retains both attempts", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  let unsubscribe = () => {};
+  try {
+    const moved: string[] = [];
+    unsubscribe = f.log.subscribe((row) => {
+      if (row.event.type !== "verification_passed") return;
+      const base = f.main();
+      const commit = execFileSync("git", ["--git-dir", f.origin, "commit-tree", `${base}^{tree}`, "-p", base, "-m", `external move ${moved.length + 1}`],
+        { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "f@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "f@example.com" } }).trim();
+      execFileSync("git", ["--git-dir", f.origin, "update-ref", "refs/heads/main", commit, base]);
+      moved.push(commit);
+    });
+    const request = await f.candidate("a.txt");
+    const a = f.submit(request);
+    await f.land(a);
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    assert.match(JSON.stringify(f.result(a)), /Remote integration changed/);
+    assert.equal(moved.length, 2);
+    assert.equal(f.main(), moved[1]);
+    const events = f.log.events({ operationId: a }).map((row) => row.event);
+    const prepared = events.filter((event) => event.type === "attempt_prepared");
+    assert.deepEqual(prepared.map((event) => event.attempt), [1, 2]);
+    assert.equal(events.filter((event) => event.type === "attempt_invalidated").length, 2);
+    assert.ok(!events.some((event) => event.type === "integrated"));
+    for (const event of prepared) {
+      assert.equal(event.source, request.commitId);
+      assert.equal(jj(event.checkout, ["log", "-r", event.candidate, "--no-graph", "-T", "commit_id"]), event.candidate);
+    }
+    await f.queue.recover(); await f.queue.recover();
+    assert.deepEqual(f.result(a)?.type, "failed");
+    assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "failed").length, 1);
+  } finally { unsubscribe(); await f.dispose(); }
+}, 120_000);
+
+test("depth-two executor loss invalidates dependent evidence and releases verifier ownership", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  const run = f.executor.run;
+  try {
+    await writeFile(join(f.root, "hold-a"), "");
+    const original = await f.candidate("a.txt");
+    const a = f.submit(original);
+    const b = f.submit(await f.candidate("b.txt"));
+    f.executor.run = async (request) => {
+      if (request.args.includes(exactPrefixGate(f.root)) && await stat(join(request.cwd, "a.txt")).then(() => true, () => false)
+        && !await stat(join(request.cwd, "b.txt")).then(() => true, () => false)) {
+        await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+        throw new Error("fixture executor connection lost");
+      }
+      return run(request);
+    };
+    await f.land(a);
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    assert.match(JSON.stringify(f.result(a)), /executor connection lost/);
+    assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
+    assert.match(JSON.stringify(f.result(b)), /does not diagnose the submitted source/);
+    assert.ok(!f.log.events().some((row) => row.event.type === "integrated"));
+    assert.equal(f.log.operation(a)!.runs.length, 1);
+    assert.equal(f.log.operation(a)!.runs[0]!.exitCode, null);
+    const artifacts = [a, b].flatMap((id) => f.log.events({ operationId: id }).map((row) => row.event).filter((event) => event.type === "attempt_prepared"));
+    assert.equal(artifacts.length, 2);
+    f.executor.run = run;
+    await rm(join(f.root, "hold-a"));
+    const next = f.submit(await f.candidate("next.txt"));
+    assert.equal((await f.land(next))?.type, "landed", JSON.stringify(f.result(next)));
+    for (const event of artifacts)
+      assert.equal(jj(event.checkout, ["log", "-r", event.candidate, "--no-graph", "-T", "commit_id"]), event.candidate);
+    await f.queue.recover(); await f.queue.recover();
+    for (const id of [a, b]) assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "failed").length, 1);
+  } finally { f.executor.run = run; await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+
+test("depth-two actual runner process loss retains durable attempts and recovers each outcome once", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate, durable: true });
+  let child: ReturnType<typeof spawn> | undefined;
+  let exited: Promise<unknown> | undefined;
+  let stderr = "";
+  try {
+    const base = f.main();
+    const original = await f.candidate("a.txt");
+    const a = f.submit(original);
+    const b = f.submit(await f.candidate("b.txt"));
+    const driver = `
+      import { createRunnerQueue, localExecutor } from ${JSON.stringify(new URL("../src/lib/runner-queue.ts", import.meta.url).href)};
+      import { openOperationLog } from ${JSON.stringify(new URL("../src/lib/runner-log.ts", import.meta.url).href)};
+      import { existsSync } from 'node:fs'; import { join } from 'node:path';
+      const local = localExecutor();
+      const executor = { host: local.host, combinedLimits: true, run: (request) => {
+        // The worker loses its process while awaiting its external executor: no child gate is orphaned by this fixture.
+        if (existsSync(join(request.cwd, 'a.txt')) && !existsSync(join(request.cwd, 'b.txt')))
+          return new Promise(() => {});
+        return local.run(request);
+      }};
+      const log = openOperationLog(${JSON.stringify(f.logPath)});
+      const queue = createRunnerQueue({log, executor, home:${JSON.stringify(f.home)}, config:{repos:{'Fixture/Repo':{url:${JSON.stringify(f.origin)},verificationDepth:2}},jj:{'user.name':'Runner Identity','user.email':'runner@example.com'}}});
+      queue.wake(); setInterval(()=>{},1000);
+    `;
+    child = spawn(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", driver], { stdio: ["ignore", "ignore", "pipe"] });
+    child.stderr!.on("data", (data) => { stderr += data.toString(); });
+    exited = new Promise((resolve) => child!.once("exit", resolve));
+    await until(() => {
+      assert.equal(child!.exitCode, null, stderr);
+      return f.log.operation(b)?.stage === "waiting-for-predecessor" || undefined;
+    });
+    const artifacts = [a, b].flatMap((id) => f.log.events({ operationId: id }).map((row) => row.event).filter((event) => event.type === "attempt_prepared"));
+    assert.equal(artifacts.length, 2);
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "fixture-owner" });
+    child.kill("SIGKILL"); await exited;
+    await f.queue.recover(); await f.queue.recover();
+    assert.equal(f.main(), base);
+    assert.ok(f.log.paused());
+    for (const id of [a, b]) {
+      assert.equal(f.result(id)?.type, "failed", JSON.stringify(f.result(id)));
+      assert.match(JSON.stringify(f.result(id)), /runner restarted/);
+      assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "failed").length, 1);
+      assert.ok(!f.log.events({ operationId: id }).some((row) => row.event.type === "integrated"));
+    }
+    const retry = f.submit(original);
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.log.operation(retry)?.status, "queued");
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "fixture-owner" });
+    assert.equal((await f.land(retry))?.type, "landed", JSON.stringify(f.result(retry)));
+    assert.equal(f.log.operation(retry)!.commitId, original.commitId);
+    assert.equal(f.log.events().filter((row) => row.event.type === "integrated").length, 1);
+    for (const event of artifacts)
+      assert.equal(jj(event.checkout, ["log", "-r", event.candidate, "--no-graph", "-T", "commit_id"]), event.candidate);
+  } finally { child?.kill("SIGKILL"); await exited; await f.dispose(); }
 }, 120_000);

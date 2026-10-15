@@ -23,7 +23,7 @@ export const candidateBookmark = (changeId: string): string => `slipjay/changes/
  * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
  * never recorded: a queued operation shows it while the owner has paused the runner.
  */
-export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
+export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "waiting-for-predecessor" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
 
 /**
  * Stages the owner's kill may stop. Up to the end of verification nothing has moved
@@ -35,7 +35,7 @@ export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "insta
  * too. Deploys run in their own lane and are never killed: each project's command
  * ends at its declared deadline.
  */
-export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying", "resetting"];
+export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying", "waiting-for-predecessor", "resetting"];
 /** The reason a killed operation carries; it is never reported as a pass. */
 export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
 /** The log's operation id for runner-wide control events (pause, resume). */
@@ -104,8 +104,12 @@ export type ClientFact =
   | { kind: "ssh_forward_failure"; reason: string; observedAt: string }
   | { kind: "preview_start"; workspace: string; port: number };
 export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
-export type RunPurpose = "gate" | "migration_generate" | "migration_verify" | "deploy" | "reset";
+export type RunPurpose = "gate" | "dependencies" | "finalization" | "migration_generate" | "migration_verify" | "deploy" | "reset";
 export type OperationEvent =
+  | { type: "attempt_started"; attempt: number; source: string; checkout: string }
+  | { type: "attempt_prepared"; attempt: number; source: string; base: string; candidate: string; predecessor?: { operationId: string; attempt: number; candidate: string }; overlap: boolean; checkout: string }
+  | { type: "attempt_invalidated"; attempt: number; reason: string }
+  | { type: "publication_intent"; attempt: number; base: string; candidate: string }
   | { type: "client_operation"; repo: string; workspace: string; machine: string }
   | { type: "identity"; ticket?: number; spec?: number; submitterKind: "person" | "agent" | "unknown"; submitterId: string; harness?: string; sessionId?: string; workspace: string; machine: string }
   | { type: "queue_snapshot"; position: number; depth: number; waitingFor: string | null; paused: boolean }
@@ -128,7 +132,7 @@ export type OperationEvent =
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
-  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose }
+  | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number }
   | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
@@ -157,7 +161,7 @@ export type StoredEvent = { seq: number; operationId: string; at: string; event:
 
 /** One executed command of an operation, projected from its run events. */
 export type RunRecord = {
-  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose;
+  runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number;
   finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean;
 };
 
@@ -286,6 +290,8 @@ export type RunnerHandler = (request: Request) => Promise<Response>;
 export interface Executor {
   /** Where commands run; recorded on each run. */
   readonly host: string;
+  /** Every run and descendant joins the same enforced host budget; failure refuses execution. */
+  readonly combinedLimits?: boolean;
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
 }
 
@@ -323,7 +329,7 @@ export type RunnerConfig = {
    * Repositories with the same `lane` share one serial lane: give it to repositories whose gates
    * share external state (a database, a deploy environment, fixed ports). Each defaults to its own.
    */
-  repos: Record<string, { url: string; lane?: string }>;
+  repos: Record<string, { url: string; lane?: string; verificationDepth?: 1 | 2 }>;
   /**
    * jj settings the runner sets as repository config in every warm checkout before it
    * touches one, over RUNNER_JJ_DEFAULTS, so nothing depends on the host's own jj config. The runner commits as
@@ -351,6 +357,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (limits.some(([key, value]) => !(key in RUNNER_DEFAULT_LIMITS) || (key === "tasksMax" ? !(Number.isSafeInteger(value) && Number(value) >= 1) : typeof value !== "string" || !/^[0-9]+(?:\.[0-9]+)?[KMGT%]?$/.test(value))))
     return `The runner config's "limits" takes memoryHigh and memoryMax (such as "40G"), cpuQuota (such as "1400%") and tasksMax (a whole number)`;
   if (Object.values(config.repos).some((repo) => repo.lane !== undefined && (typeof repo.lane !== "string" || !repo.lane.trim()))) return `A repository's "lane" in the runner config must be a non-empty name`;
+  if (Object.values(config.repos).some((repo) => repo.verificationDepth !== undefined && repo.verificationDepth !== 1 && repo.verificationDepth !== 2)) return `A repository's "verificationDepth" must be 1 or 2`;
+  if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && repo.lane !== undefined)) return `Depth-two verification requires an isolated repository lane`;
   return null;
 };
 

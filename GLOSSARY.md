@@ -1,6 +1,6 @@
 # SlipJay
 
-SlipJay owns isolated workspaces and the serial verification, integration and publication of changes.
+SlipJay owns isolated workspaces, bounded verification, and serial integration and publication of changes.
 
 ## Language
 

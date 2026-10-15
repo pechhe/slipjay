@@ -614,7 +614,7 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
     const summary = await describePlan(plan, graphql);
     onStage("installing");
     await jj(checkout, ["new", plan.candidate]);
-    await prepareWorkspaceDependencies(checkout, { quiet: true, ...(environment ? { env: environment() } : {}) });
+    await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand, ...(environment ? { env: environment() } : {}) });
     onStage("verifying");
     const verification = plan.checks.length
       ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,

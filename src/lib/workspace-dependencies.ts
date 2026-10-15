@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { migrationCommandFailure } from "./migration-command-evidence.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { runWorkspaceCommand as run } from "./workspace-command.ts";
+import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 
 /** Package-manager installation is the standalone Pi readiness authority. It is
  *  intentionally workspace-local and lockfile-frozen: package managers may reuse
@@ -127,6 +128,8 @@ async function cloneNodeModules(source: string, workspacePath: string): Promise<
  */
 export async function prepareWorkspaceDependencies(workspacePath: string, options: {
   quiet?: boolean; recordInputs?: boolean; env?: NodeJS.ProcessEnv;
+  /** Runner-owned installs share the executor's combined host budget. */
+  runCommand?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   /** Roots whose `node_modules` may seed this install, given the workspace's install-input fingerprint. */
   seedFrom?: (installInputs: string) => Promise<string[]> | string[];
 } = {}): Promise<{
@@ -144,8 +147,14 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
     }
   }
   // Installation is not a landing command: it keeps the user's environment and a longer deadline.
-  const install = () => run(dependencyCommand.command, dependencyCommand.args,
-    { cwd: workspacePath, inherit: !options.quiet, env: options.env ?? process.env, timeoutMs: 30 * 60_000 });
+  const install = async () => {
+    if (!options.runCommand) return run(dependencyCommand.command, dependencyCommand.args,
+      { cwd: workspacePath, inherit: !options.quiet, env: options.env ?? process.env, timeoutMs: 30 * 60_000 });
+    const result = await options.runCommand({ executable: dependencyCommand.command, args: dependencyCommand.args,
+      cwd: workspacePath, env: options.env ?? process.env, timeoutMs: 30 * 60_000, maxOutputBytes: 16 * 1024 * 1024 });
+    return { ...result, code: result.error || result.timedOut ? 1 : result.exitCode ?? 1,
+      stderr: result.error ? `${result.stderr}\n${result.error}` : result.stderr, truncated: Boolean(result.stdoutTruncated || result.stderrTruncated) };
+  };
   let result = await install();
   if (result.code !== 0 && seeded) {
     await Promise.all(seeded.map((path) => rm(path, { recursive: true, force: true })));

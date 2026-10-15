@@ -30,6 +30,7 @@ export type PostIntegrationInput = {
   /** Internal test/storage seam, never accepted from delivery tool input. */
   stateDirectory?: string;
   environment?: () => NodeJS.ProcessEnv;
+  runCommand?: (request: import("./bounded-process.ts").BoundedProcessRequest) => Promise<import("./bounded-process.ts").BoundedProcessResult>;
 };
 
 import { createHash } from "node:crypto";
@@ -183,7 +184,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
         SLIPJAY_FINALIZATION_COMMIT: commit, SLIPJAY_FINALIZATION_KEY: identity, SLIPJAY_FINALIZATION_TARGET: policy.target,
       });
       reason = "External target could not be verified";
-      const probe = await runBoundedProcess({
+      const probe = await (input.runCommand ?? runBoundedProcess)({
         executable: policy.targetProbe.executable,
         args: policy.targetProbe.args,
         cwd: await checkoutCwd(root, policy.targetProbe.cwd, "Finalization target probe"),
@@ -206,7 +207,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
       reason = "Integration tip changed before external-state finalization";
       await historicalMigrationTip(input, gitDirectory, commit, policyDigest, environmentFactory, abortSignal);
       reason = "Finalization command failed or its outcome is unknown; retry with the same artifact key";
-      const result = await runBoundedProcess({
+      const result = await (input.runCommand ?? runBoundedProcess)({
         executable: policy.command.executable,
         args: policy.command.args,
         cwd: await checkoutCwd(root, policy.command.cwd, "Finalization command"),

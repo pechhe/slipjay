@@ -8,6 +8,23 @@ import { test } from "vite-plus/test";
 import { confirmRelease, nonAdditiveSql, releaseIntegration, returnRelease } from "../src/lib/release.ts";
 import type { PromotionState } from "../src/lib/release.ts";
 
+test("release dependency preparation uses its runner executor and cannot bypass a refused install", async () => {
+  const f = await releaseProject();
+  try {
+    const candidate = await landFile(f, "package.json", JSON.stringify({ name: "fixture-release", private: true, packageManager: "bun@1.4.3" }));
+    const before = remoteRef(f, "release");
+    const commands: string[][] = [];
+    await assert.rejects(confirmRelease(f.repo, { candidate, run: async (request) => {
+      commands.push([request.executable, ...request.args]);
+      return { exitCode: 3, signal: null, timedOut: false, stdout: "", stderr: "executor refused install", cancelled: false,
+        stdoutTruncated: false, stderrTruncated: false, finishedAt: new Date().toISOString(), outputSha256: "fixture" };
+    } }), /executor refused install/);
+    assert.equal(commands.length, 1);
+    assert.deepEqual(commands[0]?.slice(0, 3), ["bun", "install", "--frozen-lockfile"]);
+    assert.equal(remoteRef(f, "release"), before);
+  } finally { await f.dispose(); }
+});
+
 test("a release plans, then verifies the exact candidate in the confirming checkout and publishes a merge with its tree", async () => {
   // A shallow primary, as YardSmith's is: the base exists only as fetched history.
   const f = await releaseProject({ shallow: true });

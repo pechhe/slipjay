@@ -252,7 +252,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
           operation.status = "running";
         break;
       case "run_started": {
-        const run: RunRecord = { runId: event.runId, command: event.command, host: event.host, startedAt: stored.at, ...(event.timeoutMs === undefined ? {} : { timeoutMs: event.timeoutMs }), ...(event.purpose ? { purpose: event.purpose } : {}) };
+        const run: RunRecord = { runId: event.runId, command: event.command, host: event.host, startedAt: stored.at, ...(event.timeoutMs === undefined ? {} : { timeoutMs: event.timeoutMs }), ...(event.purpose ? { purpose: event.purpose } : {}), ...(event.attempt ? { attempt: event.attempt } : {}) };
         runs.set(event.runId, run);
         operation.runs.push(run);
         break;

@@ -189,7 +189,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 
 `slipjay land` sends the change to one long-lived runner; it is the only way a
 change lands. The runner queues landings and takes each repository's one at a time
-in arrival order. For each one it rebases onto the integration tip,
+in arrival order by default. For each one it rebases onto the integration tip,
 runs the repository's declared gate in its own warm checkout, then integrates and
 publishes. The authoring machine runs none of the gate. Resets take turns in the
 same repository's queue. A confirmed release verifies in a release queue and a
@@ -215,8 +215,47 @@ the runner's `limits` bound concurrent runs together.
   the workers' gates and everything they start share one cap: `limits` in the runner
   config sets `memoryHigh` (throttled above, default `40G`), `memoryMax` (the hard
   ceiling, `48G`), `cpuQuota` (`1400%`) and `tasksMax` (`4096`). The runner sets them
-  as runtime properties at its first run after each start; if systemd refuses, its
-  journal says the runs are uncapped and the next run tries again.
+  as runtime properties at its first run after each start; if systemd refuses, the
+  run fails before its command starts. Dependency installation and post-integration
+  commands use the same executor and budget as gates and deploys.
+
+### Optional depth-two verification
+
+A runner repository entry can set `verificationDepth: 2` (default `1`) only when
+its gates are safe in independent checkouts, dependency trees and temporary
+directories, without shared database writes or other mutable external targets.
+This is an explicit configuration assertion about the gate, not an inference from
+its repository name. A configured shared `lane` cannot use depth two. The executor
+must enforce combined resource limits; an uncapped executor refuses this setting.
+Each admitted operation holds one worker until its terminal outcome.
+
+For integration D and submissions A then B, the queue prepares immutable CA on D
+and CB on that exact CA, in two independent warm verifier repositories. B can
+verify while A verifies, but waits outside the publisher lane until A publishes
+CA. Only `home/repos/<repo>` integrates, finalizes and publishes. It imports the
+artifact before moving any bookmark, checks its exact base and submitted source,
+records publication intent, and publishes with JJ's expected-old-remote-ref
+precondition. A stale-parent refusal never refreshes the base to accept the old
+verification. The integration remains held if finalization or publication fails.
+
+The ledger records each prepared attempt's submitted source, base, candidate,
+predecessor and verifier checkout, plus invalidations and publication intent. Runs
+name their attempt. Submitted source is duplicated before preparation so a later
+attempt never rewrites a retained candidate. Local private refs retain both source
+and artifact across slot reuse, independently of JJ's mutable change identifiers;
+they are not pushed upstream. Consumers pin their own copies before producer reuse.
+This retention does not introduce automatic diagnostic deletion.
+
+A failed, killed or changed predecessor invalidates the dependent, even after a
+green gate. A remote move before canonical integration permits the head one fresh
+attempt, with a new identity; a second move fails. No owner kill, changed author
+source, held integration or paused runner starts an automatic rebuild. A dependent
+whose predecessor did not publish ends explicitly and does not silently become
+D+B. Migration policies, post-integration mutation and reset policies are
+conservative preparation barriers, including when introduced by submitted source.
+Queued resets and releases fence later prefix admission. Restart retains artifacts,
+ends interrupted verifier attempts, and reconciles canonical publication intent
+and held state through the existing recovery path.
 
 - **Gate.** `requiredLandingVerification` in `slipjay.json`, an array of commands
   (`{ "executable", "args"?, "cwd"? }`), run in the runner's checkout.

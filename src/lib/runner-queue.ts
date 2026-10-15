@@ -4,7 +4,10 @@ import { stat, mkdir, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
-import { integrateLandingCandidate } from "./landing-candidate.ts";
+import { integrateLandingCandidate, prepareLandingCandidate, verifyPreparedCandidate, integratePreparedCandidate } from "./landing-candidate.ts";
+import type { PreparedLandingCandidate } from "./landing-candidate.ts";
+import { duplicateLandingSource, retainLandingSource, retainLandingArtifact, importLandingArtifact, RETAINED_ARTIFACT_REVISIONS } from "./landing-artifact.ts";
+import type { LandingArtifact } from "./landing-artifact.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
 import { createDeployScheduler } from "./deploy-scheduler.ts";
 import { createResetScheduler } from "./reset-scheduler.ts";
@@ -41,6 +44,9 @@ class OwnerKill extends Error {
   constructor() { super(OWNER_KILL_REASON); }
 }
 
+/** A verified attempt lost its authoritative remote parent before integration. */
+class PrefixInvalidated extends Error {}
+
 /**
  * Runs commands on this host. Each run's process group is killed on abort or
  * timeout, but a gate's own tools may start further groups (setsid) that a group
@@ -59,16 +65,17 @@ export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = proces
   const kill = (unit: string) => systemctl(["kill", "--signal=SIGKILL", unit]).then(() => {});
   const { memoryHigh, memoryMax, cpuQuota, tasksMax } = { ...RUNNER_DEFAULT_LIMITS, ...limits };
   // Runtime properties: they last until the user manager restarts, and each runner start sets them again.
-  // A run never waits on a failure to set them: the runner's journal says so and the next run tries again.
+  // Refuse execution if the shared budget cannot be enforced; never run uncapped.
   let sliced: Promise<void> | undefined;
   const slice = () => sliced ??= systemctl(["set-property", "--runtime", RUNNER_SLICE,
     `MemoryHigh=${memoryHigh}`, `MemoryMax=${memoryMax}`, `CPUQuota=${cpuQuota}`, `TasksMax=${tasksMax}`]).then((failure) => {
     if (failure === null) return;
-    console.error(`SlipJay runner: could not set the limits of ${RUNNER_SLICE}, so runs are not capped: ${failure}`);
     sliced = undefined;
+    throw new Error(`SlipJay runner: could not enforce the limits of ${RUNNER_SLICE}: ${failure}`);
   });
   return {
     host,
+    combinedLimits: true,
     async run(request) {
       await slice();
       const unit = `slipjay-run-${randomUUID()}.scope`;
@@ -117,12 +124,25 @@ export function createRunnerQueue(input: {
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
   const { log, executor, home, config, environment } = input;
+  if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2) && !executor.combinedLimits)
+    throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   const workers = Math.max(1, Math.floor(config.workers ?? RUNNER_DEFAULT_WORKERS));
   /** Each lane's work holding its checkouts now, and any chained behind it, by `admissionLane`. */
   const lanes = new Map<string, Promise<void>>();
   const laneOf = (repo: string) => repositoryLane(config, repo);
   /** Operations admitted to a worker, which they hold until they finish. */
   const admitted = new Set<string>();
+  // Queue-owned runtime attempts; their immutable evidence lives in the existing log.
+  type PreparedPrefix = { artifact: LandingArtifact; checkout: string; overlap: boolean };
+  const deferred = <T>() => {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  type PrefixTurn = { operation: LandingOperation; slot: number; attempt: number; prepared: ReturnType<typeof deferred<PreparedPrefix | null>>;
+    completed: ReturnType<typeof deferred<boolean>>; invalidation: AbortController; predecessor?: PrefixTurn };
+  const prefixes = new Map<string, PrefixTurn[]>();
+  const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
   const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
   /** Recovery holds every lane: nothing is admitted until it finishes. */
@@ -331,7 +351,27 @@ export function createRunnerQueue(input: {
       if (admitted.size >= workers) return;
       if (operation.kind === "deploy" || operation.status !== "queued") continue;
       const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
-      if (lanes.has(lane) || resetConflict(operation)) continue;
+      const active = prefixes.get(operation.repo) ?? [];
+      const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
+      if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && executor.combinedLimits) {
+        if (active.length >= 2 || lanes.has(lane) || resetConflict(operation)) continue;
+        // A queued reset/release is an arrival-order fence, even while no lane is held.
+        const before = log.openOperations(operation.repo).slice(0, log.openOperations(operation.repo).findIndex((entry) => entry.id === operation.id));
+        if (before.some((entry) => entry.kind !== "landing" && entry.kind !== "deploy")) continue;
+        const turn: PrefixTurn = { operation, attempt: 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
+          prepared: deferred(), completed: deferred(), invalidation: new AbortController(), predecessor: active.at(-1) };
+        prefixes.set(operation.repo, [...active, turn]);
+        admitted.add(operation.id);
+        const pending = processOperation(operation, turn).finally(() => {
+          turn.prepared.resolve(null);
+          turn.completed.resolve(log.operation(operation.id)?.status === "landed");
+          prefixes.set(operation.repo, (prefixes.get(operation.repo) ?? []).filter((entry) => entry !== turn));
+          admitted.delete(operation.id); attempts.delete(pending); wakeMain();
+        });
+        attempts.add(pending);
+        continue;
+      }
+      if (active.length || lanes.has(lane) || resetConflict(operation)) continue;
       admitted.add(operation.id);
       void inLane(lane, () => processOperation(operation))
         .finally(() => { admitted.delete(operation.id); wakeMain(); });
@@ -342,11 +382,12 @@ export function createRunnerQueue(input: {
    * verifying beside its repository lane and a reset of that repository never overlap.
    */
   function resetConflict(operation: Operation): boolean {
+    if (operation.kind === "reset" && (prefixes.get(operation.repo)?.length ?? 0) > 0) return true;
     if (operation.kind === "reset") return lanes.has(admissionLane(laneOf(operation.repo), operation.repo, "release"));
     return operation.kind === "release"
       && [...running.values()].some((entry) => entry.operation.kind === "reset" && laneOf(entry.operation.repo) === laneOf(operation.repo));
   }
-  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation): Promise<void> {
+  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation, prefix?: PrefixTurn): Promise<void> {
     let stage: RunnerStage = "queued";
     let stageStarted = Date.now();
     let installSource: "fresh" | "existing" | undefined;
@@ -357,32 +398,44 @@ export function createRunnerQueue(input: {
     const controller = new AbortController();
     running.set(operation.id, { operation, stage, controller });
     let verdict: OperationEvent | undefined;
-    const checkout = checkoutPath(operation);
+    let retryPrefix = false;
+    const checkout = prefix ? join(home, "verifiers", operation.repo, String(prefix.slot)) : checkoutPath(operation);
     const scratch = scratchOf(checkout);
     let remote: string | undefined;
     let integrationBranch: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
+    async function withAuthority<T>(pending: Promise<T>): Promise<T> {
+      const signal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]);
+      const fail = () => controller.signal.aborted ? new OwnerKill() : new Error("Exact predecessor invalidated this attempt");
+      if (signal.aborted) throw fail();
+      let aborted!: () => void;
+      const cancellation = new Promise<never>((_resolve, reject) => { aborted = () => reject(fail()); signal.addEventListener("abort", aborted, { once: true }); });
+      try { return await Promise.race([pending, cancellation]); }
+      finally { signal.removeEventListener("abort", aborted); }
+    }
     // Gate and migration commands both go through the executor, so each run records where it ran.
     async function run(request: BoundedProcessRequest, purpose?: RunPurpose): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
-      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs, purpose: purpose ?? (stage === "resetting" ? "reset" : "gate") });
-      const abortSignal = request.abortSignal ? AbortSignal.any([request.abortSignal, controller.signal]) : controller.signal;
-      const runEnvironment = stage === "resetting" ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
+      append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs,
+        purpose: purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate"), ...(prefix ? { attempt: prefix.attempt } : {}) });
+      const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : [], ...request.abortSignal ? [request.abortSignal] : []]);
+      const privateRun = stage === "resetting" || stage === "finalizing";
+      const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
       if ((purpose === "migration_generate" || purpose === "migration_verify") && request.env?.SLIPJAY_MIGRATION_CONTEXT)
         runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
       const result = await executor.run({ ...request, env: runEnvironment,
-        redactOutput: stage === "resetting" ? request.redactOutput : (value) => redactVerificationOutput(value, checkout), abortSignal }).catch((error: unknown) => {
+        redactOutput: privateRun ? request.redactOutput : (value) => redactVerificationOutput(value, checkout), abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
         throw error;
       });
-      append(operation.id, runFinished(runId, result, started, request, stage === "resetting"));
+      append(operation.id, runFinished(runId, result, started, request, privateRun));
       return result;
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
-    async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string): Promise<void> {
+    async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string, publisher = checkout, expectedBase?: string): Promise<void> {
       setStage("finalizing");
-      const tail = await completeLanding(checkout, context, commitId, { ...(environment ? { environment } : {}), onPublishing: () => setStage("publishing") })
+      const tail = await completeLanding(publisher, context, commitId, { ...(environment ? { environment } : {}), expectedBase, runCommand: run, onPublishing: () => setStage("publishing") })
         .catch((error: unknown) => { throw new HeldIntegration(commitId, stage === "publishing" ? "publishing" : "finalizing", message(error)); });
       if (tail.timings) {
         const { finalizingStartedAt, publishingStartedAt, finishedAt } = tail.timings;
@@ -398,6 +451,7 @@ export function createRunnerQueue(input: {
     const setStage = (next: RunnerStage) => {
       // A kill that landed between runs stops the operation before it moves a branch.
       if (controller.signal.aborted) throw new OwnerKill();
+      if (prefix?.invalidation.signal.aborted) throw new Error("Prepared prefix invalidated by its predecessor");
       if (stage !== "queued") append(operation.id, stageDetail());
       stageStarted = Date.now();
       stage = next;
@@ -405,6 +459,12 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "stage", stage });
     };
     try {
+      if (prefix?.predecessor) {
+        const invalidate = () => prefix.invalidation.abort();
+        prefix.predecessor.invalidation.signal.addEventListener("abort", invalidate, { once: true });
+        if (prefix.predecessor.invalidation.signal.aborted) invalidate();
+        void prefix.predecessor.completed.promise.then((published) => { if (!published) invalidate(); });
+      }
       const repository = configuredRepository(config, operation.repo);
       if (!repository) throw new Error(`Repository ${operation.repo} is not configured on this runner`);
       setStage("fetching");
@@ -424,6 +484,12 @@ export function createRunnerQueue(input: {
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);
+      if (prefix) {
+        if ((await revisionFacts(checkout, `${prefix.operation.bookmark}@${remote}`)).commitId !== operation.commitId)
+          throw new Error("Fetched source differs from submitted commit");
+        await retainLandingSource(checkout, operation.id, prefix.attempt, operation.commitId);
+        append(operation.id, { type: "attempt_started", attempt: prefix.attempt, source: operation.commitId, checkout });
+      }
       // jj's default trunk() names only main, master or trunk: published integration history on any
       // other branch would be mutable, and the candidate cleanup below would abandon it.
       await jj(checkout, ["config", "set", "--repo", 'revset-aliases."trunk()"', `${branch}@${remote}`]);
@@ -434,12 +500,12 @@ export function createRunnerQueue(input: {
         return;
       }
       const recordedHold = log.snapshot(executor.host).held.find((entry) => entry.repo === operation.repo);
-      if (recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
+      if (!prefix && recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: recordedHold.commitId });
       // A commit integrated by an earlier turn but never published (a failed push, or
       // a restart after finalization) may already be applied to the external target.
       // Finish it before anything moves the bookmark: dropping it would orphan that state.
-      if (await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
+      if (!prefix && await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
         const held = (await revisionFacts(checkout, branch)).commitId;
         if (!log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === held))
           append(operation.id, { type: "integration_held", repo: operation.repo, commitId: held, reason: "An earlier integration is not yet published" });
@@ -448,9 +514,29 @@ export function createRunnerQueue(input: {
         setStage("fetching");
       }
       await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
+      let predecessor: PreparedPrefix | null = null;
+      if (prefix?.predecessor) {
+        predecessor = await withAuthority(prefix.predecessor.prepared.promise);
+        if (!predecessor) throw new Error("Predecessor did not prepare a valid prefix");
+        if (!predecessor.overlap) {
+          setStage("waiting-for-predecessor");
+          if (!await withAuthority(prefix.predecessor.completed.promise)) throw new Error("Predecessor did not publish");
+          await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch]);
+        }
+        await importLandingArtifact(checkout, predecessor.checkout, predecessor.artifact);
+        await jj(checkout, ["bookmark", "set", branch, "-r", predecessor.artifact.candidate]);
+      }
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
+      const submittedPolicy = prefix && operation.kind === "landing"
+        ? (await readExactExecutionPolicy(await jj(checkout, ["git", "root"]), operation.commitId)).configuration : null;
+      const hasBarrier = (policy: { migrationFinalization?: unknown; postIntegration?: unknown; reset?: unknown } | null) =>
+        Boolean(policy?.migrationFinalization || policy?.postIntegration || policy?.reset);
+      if (prefix?.predecessor && (hasBarrier(context.configuration) || hasBarrier(submittedPolicy))) {
+        setStage("waiting-for-predecessor");
+        if (!await withAuthority(prefix.predecessor.completed.promise)) throw new Error("Barrier predecessor did not publish");
+      }
       if (operation.kind === "reset") {
         verdict = await reset(branch);
         return;
@@ -464,20 +550,22 @@ export function createRunnerQueue(input: {
       }
       await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
       // Drop earlier candidates; never the published integration, which a candidate on an older base does not contain.
-      await jj(checkout, ["abandon", "-r", `mutable() ~ ::${operation.bookmark} ~ ::${branch}@${remote}`]);
+      await jj(checkout, ["abandon", "-r", `mutable() ~ ::${operation.bookmark} ~ ::${branch}@${remote} ~ ${RETAINED_ARTIFACT_REVISIONS}`]);
       const commits = await jj(checkout, ["log", "-r", operation.bookmark, "--no-graph", "-T", 'commit_id ++ "\\n"']);
       if (commits !== operation.commitId) throw new Error(`Candidate bookmark ${operation.bookmark} does not resolve to submitted commit ${operation.commitId}`);
       const visible = await jj(checkout, ["log", "-r", `change_id(${operation.changeId})`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
-      if (visible.split("\n").filter(Boolean).length !== 1 || visible !== operation.commitId)
+      if (!prefix && (visible.split("\n").filter(Boolean).length !== 1 || visible !== operation.commitId))
         throw new Error(`Submitted change ${operation.changeId} must have exactly one visible commit matching ${operation.commitId}`);
-      await jj(checkout, ["edit", operation.commitId]);
+      if (prefix) await duplicateLandingSource(checkout, operation.commitId, branch);
+      else await jj(checkout, ["edit", operation.commitId]);
       const description = await jj(checkout, ["log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
       const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
       const identity = log.events({ operationId: operation.id }).findLast((row) => row.event.type === "identity")?.event;
       append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") });
       await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
-      const integrated = await integrateLandingCandidate(checkout, {
+      const candidateOptions = {
+        pinnedSource: Boolean(prefix),
         environment, onProgress: progress,
         onStage: (next) => { if (next !== "cleaning") setStage(next); },
         runCommand: run,
@@ -489,11 +577,13 @@ export function createRunnerQueue(input: {
               root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
               environment, onProgress: progress, run,
             });
+            if (prefix?.invalidation.signal.aborted) throw new Error("Exact predecessor invalidated this attempt; late verification success is not evidence");
             if (verification.status === "passed") append(operation.id, { type: "verification_passed", base, candidate });
             return verification;
           },
         },
-      }, {
+      } satisfies import("./landing-candidate.ts").CandidateOptions;
+      const candidateIO = {
         ...landingIO,
         async assertStackConflictFree(cwd, branch, changeId) {
           try {
@@ -504,23 +594,82 @@ export function createRunnerQueue(input: {
             throw error;
           }
         },
-        landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, operation.commitId) }),
+        landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, prefix ? "@" : operation.commitId) }),
         ensureLandingDescription: async (_cwd, _context, target) => target,
-        async prepareCandidateDependencies(cwd, candidate, target, onProgress) {
+        async prepareCandidateDependencies(cwd, candidate, target, onProgress, runCommand) {
           await recordShape(cwd, candidate.integrationBranch, target.commitId, candidate.configuration.migrationFinalization);
           setStage("installing");
           installSource = await stat(join(cwd, "node_modules")).then(() => "existing" as const, () => "fresh" as const);
-          await landingIO.prepareCandidateDependencies(cwd, candidate, target, onProgress);
+          await landingIO.prepareCandidateDependencies(cwd, candidate, target, onProgress, runCommand);
         },
-      });
+      } satisfies import("./landing-candidate.ts").LandingIO;
+      const integrated = prefix
+        ? await integratePrefix(await prepareLandingCandidate(checkout, candidateOptions, candidateIO))
+        : await integrateLandingCandidate(checkout, candidateOptions, candidateIO);
       const { base, artifact } = integrated;
+      if (prefix) {
+        verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
+        return;
+      }
       append(operation.id, { type: "integrated", base, commitId: artifact.commitId });
       await finishIntegration(candidateContext, artifact.commitId);
       verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
+      async function integratePrefix(prepared: PreparedLandingCandidate) {
+        const artifact: LandingArtifact = { operationId: operation.id, attempt: prefix!.attempt, source: operation.commitId,
+          base: prepared.base, candidate: prepared.artifact.commitId };
+        const policy = candidateContext.configuration;
+        const overlap = !hasBarrier(policy) && !hasBarrier(submittedPolicy);
+        await retainLandingArtifact(checkout, artifact);
+        append(operation.id, { type: "attempt_prepared", ...artifact, checkout, overlap,
+          ...(predecessor ? { predecessor: { operationId: predecessor.artifact.operationId, attempt: predecessor.artifact.attempt, candidate: predecessor.artifact.candidate } } : {}) });
+        prefix!.prepared.resolve({ artifact, checkout, overlap });
+        const verified = await verifyPreparedCandidate(checkout, prepared, candidateOptions, candidateIO);
+        if (prefix!.predecessor) {
+          setStage("waiting-for-predecessor");
+          if (!await withAuthority(prefix!.predecessor.completed.promise)) throw new Error("Exact predecessor did not publish; dependent evidence invalidated");
+        }
+        setStage("waiting-for-predecessor");
+        return serially(operation.repo, async () => {
+          // Only this canonical checkout owns integration, finalisation, publication and recovery.
+          const publisher = repoCheckout(operation.repo);
+          if (!await stat(publisher).then(() => true, () => false)) {
+            await mkdir(dirname(publisher), { recursive: true });
+            await jj(dirname(publisher), ["git", "clone", repository!.url, publisher]);
+          }
+          for (const [key, value] of Object.entries({ ...RUNNER_JJ_DEFAULTS, ...config.jj })) await jj(publisher, ["config", "set", "--repo", key, value]);
+          await jj(publisher, ["git", "fetch", "--remote", remote!, "--branch", branch]);
+          const canonical = await workspaceContext(publisher);
+          if (!canonical) throw new Error("Canonical publisher is unavailable");
+          const local = (await revisionFacts(publisher, branch)).commitId;
+          let tip = (await revisionFacts(publisher, `${branch}@${remote}`)).commitId;
+          if (local !== tip && !await revisionExists(publisher, `${local} & ::${branch}@${remote}`)) {
+            // Held external state remains canonical, even when this attempt verified elsewhere.
+            await finishIntegration(canonical, local, publisher);
+            await jj(publisher, ["git", "fetch", "--remote", remote!, "--branch", branch]);
+            tip = (await revisionFacts(publisher, `${branch}@${remote}`)).commitId;
+          }
+          if (tip !== artifact.base) throw new PrefixInvalidated("Remote integration changed; exact-prefix verification is invalidated");
+          await jj(publisher, ["git", "fetch", "--remote", remote!, "--branch", prefix!.operation.bookmark]);
+          if ((await revisionFacts(publisher, `${prefix!.operation.bookmark}@${remote}`)).commitId !== operation.commitId)
+            throw new Error("Submitted source changed; exact-prefix verification is invalidated");
+          if (prefix!.invalidation.signal.aborted || controller.signal.aborted) throw new Error("Prefix no longer has publication authority");
+          await importLandingArtifact(publisher, checkout, artifact);
+          await jj(publisher, ["bookmark", "set", branch, "-r", tip]);
+          await jj(publisher, ["new", artifact.candidate]);
+          append(operation.id, { type: "publication_intent", attempt: artifact.attempt, base: artifact.base, candidate: artifact.candidate });
+          const result = await integratePreparedCandidate(publisher, { ...verified, context: canonical }, candidateOptions, landingIO);
+          append(operation.id, { type: "integrated", base: artifact.base, commitId: artifact.candidate });
+          await finishIntegration(canonical, artifact.candidate, publisher, artifact.base);
+          return result;
+        });
+      }
     } catch (error) {
+      retryPrefix = Boolean(prefix && !prefix.predecessor && prefix.attempt === 1 && error instanceof PrefixInvalidated
+        && !controller.signal.aborted && !log.paused());
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
+      else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
       else if (error instanceof HeldIntegration) {
         append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message });
         verdict = { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) };
@@ -530,12 +679,25 @@ export function createRunnerQueue(input: {
         command: error.evidence.command, output: error.evidence.stdoutTail + error.evidence.stderrTail,
       };
       else verdict = { type: "failed", stage, reason: message(error) };
+      if (prefix && verdict?.type !== "landed") {
+        append(operation.id, { type: "attempt_invalidated", attempt: prefix.attempt, reason: message(error) });
+        prefix.invalidation.abort();
+        prefix.prepared.resolve(null);
+        if (retryPrefix) {
+          // Fence later admission onto the fresh attempt before dependent cleanup can wake it.
+          prefix.attempt += 1;
+          prefix.prepared = deferred();
+          prefix.invalidation = new AbortController();
+          verdict = undefined;
+        }
+        else prefix.completed.resolve(false);
+      }
     } finally {
       if (stage !== "queued") append(operation.id, stageDetail());
       running.delete(operation.id);
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
-      if (remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+      if (!retryPrefix && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
       // This checkout belongs to the runner: leave failed candidates in history,
       // and start the next turn from the integration (including any held commit).
       if (integrationBranch) {
@@ -551,6 +713,10 @@ export function createRunnerQueue(input: {
         await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
       // A reset, whatever its verdict, starts the next interval.
       if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
+    }
+    if (retryPrefix && prefix) {
+      // One fresh immutable attempt, never an owner kill, hold, source replacement or paused rebuild.
+      await processOperation(operation, prefix);
     }
     async function recordShape(cwd: string, branch: string, commit: string, migration: import("./execution-policy.ts").MigrationFinalizationPolicy | null | undefined): Promise<void> {
       const diff = await jj(cwd, ["diff", "--from", branch, "--to", commit, "--git"]);
@@ -662,11 +828,17 @@ export function createRunnerQueue(input: {
           // so a reland recognises it once the next turn publishes it.
           if (!integrated && context && remote) {
             const branch = context.integrationBranch;
+            const intent = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "publication_intent");
+            if (intent?.type === "publication_intent" && (await revisionFacts(checkout, branch)).commitId === intent.candidate) {
+              integrated = { type: "integrated", base: intent.base, commitId: intent.candidate };
+              append(operation.id, integrated);
+              retainUnresolved();
+            }
             const held = await jj(checkout, ["log", "-r", `${branch} & change_id(${operation.changeId}) ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
             // Another operation's integration of the same change (an earlier submission) is not this one's.
             const claimed = log.operationsForChange(operation.repo, operation.changeId).some((other) =>
               log.events({ operationId: other.id }).some((stored) => stored.event.type === "integrated" && stored.event.commitId === held));
-            if (held && !claimed) {
+            if (!integrated && held && !claimed) {
               const [base = ""] = (await jj(checkout, ["log", "-r", `${held}-`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n");
               integrated = { type: "integrated", base, commitId: held };
               append(operation.id, integrated);
@@ -733,7 +905,7 @@ export function createRunnerQueue(input: {
     },
     async recover() {
       // Every lane is idle at startup; recovery waits for any that is not, and holds them all.
-      recovering = Promise.allSettled([...lanes.values()]).then(async () => { await recoverRunning(); await reconcileHeld(); })
+      recovering = Promise.allSettled([...lanes.values(), ...attempts]).then(async () => { await recoverRunning(); await reconcileHeld(); })
         .finally(() => { recovering = undefined; });
       await recovering;
       for (const repo of Object.keys(config.repos).map(repositoryKey)) await scheduleLatest(repo);
@@ -750,10 +922,10 @@ export function createRunnerQueue(input: {
     async idle() {
       for (;;) {
         if (recovering) await recovering;
-        await Promise.allSettled([...lanes.values()]);
+        await Promise.allSettled([...lanes.values(), ...attempts]);
         const lane = deploying;
         await lane;
-        if (!recovering && !lanes.size && lane === deploying) return;
+        if (!recovering && !lanes.size && !attempts.size && lane === deploying) return;
       }
     },
     close() { scheduler.close(); resetScheduler.close(); },

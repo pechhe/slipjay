@@ -18,6 +18,9 @@ export type LandingTailOptions = {
   environment?: () => NodeJS.ProcessEnv;
   /** Called once finalization has succeeded, just before the push. */
   onPublishing?: () => void;
+  /** Speculative publication requires this exact remote predecessor, including at push time. */
+  expectedBase?: string;
+  runCommand?: import("./landing-candidate.ts").CandidateOptions["runCommand"];
 };
 /** Finalization, publication and timing outcome of a landing. */
 export type LandingTail = {
@@ -106,12 +109,13 @@ async function assertStackConflictFree(cwd: string, branch: string, changeId: st
  * workspace packages since. An install that changes tracked source is undone and
  * fails the landing.
  */
-async function prepareCandidateDependencies(cwd: string, context: CandidateContext, candidate: LandingRevision, onProgress: (line: string) => void = (line) => console.log(line)): Promise<void> {
+async function prepareCandidateDependencies(cwd: string, context: CandidateContext, candidate: LandingRevision, onProgress: (line: string) => void = (line) => console.log(line), runCommand?: import("./landing-candidate.ts").CandidateOptions["runCommand"]): Promise<void> {
   const drift = () => jj(cwd, ["diff", "--from", candidate.commitId, "--to", "@", "--summary"]);
   if (await drift()) throw new Error("Verification checkout differs from the landing candidate; repair and rerun landing");
+  const before = (await revisionFacts(cwd, "@")).commitId;
   onProgress("[deps] preparing frozen candidate dependencies");
-  await prepareWorkspaceDependencies(context.current.root, { quiet: true });
-  if ((await revisionFacts(cwd, candidate.changeId)).commitId === candidate.commitId && !await drift()) return;
+  await prepareWorkspaceDependencies(context.current.root, { quiet: true, runCommand });
+  if ((await revisionFacts(cwd, "@")).commitId === before && !await drift()) return;
   await jj(cwd, ["restore", "--from", candidate.commitId, "--into", "@"]);
   throw new Error("Dependency preparation changed the landing candidate's source; it was restored. Fix the install script and rerun landing");
 }
@@ -154,10 +158,21 @@ export const fetchIntegration = (cwd: string, remote: string, branch: string, { 
   run("jj", ["--color=never", ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
 
 /** Push the integration bookmark and confirm the remote-tracking bookmark contains the artifact. */
-export async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string): Promise<LandingPublication> {
+export async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string, expectedBase?: string): Promise<LandingPublication> {
+  if (expectedBase !== undefined) {
+    const local = await revisionFacts(cwd, branch);
+    const tracked = await revisionFacts(cwd, `${branch}@${remote}`);
+    if (local.commitId !== commitId || tracked.commitId !== expectedBase)
+      return { ok: false, status: "push_failed", remote, branch, commitId, reason: "Exact publication candidate or expected remote base changed; retained integration requires reconciliation" };
+  }
   // A colocated import can leave the remote bookmark untracked; jj refuses to push it then.
   await run("jj", ["--color=never", "bookmark", "track", `${branch}@${remote}`], { cwd });
   const pushed = await run("jj", ["--color=never", "git", "push", "--remote", remote, "--bookmark", branch], { cwd });
+  // JJ's push uses the remote-tracking old ref as its server-side precondition. Do not
+  // refresh it or accept ancestry after refusal: that would weaken exact-prefix admission.
+  if (expectedBase !== undefined) return pushed.code === 0
+    ? { ok: true, status: "pushed", remote, branch, commitId }
+    : { ok: false, status: "push_failed", remote, branch, commitId, reason: `Exact-parent publication failed; the local integration is kept: ${(pushed.stderr || pushed.stdout).trim()}` };
   // A remote that another landing already advanced past this artifact also counts.
   if (pushed.code !== 0) await fetchIntegration(cwd, remote, branch);
   if (await revisionExists(cwd, `${commitId} & ::${branch}@${remote}`)) {
@@ -192,6 +207,7 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
     recoverDescendant: true,
     readIntegrationTip: async () => (await revisionFacts(cwd, context.integrationBranch)).commitId,
     ...(options.environment ? { environment: options.environment } : {}),
+    ...(options.runCommand ? { runCommand: options.runCommand } : {}),
   });
   timings.publishingStartedAt = Date.now();
   const remote = publicationRemote(context);
@@ -207,7 +223,7 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
   }
   options.onPublishing?.();
   const publication: LandingPublication = remote
-    ? await publishIntegration(cwd, remote, context.integrationBranch, commitId)
+    ? await publishIntegration(cwd, remote, context.integrationBranch, commitId, options.expectedBase)
     : { ok: true, status: "not_declared", commitId };
   return { ok: publication.ok, postIntegration, publication, timings: { ...timings, finishedAt: Date.now() } };
 }

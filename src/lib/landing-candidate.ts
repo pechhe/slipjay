@@ -23,6 +23,8 @@ export type PrimaryCheckoutOutcome = {
 export type CandidateOptions = {
   adapter: LandingAdapter;
   operationId?: string;
+  /** Runner slot already edits the exact submitted commit; retained earlier rewrites may share its change id. */
+  pinnedSource?: boolean;
   environment?: () => NodeJS.ProcessEnv;
   /** Runs migration generation and verification commands (default: a bounded local process). */
   runCommand?: (request: import("./bounded-process.ts").BoundedProcessRequest, purpose?: import("./migration-candidate.ts").MigrationRunPurpose) => Promise<import("./bounded-process.ts").BoundedProcessResult>;
@@ -37,7 +39,7 @@ export type LandingIO = {
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;
   /** Frozen install of the rebased candidate; fails, restoring source, if the install edits it. */
-  prepareCandidateDependencies(cwd: string, context: CandidateContext, candidate: LandingRevision, progress?: (line: string) => void): Promise<void>;
+  prepareCandidateDependencies(cwd: string, context: CandidateContext, candidate: LandingRevision, progress?: (line: string) => void, runCommand?: CandidateOptions["runCommand"]): Promise<void>;
   writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string, operationId?: string): Promise<unknown>;
   readJsonOptional(path: string): Promise<Record<string, unknown> | null>;
   statePath(name: string): string;
@@ -47,58 +49,101 @@ export type LandingIO = {
 import { migrationCandidate } from "./migration-candidate.ts";
 import { writeWorkspaceJson } from "./workspace-transaction.ts";
 
-export async function integrateLandingCandidate(cwd: string, options: CandidateOptions, io: LandingIO): Promise<{ context: CandidateContext; artifact: LandingRevision; base: string; verification: VerificationEvidence; cleanupPending: boolean; cleanupError?: string; primaryCheckout?: PrimaryCheckoutOutcome }> {
-  const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, prepareCandidateDependencies, writeLandingState, readJsonOptional, statePath } = io;
+/** A prepared immutable candidate. Verification and publication retain its exact parent. */
+export type PreparedLandingCandidate = {
+  context: CandidateContext;
+  artifact: LandingRevision;
+  base: string;
+  /** Process-local cleanup of generated source in the original verification checkout. */
+  rollback(): Promise<void>;
+};
+
+export type VerifiedLandingCandidate = PreparedLandingCandidate & { verification: VerificationEvidence };
+
+type IntegratedLandingCandidate = Omit<VerifiedLandingCandidate, "rollback"> & {
+  cleanupPending: boolean; cleanupError?: string; primaryCheckout?: PrimaryCheckoutOutcome;
+};
+
+async function assertPreparedIdentity(cwd: string, prepared: Pick<PreparedLandingCandidate, "context" | "artifact" | "base">, io: LandingIO, allowEmptyChild = false): Promise<void> {
+  const { context, artifact, base } = prepared;
+  const drift = await io.jj(cwd, ["diff", "--from", artifact.commitId, "--to", "@", "--summary"]);
+  const current = await io.revisionFacts(cwd, "@");
+  const exact = current.commitId === artifact.commitId || (allowEmptyChild && current.empty &&
+    (await io.jj(cwd, ["log", "-r", "parents(@)", "--no-graph", "-T", 'commit_id ++ "\\n"'])).trim() === artifact.commitId);
+  if (!exact || drift)
+    throw new Error("Verification checkout differs from the landing candidate; repair and rerun landing");
+  if ((await io.revisionFacts(cwd, context.integrationBranch)).commitId !== base)
+    throw new Error("Integration bookmark moved during verification; rerun landing against the new base");
+}
+
+async function rollbackFailure(error: unknown, rollback: () => Promise<void>): Promise<never> {
+  try { await rollback(); } catch (rollbackError) {
+    throw new AggregateError([error, rollbackError], `Landing failed and migration rollback requires reconciliation\n${error instanceof Error ? error.message : String(error)}\nRollback could not restore the checkout; retained errors require reconciliation`);
+  }
+  throw error;
+}
+
+/** Prepare without running the gate, moving integration, or writing landing state. */
+export async function prepareLandingCandidate(cwd: string, options: CandidateOptions, io: LandingIO): Promise<PreparedLandingCandidate> {
+  const { landingPreview, ensureLandingDescription, jj, assertStackConflictFree, revisionFacts, prepareCandidateDependencies } = io;
   const { adapter } = options;
   const preview = await landingPreview(cwd);
   const { context } = preview;
-  const direct = context.current.name === "default";
   const target = await ensureLandingDescription(cwd, context, preview.target);
-  // The primary checkout's working copy never gates an Isolated landing: housekeeping
-  // moves it afterwards only when that is safe (see primaryCheckoutDisposition).
-  // The runner's serial queue protects generation and verification. The repository
-  // transaction covers only the final identity check and bookmark transition.
   const migration = await migrationCandidate(cwd, context, io, options);
   try {
     options.onStage?.("rebasing");
-    await jj(cwd, ["rebase", "--branch", target.changeId, "--onto", context.integrationBranch]);
-    await assertStackConflictFree(cwd, context.integrationBranch, target.changeId);
+    await jj(cwd, ["rebase", "--branch", options.pinnedSource ? target.commitId : target.changeId, "--onto", context.integrationBranch]);
+    const rebased = options.pinnedSource ? await revisionFacts(cwd, "@") : await revisionFacts(cwd, target.changeId);
+    await assertStackConflictFree(cwd, context.integrationBranch, rebased.commitId);
     const base = await revisionFacts(cwd, context.integrationBranch);
-    let candidate = await revisionFacts(cwd, target.changeId);
-    await prepareCandidateDependencies(cwd, context, candidate, options.onProgress);
+    let candidate = rebased;
+    await prepareCandidateDependencies(cwd, context, candidate, options.onProgress, options.runCommand);
     candidate = await (adapter.finalizeCandidate?.(candidate, base) ?? migration.finalize(candidate, base));
-    const assertIdentity = async () => {
-      const drift = await jj(cwd, ["diff", "--from", candidate.commitId, "--to", "@", "--summary"]);
-      if ((await revisionFacts(cwd, target.changeId)).commitId !== candidate.commitId || drift)
-        throw new Error("Verification checkout differs from the landing candidate; repair and rerun landing");
-      if ((await revisionFacts(cwd, context.integrationBranch)).commitId !== base.commitId)
-        throw new Error("Integration bookmark moved during verification; rerun landing against the new base");
-    };
-    await assertIdentity();
-    // A publication retry may still be on the empty child created by the first
-    // landing. Gates inspecting @ must see the exact candidate, not just its tree.
+    const identity = { context, artifact: candidate, base: base.commitId };
+    // A retry can still be on an empty child: gates inspecting @ require the exact candidate.
     if ((await revisionFacts(cwd, "@")).commitId !== candidate.commitId) {
       await jj(cwd, ["edit", candidate.commitId]);
-      await assertIdentity();
     }
-    options.onStage?.("verifying");
-    const verification = await adapter.verify({ base: base.commitId, candidate: candidate.commitId });
-    await assertIdentity();
-    // The runner's queue runs one landing or release at a time: nothing else moves the bookmark here.
-    await assertIdentity();
-    if (!direct) await writeLandingState(context, candidate, verification, "prepared", options.operationId);
-    options.onStage?.("integrating");
-    await jj(cwd, ["bookmark", "set", context.integrationBranch, "--revision", candidate.commitId]);
-    if (!direct) await writeLandingState(context, candidate, verification, "landed", options.operationId);
-    options.onStage?.("cleaning");
-    const state = direct ? { artifactCommitId: candidate.commitId } : await readJsonOptional(statePath(context.current.name));
-    const cleanup = await finishLanding(context, state!, io);
-    return { context, artifact: candidate, base: base.commitId, verification, ...cleanup };
+    await assertPreparedIdentity(cwd, identity, io);
+    return { ...identity, rollback: () => migration.rollback() };
   } catch (error) {
-    try { await migration.rollback(); } catch (rollbackError) {
-      throw new AggregateError([error, rollbackError], `Landing failed and migration rollback requires reconciliation\n${error instanceof Error ? error.message : String(error)}\nRollback could not restore the checkout; retained errors require reconciliation`);
-    }
-    throw error;
+    return rollbackFailure(error, () => migration.rollback());
+  }
+}
+
+/** Verify the prepared identity; a dependent can prepare while this exact gate runs. */
+export async function verifyPreparedCandidate(cwd: string, prepared: PreparedLandingCandidate, options: CandidateOptions, io: LandingIO): Promise<VerifiedLandingCandidate> {
+  await assertPreparedIdentity(cwd, prepared, io);
+  options.onStage?.("verifying");
+  const verification = await options.adapter.verify({ base: prepared.base, candidate: prepared.artifact.commitId });
+  await assertPreparedIdentity(cwd, prepared, io);
+  return { ...prepared, verification };
+}
+
+/** Integrate the exact prepared artifact; this transition never rebases or reruns a gate. */
+export async function integratePreparedCandidate(cwd: string, prepared: VerifiedLandingCandidate, options: CandidateOptions, io: LandingIO): Promise<IntegratedLandingCandidate> {
+  const { context, artifact, base, verification } = prepared;
+  const direct = context.current.name === "default";
+  await assertPreparedIdentity(cwd, prepared, io, true);
+  if (!direct) await io.writeLandingState(context, artifact, verification, "prepared", options.operationId);
+  options.onStage?.("integrating");
+  await io.jj(cwd, ["bookmark", "set", context.integrationBranch, "--revision", artifact.commitId]);
+  if (!direct) await io.writeLandingState(context, artifact, verification, "landed", options.operationId);
+  options.onStage?.("cleaning");
+  const state = direct ? { artifactCommitId: artifact.commitId } : await io.readJsonOptional(io.statePath(context.current.name));
+  const cleanup = await finishLanding(context, state!, io);
+  return { context, artifact, base, verification, ...cleanup };
+}
+
+/** Existing callers retain the same prepare/verify/integrate and rollback behavior. */
+export async function integrateLandingCandidate(cwd: string, options: CandidateOptions, io: LandingIO): Promise<IntegratedLandingCandidate> {
+  const prepared = await prepareLandingCandidate(cwd, options, io);
+  try {
+    const verified = await verifyPreparedCandidate(cwd, prepared, options, io);
+    return await integratePreparedCandidate(cwd, verified, options, io);
+  } catch (error) {
+    return rollbackFailure(error, prepared.rollback);
   }
 }
 
