@@ -394,8 +394,11 @@ integration branch; `production` deploys only through a promotion (see
   `minIntervalMs` (default one hour) has passed since the environment's last deploy.
   Otherwise one timer deploys it when the interval ends. It never redeploys a commit
   the environment already has. A commit whose projects failed is retried only on
-  demand (`slipjay deploy staging`) or by the next landing. Scheduling is rebuilt from
-  the log at startup.
+  demand (`slipjay deploy staging`) or by the next landing. A failure before any
+  project ran retries after at least an hour, even with a zero `minIntervalMs`;
+  a newer landing follows the normal interval. Cancelling a queued deployment
+  prevents scheduled retries of that commit. Scheduling is rebuilt from the log
+  at startup.
 - **Where.** Deploys take turns in their own lane, so a deploy waiting minutes on its
   build never holds a landing. Each project's command runs, one after another, in an
   exact source view of the commit (a detached git checkout that borrows the warm

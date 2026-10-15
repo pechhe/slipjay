@@ -1,6 +1,8 @@
 import type { DeploymentEnvironment } from "./deployment-policy.ts";
 import type { DeployOperation, OperationLog } from "./runner-contract.ts";
 
+const RETRY_MS = 3_600_000;
+
 /**
  * When the runner deploys an environment that follows the integration branch (not production): its
  * latest landed commit, once the environment's interval has passed since the last
@@ -23,16 +25,20 @@ export function createDeployScheduler(input: {
     if (deploys.some((operation) => operation.status === "queued" || operation.status === "running")) return;
     if (deploys.some((operation) => operation.commitId === landed.commitId && attempted(operation))) return;
     const latest = deploys.find((operation) => operation.status !== "superseded" && operation.status !== "cancelled");
-    const due = latest ? Date.parse(latest.submittedAt) + policy.minIntervalMs : 0;
+    // A pre-project failure may be retried, but a zero deploy interval must not
+    // turn a persistent fetch/policy failure into an unbounded operation loop.
+    // A newer landed commit still uses its normal deployment interval.
+    const retry = latest?.commitId === landed.commitId && latest.result?.type === "failed" && !attempted(latest);
+    const interval = retry ? Math.max(policy.minIntervalMs, RETRY_MS) : policy.minIntervalMs;
+    const due = latest ? Date.parse(latest.submittedAt) + interval : 0;
     const wait = due - now();
     const key = `${repo}\n${environment}`;
+    clearTimeout(timers.get(key));
+    timers.delete(key);
     if (wait <= 0) {
-      clearTimeout(timers.get(key));
-      timers.delete(key);
       submit(repo, environment, landed.commitId);
       return;
     }
-    if (timers.has(key)) return;
     const timer = setTimeout(() => { timers.delete(key); considerOne(repo, environment, policy); }, wait);
     timer.unref?.();
     timers.set(key, timer);
@@ -51,6 +57,6 @@ export function createDeployScheduler(input: {
   };
 }
 
-/** A deploy whose projects ran (deployed, or some failed): retried only on demand. One the runner never ran retries on schedule. */
+/** Projects that ran, or an owner's cancellation, are retried only on demand. */
 const attempted = (operation: DeployOperation): boolean =>
-  operation.result?.type === "deployed" || (operation.result?.type === "failed" && operation.result.deployment !== undefined);
+  operation.status === "cancelled" || operation.result?.type === "deployed" || (operation.result?.type === "failed" && operation.result.deployment !== undefined);

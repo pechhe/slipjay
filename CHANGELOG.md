@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Deployment recovery stays bounded (#55):** failures before project commands
+  retry no sooner than an hour, including environments with a zero deployment
+  interval. A queued deployment cancelled by its owner is not restarted on schedule;
+  newer landed commits still follow the normal deployment interval.
+
 - **Finish the SlipJay command rename (#8):** the package exposes only `slipjay`;
   the retired command stub is removed. Only `slipjay.json` declares repository
   checks and guarded branches. The explicit state cutover and recorded paths of

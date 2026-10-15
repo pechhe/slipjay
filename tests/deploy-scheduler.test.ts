@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import { createDeployScheduler } from "../src/lib/deploy-scheduler.ts";
 import type { DeploymentEnvironment } from "../src/lib/deployment-policy.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
@@ -107,5 +107,67 @@ test("production never follows the integration branch: a landed commit submits s
     f.scheduler.consider("owner/repo", { staging, production: staging });
     assert.deepEqual(f.submitted, ["a".repeat(40)], "only staging is submitted");
     assert.equal(f.log.deployments("owner/repo", "production").length, 0);
+  } finally { f.scheduler.close(); f.log.close(); }
+});
+
+test("pre-project failure with a zero interval waits an hour and queues one retry", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const immediate = { ...staging, minIntervalMs: 0 };
+  try {
+    f.land("a".repeat(40));
+    f.scheduler.consider("owner/repo", { staging: immediate });
+    f.log.append("deploy-1", { type: "failed", stage: "deploying", reason: "remote unavailable" });
+    for (let turn = 0; turn < 3; turn++) f.scheduler.consider("owner/repo", { staging: immediate });
+    assert.equal(f.submitted.length, 1, "a lasting pre-project failure cannot spin");
+    assert.equal(vi.getTimerCount(), 1);
+    f.advance(HOUR - 1);
+    await vi.advanceTimersByTimeAsync(HOUR - 1);
+    assert.equal(f.submitted.length, 1);
+    f.advance(1);
+    await vi.advanceTimersByTimeAsync(1);
+    assert.deepEqual(f.submitted, ["a".repeat(40), "a".repeat(40)]);
+    f.scheduler.consider("owner/repo", { staging: immediate });
+    assert.equal(f.submitted.length, 2, "the open retry holds further submissions");
+  } finally { f.scheduler.close(); f.log.close(); vi.useRealTimers(); }
+});
+
+test("a newer landing replaces the previous commit's retry timer with its normal deadline", async () => {
+  vi.useFakeTimers();
+  const f = fixture();
+  const minute = { ...staging, minIntervalMs: 60_000 };
+  try {
+    f.land("a".repeat(40));
+    f.scheduler.consider("owner/repo", { staging: minute });
+    f.log.append("deploy-1", { type: "failed", stage: "deploying", reason: "remote unavailable" });
+    f.scheduler.consider("owner/repo", { staging: minute });
+    f.advance(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+    f.land("b".repeat(40));
+    f.scheduler.consider("owner/repo", { staging: minute });
+    f.scheduler.consider("owner/repo", { staging: minute });
+    assert.equal(vi.getTimerCount(), 1, "the normal deadline replaces the retry timer");
+    f.advance(49_999);
+    await vi.advanceTimersByTimeAsync(49_999);
+    assert.equal(f.submitted.length, 1);
+    f.advance(1);
+    await vi.advanceTimersByTimeAsync(1);
+    assert.deepEqual(f.submitted, ["a".repeat(40), "b".repeat(40)]);
+    assert.equal(vi.getTimerCount(), 0, "no retry timer remains after the newer deployment");
+  } finally { f.scheduler.close(); f.log.close(); vi.useRealTimers(); }
+});
+
+test("an owner's cancelled deployment is not restarted by the schedule", () => {
+  const f = fixture();
+  try {
+    f.land("a".repeat(40));
+    f.scheduler.consider("owner/repo", { staging });
+    f.log.append("deploy-1", { type: "cancelled", reason: "cancelled by the author" });
+    f.advance(2 * HOUR);
+    f.scheduler.consider("owner/repo", { staging });
+    assert.equal(f.submitted.length, 1);
+    f.land("b".repeat(40));
+    f.scheduler.consider("owner/repo", { staging });
+    assert.deepEqual(f.submitted, ["a".repeat(40), "b".repeat(40)]);
   } finally { f.scheduler.close(); f.log.close(); }
 });
