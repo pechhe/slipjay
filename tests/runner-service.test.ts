@@ -65,6 +65,8 @@ test("the runner refuses a config whose workers, limits or lanes it cannot honou
   assert.equal(runnerConfigProblem({ ...base, workers: 2, limits: { memoryHigh: "40G", memoryMax: "48G", cpuQuota: "1400%", tasksMax: 4096 } }), null);
   for (const workers of [0, 1.5, "2" as unknown as number, Number.NaN]) assert.match(runnerConfigProblem({ ...base, workers }) ?? "", /"workers"/);
   assert.match(runnerConfigProblem({ ...base, limits: { memoryMax: "lots" } }) ?? "", /"limits"/);
+  for (const origin of ["https://hq.example.com", "http://localhost:3290", "http://127.0.0.1:3290/"]) assert.equal(runnerConfigProblem({ ...base, build: { origin } }), null, origin);
+  for (const origin of ["http://hq.example.com", "https://hq.example.com/api", "", "localhost:3290"]) assert.match(runnerConfigProblem({ ...base, build: { origin } }) ?? "", /"build.origin"/, origin);
   assert.match(runnerConfigProblem({ ...base, limits: { tasksMax: 0 } }) ?? "", /"limits"/);
   assert.match(runnerConfigProblem({ ...base, limits: { swapMax: "1G" } as never }) ?? "", /"limits"/);
   assert.match(runnerConfigProblem({ ...base, repos: { "Owner/Repo": { url: "x", lane: " " } } }) ?? "", /"lane"/);

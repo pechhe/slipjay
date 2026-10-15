@@ -70,7 +70,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   function queue(): Operation[] {
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
     const held = paused() !== null;
-    const serial = open.filter((operation) => operation.kind !== "deploy");
+    // Until Build admits it, a Build-bound landing holds no place in any lane.
+    for (const operation of open) if (operation.kind === "landing" && operation.admission === "pending" && operation.status === "queued") operation.waitingFor = "Build admission";
+    const serial = open.filter((operation) => operation.kind !== "deploy" && !(operation.kind === "landing" && operation.admission === "pending"));
     const busy = serial.filter((operation) => operation.status === "running");
     const admittedTo = (operation: Operation) => admissionLane(lane(operation.repo), operation.repo, operation.kind);
     const holding = (first: Operation | undefined) => first && first.kind !== "deploy" ? busy.find((operation) => lane(operation.repo) === lane(first.repo) && (
@@ -250,7 +252,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     : submitted.event.kind === "deploy"
       ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
       : submitted.event.kind === "reset" ? { ...fields, kind: "reset" }
-      : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark };
+      : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark, ...submitted.event.admission ? { admission: "pending" } : {} };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {
     const event = stored.event;
@@ -274,6 +276,9 @@ function project(id: string, events: StoredEvent[]): Operation | null {
         }
         break;
       }
+      case "build_admitted":
+        if (operation.kind === "landing") operation.admission = "admitted";
+        break;
       case "landed":
       case "released":
       case "deployed":

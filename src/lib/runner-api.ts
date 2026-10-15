@@ -4,6 +4,8 @@ import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
+import { admissionRecord, admissionRequest, BUILD_TOKEN_ENV, RETRYABLE_BUILD_REFUSALS } from "./build-admission.ts";
+import type { BuildAdmitter } from "./build-admission.ts";
 
 export function createRunnerHandler(input: {
   log: OperationLog;
@@ -21,9 +23,41 @@ export function createRunnerHandler(input: {
   /** A queued operation was cancelled: its candidate bookmark is the queue's to delete. */
   onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
+  /** Build admission for Build-bound landings; absent, the runner refuses them rather than skipping admission. */
+  admitBuild?: BuildAdmitter;
 }): RunnerHandler {
   let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
+  /**
+   * Offers a pending Build-bound landing to Build at its `submitted` sequence and records the answer.
+   * Unavailable leaves it pending and unqueued: the author resubmits, which resends the same fact.
+   */
+  async function resolveAdmission(operationId: string): Promise<{ resolved: true; operation: Operation | null } | { resolved: false; reason: string }> {
+    const submitted = input.log.events({ operationId }).find((row) => row.event.type === "submitted");
+    if (submitted?.event.type !== "submitted" || submitted.event.kind === "release" || submitted.event.kind === "deploy" || submitted.event.kind === "reset" || !submitted.event.admission)
+      throw new Error(`Operation ${operationId} has no Build admission to resolve`);
+    const answer = await input.admitBuild!(admissionRequest({ repo: submitted.event.repo, operationId, sequence: submitted.seq, occurredAt: submitted.at,
+      commitId: submitted.event.commitId, record: submitted.event.admission }));
+    if (answer.outcome === "unavailable") return { resolved: false, reason: answer.reason };
+    // An owner may have cancelled it meanwhile; Build's answer is still recorded, and the queue starts only open work.
+    if (answer.outcome === "admitted") {
+      input.log.append(operationId, { type: "build_admitted", sequence: answer.sequence, sessionId: answer.sessionId, recordedAt: answer.recordedAt });
+      input.onSubmitted();
+    } else if (!input.log.operation(operationId)?.result) {
+      const retryable = RETRYABLE_BUILD_REFUSALS.includes(answer.code);
+      input.log.append(operationId, { type: "declined", paths: [], build: { code: answer.code, retryable },
+        reason: `Build refused admission: ${answer.code}${retryable ? "; another delivery of this Spec is still in Build's custody: land again once it has finished" : ""}` });
+    }
+    return { resolved: true, operation: input.log.operation(operationId) };
+  }
+  const unresolved = (reason: string, operation: Operation | null) =>
+    json({ error: `Build admission did not complete (${reason}); nothing will run until it does. Run slipjay land again to retry the same admission`, retryable: true, operation }, 503);
+  async function admit(operationId: string, body: SubmitRequest): Promise<Response> {
+    const result = await resolveAdmission(operationId);
+    if (!result.resolved) return unresolved(result.reason, input.log.operation(operationId));
+    return json({ operation: result.operation, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
+  }
+  const awaitingAdmission = (operation: Operation | null | undefined) => operation?.kind === "landing" && operation.admission === "pending" && !operation.result;
   return async (request) => {
     const authorization = Buffer.from(request.headers.get("authorization") ?? "");
     if (authorization.length !== credential.length || !timingSafeEqual(authorization, credential))
@@ -132,6 +166,8 @@ export function createRunnerHandler(input: {
       }
       if (!validSubmission(body))
         return json({ error: "Invalid submission" }, 400);
+      if (body.handoff?.build && !input.admitBuild)
+        return json({ error: `This runner cannot admit Build-bound submissions: set "build.origin" in its config and ${BUILD_TOKEN_ENV} in its environment` }, 400);
       // Retention adds an await: serialize admission through the append, including deduplication.
       const preceding = landingAdmission;
       let release!: () => void;
@@ -146,6 +182,7 @@ export function createRunnerHandler(input: {
         if (prior) {
           if ((["changeId", "commitId", "bookmark", "submittedBy", "handoffSha256", "repairClaimId"] as const).some((key) => prior.request[key] !== requestFact![key]))
             return json({ error: "Submission request identity is already bound to another candidate" }, 409);
+          if (awaitingAdmission(prior.operation)) return await admit(prior.operation.id, body);
           return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
         }
         const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
@@ -154,12 +191,18 @@ export function createRunnerHandler(input: {
           if (original?.type === "submitted" && (original.kind === undefined || original.kind === "landing") && original.handoffSha256 !== handoffDigest(body.handoff))
             return json({ error: "Open candidate already has different handoff evidence" }, 409);
           if (requestFact) input.log.append(existing.id, requestFact);
+          if (awaitingAdmission(existing)) return await admit(existing.id, body);
           return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
         }
         if (existing?.status === "running")
           return json({ operation: existing }, 409);
         const repairRefusal = repairAdmission(input.log, body);
         if (repairRefusal) return json({ error: repairRefusal }, 409);
+        // A queued candidate whose admission never got an answer may be in Build's custody: learn which before replacing it.
+        if (existing && awaitingAdmission(existing) && input.admitBuild) {
+          const previous = await resolveAdmission(existing.id);
+          if (!previous.resolved) return unresolved(`the earlier candidate's admission is unresolved: ${previous.reason}`, existing);
+        }
         const id = newOperationId();
         let retained: Awaited<ReturnType<NonNullable<typeof input.retainSubmission>>> | undefined;
         try { retained = await input.retainSubmission?.(id, body); }
@@ -170,12 +213,20 @@ export function createRunnerHandler(input: {
         const changedRepair = repairAdmission(input.log, body);
         if (changedRepair) return json({ error: changedRepair }, 409);
         if (active) input.log.append(active.id, { type: "superseded", by: id });
+        // Build knows only an operation it admitted, so only that one is named as superseded in its custody.
+        const admission = body.handoff?.build ? admissionRecord({ ...body.handoff, build: body.handoff.build }, body.repair?.operationId ?? null,
+          active?.kind === "landing" && active.admission === "admitted" ? active.id : null) : undefined;
         input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
-          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {} });
+          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {}, ...admission ? { admission } : {} });
         if (retained) input.log.append(id, retained);
         if (body.repair) input.log.append(id, { type: "repair_proposed", operationId: body.repair.operationId, claimId: body.repair.claimId, source: body.commitId });
         if (body.identity) input.log.append(id, body.identity);
         if (requestFact) input.log.append(id, requestFact);
+        if (admission) {
+          const result = await resolveAdmission(id);
+          if (!result.resolved) return unresolved(result.reason, input.log.operation(id));
+          return json({ operation: result.operation, reattached: false, ...body.requestId ? { requestId: body.requestId } : {}, ...active ? { superseded: active.id } : {} });
+        }
         input.onSubmitted();
         return json({ operation: input.log.operation(id), reattached: false, ...body.requestId ? { requestId: body.requestId } : {}, ...active ? { superseded: active.id } : {} });
       } finally { release(); }

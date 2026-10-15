@@ -10,9 +10,10 @@ import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
+import type { BuildAdmission, BuildAdmitter } from "../src/lib/build-admission.ts";
 import { configureLocalGithubTransport, jj, project } from "./support/workspace-project.ts";
 
-async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 = false) {
+async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 = false, admitBuild?: BuildAdmitter) {
   const f = await project();
   const transport = await configureLocalGithubTransport(f);
   try {
@@ -33,6 +34,7 @@ async function fixture(dropStream = false, racedSubmission = false, loseSubmissi
     const handler = createRunnerHandler({ log, token: "test-token", runnerName: "test-runner",
       readLog: async () => "test log", onSubmitted: () => {}, kill: (operationId) => { killRequests.push(operationId); return killed; },
       subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener); }; },
+      ...admitBuild ? { admitBuild } : {},
     });
     const streamRequests: number[] = [];
     let droppedSeq = 0;
@@ -592,3 +594,27 @@ test("an explicit submission refusal is not described as an unknown transport ou
     } finally { await f.dispose(); }
   }
 });
+
+test("a Build admission that did not complete is reported as retryable, and landing again retries it on the same operation", async () => {
+  const answers: BuildAdmission[] = [{ outcome: "unavailable", reason: "Build did not answer in time" }];
+  const f = await fixture(false, false, false, (request) => Promise.resolve(answers.shift() ?? { outcome: "admitted", sequence: request.sequence, sessionId: request.sessionId, recordedAt: null }));
+  try {
+    const handoff = { version: 1 as const, source: f.commit, intent: "Bound work", scope: [], spec: null, helpers: [], checks: [], reviews: [], toolchain: [], gaps: [],
+      build: { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: null, bindGeneration: 1, sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" } };
+    await assert.rejects(landThroughRunner(f.cwd, { ...f.options, handoff }), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /did not answer in time.*slipjay land again/);
+      assert.doesNotMatch(error.message, /unknown/);
+      return true;
+    });
+    const pending = f.log.operation(f.log.events().find((row) => row.event.type === "submitted")!.operationId);
+    assert.ok(pending?.kind === "landing" && pending.admission === "pending");
+    // Not followed as if queued: the client resubmits, which retries the admission of that same operation.
+    const retry = landThroughRunner(f.cwd, { ...f.options, handoff });
+    await waitFor(() => f.log.operation(pending.id)?.kind === "landing" && (f.log.operation(pending.id) as { admission?: string }).admission === "admitted");
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 1);
+    assert.equal(f.requestIds[0], f.requestIds[1]);
+    f.append(pending.id, { type: "cancelled", reason: "fixture done" });
+    await retry;
+  } finally { await f.dispose(); }
+}, 60_000);

@@ -7,6 +7,7 @@ import { readSubmissionManifest, retainSubmissionSource } from "./submission-sou
 import { readCommandArtifact } from "./command-artifact.ts";
 import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
+import { BUILD_TOKEN_ENV, buildAdmitter } from "./build-admission.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
@@ -40,6 +41,8 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const server = await serveRunner(createRunnerHandler({
     log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
     subscribe: log.subscribe,
+    // Without both, Build-bound submissions are refused, never queued unadmitted.
+    ...config.build && env[BUILD_TOKEN_ENV]?.trim() ? { admitBuild: buildAdmitter({ origin: config.build.origin, token: env[BUILD_TOKEN_ENV].trim() }) } : {},
     async readSource(operation, signal) {
       const retained = log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event;
       if (retained?.type !== "source_retained") throw new Error("No retained submission");

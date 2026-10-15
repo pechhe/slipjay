@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Admit Build-bound submissions through Build before queueing them (#68, #60):** a
+  submission carrying a Build binding is recorded as awaiting admission and offered to
+  Build's `admitAttempt` at its real ledger sequence (bounded to 10 s). The queue never
+  starts it until Build admits it; a refusal ends it as `declined` with Build's code; an
+  unanswered call is a retryable refusal, and landing again replays the same admission.
+  A runner without `build.origin` and `YARDSMITH_SLIPJAY_BUILD_TOKEN` refuses
+  Build-bound submissions.
+
 - **Carry the author's Build binding through submission (#67, #60):** version-1
   handoff evidence accepts an optional `build` object (Build Spec id, Ticket ids,
   HQ Docs body revision, bind generation, lead session). The runner validates it,

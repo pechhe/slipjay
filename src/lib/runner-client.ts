@@ -155,9 +155,11 @@ async function request(baseUrl: string, token: string, path: string, init: Reque
   });
   if (response.status === 401) throw new RunnerRequestRefused(401, "runner refused the credential; check SLIPJAY_RUNNER_TOKEN");
   if (response.ok || response.status === 409) return response;
-  // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner.
-  const refusal = response.status === 400 ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
+  // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner;
+  // so does a known retryable one (503), such as Build admission that did not complete.
+  const refusal = response.status === 400 || response.status === 503 ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
   if (response.status === 400) throw new RunnerRequestRefused(400, `Runner request refused: HTTP 400: ${typeof refusal === "string" ? refusal : "invalid request"}`);
+  if (response.status === 503 && typeof refusal === "string") throw new RunnerRequestRefused(503, `Runner request refused: HTTP 503: ${refusal}`);
   throw new Error(`Runner request failed: HTTP ${response.status}`);
 }
 
@@ -542,7 +544,8 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       const existing = await operationsFor(target.changeId);
       priorAttempt = existing[0];
       // Reattach to this commit's open operation, or to one that landed while nobody followed it.
-      operation = existing.find((op) => (op.status === "queued" || op.status === "running") && op.commitId === target.commitId)
+      // One still awaiting Build admission is resubmitted instead, which retries that admission.
+      operation = existing.find((op) => (op.status === "queued" && !(op.kind === "landing" && op.admission === "pending") || op.status === "running") && op.commitId === target.commitId)
         ?? existing.find((op) => op.status === "landed" && op.commitId === target.commitId);
       // A running older commit already fetched its bookmark state; follow it instead of moving the bookmark under it.
       const running = operation ? undefined : existing.find((op) => op.status === "running");
@@ -643,7 +646,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
         if (!released.cleaned) onLine(`Kept landed workspace ${context.current.name}: ${released.reason}`);
       }
     } else if (result?.type === "declined") {
-      // Only runners from before migration landings declined; nothing lands locally now.
+      // A Build refusal of admission, or a runner from before migration landings; nothing lands locally now.
       onLine(`[runner ${name}] declined: ${result.reason}\n${result.paths.join("\n")}`);
     } else if (result?.type === "failed") {
       onLine(`[runner ${name}] failed at ${result.stage}: ${result.reason}`);

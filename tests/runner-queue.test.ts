@@ -846,6 +846,28 @@ test("while paused, queued changes wait and show paused; resumed, they land in o
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a Build-bound landing never starts before admission, holds no place in its lane, and once admitted still waits out a pause", async () => {
+  const f = await fixture();
+  try {
+    const binding = { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: null, bindGeneration: 1, sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" };
+    const bound = newOperationId();
+    f.log.append(bound, { type: "submitted", ...await f.candidate("bound.txt"), admission: { binding, specBodyHash: null, helperRevisions: [], repairsOperationId: null, supersedes: null } });
+    const other = f.submit(await f.candidate("other.txt"));
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+    const pending = f.log.operation(bound)!;
+    assert.ok(pending.kind === "landing" && pending.admission === "pending" && pending.status === "queued" && pending.runs.length === 0);
+    assert.equal(pending.waitingFor, "Build admission");
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    f.log.append(bound, { type: "build_admitted", sequence: 1, sessionId: binding.sessionId, recordedAt: null });
+    f.queue.wake(); await f.queue.idle();
+    assert.deepEqual([f.log.operation(bound)!.status, f.log.operation(bound)!.stage], ["queued", "paused"]);
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "owner" });
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.result(bound)?.type, "landed", JSON.stringify(f.result(bound)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
 const generations = (f: Awaited<ReturnType<typeof fixture>>, ids: string[]) =>
   ids.flatMap((id) => f.log.operation(id)!.runs).filter((run) => run.command.startsWith("node -e const fs=require(\"node:fs\");fs.mkdirSync")).length;
 

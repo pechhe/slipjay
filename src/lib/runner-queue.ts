@@ -491,7 +491,7 @@ export function createRunnerQueue(input: {
     if (recovering || log.paused()) return;
     for (const operation of log.openOperations()) {
       if (admitted.size >= workers) return;
-      if (operation.kind === "deploy" || operation.status !== "queued") continue;
+      if (operation.kind === "deploy" || operation.status !== "queued" || (operation.kind === "landing" && operation.admission === "pending")) continue;
       const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
       const active = prefixes.get(operation.repo) ?? [];
       const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;

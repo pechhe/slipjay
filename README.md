@@ -700,6 +700,26 @@ Build claim: nothing is inferred from the Spec ref, the identity's `sessionId` o
 branch names, and `bodyRevision` and the Spec's `bodySha256` are never coerced into
 each other.
 
+**Build admission.** A runner accepts a submission with a `build` binding only when its
+config sets `build.origin` (HQ's https origin, or a loopback http one) and its environment holds
+`YARDSMITH_SLIPJAY_BUILD_TOKEN`; otherwise it refuses the submission (400) rather than
+queue it unadmitted. After retaining the source it records the operation as awaiting
+Build admission, then calls Build's `admitAttempt` (`POST {origin}/api/build/runner`)
+with that `submitted` record's ledger sequence, waiting at most 10 seconds. Until Build
+admits it the operation has no place in its queue and never starts (`waitingFor`
+reads `Build admission`); once admitted it queues as usual, and a pause still holds
+it. A Build refusal (`bind_generation_stale`, `admission_session_invalid`,
+`delivery_pending`, `attempt_fact_conflict`, or an input Build will not accept) ends
+the operation as `declined` with Build's code, and nothing runs. Only `delivery_pending`
+is marked retryable: another delivery of the Spec is still in Build's custody, so land
+again once it has finished. When Build does not
+answer, the runner keeps the operation awaiting admission and refuses the submission
+as retryable (503): running `slipjay land` again resends the same admission, which
+Build replays, so a lost response never opens a second operation. A newer candidate
+of the same change names the queued one it supersedes to Build; if that one's admission
+never got an answer, the runner resends it first, and while Build stays silent it
+refuses the newer candidate as retryable and leaves the queued one as it was. No Build call is made during integration or publication.
+
 The client redacts with its environment before transport, then the runner redacts
 again before retention. Redacted Spec snapshots receive a new snapshot digest and
 a gap preserving the original body digest. Unknown credentials cannot be detected

@@ -138,7 +138,11 @@ export type OperationEvent =
   /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */
   | { type: "submission_request"; repairClaimId?: string; handoffSha256?: string; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */
-  | { type: "submitted"; kind?: "landing"; handoffSha256?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
+  | { type: "submitted"; kind?: "landing"; handoffSha256?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string;
+      /** Build-bound: the queue starts it only after `build_admitted`. `supersedes` is the admitted operation it replaces in Build's custody. */
+      admission?: import("./build-admission.ts").BuildAdmissionRecord }
+  /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
+  | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null }
   /** A release of `commitId`, the integration commit a human approved. */
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
@@ -161,7 +165,7 @@ export type OperationEvent =
   /** The declared reset step ran against `target` from the exact source of `source`, the integration tip. */
   | { type: "reset"; target: string; source: string }
   /** The change touches migration trigger or artifact paths; the author lands it locally (until #11). */
-  | { type: "declined"; reason: string; paths: string[] }
+  | { type: "declined"; reason: string; paths: string[]; build?: { code: string; retryable: boolean } }
   /** `output` is the failing command's output verbatim (bounded as the local gate bounds it). */
   | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; deployment?: DeployRecord }
   /** A queued operation replaced by a newer submission of the same change. */
@@ -201,7 +205,9 @@ type OperationFields = {
   /** Seq of the latest event, for resuming a stream after it. */
   lastSeq: number;
 };
-export type LandingOperation = OperationFields & { kind: "landing"; changeId: string; bookmark: string; outcome?: LandingOutcome };
+export type LandingOperation = OperationFields & { kind: "landing"; changeId: string; bookmark: string; outcome?: LandingOutcome;
+  /** Build-bound only: `pending` until Build admits it, and the queue never starts it while pending. */
+  admission?: "pending" | "admitted" };
 
 /** Versioned recorded evidence, not authority to repair, retry, or release the author. */
 export type LandingOutcome = {
@@ -401,6 +407,8 @@ export type RunnerConfig = {
   workers?: number;
   /** Combined limits of every run on a systemd host (RUNNER_DEFAULT_LIMITS), deploys included. */
   limits?: RunnerLimits;
+  /** HQ's origin for Build admission and receipts; with BUILD_TOKEN_ENV, required to accept Build-bound submissions. */
+  build?: { origin: string };
 };
 
 /** jj settings the runner sets unless its config overrides them: YardSmith checks in files over jj's 1MiB default. */
@@ -417,6 +425,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (Object.values(config.repos).some((repo) => repo.lane !== undefined && (typeof repo.lane !== "string" || !repo.lane.trim()))) return `A repository's "lane" in the runner config must be a non-empty name`;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth !== undefined && repo.verificationDepth !== 1 && repo.verificationDepth !== 2)) return `A repository's "verificationDepth" must be 1 or 2`;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && repo.lane !== undefined)) return `Depth-two verification requires an isolated repository lane`;
+  if (config.build !== undefined && !/^(?:https:\/\/[^/\s]+|http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?)\/?$/.test(config.build?.origin ?? ""))
+    return `The runner config's "build.origin" must be an https origin, such as "https://hq.example.com", or a loopback http one`;
   return null;
 };
 
