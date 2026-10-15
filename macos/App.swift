@@ -34,7 +34,7 @@ import UserNotifications
         super.init()
         let defaults = UserDefaults.standard
         let origin = (defaults.object(forKey: "contactOrigin") as? Date) ?? Date()
-        state = RunnerState(lastContact: defaults.object(forKey: "lastRunnerContact") as? Date, startedAt: origin)
+        state = RunnerState(lastContact: defaults.object(forKey: "lastRunnerContact") as? Date, startedAt: origin, cursor: defaults.object(forKey: "watchCursor") as? Int)
         defaults.set(origin, forKey: "contactOrigin")
         UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, _ in
@@ -66,7 +66,12 @@ import UserNotifications
         let process = Process(), output = Pipe(), diagnostic = Pipe()
         process.executableURL = URL(fileURLWithPath: cli)
         process.arguments = ["watch", "--json"]
-        process.environment = environment
+        var watchEnvironment = environment
+        watchEnvironment.removeValue(forKey: "SLIPJAY_WATCH_CURSOR")
+        if let cursor = UserDefaults.standard.object(forKey: "watchCursor") as? Int {
+            watchEnvironment["SLIPJAY_WATCH_CURSOR"] = String(cursor)
+        }
+        process.environment = watchEnvironment
         process.standardOutput = output; process.standardError = diagnostic
         watcher = process
         diagnostic.fileHandleForReading.readabilityHandler = { handle in
@@ -118,6 +123,10 @@ import UserNotifications
                 UserDefaults.standard.set(contact, forKey: "lastRunnerContact")
             }
             error = nil; deliverNotices()
+            // Persist notification proposals before acknowledging their event cursor.
+            if state.connection == "connected" {
+                UserDefaults.standard.set(state.cursor, forKey: "watchCursor")
+            }
         }
         catch { self.error = "Unsupported or malformed runner watch message" }
     }

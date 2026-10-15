@@ -1,7 +1,110 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { watchRunner, type WatchEnvelope } from "../src/lib/runner-watch.ts";
+import { watchCursor, watchRunner, WATCH_REPLAY_LIMIT, type WatchEnvelope } from "../src/lib/runner-watch.ts";
+import { createRunnerHandler } from "../src/lib/runner-api.ts";
+import { openOperationLog } from "../src/lib/runner-log.ts";
+import { readFileSync, writeFileSync } from "node:fs";
 import type { QueueSnapshot, StoredEvent } from "../src/lib/runner-contract.ts";
+
+test("watch cursor accepts only non-negative safe integers", () => {
+  assert.equal(watchCursor(undefined), undefined);
+  assert.equal(watchCursor("0"), 0);
+  assert.equal(watchCursor("42"), 42);
+  for (const raw of ["", "-1", "1.5", "1e2", "Infinity", " 2", "9007199254740992"])
+    assert.throws(() => watchCursor(raw), /SLIPJAY_WATCH_CURSOR/);
+});
+
+test("real watch contract: first install, restart catch-up, dedup and replaced-log resync", async () => {
+  let log = openOperationLog(":memory:");
+  const originalCursor = process.env.SLIPJAY_WATCH_CURSOR;
+  const sessions: WatchEnvelope[][] = [];
+  const requests: number[][] = [];
+  function submit(id: string) {
+    log.append(id, { type: "submitted", kind: "release", repo: "fixture/repo", commitId: "candidate", migrationsReady: false, submittedBy: "owner" });
+    log.append(id, { type: "stage", stage: "verifying" });
+  }
+  async function session(cursor: number | undefined, afterConnected?: () => void) {
+    if (cursor === undefined) delete process.env.SLIPJAY_WATCH_CURSOR;
+    else process.env.SLIPJAY_WATCH_CURSOR = String(cursor);
+    const controller = new AbortController();
+    const values: WatchEnvelope[] = [], cursors: number[] = [];
+    const handler = createRunnerHandler({ log, token: "fixture", runnerName: "fixture-runner", readLog: async () => null, onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: () => () => {} });
+    const request = (path: string, signal: AbortSignal, headers: Record<string, string> = {}) => handler(new Request(`http://runner/v1/${path}`, { signal, headers: { authorization: "Bearer fixture", ...headers } }));
+    await watchRunner({ signal: controller.signal,
+      emit(value) {
+        values.push(value);
+        if (value.type === "connection" && value.state === "connected") {
+          afterConnected?.();
+          if (value.cursor === log.latestSeq()) controller.abort();
+        }
+        if (value.type === "snapshot" && values.some((item) => item.type === "event" && item.event.seq === log.latestSeq())) controller.abort();
+      },
+      async connect() {
+        return { close() {},
+          async snapshot(signal) { return (await request("queue", signal)).json() as Promise<QueueSnapshot>; },
+          async stream(cursor, signal) { cursors.push(cursor); return request(`metrics/events?since=${cursor}`, signal, { accept: "text/event-stream" }); },
+        };
+      },
+    });
+    sessions.push(values); requests.push(cursors);
+    return values;
+  }
+  try {
+    submit("release");
+    const initialCursor = log.latestSeq();
+    await session(undefined); // Existing verification does not notify on first install.
+    log.append("release", { type: "failed", stage: "verifying", reason: "fixture gate failed" });
+    const appliedCursor = log.latestSeq();
+    const caughtUp = await session(initialCursor);
+    assert.deepEqual(caughtUp.filter((item) => item.type === "event").map((item) => item.event.seq), log.events({ afterSeq: initialCursor }).map((item) => item.seq));
+    assert.equal(caughtUp.filter((item) => item.type === "snapshot").length, 2);
+    await session(appliedCursor); // Acknowledged events do not replay after another app restart.
+    log.close(); log = openOperationLog(":memory:");
+    await session(appliedCursor, () => { submit("replacement"); log.append("replacement", { type: "failed", stage: "verifying", reason: "new log failure" }); });
+    assert.deepEqual(requests, [[initialCursor], [initialCursor], [appliedCursor], [appliedCursor, 0]]);
+    assert.deepEqual(sessions[3]!.filter((item) => item.type === "event").map((item) => item.event.seq), log.events().map((item) => item.seq));
+    // Share actual CLI envelopes with Swift, removing only wall-clock timestamps.
+    const normalized = JSON.parse(JSON.stringify(sessions, (key, value: unknown) =>
+      ["at", "observedAt", "submittedAt", "finishedAt", "stageStartedAt"].includes(key) ? "2026-10-14T00:00:00Z" : value));
+    const path = new URL("../macos/fixtures/watch-restart.json", import.meta.url);
+    if (process.env.SLIPJAY_UPDATE_WATCH_FIXTURE === "1") writeFileSync(path, JSON.stringify(normalized, null, 2) + "\n");
+    assert.deepEqual(normalized, JSON.parse(readFileSync(path, "utf8")));
+  } finally {
+    log.close();
+    if (originalCursor === undefined) delete process.env.SLIPJAY_WATCH_CURSOR;
+    else process.env.SLIPJAY_WATCH_CURSOR = originalCursor;
+  }
+});
+
+test("catch-up bounds the event window and refreshes once after the replay batch", async () => {
+  const originalCursor = process.env.SLIPJAY_WATCH_CURSOR;
+  process.env.SLIPJAY_WATCH_CURSOR = "0";
+  const controller = new AbortController();
+  const envelopes: WatchEnvelope[] = [];
+  let snapshots = 0;
+  try {
+    await watchRunner({ signal: controller.signal, emit(value) { envelopes.push(value); },
+      async connect() {
+        return { close() {},
+          async snapshot() { if (++snapshots === 2) controller.abort(); return { version: 1, seq: 1000 } as QueueSnapshot; },
+          async stream(cursor) {
+            assert.equal(cursor, 1000 - WATCH_REPLAY_LIMIT);
+            return new Response(new ReadableStream<Uint8Array>({ start(c) {
+              for (let seq = cursor + 1; seq <= 1000; seq++)
+                c.enqueue(new TextEncoder().encode(`event: stored\ndata: ${JSON.stringify({ seq })}\n\n`));
+              c.close();
+            } }));
+          },
+        };
+      },
+    });
+    assert.equal(envelopes.filter((item) => item.type === "event").length, WATCH_REPLAY_LIMIT);
+    assert.equal(snapshots, 2, "one initial snapshot and one refresh for the entire replay");
+  } finally {
+    if (originalCursor === undefined) delete process.env.SLIPJAY_WATCH_CURSOR;
+    else process.env.SLIPJAY_WATCH_CURSOR = originalCursor;
+  }
+});
 
 test("watch refreshes a replaced connection without skipping replay and emits JSON heartbeats", async () => {
   const controller = new AbortController();

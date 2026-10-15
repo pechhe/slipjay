@@ -114,8 +114,8 @@ enum WatchEnvelope: Codable, Equatable {
 
 struct RunnerState {
     var startedAt: Date
-    init(now: Date = Date(), lastContact: Date? = nil, startedAt: Date? = nil) {
-        self.startedAt = startedAt ?? now; self.lastContact = lastContact
+    init(now: Date = Date(), lastContact: Date? = nil, startedAt: Date? = nil, cursor: Int? = nil) {
+        self.startedAt = startedAt ?? now; self.lastContact = lastContact; self.cursor = cursor ?? 0
     }
     var snapshot: Snapshot?
     var operations: [String: Operation] = [:]
@@ -150,7 +150,9 @@ struct RunnerState {
                 operations[value.operationId] = operation
             }
         case .heartbeat: lastContact = receivedAt
-        case .connection(let state, _): connection = state
+        case .connection(let state, let baseline):
+            connection = state
+            if state == "connected" { cursor = baseline }
         case .unknown: break
         }
         let protected = Set(snapshot?.operations.map(\.id) ?? [])

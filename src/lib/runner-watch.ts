@@ -16,7 +16,17 @@ export type WatchConnection = {
   close(): void;
 };
 
-/** Reconnect snapshots describe current state; only emitted events advance a replay cursor. */
+/** Bound catch-up by global events, so at most this many can propose notifications. */
+export const WATCH_REPLAY_LIMIT = 100;
+
+export function watchCursor(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)))
+    throw new Error("SLIPJAY_WATCH_CURSOR must be a non-negative safe integer");
+  return Number(raw);
+}
+
+/** Snapshots describe current state; connected cursors establish replay baselines. */
 export async function watchRunner(input: {
   connect(): Promise<WatchConnection>;
   emit(envelope: WatchEnvelope): void;
@@ -24,7 +34,7 @@ export async function watchRunner(input: {
   retry?(signal: AbortSignal): Promise<void>;
   armTimeout?(expire: () => void, ms: number): () => void;
 }): Promise<void> {
-  let cursor: number | undefined;
+  let cursor = watchCursor(process.env.SLIPJAY_WATCH_CURSOR);
   while (!input.signal.aborted) {
     let connection: WatchConnection | undefined;
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -33,12 +43,20 @@ export async function watchRunner(input: {
         input.emit({ version: 1, type: "connection", state: "connecting", cursor });
       connection = await input.connect();
       if (input.signal.aborted) break;
-      const snapshot = await connection.snapshot(input.signal);
+      let snapshot = await connection.snapshot(input.signal);
       input.emit({ version: 1, type: "snapshot", snapshot });
-      cursor ??= snapshot.seq;
-      input.emit({ version: 1, type: "connection", state: "connected", cursor });
-      const response = await connection.stream(cursor, input.signal);
+      cursor = Math.max(cursor ?? snapshot.seq, snapshot.seq - WATCH_REPLAY_LIMIT);
+      let response = await connection.stream(cursor, input.signal);
+      if (response.status === 409) {
+        await response.body?.cancel();
+        snapshot = await connection.snapshot(input.signal);
+        cursor = snapshot.seq;
+        input.emit({ version: 1, type: "snapshot", snapshot });
+        response = await connection.stream(cursor, input.signal);
+      }
       if (!response.ok || !response.body) throw new Error("Runner event stream unavailable");
+      input.emit({ version: 1, type: "connection", state: "connected", cursor });
+      const replayThrough = snapshot.seq;
       const streamReader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
       reader = streamReader;
       const abortReader = () => {
@@ -82,7 +100,7 @@ export async function watchRunner(input: {
               if (event.seq <= cursor) continue;
               input.emit({ version: 1, type: "event", event });
               cursor = event.seq;
-              if (!input.signal.aborted)
+              if (!input.signal.aborted && cursor >= replayThrough)
                 input.emit({
                   version: 1,
                   type: "snapshot",

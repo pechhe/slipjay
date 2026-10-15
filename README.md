@@ -892,10 +892,17 @@ pre-v1.0.0 state in that disposable `HOME` and never touch the real one. Run a s
 SSH forwarding. stdout contains only version-1 JSONL envelopes: `snapshot` with the
 `QueueSnapshot`, `event` with a stored global event, `heartbeat` with `at` and `seq`,
 and `connection` with `connecting`, `connected` or `disconnected` and the replay
-`cursor`. The first envelope is a snapshot; its `seq` establishes the initial cursor.
-Events and heartbeats refresh the runner-owned queue projection. Reconnect creates
-a new transport and refreshes the snapshot without advancing that
-cursor; only emitted events advance it, so intervening events replay without repeats.
+`cursor`. Without a saved cursor, the first snapshot's `seq` establishes the initial
+cursor and history is not replayed. A consumer can set `SLIPJAY_WATCH_CURSOR` on the
+watch process to resume from a non-negative safe integer sequence; invalid values
+are rejected before connecting. Catch-up is bounded to the latest 100 global events
+on each connection, so older events are skipped. The `connected` envelope's cursor
+establishes the applied baseline before replay. A cursor ahead of a replaced runner
+log (HTTP 409) resets to a fresh snapshot's sequence and resumes watching.
+Events and heartbeats refresh the runner-owned queue projection; replay refreshes
+once at the end of the batch rather than after each historical event. Reconnect
+creates a new transport, refreshes the snapshot, and replays from the applied cursor
+within the same bound; only emitted events advance it after the baseline.
 Heartbeats prove connection liveness even during a quiet command and never advance
 the replay cursor. Interrupting watch closes its readers and SSH transport.
 
@@ -917,6 +924,11 @@ The SwiftUI app runs the installed `slipjay watch --json` CLI; it holds no crede
 SSH forward or HTTP client. Its direct CLI default is `~/.bun/bin/slipjay`; set
 `SLIPJAY_CLI` to an explicit executable path when launching a different installation.
 Its child environment includes `~/.bun/bin`, `~/.local/bin` and system tools.
+The app persists its last applied cursor and supplies `SLIPJAY_WATCH_CURSOR` only
+to its watch child. It queues notification proposals before saving the cursor,
+retains pending notifications across restarts, and deduplicates accepted notices.
+First install starts from the snapshot; later starts can notify for up to 100 recent
+events that occurred while the app was stopped.
 The menu shows the queued and running landings, releases and resets (each repository
 in order), the deploy lane, runner-owned timing, held and paused state,
 staging attempts, recent releases and contact. The hourly suite remains unavailable

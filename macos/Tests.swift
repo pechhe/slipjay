@@ -52,8 +52,45 @@ struct ModelTests {
         try backlogTests(now: now)
         try controlTests(now: now)
         try policyTests(now: now)
+        try watchRestartTests(now: now)
         print("Runner model and policy tests passed")
     }
+}
+
+func watchRestartTests(now: Date) throws {
+    // This fixture is checked against watchRunner + the authenticated runner handler in TS.
+    let data = try Data(contentsOf: URL(fileURLWithPath: "macos/fixtures/watch-restart.json"))
+    let sessions = try JSONDecoder().decode([[WatchEnvelope]].self, from: data)
+    var state = RunnerState(now: now)
+    var backlog = NoticeBacklog()
+    var accepted = Set<String>()
+    func consume(_ session: [WatchEnvelope]) {
+        for envelope in session {
+            state.consume(envelope, receivedAt: now)
+            backlog.update(notices(state: state, now: now, landingFailures: false), accepted: accepted)
+        }
+    }
+    consume(sessions[0])
+    expect(backlog.pending.isEmpty, "first install starts at the snapshot without historical verification notices")
+    expect(state.cursor == state.snapshot?.seq, "first connected snapshot establishes persisted baseline")
+    let savedCursor = state.cursor
+    state = RunnerState(now: now, cursor: savedCursor)
+    consume(sessions[1])
+    expect(backlog.pending.map(\.title) == ["Release failed"], "restart catches release failure while app was stopped")
+    expect(backlog.pending[0].body.contains("fixture/repo"), "replayed notice has real snapshot operation context")
+    // A restart before OS acceptance retains the queued notice alongside the applied cursor.
+    backlog = try JSONDecoder().decode(NoticeBacklog.self, from: JSONEncoder().encode(backlog))
+    state = RunnerState(now: now, cursor: state.cursor)
+    consume(sessions[2])
+    expect(backlog.pending.count == 1, "no replay required to deliver a persisted pending notice")
+    for notice in backlog.pending { accepted.insert(notice.id); backlog.accepted(notice.id) }
+    consume(sessions[1])
+    expect(backlog.pending.isEmpty, "repeated replay cannot notify an accepted event twice")
+    state = RunnerState(now: now, cursor: state.cursor)
+    consume(sessions[3])
+    expect(state.cursor == state.snapshot?.seq, "409 resets a cursor ahead of the replaced log")
+    expect(Set(backlog.pending.map(\.title)) == Set(["Release verification started", "Release failed"]), "new events notify after resync to a replaced log")
+    expect(backlog.pending.allSatisfy { $0.operationId == "replacement" }, "resync notifications refer to the new log")
 }
 
 func policyTests(now: Date) throws {

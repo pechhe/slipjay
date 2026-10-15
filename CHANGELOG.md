@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Menu bar notifications survive downtime (#50):** the app saves its applied
+  watch cursor after queuing notifications and resumes with at most 100 recent
+  events. First install starts at the current snapshot. A cursor ahead of a
+  replaced runner log resyncs automatically, and replay refreshes the queue once
+  per batch rather than once per event.
+
 ## v3.16.0
 
 - **Optional depth-two verification (#56):** a runner repository entry may set
