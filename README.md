@@ -162,7 +162,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 
 | Command | Effect |
 | --- | --- |
-| `status` | Mode, current workspace, integration checkout and landing state (JSON). |
+| `status` | Mode, current workspace and its Issue, integration checkout and landing state (JSON). |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
 | `list` | Workspaces with their state, Issue and retained material. |
 | `pool [refill]` | Show ready spare workspaces, or provision one (up to `spares`). |

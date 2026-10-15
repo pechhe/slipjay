@@ -6,7 +6,9 @@
   the retired command stub is removed. Only `slipjay.json` declares repository
   checks and guarded branches. The explicit state cutover and recorded paths of
   pre-cutover workspaces remain available so in-flight work is preserved.
-
+- **`status` reports the workspace's Issue:** `workspace.issueNumber` is present
+  when the workspace has one from `start --issue` or `attach-issue`, so clients such
+  as T3 Code can label a workspace without reading SlipJay's state files.
 - **Menu bar notifications survive downtime (#50):** the app saves its applied
   watch cursor after queuing notifications and resumes with at most 100 recent
   events. First install starts at the current snapshot. A cursor ahead of a

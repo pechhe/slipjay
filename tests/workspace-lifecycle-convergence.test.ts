@@ -45,6 +45,19 @@ test("attaching an Issue to a landed workspace is refused", async () => {
   }
 }, 120_000);
 
+test("status reports the Issue attached to the workspace", async () => {
+  const f = await project();
+  try {
+    const workspace = await createWorkspace("status-issue", f.repo);
+    const statusIssue = async () => JSON.parse((await runCli(workspace.workspacePath, ["status"])).stdout).workspace.issueNumber;
+    assert.equal(await statusIssue(), undefined);
+    assert.equal((await runCli(workspace.workspacePath, ["attach-issue", "77"])).code, 0);
+    assert.equal(await statusIssue(), 77);
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
+
 test("rename preserves landing state in both locations with its history", async () => {
   const f = await project();
   try {

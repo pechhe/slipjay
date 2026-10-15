@@ -30,6 +30,7 @@ import {
   cutoverPending,
 } from "../lib/slipjay.ts";
 import { legacyStateHome } from "../lib/workspace-paths.ts";
+import { workspaceMetadata } from "../lib/workspace-state.ts";
 import { landingGuardDecision } from "../lib/landing-guard.ts";
 import { landingTimingLine } from "../lib/landing-timing.ts";
 import { execFileSync, spawn } from "node:child_process";
@@ -284,8 +285,10 @@ try {
   } else if (command === "status") {
     const context = await workspaceContext();
     const landing = context && context.current.name !== "default" ? await readLandingState(context.current.name, { readOnly: true }) : null;
+    // The Issue attached by `start --issue` or `attach-issue`, for clients that label the workspace.
+    const issueNumber = context ? (await workspaceMetadata(context.current.name))?.issueNumber : undefined;
     console.log(context
-      ? JSON.stringify({ mode: await readWorkspaceMode(), workspace: context.current, integration: context.integration, integrationBranch: context.integrationBranch,
+      ? JSON.stringify({ mode: await readWorkspaceMode(), workspace: { ...context.current, ...(issueNumber ? { issueNumber } : {}) }, integration: context.integration, integrationBranch: context.integrationBranch,
         ...(landing ? { landing: { phase: landing.phase, artifactCommitId: landing.artifactCommitId, ...(landing.primaryCheckout ? { primaryCheckout: landing.primaryCheckout } : {}) } } : {}) }, null, 2)
       : "Not inside a Jujutsu repository");
   } else if (command === "mode") {
