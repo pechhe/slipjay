@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "@pechhe/slipway",
+      "name": "@pechhe/slipjay",
       "dependencies": {
         "effect": "4.0.3",
         "proper-lockfile": "4.1.2",

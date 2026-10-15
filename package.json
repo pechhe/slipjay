@@ -7,8 +7,7 @@
   "license": "UNLICENSED",
   "repository": "github:pechhe/slipjay",
   "bin": {
-    "slipjay": "src/launcher/workspace.ts",
-    "slipway": "src/launcher/retired-slipway.ts"
+    "slipjay": "src/launcher/workspace.ts"
   },
   "exports": {
     ".": {

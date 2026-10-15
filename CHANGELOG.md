@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Finish the SlipJay command rename (#8):** the package exposes only `slipjay`;
+  the retired command stub is removed. Only `slipjay.json` declares repository
+  checks and guarded branches. The explicit state cutover and recorded paths of
+  pre-cutover workspaces remain available so in-flight work is preserved.
+
 - **Menu bar notifications survive downtime (#50):** the app saves its applied
   watch cursor after queuing notifications and resumes with at most 100 recent
   events. First install starts at the current snapshot. A cursor ahead of a

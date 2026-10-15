@@ -275,16 +275,14 @@ async function stderrOf<T>(operation: () => Promise<T>) {
     spy.mockRestore();
   }
 }
-const refusal = /slipway\.json is no longer read .* rename it to slipjay\.json/;
 
-test("working files: slipjay.json governs, and the retired path alone is refused, not read", async () => {
+test("working files: only slipjay.json declares a policy", async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "slipjay-policy-files-")));
   try {
     assert.equal(await readExecutionPolicy(root), null);
 
     await writeFile(join(root, "slipway.json"), policy({ integrationBranch: "retired" }));
-    await assert.rejects(readExecutionPolicy(root), (error: Error & { code?: string }) =>
-      refusal.test(error.message) && error.code === "SLIPJAY_RETIRED_POLICY_PATH");
+    assert.equal(await readExecutionPolicy(root), null, "the former filename is not a policy");
 
     await writeFile(join(root, "slipjay.json"), policy({ integrationBranch: "neutral" }));
     const both = await stderrOf(() => readExecutionPolicy(root));
@@ -316,13 +314,13 @@ for (const [label, policyPaths] of [
   }, 60_000);
 }
 
-test("at-commit reads (jj, integration and exact git object) refuse a commit whose tree has only the retired path", async () => {
+test("at-commit reads ignore the former policy filename", async () => {
   const f = await gitRepository({ main: "main" }, "main", ["slipway.json"]);
   try {
     const commit = jj(f.repo, ["log", "--no-graph", "-r", "main", "-T", "commit_id"]);
-    await assert.rejects(readExecutionPolicyAtCommit(f.repo, "main"), refusal);
-    await assert.rejects(readIntegrationPolicy(f.repo), refusal);
-    await assert.rejects(readExactExecutionPolicy(join(f.repo, ".git"), commit), refusal);
+    assert.equal((await readExecutionPolicyAtCommit(f.repo, "main")).policy, null);
+    assert.equal((await readIntegrationPolicy(f.repo)).policy, null);
+    assert.equal((await readExactExecutionPolicy(join(f.repo, ".git"), commit)).configuration, null);
   } finally {
     await f.dispose();
   }

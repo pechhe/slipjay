@@ -1,7 +1,7 @@
-import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
+import { project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
@@ -9,7 +9,6 @@ import { createHash } from "node:crypto";
 import { finalizePostIntegration } from "../src/lib/post-integration-finalization.ts";
 import { postIntegrationPolicyDigest } from "../src/lib/post-integration-policy.ts";
 import { readPostIntegrationPolicy } from "../src/lib/post-integration-source.ts";
-import { createWorkspace } from "../src/lib/slipjay.ts";
 
 // Finalization and its retry run on the runner (tests/runner-queue.test.ts); these
 // cases cover the policy path and descendant recovery.
@@ -22,20 +21,6 @@ function finalization(ledger: string) {
     targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
   };
 }
-
-test("a repository governed only by the retired slipway.json is refused, naming slipjay.json", async () => {
-  const f = await project({ policyPath: "slipway.json" });
-  try {
-    const workspace = await createWorkspace("retired policy", f.repo).catch((error: Error) => error);
-    const outcome = workspace instanceof Error ? workspace
-      : await writeFile(join(workspace.workspacePath, "task.txt"), "task\n").then(() => landThroughTestRunner(f, workspace.workspacePath)).catch((error: Error) => error);
-    assert.ok(outcome instanceof Error, JSON.stringify(outcome));
-    assert.match(outcome.message, /slipway\.json is no longer read .* rename it to slipjay\.json/);
-    assert.equal(jj(f.repo, ["log", "--no-graph", "-r", "main", "-T", "description"]), "Initial", "nothing was integrated");
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
 
 // YardSmith ys-skip-optimiser / ys-1269: a completed receipt whose commit still carries the
 // retired slipway.json cannot cover an older artifact, and must not crash the scan.
@@ -61,8 +46,10 @@ test("a completed receipt on a retired-policy commit is skipped, not thrown, by 
       policyDigest, target: policy.target, idempotencyKey: digest([gitDirectory, newer, policyDigest, policy.target]) }));
     const outcome = await finalizePostIntegration({ gitDirectory, integratedCommitSha: older, stateDirectory,
       recoverDescendant: true, readIntegrationTip: async () => newer });
-    // Not covered, so finalization proceeds to its own tip check instead of throwing from the scan.
-    assert.equal(outcome.reason, "Integration tip changed before finalization", JSON.stringify(outcome));
+    // A former filename cannot supply the canonical policy or prove a matching receipt.
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reason, "Historical migration policy changed or is not recoverable", JSON.stringify(outcome));
+    await assert.rejects(readFile(join(external, "ledger.jsonl")), { code: "ENOENT" });
   } finally {
     await Promise.all([f.dispose(), rm(external, { recursive: true, force: true })]);
   }

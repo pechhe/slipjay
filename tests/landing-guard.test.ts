@@ -88,15 +88,13 @@ test("a declared release branch moves only through slipjay promote", async () =>
   }
 });
 
-test("a directory with only the retired path still guards (fail closed) and the denial names slipjay.json", async () => {
+test("the former filename does not declare guarded branches", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "slipjay-landing-guard-retired-"));
   try {
     await writeFile(path.join(root, "slipway.json"), JSON.stringify({ version: 1, integrationBranch: "develop" }));
     const push = (branch: string) => landingGuardDecision({ tool_name: "Bash", cwd: root, tool_input: { command: `jj git push -b ${branch}` } });
     for (const branch of ["develop", "main", "master"]) {
-      const denied = await push(branch);
-      assert.equal(denied?.hookSpecificOutput.permissionDecision, "deny", branch);
-      assert.match(denied!.hookSpecificOutput.permissionDecisionReason, /slipjay land.*no longer read.*rename it to slipjay\.json/);
+      assert.equal(await push(branch), null, "only slipjay.json declares governance");
     }
     assert.equal(await push("feature"), null, "feature bookmarks stay pushable");
   } finally {

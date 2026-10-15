@@ -1,10 +1,10 @@
-# slipjay
+# SlipJay
 
 Harness-neutral JJ workspace and landing tool. One tagged artifact is both the
 `slipjay` CLI and a library, written in TypeScript and run by Bun (1.4 or later),
 its only runtime.
 
-slipjay was extracted from `pechhe/peach-pi` at `37a32367` as `peach-workspace`,
+SlipJay was extracted from `pechhe/peach-pi` at `37a32367` as `peach-workspace`,
 became Slipway in v1.0.0, and is renamed to SlipJay in v2.0.0. It uses the
 `slipjay` CLI, `slipjay.json` config, `SLIPJAY_*` environment names, and state
 under `~/.slipjay`. See [CHANGELOG.md](CHANGELOG.md) and [State and cutover](#state-and-cutover).
@@ -19,8 +19,7 @@ under `~/.slipjay`. See [CHANGELOG.md](CHANGELOG.md) and [State and cutover](#st
 | Cutover record | `~/.slipjay/cutover.json` |
 
 In v2.0.0, `slipjay cutover` moves state from `~/.slipway` to `~/.slipjay` once. The
-package also ships a `slipway` bin that only refuses: it prints "slipway is now
-slipjay. Run instead: slipjay <args>" and exits 1. On a machine that still has `~/.slipway/state`,
+package exposes only the `slipjay` command. On a machine that still has `~/.slipway/state`,
 every command except `status` and `cutover` refuses until the cutover has run.
 
 `slipjay cutover`:
@@ -41,10 +40,10 @@ are per-machine lock stores.
 
 ## Repository config
 
-A repository's landing policy is `slipjay.json` at its root. A repository with
-only `slipway.json` is refused with a message to rename it; the landing guard still
-guards it (fail closed). Once `slipjay.json` exists, a leftover `slipway.json` is
-ignored. The earlier retired path `.peach/execution.json` is no longer read.
+A repository's landing policy is `slipjay.json` at its root. It is the only
+configuration filename read by the CLI and landing guard. Former filenames are
+ordinary files and declare neither landing checks nor guarded branches. Migrate a
+repository's configuration before using it with SlipJay. The earlier retired path `.peach/execution.json` is no longer read.
 
 Workspaces are named by a project code: `projectCode` in `slipjay.json` (2-8
 lowercase letters or digits) when declared, else two letters derived from the
@@ -157,8 +156,8 @@ The repository is public, so the `github:` tag form needs no authentication.
 
 ## CLI
 
-`slipjay <command>` offers the same commands and behaviour as the earlier `slipway`
-tool, plus `cutover` and what a Claude Code `WorktreeCreate`/`WorktreeRemove` hook needs without library
+`slipjay <command>` runs the workspace and runner commands below. It also provides
+what a Claude Code `WorktreeCreate`/`WorktreeRemove` hook needs without library
 imports (`start --integration --issue <n> --json`, `remove <path>`):
 
 | Command | Effect |
@@ -182,7 +181,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `promote`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
-| `cutover [--check]` | Move state from `~/.slipway` to `~/.slipjay` once and retire the `slipway` CLI (see [State and cutover](#state-and-cutover)). |
+| `cutover [--check]` | Move historical state from `~/.slipway` to `~/.slipjay` once (see [State and cutover](#state-and-cutover)). |
 | `runner <serve\|log <operation>\|kill [<operation>]\|pause\|resume>` | Run the landing runner on this host, print one operation's run log, or use the owner's controls (see [Runner](#runner)). |
 
 ## Runner

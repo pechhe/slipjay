@@ -95,7 +95,7 @@ export async function readExactExecutionPolicy(selectedGitDirectory: string, com
   if (resolved !== commit) throw new Error("Commit identity changed");
   const listed = new Set((await finalizationGit(gitDirectory, ["ls-tree", "--name-only", commit, "--", ...EXECUTION_POLICY_PROBE_PATHS], environment))
     .split("\n").map((line) => line.trim()).filter(Boolean));
-  const policyPath = await selectExecutionPolicyPath(async (candidate: string) => listed.has(candidate), gitDirectory);
+  const policyPath = await selectExecutionPolicyPath(async (candidate: string) => listed.has(candidate));
   if (!policyPath) return { gitDirectory, configuration: null };
   // The same strict rules as landing, applied to the exact integrated object.
   const configuration = parseExecutionPolicy(await finalizationGit(gitDirectory, ["show", `${commit}:${policyPath}`], environment), policyPath);

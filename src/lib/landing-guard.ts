@@ -17,7 +17,7 @@ import { jjWorkspaceRoot, parseWorkspaceList, run } from "./workspace-jj.ts";
 import { workspaceMetadata } from "./workspace-state.ts";
 import { EXECUTION_POLICY_PROBE_PATHS, parseExecutionPolicy, selectExecutionPolicyPath } from "./execution-policy.ts";
 
-type Governance = { branches: string[]; release: string | null; retired: string | null };
+type Governance = { branches: string[]; release: string | null };
 type Violation = [reason: string, branch: string | null];
 type Checkout = { cwd: string; target: string; byName?: string };
 type HookInput = { tool_name?: unknown; tool_input?: { command?: unknown } | null; cwd?: string | null };
@@ -31,11 +31,7 @@ const rawBranch = (raw: string): string | null => {
   try { const declared = (JSON.parse(raw) as { integrationBranch?: unknown } | null)?.integrationBranch; return typeof declared === "string" && declared ? declared : null; } catch { return null; }
 };
 
-/**
- * Nearest policy above `cwd` and the branches it guards, or null when ungoverned.
- * A directory with only Slipway's retired `slipway.json` is refused, not read,
- * but still guarded (fail closed): `retired` carries the refusal for the deny reason.
- */
+/** Nearest canonical policy above `cwd` and its guarded branches. */
 async function governance(cwd: string): Promise<Governance | null> {
   for (let dir = cwd; ; dir = dirname(dir)) {
     const texts = new Map<string, string>();
@@ -43,11 +39,7 @@ async function governance(cwd: string): Promise<Governance | null> {
       const text = await readFile(join(dir, candidate), "utf8").catch(() => null);
       if (text !== null) texts.set(candidate, text);
     }
-    let found: string | null;
-    try { found = await selectExecutionPolicyPath(async (candidate: string) => texts.has(candidate), dir); } catch (error) {
-      const declared = rawBranch([...texts.values()][0]!);
-      return { branches: [...new Set([...(declared ? [declared] : []), "main", "master"])], release: null, retired: (error as Error).message };
-    }
+    const found = await selectExecutionPolicyPath(async (candidate: string) => texts.has(candidate));
     if (found !== null) {
       const raw = texts.get(found)!;
       let declared: string | null | undefined;
@@ -59,7 +51,7 @@ async function governance(cwd: string): Promise<Governance | null> {
         release = policy.releaseBranch ?? null;
       } catch { declared = rawBranch(raw); }
       const integration = typeof declared === "string" && declared ? [declared] : ["main", "master"];
-      return { branches: [...new Set([...integration, ...(release ? [release] : [])])], release, retired: null };
+      return { branches: [...new Set([...integration, ...(release ? [release] : [])])], release };
     }
     if (dirname(dir) === dir) return null;
   }
@@ -322,7 +314,7 @@ export async function landingGuardDecision(input: unknown): Promise<HookOutput |
     const [program, ...args] = command;
     const governed = await governance(targetDirectory(program!.split("/").pop()!, args, cwd, hook.tool_input.command));
     const bypass = governed && commandBypass(command, governed.branches, governed.release);
-    let reason = bypass && governed.retired ? `${bypass} ${governed.retired}.` : bypass;
+    let reason = bypass;
     if (!reason && governed && program!.split("/").pop() === "jj") reason = await orphanedWork(args, targetDirectory("jj", args, cwd, hook.tool_input.command), governed);
     if (reason) return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } };
   }
