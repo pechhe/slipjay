@@ -146,7 +146,8 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
       if (seeded) { console.error(`[deps] ${basename(workspacePath)}: seeded node_modules from ${source}`); break; }
     }
   }
-  // Installation is not a landing command: it keeps the user's environment and a longer deadline.
+  // Installation is not a landing command: it has a longer deadline, and outside the runner it keeps the
+  // user's environment. The runner passes `runCommand`, which shares its budget and withholds its secrets.
   const install = async () => {
     if (!options.runCommand) return run(dependencyCommand.command, dependencyCommand.args,
       { cwd: workspacePath, inherit: !options.quiet, env: options.env ?? process.env, timeoutMs: 30 * 60_000 });

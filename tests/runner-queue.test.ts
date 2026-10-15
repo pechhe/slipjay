@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../src/lib/runner-contract.ts";
 import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
-import { retainSubmissionSource } from "../src/lib/submission-source.ts";
+import { importSubmissionSource, retainSubmissionSource } from "../src/lib/submission-source.ts";
 import { readCommandArtifact } from "../src/lib/command-artifact.ts";
 import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 
@@ -1611,7 +1612,7 @@ test("a reset of a repository that declares none fails, and recovery fails a res
 const exactPrefixGate = (root: string) => `const fs=require('node:fs'), path=require('node:path');
 const at=(name)=>path.join(${JSON.stringify(root)},name);
 if(fs.existsSync('b.txt')) {
- if(!fs.existsSync('a.txt')) { console.error('B did not contain its exact predecessor A'); process.exit(4); }
+ if(!fs.existsSync('a.txt') && !fs.existsSync(at('a-gone'))) { console.error('B did not contain its exact predecessor A'); process.exit(4); }
  fs.writeFileSync(at('b-verified'),process.cwd());
  if(fs.existsSync(at('fail-combination'))) { console.error('A+B conflict'); process.exit(5); }
 } else if(fs.existsSync('a.txt')) {
@@ -1669,7 +1670,7 @@ test("depth-two exact prefix catches a combination failure before B publication"
   } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
 }, 120_000);
 
-for (const outcome of ["failure", "kill", "hold", "remote-move"] as const) test(`depth-two exact prefix invalidates B after predecessor ${outcome}`, async () => {
+for (const outcome of ["failure", "kill", "hold", "remote-move"] as const) test(`depth-two exact prefix invalidates B after predecessor ${outcome} and rebuilds it once on what A left`, async () => {
   const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
   try {
     const base = f.main();
@@ -1688,14 +1689,26 @@ for (const outcome of ["failure", "kill", "hold", "remote-move"] as const) test(
       execFileSync("git", ["--git-dir", f.origin, "update-ref", "refs/heads/main", commit, base]);
     }
     if (outcome === "kill") assert.equal(f.queue.kill(a).status, "killed");
+    // Without A, B's rebuild verifies B alone.
+    if (outcome !== "remote-move") await writeFile(join(f.root, "a-gone"), "");
     await rm(join(f.root, "hold-a")); await f.queue.idle();
     assert.equal(f.result(a)?.type, outcome === "kill" ? "cancelled" : outcome === "remote-move" ? "landed" : "failed", JSON.stringify(f.result(a)));
-    assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
-    assert.ok(!f.log.events({ operationId: b }).some((row) => row.event.type === "integrated"));
+    const prepared = (id: string) => f.log.events({ operationId: id }).map((row) => row.event).filter((event) => event.type === "attempt_prepared");
     assert.ok(f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_invalidated"));
-    if (outcome === "hold") assert.equal(f.log.snapshot(f.executor.host).held.length, 1);
-    if (outcome === "remote-move") assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "attempt_prepared").length, 2, "one immutable automatic rebuild");
-    if (outcome !== "remote-move") assert.equal(f.main(), base);
+    assert.deepEqual(prepared(b).map((event) => event.attempt), [1, 2], "B's stale evidence is never reused: one fresh attempt");
+    if (outcome === "hold") {
+      // A held integration is finished first; while it cannot publish, nothing after it does.
+      assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
+      assert.equal(f.log.snapshot(f.executor.host).held.length, 1);
+      assert.equal(f.main(), base);
+    } else {
+      const landed = f.result(b);
+      assert.ok(landed?.type === "landed", JSON.stringify(landed));
+      assert.equal(f.main(), landed.commitId);
+      assert.equal(landed.base, outcome === "remote-move" ? (f.result(a) as { commitId: string }).commitId : base, "B rebuilt on what A's outcome left");
+      assert.equal(prepared(b)[1]!.base, landed.base);
+    }
+    if (outcome === "remote-move") assert.equal(prepared(a).length, 2, "one immutable automatic rebuild");
     // Every prepared candidate remains retained in the verifier after terminal outcome.
     for (const id of [a, b]) {
       const prepared = f.log.events({ operationId: id }).map((row) => row.event).find((event) => event.type === "attempt_prepared");
@@ -1703,6 +1716,100 @@ for (const outcome of ["failure", "kill", "hold", "remote-move"] as const) test(
       assert.equal(jj(prepared.checkout, ["log", "-r", prepared.candidate, "--no-graph", "-T", "commit_id"]), prepared.candidate);
     }
   } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+/** Hold A's rebuild after a remote move, so B waits on A's outcome while A verifies again. */
+async function dependentWaitingOnRebuild(f: Awaited<ReturnType<typeof fixture>>) {
+  const base = f.main();
+  await writeFile(join(f.root, "hold-a"), "");
+  await writeFile(join(f.root, "a-gone"), "");
+  const a = f.submit(await f.candidate("a.txt"));
+  const b = f.submit(await f.candidate("b.txt"));
+  const unsubscribe = f.log.subscribe((row) => {
+    // A's first attempt is invalidated by the move: hold its rebuild before it reaches its gate.
+    if (row.operationId === a && row.event.type === "attempt_invalidated" && row.event.attempt === 1) writeFileSync(join(f.root, "hold-a"), "");
+  });
+  f.queue.wake();
+  await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+  const commit = execFileSync("git", ["--git-dir", f.origin, "commit-tree", `${base}^{tree}`, "-p", base, "-m", "external move"],
+    { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "f@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "f@example.com" } }).trim();
+  execFileSync("git", ["--git-dir", f.origin, "update-ref", "refs/heads/main", commit, base]);
+  await rm(join(f.root, "hold-a"));
+  await until(() => f.log.events({ operationId: a }).some((row) => row.event.type === "attempt_started" && row.event.attempt === 2) || undefined);
+  await until(() => f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_invalidated") || undefined);
+  return { a, b, unsubscribe };
+}
+
+test("depth-two dependent waiting on its predecessor's rebuild can be killed, and is not rebuilt", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  let unsubscribe = () => {};
+  try {
+    const waiting = await dependentWaitingOnRebuild(f);
+    unsubscribe = waiting.unsubscribe;
+    assert.equal(f.queue.kill(waiting.b).status, "killed", "the waiting dependent is still the owner's to stop");
+    await until(() => f.result(waiting.b));
+    assert.deepEqual(f.result(waiting.b), { type: "cancelled", reason: OWNER_KILL_REASON });
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(waiting.a)?.type, "landed", JSON.stringify(f.result(waiting.a)));
+    assert.equal(f.log.events({ operationId: waiting.b }).filter((row) => row.event.type === "attempt_prepared").length, 1, "a killed dependent never rebuilds");
+  } finally { unsubscribe(); await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two dependent waiting on its predecessor's rebuild does not rebuild once the runner is paused", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  let unsubscribe = () => {};
+  try {
+    const waiting = await dependentWaitingOnRebuild(f);
+    unsubscribe = waiting.unsubscribe;
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "fixture-owner" });
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(waiting.a)?.type, "landed", JSON.stringify(f.result(waiting.a)));
+    const outcome = f.result(waiting.b);
+    assert.ok(outcome?.type === "failed" && /predecessor invalidated/.test(outcome.reason), JSON.stringify(outcome));
+    assert.equal(f.log.events({ operationId: waiting.b }).filter((row) => row.event.type === "attempt_prepared").length, 1, "a pause stops the rebuild");
+  } finally { unsubscribe(); await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two dependent rebuilt behind a held predecessor lands on it once the hold publishes", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  let unsubscribe = () => {};
+  try {
+    await writeFile(join(f.root, "hold-a"), "");
+    // B's rebuild first verifies on the remote tip, before the held A publishes under it.
+    await writeFile(join(f.root, "a-gone"), "");
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    // The outage ends as soon as A is held: B's rebuild then finishes A first, and lands after it.
+    unsubscribe = f.log.subscribe((row) => { if (row.operationId === a && row.event.type === "failed") rmSync(join(f.root, "reject-push"), { force: true }); });
+    f.queue.wake();
+    await until(() => f.log.operation(b)?.stage === "waiting-for-predecessor" || f.result(b) || undefined);
+    await writeFile(join(f.root, "reject-push"), "");
+    await rm(join(f.root, "hold-a")); await f.queue.idle();
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    const landed = f.result(b);
+    assert.ok(landed?.type === "landed", JSON.stringify(landed));
+    assert.equal(f.main(), landed.commitId);
+    assert.equal(f.remoteFile("a.txt"), "a.txt", "the held predecessor published first");
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
+  } finally { unsubscribe(); await rm(join(f.root, "hold-a"), { force: true }); await rm(join(f.root, "reject-push"), { force: true }); await f.dispose(); }
+}, 120_000);
+
+test("depth-two restores a migration candidate's generated state in its verifier when the gate fails", async () => {
+  const f = await fixture(true, false, undefined, false, { verificationDepth: 2 });
+  try {
+    const base = f.main();
+    // One migration-bearing candidate whose gate fails after generation.
+    await f.candidate("schema/a.ts");
+    await writeFile(join(f.author, "fail"), "");
+    const a = f.submit(await f.push(f.author));
+    await f.land(a);
+    assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
+    assert.equal(f.main(), base);
+    const prepared = f.log.events({ operationId: a }).map((row) => row.event).find((event) => event.type === "attempt_prepared");
+    assert.ok(prepared?.type === "attempt_prepared");
+    // As at depth one: the verifier's candidate change is restored to its submitted tree, not left generated.
+    assert.match(jj(prepared.checkout, ["op", "log", "--no-graph", "-T", 'description ++ "\\n"']), /restore/);
+  } finally { await f.dispose(); }
 }, 120_000);
 
 test("depth-two migration finalization is a barrier and a hold invalidates its waiting dependent", async () => {
@@ -1879,6 +1986,7 @@ test("depth-two executor loss invalidates dependent evidence and releases verifi
   const run = f.executor.run;
   try {
     await writeFile(join(f.root, "hold-a"), "");
+    await writeFile(join(f.root, "a-gone"), "");
     const original = await f.candidate("a.txt");
     const a = f.submit(original);
     const b = f.submit(await f.candidate("b.txt"));
@@ -1893,13 +2001,15 @@ test("depth-two executor loss invalidates dependent evidence and releases verifi
     await f.land(a);
     assert.equal(f.result(a)?.type, "failed", JSON.stringify(f.result(a)));
     assert.match(JSON.stringify(f.result(a)), /executor connection lost/);
-    assert.equal(f.result(b)?.type, "failed", JSON.stringify(f.result(b)));
-    assert.match(JSON.stringify(f.result(b)), /does not diagnose the submitted source/);
-    assert.ok(!f.log.events().some((row) => row.event.type === "integrated"));
+    // B's combined evidence is invalidated; it rebuilds alone on the unchanged base and lands.
+    await until(() => f.result(b));
+    assert.equal(f.result(b)?.type, "landed", JSON.stringify(f.result(b)));
+    assert.ok(f.log.events({ operationId: b }).some((row) => row.event.type === "attempt_invalidated" && /predecessor/i.test(row.event.reason)));
+    assert.ok(!f.log.events({ operationId: a }).some((row) => row.event.type === "integrated"));
     assert.equal(f.log.operation(a)!.runs.length, 1);
     assert.equal(f.log.operation(a)!.runs[0]!.exitCode, null);
     const artifacts = [a, b].flatMap((id) => f.log.events({ operationId: id }).map((row) => row.event).filter((event) => event.type === "attempt_prepared"));
-    assert.equal(artifacts.length, 2);
+    assert.equal(artifacts.length, 3, "A's attempt, B's invalidated attempt and B's rebuild");
     f.executor.run = run;
     await rm(join(f.root, "hold-a"));
     const next = f.submit(await f.candidate("next.txt"));
@@ -1907,7 +2017,8 @@ test("depth-two executor loss invalidates dependent evidence and releases verifi
     for (const event of artifacts)
       assert.equal(jj(event.checkout, ["log", "-r", event.candidate, "--no-graph", "-T", "commit_id"]), event.candidate);
     await f.queue.recover(); await f.queue.recover();
-    for (const id of [a, b]) assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "failed").length, 1);
+    assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "failed").length, 1);
+    assert.deepEqual(f.log.events({ operationId: b }).filter((row) => row.event.type === "failed" || row.event.type === "landed").map((row) => row.event.type), ["landed"]);
   } finally { f.executor.run = run; await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
 }, 120_000);
 
@@ -1969,6 +2080,31 @@ test("depth-two actual runner process loss retains durable attempts and recovers
   } finally { child?.kill("SIGKILL"); await exited; await f.dispose(); }
 }, 120_000);
 
+
+test("recovery finds a retained submission's integration under its duplicate's change ID before it was recorded", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("first.txt"))))?.type, "landed");
+    const request = await f.candidate("retained.txt");
+    const id = f.submit(request);
+    const retained = await retainSubmissionSource({ home: f.home, operationId: id, request, url: f.origin, executor: f.executor });
+    f.log.append(id, retained);
+    // The runner verified a duplicate of the source, moved the integration bookmark to it, and stopped before recording that.
+    const checkout = join(f.home, "repos", "fixture/repo");
+    await importSubmissionSource(f.home, request.repo, id, retained, checkout);
+    jj(checkout, ["duplicate", request.commitId, "--onto", "main@origin"]);
+    const duplicate = jj(checkout, ["log", "-r", `heads(main@origin+ ~ ${request.commitId}) & description(substring:"retained.txt")`, "--no-graph", "-T", "commit_id"]);
+    assert.match(duplicate, /^[a-f0-9]{40}$/);
+    jj(checkout, ["bookmark", "set", "main", "-r", duplicate]);
+    f.log.append(id, { type: "stage", stage: "verifying" });
+    f.log.append(id, { type: "verification_passed", base: f.main(), candidate: duplicate });
+    f.log.append(id, { type: "stage", stage: "integrating" });
+    await f.queue.recover();
+    const events = f.log.events({ operationId: id }).map((row) => row.event);
+    assert.ok(events.some((event) => event.type === "integrated" && event.commitId === duplicate), "the unrecorded integration is recognised, not dropped");
+    assert.ok(f.log.snapshot(f.executor.host).held.some((entry) => entry.commitId === duplicate));
+  } finally { await f.dispose(); }
+}, 120_000);
 
 test("queued retained source lands after author and upstream candidate loss with a cold runner checkout", async () => {
   for (const verificationDepth of [1, 2] as const) {

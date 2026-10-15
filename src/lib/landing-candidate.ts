@@ -76,7 +76,7 @@ async function assertPreparedIdentity(cwd: string, prepared: Pick<PreparedLandin
     throw new Error("Integration bookmark moved during verification; rerun landing against the new base");
 }
 
-async function rollbackFailure(error: unknown, rollback: () => Promise<void>): Promise<never> {
+export async function rollbackFailure(error: unknown, rollback: () => Promise<void>): Promise<never> {
   try { await rollback(); } catch (rollbackError) {
     throw new AggregateError([error, rollbackError], `Landing failed and migration rollback requires reconciliation\n${error instanceof Error ? error.message : String(error)}\nRollback could not restore the checkout; retained errors require reconciliation`);
   }

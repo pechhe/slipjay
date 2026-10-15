@@ -4,7 +4,7 @@ import { stat, mkdir, rm } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
-import { integrateLandingCandidate, prepareLandingCandidate, verifyPreparedCandidate, integratePreparedCandidate } from "./landing-candidate.ts";
+import { integrateLandingCandidate, prepareLandingCandidate, rollbackFailure, verifyPreparedCandidate, integratePreparedCandidate } from "./landing-candidate.ts";
 import type { PreparedLandingCandidate } from "./landing-candidate.ts";
 import { importSubmissionSource } from "./submission-source.ts";
 import { duplicateLandingSource, retainLandingSource, retainLandingArtifact, importLandingArtifact, RETAINED_ARTIFACT_REVISIONS } from "./landing-artifact.ts";
@@ -143,7 +143,7 @@ export function createRunnerQueue(input: {
     return { promise, resolve };
   };
   type PrefixTurn = { operation: LandingOperation; slot: number; attempt: number; prepared: ReturnType<typeof deferred<PreparedPrefix | null>>;
-    completed: ReturnType<typeof deferred<boolean>>; invalidation: AbortController; predecessor?: PrefixTurn };
+    completed: ReturnType<typeof deferred<boolean>>; invalidation: AbortController; predecessor?: PrefixTurn; remoteRebuilt?: boolean };
   const prefixes = new Map<string, PrefixTurn[]>();
   const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
@@ -469,7 +469,9 @@ export function createRunnerQueue(input: {
     };
     try {
       if (prefix?.predecessor) {
-        const invalidate = () => prefix.invalidation.abort();
+        // This attempt's own authority: a rebuilt attempt gets a fresh controller.
+        const invalidation = prefix.invalidation;
+        const invalidate = () => invalidation.abort();
         prefix.predecessor.invalidation.signal.addEventListener("abort", invalidate, { once: true });
         if (prefix.predecessor.invalidation.signal.aborted) invalidate();
         void prefix.predecessor.completed.promise.then((published) => { if (!published) invalidate(); });
@@ -617,7 +619,12 @@ export function createRunnerQueue(input: {
         },
       } satisfies import("./landing-candidate.ts").LandingIO;
       const integrated = prefix
-        ? await integratePrefix(await prepareLandingCandidate(checkout, candidateOptions, candidateIO))
+        ? await (async () => {
+          const prepared = await prepareLandingCandidate(checkout, candidateOptions, candidateIO);
+          // As integrateLandingCandidate does: any later failure restores generated migration state.
+          try { return await integratePrefix(prepared); }
+          catch (error) { return rollbackFailure(error, prepared.rollback); }
+        })()
         : await integrateLandingCandidate(checkout, candidateOptions, candidateIO);
       const { base, artifact } = integrated;
       if (prefix) {
@@ -678,8 +685,11 @@ export function createRunnerQueue(input: {
         });
       }
     } catch (error) {
-      retryPrefix = Boolean(prefix && !prefix.predecessor && prefix.attempt === 1 && error instanceof PrefixInvalidated
-        && !controller.signal.aborted && !log.paused());
+      // A fresh attempt: once for a dependent whose predecessor's outcome invalidated it (it then
+      // has no predecessor), and once for a head whose remote base moved. Its own failure, an
+      // owner kill or a pause never rebuilds.
+      retryPrefix = Boolean(prefix && !controller.signal.aborted && !log.paused()
+        && (prefix.predecessor ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
@@ -697,6 +707,17 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "attempt_invalidated", attempt: prefix.attempt, reason: message(error) });
         prefix.invalidation.abort();
         prefix.prepared.resolve(null);
+        if (retryPrefix && prefix.predecessor) {
+          // Wait for the predecessor's outcome while still running here, so a kill reaches this
+          // attempt and a pause that starts meanwhile is seen before anything rebuilds.
+          const killed = new Promise<void>((resolve) => controller.signal.addEventListener("abort", () => resolve(), { once: true }));
+          await Promise.race([prefix.predecessor.completed.promise, killed]);
+          if (controller.signal.aborted) { retryPrefix = false; verdict = { type: "cancelled", reason: OWNER_KILL_REASON }; }
+          else if (log.paused()) retryPrefix = false;
+          // It rebuilds as the head, on whatever that outcome left.
+          else prefix.predecessor = undefined;
+        }
+        else if (retryPrefix) prefix.remoteRebuilt = true;
         if (retryPrefix) {
           // Fence later admission onto the fresh attempt before dependent cleanup can wake it.
           prefix.attempt += 1;
@@ -729,7 +750,7 @@ export function createRunnerQueue(input: {
       if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
     }
     if (retryPrefix && prefix) {
-      // One fresh immutable attempt, never an owner kill, hold, source replacement or paused rebuild.
+      // A fresh immutable attempt, never an owner kill, hold, source replacement or paused rebuild.
       await processOperation(operation, prefix);
     }
     async function recordShape(cwd: string, branch: string, commit: string, migration: import("./execution-policy.ts").MigrationFinalizationPolicy | null | undefined): Promise<void> {
@@ -848,7 +869,15 @@ export function createRunnerQueue(input: {
               append(operation.id, integrated);
               retainUnresolved();
             }
-            const held = await jj(checkout, ["log", "-r", `${branch} & change_id(${operation.changeId}) ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
+            // A retained submission verifies a duplicate of its source, under a change ID of its own:
+            // the verified candidates name it.
+            const changes = [operation.changeId];
+            for (const stored of log.events({ operationId: operation.id }))
+              if (stored.event.type === "verification_passed") {
+                const change = await jj(checkout, ["log", "-r", `present(${stored.event.candidate})`, "--no-graph", "-T", "change_id"]);
+                if (change) changes.push(change);
+              }
+            const held = await jj(checkout, ["log", "-r", `${branch} & (${changes.map((change) => `change_id(${change})`).join(" | ")}) ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
             // Another operation's integration of the same change (an earlier submission) is not this one's.
             const claimed = log.operationsForChange(operation.repo, operation.changeId).some((other) =>
               log.events({ operationId: other.id }).some((stored) => stored.event.type === "integrated" && stored.event.commitId === held));

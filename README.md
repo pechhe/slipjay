@@ -244,14 +244,19 @@ name their attempt. Submitted source is duplicated before preparation so a later
 attempt never rewrites a retained candidate. Local private refs retain both source
 and artifact across slot reuse, independently of JJ's mutable change identifiers;
 they are not pushed upstream. Consumers pin their own copies before producer reuse.
-This retention does not introduce automatic diagnostic deletion.
+These verifier refs are separate from the evidence retention schedule below, which
+covers retained submissions, manifests and command artifacts.
 
 A failed, killed or changed predecessor invalidates the dependent, even after a
-green gate. A remote move before canonical integration permits the head one fresh
-attempt, with a new identity; a second move fails. No owner kill, changed author
-source, held integration or paused runner starts an automatic rebuild. A dependent
-whose predecessor did not publish ends explicitly and does not silently become
-D+B. Migration policies, post-integration mutation and reset policies are
+green gate: its D+A+B evidence is never reused as D+B. Once the predecessor's
+outcome is known, the dependent takes one fresh attempt, with a new identity, as the
+head on whatever that outcome left: D if A did not publish, D+A if it did. A dependent
+stays killable while it waits for that outcome, and a pause that starts meanwhile
+stops the rebuild. A remote move before canonical integration permits a head one
+fresh attempt of its own, including when a held predecessor publishes under it; a
+second move fails. If a held integration still cannot publish, the attempt fails
+behind it. An operation's own failure or owner kill, changed author source, or a
+paused runner never starts a rebuild. Migration policies, post-integration mutation and reset policies are
 conservative preparation barriers, including when introduced by submitted source.
 Queued resets and releases fence later prefix admission. Restart retains artifacts,
 ends interrupted verifier attempts, and reconciles canonical publication intent
@@ -587,12 +592,10 @@ or verifier checkout. Failed capture acknowledges no new operation and does not
 supersede queued work. Admission rechecks queue state after capture, so work that
 started meanwhile is followed rather than superseded.
 
-This is **not a complete durable handoff**. Keep the author workspace until the
-remaining contract exists: the minimal manifest explicitly records missing Spec
-snapshots, helper/check/review evidence and fresh-worker repair ownership. Source
-objects and manifests currently remain with the ledger without automatic deletion;
-bounded cleanup with repair/adoption evidence is still outstanding. Older operations
-without a retention event keep their historical source availability. An older runner
+Without `--handoff`, the manifest records that no Spec snapshot or helper, check or
+review evidence was supplied. Source objects and manifests follow the retention
+schedule below. Older operations without a retention event keep their historical
+source availability. An older runner
 that does not echo request identity cannot certify request reconciliation; the CLI
 reports the outcome as unknown.
 
@@ -606,8 +609,7 @@ alongside parsed test identities and diagnostics, and the terminal failure inclu
 the compact summary. `slipjay runner log <operation>` retrieves these retained
 events, including after restart; it does not provide complete stdout/stderr.
 An external signal alone does not prove timeout or OOM. Diagnostic text is untrusted
-output, never authority to execute a suggested command. Complete submission manifests
-and fresh-worker recovery remain separate work in #57.
+output, never authority to execute a suggested command.
 
 Run-finished events now reference immutable per-command JSON artifacts outside SQLite.
 `slipjay runner artifact <operation> <run>` retrieves one, verifies the retained hash,
@@ -701,8 +703,6 @@ The public `importSourceBundle(bundle, assignedCheckout, operationId, sourceComm
 validates the bundle's exact operation ref and imports immutable objects into an
 already assigned authoring checkout. It leaves the working revision unchanged. It
 does not grant repair ownership, execute source, retry verification or publish.
-Exclusive repair claims/fencing still need completion before concurrent recovery
-workers can safely author and submit corrections.
 
 A source correction uses a durable repair claim:
 

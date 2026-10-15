@@ -91,3 +91,33 @@ test("once a logical change published, every attempt's evidence expires after 14
     assert.deepEqual(expiredEvidence(log, later(15)).map(({ operation, policy }) => [operation.id, policy]), [["op_first", "published"]]);
   } finally { log.close(); await f.dispose(); }
 }, 120_000);
+
+test("a repair claim admitted during a retention pass keeps its evidence, and a cut-short deletion finishes later", async () => {
+  const base = await project();
+  const f = { ...base, home: join(base.root, "runner") };
+  await mkdir(f.home);
+  const log = openOperationLog(join(f.home, "operations.sqlite"));
+  try {
+    await failedAttempt(log, "op_first", f);
+    jj(f.repo, ["new", "main"]);
+    const second = await failedAttempt(log, "op_second", f);
+    const real = localExecutor();
+    let first = true;
+    const executor = { ...real, run: async (request: Parameters<typeof real.run>[0]) => {
+      if (first && request.args.includes("update-ref")) {
+        first = false;
+        // A claim on the second change lands while the pass deletes the first.
+        log.append("op_second", { type: "repair_claimed", claimId: "claim", tokenSha256: "0".repeat(64), source: second.commitId, workspace: "repair", by: "worker" });
+        throw new Error("fixture: deletion cut short");
+      }
+      return real.run(request);
+    } };
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor, now: later(31) }), ["op_first"]);
+    const claimed = log.operation("op_second");
+    assert.ok(claimed?.kind === "landing" && !claimed.outcome?.evidenceExpired, "the claimed change keeps its evidence");
+    assert.equal((await files(join(f.home, "submissions"))).length, 2, "the first deletion was cut short");
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: real, now: later(31) }), []);
+    assert.equal((await files(join(f.home, "submissions"))).length, 1, "a later pass finishes it without recording expiry again");
+    assert.equal(log.events({ operationId: "op_first" }).filter((row) => row.event.type === "evidence_expired").length, 1);
+  } finally { log.close(); await f.dispose(); }
+}, 120_000);

@@ -51,7 +51,8 @@ async function landingRequestIdentity(context: WorkspaceContext, location: strin
   const key = createHash("sha256").update(JSON.stringify([runnerBinding(location), repo, commitId])).digest("hex");
   return withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
     const metadata = await workspaceMetadata(context.current.name);
-    if (!metadata) throw new Error("Cannot persist landing request identity: workspace metadata is missing");
+    // A checkout outside workspace storage has nowhere durable to keep it: the legacy follower contract.
+    if (!metadata) return undefined;
     const pending = { ...(metadata.pendingLandingRequests as Record<string, string> | undefined) };
     if (acknowledge) {
       if (pending[key] !== acknowledge) return undefined;
@@ -720,7 +721,14 @@ async function ownChangeId(context: WorkspaceContext): Promise<string | null> {
  */
 async function dropSupersededCandidate(cwd: string, root: string, candidate: RevisionFacts, landedCommitId: string, onLine: (line: string) => void): Promise<void> {
   const stack = `::${candidate.commitId} ~ ::${landedCommitId}`;
-  try { await jj(cwd, ["abandon", stack]); } catch (error) {
+  // Abandoning the stack moves the working copy onto the candidate's old base; work on top
+  // of the candidate belongs on what landed, which carries the candidate's content.
+  const onTop = await revisionExists(cwd, `${candidate.commitId} & ::@`);
+  try {
+    await jj(cwd, ["abandon", stack]);
+    if (onTop) await jj(cwd, ["rebase", "-b", "@", "-d", landedCommitId]).catch((error: unknown) =>
+      onLine(`Could not move the working copy onto ${landedCommitId}, which landed: ${String(error).trim()}`));
+  } catch (error) {
     onLine(`Could not abandon the submitted stack ending at ${candidate.commitId}, which landed as ${landedCommitId}: ${String(error).trim()}`);
     onLine(`Abandon it with \`jj abandon '${stack}'\` in ${root} once the cause is fixed, or it shows as divergent.`);
     if (await revisionExists(cwd, `${candidate.commitId} & ::@`) && !await revisionExists(cwd, `(${candidate.commitId}..@) & ~empty()`))
