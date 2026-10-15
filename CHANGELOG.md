@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.18.0
+
 - **Contain nested work and recover it after a crash (#63, #55):** each runner
   command runs in a systemd slice of its own beneath one named for the runner home,
   named to the command in `SLIPJAY_SYSTEMD_SLICE` so nested scopes (YardSmith's

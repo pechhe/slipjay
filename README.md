@@ -134,7 +134,7 @@ consumer requires a SlipJay version that implements this environment contract.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.17.0
+bun add -g github:pechhe/slipjay#v3.18.0
 slipjay status
 ```
 
