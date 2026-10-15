@@ -1,3 +1,5 @@
+import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-handoff.ts";
+import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -336,6 +338,19 @@ export async function readLandingOutcome(location: string, operationId: string, 
   } finally { connection.close(); }
 }
 
+/** Read-only author evidence; never starts a repair or changes operation ownership. */
+export async function readLandingHandoff(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/handoff`, { signal: AbortSignal.timeout(15000) });
+    if (!response.ok) throw new Error("Retained handoff is unavailable");
+    const body = await response.json() as { manifest?: { version?: number; operationId?: string } };
+    if (body.manifest?.version !== 1 || body.manifest.operationId !== operationId) throw new Error("Runner returned an unsupported or mismatched handoff");
+    return body.manifest;
+  } finally { connection.close(); }
+}
+
 /** Retained events of one operation, including bounded failure diagnostics. */
 export async function readRunLog(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
   const token = await runnerToken(env);
@@ -373,7 +388,7 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
   } finally { connection.close(); }
 }
 
-export async function landThroughRunner(cwd: string, options: { direct?: boolean; location: string; env?: NodeJS.ProcessEnv;
+export async function landThroughRunner(cwd: string, options: { direct?: boolean; handoff?: SubmissionHandoff; location: string; env?: NodeJS.ProcessEnv;
   onLine?(line: string): void; onStage?(stage: string): void; signal?: AbortSignal }): Promise<{ ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult }> {
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
@@ -390,6 +405,9 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
   const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
   const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview) : preview;
+  if (options.handoff && (!validSubmissionHandoff(options.handoff) || options.handoff.source !== target.commitId))
+    throw new Error("Handoff must contain valid evidence for the exact landing source");
+  const handoff = options.handoff ? prepareSubmissionHandoff(options.handoff, { ...process.env, ...env }) : undefined;
   const token = await runnerToken(env);
   const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
   const { baseUrl, name } = connection;
@@ -435,7 +453,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       let response: Response;
       try {
         response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
-        headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId, repo, changeId: target.changeId, commitId: target.commitId, bookmark,
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ ...handoff ? { handoff } : {}, requestId, repo, changeId: target.changeId, commitId: target.commitId, bookmark,
           submittedBy: `${hostname()}:${context.current.name}`, identity: {
             type: "identity", submitterKind: env.CODEX_THREAD_ID || env.CLAUDE_SESSION_ID ? "agent" : "unknown",
             submitterId: `${hostname()}:${context.current.name}`, workspace: context.current.name, machine: hostname(),

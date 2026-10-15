@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { sanitizedHandoff, validSubmissionHandoff, handoffDigest } from "./submission-handoff.ts";
+import { createHash, randomUUID } from "node:crypto";
+import { link, mkdir, open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { landingCommandEnvironment, runWorkspaceCommand } from "./workspace-command.ts";
-import { writeWorkspaceJson } from "./workspace-transaction.ts";
 import { jj } from "./workspace-jj.ts";
 import { repositoryKey } from "./runner-contract.ts";
 import type { Executor, OperationEvent, SubmitRequest } from "./runner-contract.ts";
@@ -19,6 +19,7 @@ export async function retainSubmissionSource(input: {
 }): Promise<RetainedSubmission> {
   const { home, operationId, request, executor } = input;
   if (!/^[a-f0-9]{40}$/.test(request.commitId)) throw new Error("Submission retention requires an exact commit id");
+  if (request.handoff && (!validSubmissionHandoff(request.handoff) || request.handoff.source !== request.commitId)) throw new Error("Invalid handoff or source mismatch");
   const store = storePath(home, request.repo);
   await mkdir(join(home, "sources"), { recursive: true, mode: 0o700 });
   await mkdir(join(home, "submissions"), { recursive: true, mode: 0o700 });
@@ -46,21 +47,34 @@ export async function retainSubmissionSource(input: {
   const manifest = JSON.stringify({ version: 1, operationId, repo: repositoryKey(request.repo), source: request.commitId,
     changeId: request.changeId, requestId: request.requestId ?? null, submittedBy: request.submittedBy,
     identity: request.identity ?? null,
-    gaps: ["Spec revision/snapshot and intent not supplied", "Helper, focused-check and independent-review evidence not supplied", "Fresh-worker repair claim and reproduction contract incomplete"],
+    ...(request.handoff ? { handoff: { ...sanitizedHandoff(request.handoff, input.env ?? process.env), authority: "author-reported", inputSha256: handoffDigest(request.handoff) } } : {}),
+    gaps: [...request.handoff ? [] : ["Spec revision/snapshot and intent not supplied", "Helper, focused-check and independent-review evidence not supplied"], "Fresh-worker repair claim and reproduction contract incomplete"],
     retention: "Preserved with the runner ledger; no automatic source or manifest deletion" });
+  if (Buffer.byteLength(manifest) > 131072) throw new Error("Sanitized submission manifest exceeds retention capacity");
   const path = manifestPath(home, operationId);
   const previous = await readFile(path, "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
   if (previous !== null && previous !== manifest) throw new Error("Retained submission manifest changed");
-  if (previous === null) await writeWorkspaceJson(path, JSON.parse(manifest));
+  if (previous === null) {
+    const temporary = `${path}.${randomUUID()}.tmp`;
+    try {
+      const file = await open(temporary, "wx", 0o600);
+      try { await file.writeFile(manifest); await file.sync(); } finally { await file.close(); }
+      try { await link(temporary, path); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || await readFile(path, "utf8") !== manifest) throw error;
+      }
+    } finally { await rm(temporary, { force: true }); }
+  }
+  for (const directory of [join(home, "submissions"), home]) {
+    const handle = await open(directory, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+  }
   return { type: "source_retained", commitId: request.commitId, manifestSha256: digest(manifest), sourceRef: ref, handoffComplete: false };
 }
 
 /** Restore from runner-owned objects even after the upstream candidate or warm checkout disappears. */
 export async function importSubmissionSource(home: string, repo: string, operationId: string, retained: RetainedSubmission, checkout: string): Promise<void> {
-  const bytes = await readFile(manifestPath(home, operationId), "utf8");
-  const manifest = JSON.parse(bytes) as { source: string; operationId: string; repo: string };
-  if (digest(bytes) !== retained.manifestSha256 || manifest.source !== retained.commitId || manifest.operationId !== operationId
-    || manifest.repo !== repositoryKey(repo) || retained.sourceRef !== sourceRef(operationId)) throw new Error("Retained submission manifest does not match ledger evidence");
+  await readSubmissionManifest(home, repo, operationId, retained);
   const gitRoot = await jj(checkout, ["--ignore-working-copy", "git", "root"]);
   const name = `refs/heads/slipjay-private/artifacts/submission-${digest(operationId)}`;
   const result = await runWorkspaceCommand("git", ["--git-dir", gitRoot, "fetch", "--no-tags", "--no-write-fetch-head", storePath(home, repo), `${retained.sourceRef}:${name}`], { cwd: checkout });
@@ -68,4 +82,13 @@ export async function importSubmissionSource(home: string, repo: string, operati
   await jj(checkout, ["git", "import"]);
   const observed = await jj(checkout, ["log", "-r", name.slice("refs/heads/".length), "--no-graph", "-T", "commit_id"]);
   if (observed !== retained.commitId) throw new Error("Restored submission differs from retained source");
+}
+
+/** Ledger hash binds retrieval to the retained operation, including its immutable source. */
+export async function readSubmissionManifest(home: string, repo: string, operationId: string, retained: RetainedSubmission): Promise<unknown> {
+  const bytes = await readFile(manifestPath(home, operationId), "utf8");
+  const manifest = JSON.parse(bytes);
+  if (digest(bytes) !== retained.manifestSha256 || manifest.source !== retained.commitId || manifest.operationId !== operationId
+    || manifest.repo !== repositoryKey(repo) || retained.sourceRef !== sourceRef(operationId)) throw new Error("Retained submission manifest does not match ledger evidence");
+  return manifest;
 }

@@ -633,6 +633,52 @@ reference and cannot be retrieved through the API. Artifacts currently stay with
 runner ledger, without automatic deletion or a total-store retention guarantee;
 bounded cleanup and repair/adoption retention remain outstanding in #57.
 
+`slipjay land --handoff <json-file>` optionally supplies version-1 author evidence
+alongside the exact source. The file is at most 64KiB. All fields below are required;
+arrays may be empty and `spec` may be null. A Spec snapshot's SHA-256 must match its
+exact UTF-8 body. Revisions are full 40-character commit IDs. Each evidence array
+has at most 32 entries. Intent, scope entries and evidence details are at most 2,000
+characters; the Spec snapshot is at most 32,768 characters.
+
+```json
+{
+  "version": 1,
+  "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "intent": "What this candidate delivers",
+  "scope": ["src/lib/example.ts"],
+  "spec": null,
+  "helpers": [],
+  "checks": [],
+  "reviews": [],
+  "toolchain": [{ "name": "bun", "version": "1.4.3" }],
+  "gaps": ["Independent review pending"]
+}
+```
+
+A non-null `spec` has `ref` (`owner/repo#57`), `bodySha256` and `snapshot`.
+Helpers have `revision`, `base` and `scope`; checks have `revision`, `command`,
+`result` (`passed`, `failed`, `not-run`) and `detail`; reviews have `revision`,
+`reference`, `result` (`complete`, `incomplete`) and `detail`. These are author
+reports, never runner verification, independent-review approval or repair authority.
+Empty evidence arrays do not establish that a check or review was unnecessary.
+
+The client redacts with its environment before transport, then the runner redacts
+again before retention. Redacted Spec snapshots receive a new snapshot digest and
+a gap preserving the original body digest. Unknown credentials cannot be detected
+reliably: supply evidence without secrets. The manifest records redaction status,
+input digest and explicit missing repair authority. Its immutable file and parent
+directories are flushed before acknowledgement. Reusing a request identity with
+different evidence is refused; evidence on an existing acknowledged operation is
+immutable. Reattaching to an existing operation observes its original evidence.
+
+`slipjay runner handoff <operation>` retrieves the retained sanitized manifest as
+JSON through authenticated `GET /v1/operations/:id/handoff` (`{ manifest }`). It
+checks the ledger digest before serving; missing/tampered evidence returns 410,
+non-landing operations return 409 and unsupported runners may return 404/501.
+Read failure exits nonzero. This read never creates a repair claim or resubmits.
+Retained manifests remain partial handoffs: exclusive repair fencing, full
+reproduction prerequisites and bounded lifetime cleanup are still outstanding.
+
 `slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
 without following or submitting it. The authenticated API route is
 `GET /v1/operations/:id/outcome` (`{ outcome }`); the same object appears on landing

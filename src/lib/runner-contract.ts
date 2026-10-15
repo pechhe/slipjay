@@ -131,9 +131,9 @@ export type OperationEvent =
   | { type: "verification_passed"; base: string; candidate: string }
   | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
   /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */
-  | { type: "submission_request"; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
+  | { type: "submission_request"; handoffSha256?: string; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */
-  | { type: "submitted"; kind?: "landing"; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
+  | { type: "submitted"; kind?: "landing"; handoffSha256?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A release of `commitId`, the integration commit a human approved. */
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
@@ -262,7 +262,7 @@ export interface OperationLog {
  * Optional requestId binds a transport retry to one operation, even after it finishes.
  * It acknowledges request identity only, not a durable source handoff.
  */
-export type SubmitRequest = { requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
+export type SubmitRequest = { handoff?: import("./submission-handoff.ts").SubmissionHandoff; requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
 
 /**
  * POST /v1/releases body: the full id of a candidate already published on the

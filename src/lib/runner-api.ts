@@ -1,3 +1,4 @@
+import { validSubmissionHandoff, handoffDigest } from "./submission-handoff.ts";
 import { timingSafeEqual } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
@@ -8,6 +9,7 @@ export function createRunnerHandler(input: {
   token: string;
   runnerName: string;
   readLog(operationId: string): Promise<string | null>;
+  readManifest?(operation: Extract<Operation, { kind: "landing" }>): Promise<unknown>;
   readArtifact?(operationId: string, runId: string, reference: Extract<CommandArtifact, { status: "retained" }>, offset: number, limit: number): Promise<ArtifactChunk>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
@@ -87,7 +89,7 @@ export function createRunnerHandler(input: {
     if (request.method === "POST" && path === `${RUNNER_API}/operations`) {
       let body: unknown;
       try {
-        body = await request.json();
+        body = await boundedJson(request, 73728);
       } catch {
         return json({ error: "Invalid JSON body" }, 400);
       }
@@ -101,15 +103,19 @@ export function createRunnerHandler(input: {
       try {
         const repo = repositoryKey(body.repo);
         const requestFact = body.requestId ? { type: "submission_request" as const, requestId: body.requestId, repo,
-          changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy } : undefined;
+          changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
+          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {} } : undefined;
         const prior = body.requestId ? input.log.submission(repo, body.requestId) : null;
         if (prior) {
-          if ((["changeId", "commitId", "bookmark", "submittedBy"] as const).some((key) => prior.request[key] !== requestFact![key]))
+          if ((["changeId", "commitId", "bookmark", "submittedBy", "handoffSha256"] as const).some((key) => prior.request[key] !== requestFact![key]))
             return json({ error: "Submission request identity is already bound to another candidate" }, 409);
           return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
         }
         const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
         if (existing?.commitId === body.commitId) {
+          const original = input.log.events({ operationId: existing.id }).find((row) => row.event.type === "submitted")?.event;
+          if (original?.type === "submitted" && (original.kind === undefined || original.kind === "landing") && original.handoffSha256 !== handoffDigest(body.handoff))
+            return json({ error: "Open candidate already has different handoff evidence" }, 409);
           if (requestFact) input.log.append(existing.id, requestFact);
           return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
         }
@@ -123,7 +129,8 @@ export function createRunnerHandler(input: {
         const active = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
         if (active?.status === "running") return json({ operation: active }, 409);
         if (active) input.log.append(active.id, { type: "superseded", by: id });
-        input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
+        input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
+          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {} });
         if (retained) input.log.append(id, retained);
         if (body.identity) input.log.append(id, body.identity);
         if (requestFact) input.log.append(id, requestFact);
@@ -235,7 +242,7 @@ export function createRunnerHandler(input: {
       try { return json(await input.readArtifact(operationId, runId, reference, Number(rawOffset), Number(rawLimit))); }
       catch { return json({ error: "Retained artifact is missing or does not match ledger evidence" }, 410); }
     }
-    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|cancel))?$`));
+    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|handoff|cancel))?$`));
     if (!route || (route[2] === "cancel" ? request.method !== "POST" : request.method !== "GET"))
       return json({ error: "Not found" }, 404);
     const id = decodeURIComponent(route[1]!);
@@ -243,6 +250,11 @@ export function createRunnerHandler(input: {
     if (!operation)
       return json({ error: "Unknown operation" }, 404);
     switch (route[2]) {
+      case "handoff":
+        if (operation.kind !== "landing") return json({ error: "Handoff supports landing operations only" }, 409);
+        if (!input.readManifest) return json({ error: "Handoff retrieval is unavailable" }, 501);
+        try { return json({ manifest: await input.readManifest(operation) }); }
+        catch { return json({ error: "Retained handoff is missing or does not match ledger evidence" }, 410); }
       case "outcome":
         return operation.kind === "landing" ? json({ outcome: operation.outcome }) : json({ error: "Outcome v1 supports landing operations only" }, 409);
       case "cancel": {
@@ -274,7 +286,7 @@ export function createRunnerHandler(input: {
 }
 
 const boundedString = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 300;
-async function boundedJson(request: Request): Promise<Record<string, unknown> | null> {
+async function boundedJson(request: Request, maximumBytes = 8192): Promise<Record<string, unknown> | null> {
   const reader = request.body?.getReader();
   if (!reader) return null;
   const chunks: Uint8Array[] = [];
@@ -284,7 +296,7 @@ async function boundedJson(request: Request): Promise<Record<string, unknown> | 
       const { value, done } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 8192) { await reader.cancel(); return null; }
+      if (size > maximumBytes) { await reader.cancel(); return null; }
       chunks.push(value);
     }
     const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -313,6 +325,7 @@ function validSubmission(body: unknown): body is SubmitRequest {
   if (typeof body !== "object" || body === null)
     return false;
   const value = body as Record<string, unknown>;
+  if (value.handoff !== undefined && (!validSubmissionHandoff(value.handoff) || value.handoff.source !== value.commitId)) return false;
   if (value.requestId !== undefined && (typeof value.requestId !== "string" || !/^[a-zA-Z0-9_-]{16,128}$/.test(value.requestId)
     || typeof value.commitId !== "string" || !/^[a-f0-9]{40}$/.test(value.commitId)
     || typeof value.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(value.repo))) return false;

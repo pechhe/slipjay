@@ -634,3 +634,25 @@ test("retention rechecks a queued predecessor that starts or is cancelled during
     } finally { release(); await f.close(); }
   }
 });
+
+
+test("handoff admission binds immutable author evidence and refuses changed replay, invalid snapshots and oversized bodies", async () => {
+  const f = await fixture();
+  try {
+    const handoff = { version: 1 as const, source: "a".repeat(40), intent: "Repair a failed gate", scope: ["src"], spec: null,
+      helpers: [], checks: [], reviews: [], toolchain: [], gaps: ["Independent review missing"] };
+    const body = { ...submission(handoff.source), requestId: "handoff-request-identity", handoff };
+    const first = await submitted(await f.submit(body));
+    assert.equal((await submitted(await f.submit(body))).operation.id, first.operation.id);
+    assert.equal((await f.submit({ ...body, handoff: { ...handoff, intent: "changed" } })).status, 409);
+    assert.equal((await f.submit({ ...body, requestId: "another-request-identity", handoff: { ...handoff, intent: "changed" } })).status, 409);
+    assert.equal((await f.submit({ ...body, handoff: { ...handoff, source: "b".repeat(40) } })).status, 400);
+    assert.equal((await f.request("/operations", { method: "POST", body: JSON.stringify({ ...body, padding: "x".repeat(75000) }) })).status, 400);
+    assert.equal(f.submissions, 1);
+    assert.equal((await f.request(`/operations/${first.operation.id}/handoff`)).status, 501);
+    const legacyChange = "z".repeat(32);
+    const withoutRequestId = { ...submission(handoff.source, legacyChange), handoff };
+    await submitted(await f.submit(withoutRequestId));
+    assert.equal((await f.submit({ ...withoutRequestId, handoff: { ...handoff, intent: "changed" } })).status, 409);
+  } finally { await f.close(); }
+});

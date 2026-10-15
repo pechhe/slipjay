@@ -4,7 +4,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { test } from "vite-plus/test";
-import { retainSubmissionSource, importSubmissionSource } from "../src/lib/submission-source.ts";
+import { retainSubmissionSource, importSubmissionSource, readSubmissionManifest } from "../src/lib/submission-source.ts";
 import { localExecutor } from "../src/lib/runner-queue.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import { jj, project } from "./support/workspace-project.ts";
@@ -26,7 +26,9 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
   const f = await sourceFixture();
   try {
     const operationId = "retained-source";
-    const input = { home: f.home, operationId, request: f.request, url: f.remote, executor: localExecutor() };
+    const request = { ...f.request, handoff: { version: 1 as const, source: f.request.commitId, intent: "Repair without author chat",
+      scope: ["retained.txt"], spec: null, helpers: [], checks: [], reviews: [], toolchain: [], gaps: ["APP_SECRET=do-not-retain"] } };
+    const input = { home: f.home, operationId, request, url: f.remote, executor: localExecutor() };
     const retained = await retainSubmissionSource(input);
     assert.equal(retained.handoffComplete, false);
     assert.deepEqual(await retainSubmissionSource(input), retained);
@@ -44,7 +46,15 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
     const file = (await readdir(join(f.home, "submissions")))[0]!;
     const manifest = JSON.parse(await readFile(join(f.home, "submissions", file), "utf8")) as { gaps: string[]; source: string };
     assert.equal(manifest.source, f.request.commitId);
-    assert.equal(manifest.gaps.length, 3);
+    assert.equal(manifest.gaps.length, 1);
+    const stored = JSON.stringify(manifest);
+    assert.equal(stored.includes("Repair without author chat"), true);
+    assert.equal(stored.includes("do-not-retain"), false);
+    assert.equal(stored.includes("author-reported"), true);
+    assert.deepEqual(await readSubmissionManifest(f.home, f.request.repo, operationId, retained), manifest);
+    await assert.rejects(readSubmissionManifest(f.home, "wrong/repo", operationId, retained), /manifest/);
+    await writeFile(join(f.home, "submissions", file), "{}");
+    await assert.rejects(readSubmissionManifest(f.home, f.request.repo, operationId, retained), /manifest/);
   } finally { await f.dispose(); }
 }, 120_000);
 
