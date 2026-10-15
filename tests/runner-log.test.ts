@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
-import type { OperationEvent } from "../src/lib/runner-contract.ts";
+import type { LandingOperation, OperationEvent } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 
 function submission(repo = "owner/repo", changeId = "k".repeat(32), commitId = "commit"): OperationEvent {
@@ -40,7 +40,8 @@ test("operation log projects stages, command runs and the latest terminal result
     assert.equal(log.operation(id)?.status, "running");
     log.append(id, { type: "stage", stage: "publishing" });
     const landed = log.append(id, { type: "landed", base: "old", commitId: "new", branch: "main", remote: "origin" });
-    assert.deepEqual(log.operation(id), {
+    const { outcome: _outcome, ...legacyFields } = log.operation(id) as LandingOperation;
+    assert.deepEqual(legacyFields, {
       id, kind: "landing", repo: "owner/repo", changeId: "k".repeat(32), commitId: "commit", bookmark: candidateBookmark("k".repeat(32)), submittedBy: "author",
       status: "landed", stage: "publishing", submittedAt: submitted.at, finishedAt: landed.at,
       runs: [

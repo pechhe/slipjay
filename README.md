@@ -609,6 +609,35 @@ An external signal alone does not prove timeout or OOM. Diagnostic text is untru
 output, never authority to execute a suggested command. Durable submission manifests,
 retained per-command artifacts and fresh-worker recovery remain separate work in #57.
 
+`slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
+without following or submitting it. The authenticated API route is
+`GET /v1/operations/:id/outcome` (`{ outcome }`); the same object appears on landing
+operation projections and in `slipjay land`'s stdout as `outcome`. Existing `ok`,
+`verdict` and `log` fields remain. Older runners may omit it. The read command exits
+zero when evidence was retrieved, including for a failed or live operation; read
+`status` and `terminal` for that operation's outcome. Unavailable/unsupported evidence
+is a nonzero command error. The API returns 404 for unknown operations, 409 for
+non-landing kinds, and 401 without the runner credential. Normal landing exit codes
+remain zero for the requested published candidate and one otherwise; progress stays
+on stderr.
+
+The object records its operation-local `asOfSeq`, source/request/actor identity when
+available, the latest prepared attempt and exact base/candidate, versioned failure
+classification, bounded causal excerpt, and all recorded command completions with
+invalidation flags. An invalidated pass remains historical evidence, not a passing
+current attempt. Missing run completions are `incomplete`; signals do not establish
+OOM. `evidence.coverage` is always `partial` until complete artifact and handoff
+contracts exist: gaps explicitly include absent exact argument/cwd records,
+unstarted/skipped units, artifacts and repair authority.
+
+`publication.state` is `published` only for that operation's landed verdict. An
+integration/publication intent, held integration, or failure at the integration tail
+reports `unconfirmed`. It may have been recovered by a different operation: this
+historical projection cannot certify current remote refs or external migration state.
+`recovery.kind` calls for reconciliation before retry in that case; every outcome
+has `automaticRetry: false`. A read never claims a repair lease or releases the
+author workspace. Owner cancellation and supersession remain terminal history.
+
 Cause rules in `src/lib/failure-classification.ts` carry their version on every
 `classified` event: `gate` for a failed verification, `conflict` for a rebase
 conflict, `infrastructure` for fetch/install/executor problems or a timeout before

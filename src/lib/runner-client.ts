@@ -151,7 +151,7 @@ async function request(baseUrl: string, token: string, path: string, init: Reque
   if (response.ok || response.status === 409) return response;
   // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner.
   const refusal = response.status === 400 ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
-  if (response.status === 400) throw new RunnerRequestRefused(400, `Runner request refused: ${typeof refusal === "string" ? refusal : "invalid request"}`);
+  if (response.status === 400) throw new RunnerRequestRefused(400, `Runner request refused: HTTP 400: ${typeof refusal === "string" ? refusal : "invalid request"}`);
   throw new Error(`Runner request failed: HTTP ${response.status}`);
 }
 
@@ -293,6 +293,19 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
 
 /** How to read retained operation events from any machine with the runner location. */
 export const runLogCommand = (operationId: string): string => `slipjay runner log ${operationId}`;
+
+/** Read evidence without following, resubmitting, or claiming repair authority. */
+export async function readLandingOutcome(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<import("./runner-contract.ts").LandingOutcome> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`);
+    if (!response.ok) throw new Error(`Runner outcome unavailable (${response.status}); no submission or repair was attempted`);
+    const body = await response.json() as { outcome: import("./runner-contract.ts").LandingOutcome };
+    if (body.outcome?.version !== 1 || body.outcome.operationId !== operationId) throw new Error("Runner returned an unsupported or mismatched landing outcome");
+    return body.outcome;
+  } finally { connection.close(); }
+}
 
 /** Retained events of one operation, including bounded failure diagnostics. */
 export async function readRunLog(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {

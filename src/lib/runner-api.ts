@@ -220,7 +220,7 @@ export function createRunnerHandler(input: {
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.operationsForChange(repositoryKey(repo), decodeURIComponent(change[1]!)) });
     }
-    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|cancel))?$`));
+    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|cancel))?$`));
     if (!route || (route[2] === "cancel" ? request.method !== "POST" : request.method !== "GET"))
       return json({ error: "Not found" }, 404);
     const id = decodeURIComponent(route[1]!);
@@ -228,6 +228,8 @@ export function createRunnerHandler(input: {
     if (!operation)
       return json({ error: "Unknown operation" }, 404);
     switch (route[2]) {
+      case "outcome":
+        return operation.kind === "landing" ? json({ outcome: operation.outcome }) : json({ error: "Outcome v1 supports landing operations only" }, 409);
       case "cancel": {
         let body: unknown = {};
         try { const text = await request.text(); if (text) body = JSON.parse(text); } catch { return json({ error: "Invalid JSON body" }, 400); }

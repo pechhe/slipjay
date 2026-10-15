@@ -187,7 +187,24 @@ type OperationFields = {
   /** Seq of the latest event, for resuming a stream after it. */
   lastSeq: number;
 };
-export type LandingOperation = OperationFields & { kind: "landing"; changeId: string; bookmark: string };
+export type LandingOperation = OperationFields & { kind: "landing"; changeId: string; bookmark: string; outcome?: LandingOutcome };
+
+/** Versioned recorded evidence, not authority to repair, retry, or release the author. */
+export type LandingOutcome = {
+  version: 1; operationId: string; repo: string; changeId: string; sourceCommitId: string;
+  status: OperationStatus; stage: RunnerStage; terminal: boolean; asOfSeq: number;
+  submittedAt: string; finishedAt?: string;
+  identity?: Extract<OperationEvent, { type: "identity" }>;
+  requestId?: string;
+  sourceRetention?: Extract<OperationEvent, { type: "source_retained" }>;
+  attempt?: Extract<OperationEvent, { type: "attempt_prepared" }>;
+  publication: { state: "not-attempted" | "unconfirmed" | "published"; base?: string; commitId?: string };
+  failure?: { reason: string; stage?: RunnerStage; command?: string; excerpt?: string; excerptTruncated: boolean };
+  classification?: ClassifiedFact;
+  runs: (RunRecord & { outcome: "passed" | "failed" | "incomplete" | "killed"; invalidated: boolean })[];
+  evidence: { coverage: "partial"; gaps: string[]; logCommand: string; logPath: string };
+  recovery: { kind: "follow" | "inspect-failure" | "reconcile-publication" | "already-published" | "owner-stopped" | "superseded" | "policy-refusal"; automaticRetry: false };
+};
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
 
@@ -285,6 +302,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,
  *                                                 replaying after `seq`, then live; ends after the terminal event
  * - GET  /v1/operations/:id/log                 → `text/plain` retained operation events (not complete process output)
+ * - GET  /v1/operations/:id/outcome             → `{ outcome: LandingOutcome }` (409 for other operation kinds)
  * - POST /v1/operations/:id/cancel              → `{ operation }`; only a queued operation can be cancelled (else 409)
  * - GET  /v1/changes/:changeId?repo=<owner/name> → `{ operations: Operation[] }` newest first
  * - POST /v1/runner/kill                         `{ by }` → `{ operation }`: the running operation as the kill

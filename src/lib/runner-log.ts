@@ -1,4 +1,5 @@
 import { projectWatchOperation } from "./runner-watch-projection.ts";
+import { landingOutcome } from "./landing-outcome.ts";
 import { classifyFailure } from "./failure-classification.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -289,5 +290,6 @@ function project(id: string, events: StoredEvent[]): Operation | null {
         break;
     }
   }
+  if (operation.kind === "landing") operation.outcome = landingOutcome(operation, events);
   return operation;
 }
