@@ -704,6 +704,52 @@ does not grant repair ownership, execute source, retry verification or publish.
 Exclusive repair claims/fencing still need completion before concurrent recovery
 workers can safely author and submit corrections.
 
+A source correction uses a durable repair claim:
+
+```sh
+# From the repair worker's assigned isolated checkout of the same repository:
+slipjay runner repair-claim <failed-operation>
+slipjay runner source <failed-operation> /path/to/new/recovery.bundle
+# Import the bundle with importSourceBundle; edit the retained source revision,
+# preserving its logical jj change ID. Fix and run focused checks, then:
+slipjay land
+```
+
+The claim capability is stored and flushed in private workspace metadata **before**
+the claim request; its confirmed identity is retained before CLI success. A new CLI
+process retries the same capability after response loss. stdout and ledger events
+never contain its token. Ordinary `land` carries the matching workspace capability
+and records a new `repair_proposed` attempt linked to the original failure. The old
+attempt, source and failure are immutable history. This command does not waive the
+normal independent review/gate requirements.
+
+`GET /v1/operations/:id/repair` reports whether the logical change has ever been
+fenced and its public current claim. `POST` accepts `claim` with `workspace`, `by`
+and a 64-character lowercase hex `token`; `release` with `claimId`, `token`, `by`;
+or explicit owner `revoke` with `by`. All use the existing runner credential. This
+is the runner's existing trusted-owner API, not a separate person/agent role system.
+Claim/release/revoke failures return 409, invalid input 400, missing operation 404,
+missing or invalid retained handoff 410, unsupported validation 501. Owner revocation
+is an explicit control action; loss of heartbeat never invokes it.
+
+Only the latest confirmed pre-publication gate/conflict failure with retained source
+and a valid manifest accepts a fresh claim. Pause, kill/cancellation, held/unknown
+publication, published source and migration/finalisation-sensitive histories do not.
+Only one claimant may write a logical change, across retry attempts and runner
+restart. The capability is checked before candidate transport and again by server
+admission after source capture. Reattachment to an already accepted operation remains
+observation. Claims have no automatic timeout: offline admission is not exclusive
+ownership, and an absent author is not permission to take over.
+
+`slipjay runner repair-release <operation>` releases the holder's claim.
+`slipjay runner repair-revoke <operation>` is an explicit owner override after a
+lost/stale claimant. Neither may change repair ownership while the runner has an
+admitted queued/running attempt: wait or explicitly cancel that attempt first.
+A released/revoked claimant cannot submit source, and releasing does not silently
+restore the original author's write authority. A new claimant must acquire a new
+capability on the latest repairable failed attempt. Publication closes the claim.
+No automatic repair session or model is started.
+
 `slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
 without following or submitting it. The authenticated API route is
 `GET /v1/operations/:id/outcome` (`{ outcome }`); the same object appears on landing

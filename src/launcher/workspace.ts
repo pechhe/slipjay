@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, readMetricsEvents } from "../lib/runner-client.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, readMetricsEvents } from "../lib/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
@@ -460,6 +460,10 @@ try {
       const location = runnerLocation();
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
       console.log(JSON.stringify(await readRunArtifact(location, rest[1]!, rest[2]!), null, 2));
+    } else if (["repair-claim", "repair-release", "repair-revoke"].includes(rest[0] ?? "") && rest.length === 2) {
+      const location = runnerLocation();
+      if (!location) throw new Error("No runner location configured");
+      console.log(JSON.stringify(await manageRepairClaim(process.cwd(), location, rest[1]!, rest[0]!.slice(7) as "claim" | "release" | "revoke"), null, 2));
     } else if (rest[0] === "source" && rest.length === 3) {
       const location = runnerLocation();
       if (!location) throw new Error("No runner location configured");
@@ -488,7 +492,7 @@ try {
       // systemd stops the unit with SIGTERM; a running gate is left to restart recovery.
       await new Promise<void>((resolve) => process.once("SIGTERM", () => resolve()));
       process.exit(0);
-    } else throw new Error("Usage: slipjay runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|artifact <operation> <run>|kill [<operation>]|pause|resume>");
+    } else throw new Error("Usage: slipjay runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>");
   } else if (command === "guard") {
     // Claude Code PreToolUse hook: reads the tool call on stdin, prints a deny decision.
     let input = "";
@@ -503,7 +507,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

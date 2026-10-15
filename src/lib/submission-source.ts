@@ -47,6 +47,7 @@ export async function retainSubmissionSource(input: {
   const manifest = JSON.stringify({ version: 1, operationId, repo: repositoryKey(request.repo), source: request.commitId,
     changeId: request.changeId, requestId: request.requestId ?? null, submittedBy: request.submittedBy,
     identity: request.identity ?? null,
+    ...(request.repair ? { repair: { operationId: request.repair.operationId, claimId: request.repair.claimId } } : {}),
     ...(request.handoff ? { handoff: { ...sanitizedHandoff(request.handoff, input.env ?? process.env), authority: "author-reported", inputSha256: handoffDigest(request.handoff) } } : {}),
     gaps: [...request.handoff ? [] : ["Spec revision/snapshot and intent not supplied", "Helper, focused-check and independent-review evidence not supplied"], "Fresh-worker repair claim and reproduction contract incomplete"],
     retention: "Preserved with the runner ledger; no automatic source or manifest deletion" });

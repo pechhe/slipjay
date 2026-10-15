@@ -1,4 +1,5 @@
 import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-handoff.ts";
+import type { RepairProof } from "./repair-claim.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { spawn } from "node:child_process";
 import { open, link, rm, lstat } from "node:fs/promises";
@@ -7,7 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "./bounded-process.ts";
 import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "./landing-steps.ts";
@@ -340,6 +341,74 @@ export async function readLandingOutcome(location: string, operationId: string, 
   } finally { connection.close(); }
 }
 
+async function flushWorkspaceCapability(path: string): Promise<void> {
+  for (const target of [path, dirname(path)]) {
+    const handle = await open(target, "r");
+    try { await handle.sync(); } finally { await handle.close(); }
+  }
+}
+
+type WorkspaceRepair = { operationId: string; repo: string; changeId: string; binding: string; token: string; claimId?: string; confirmedAt?: number };
+const workspaceRepairs = (metadata: Record<string, unknown>): Record<string, WorkspaceRepair> => (metadata.repairClaims ?? {}) as Record<string, WorkspaceRepair>;
+
+/** Capability is persisted before the request and never returned in CLI evidence. */
+export async function manageRepairClaim(cwd: string, location: string, operationId: string, action: "claim" | "release" | "revoke", env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
+  const context = await workspaceContext(cwd);
+  if (!context || context.current.name === "default") throw new Error("Repair claims require an assigned isolated authoring workspace");
+  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Cannot resolve the workspace repository");
+  const token = await runnerToken(env), binding = runnerBinding(location);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
+  const key = createHash("sha256").update(JSON.stringify([binding, repo.toLowerCase(), operationId])).digest("hex");
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`);
+    const result = await response.json() as { outcome?: import("./runner-contract.ts").LandingOutcome };
+    if (result.outcome?.repo.toLowerCase() !== repo.toLowerCase() || result.outcome.operationId !== operationId) throw new Error("Repair operation does not belong to this workspace repository");
+    const changeId = result.outcome.changeId;
+    const saved = await withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
+      const metadata = await workspaceMetadata(context.current.name);
+      if (!metadata) throw new Error("Assigned workspace metadata is missing");
+      const claims = { ...workspaceRepairs(metadata) };
+      if (action === "claim" && !claims[key]) {
+        if (Object.keys(claims).length >= 32) throw new Error("Resolve existing repair claims before creating more");
+        claims[key] = { operationId, repo: repo.toLowerCase(), changeId, binding, token: randomUUID().replaceAll("-", "") + randomUUID().replaceAll("-", "") };
+        await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, repairClaims: claims });
+        await flushWorkspaceCapability(metadataPath(context.current.name));
+      }
+      return claims[key];
+    }, { waitMs: 1000 });
+    if (action !== "revoke" && !saved) throw new Error("No locally retained capability for this repair claim");
+    const control = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/repair`, {
+      method: "POST", signal: AbortSignal.timeout(15000), headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, by: `${hostname()}:${context.current.name}`, ...(action === "claim" ? { workspace: context.current.name, token: saved!.token }
+        : action === "release" ? { claimId: saved!.claimId, token: saved!.token } : {}) }),
+    });
+    const body = await control.json() as { claim?: { claimId: string; operationId: string; source: string } | null; error?: string };
+    if (!control.ok) throw new Error(body.error ?? "Repair claim was refused; keep its local capability until reconciled");
+    await withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
+      const metadata = await workspaceMetadata(context.current.name);
+      if (!metadata) throw new Error("Assigned workspace metadata disappeared; retain this workspace for recovery");
+      const claims = { ...workspaceRepairs(metadata) };
+      if (action === "claim") {
+        if (!body.claim?.claimId || body.claim.operationId !== operationId || claims[key]?.token !== saved?.token) throw new Error("Repair acknowledgement did not match the persisted capability");
+        for (const [oldKey, old] of Object.entries(claims)) if (oldKey !== key && old.binding === binding && old.repo === repo.toLowerCase() && old.changeId === changeId) delete claims[oldKey];
+        claims[key] = { ...saved!, claimId: body.claim.claimId, confirmedAt: Date.now() };
+      } else delete claims[key];
+      await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, repairClaims: claims });
+        await flushWorkspaceCapability(metadataPath(context.current.name));
+    }, { waitMs: 1000 });
+    return body;
+  } finally { connection.close(); }
+}
+
+async function workspaceRepairProof(context: WorkspaceContext, location: string, repo: string, changeId: string): Promise<RepairProof | undefined> {
+  const metadata = await workspaceMetadata(context.current.name);
+  if (!metadata) return undefined;
+  const claim = Object.values(workspaceRepairs(metadata)).filter((entry) => entry.binding === runnerBinding(location)
+    && entry.repo === repo.toLowerCase() && entry.changeId === changeId && entry.claimId).sort((a, b) => (b.confirmedAt ?? 0) - (a.confirmedAt ?? 0))[0];
+  return claim?.claimId ? { operationId: claim.operationId, claimId: claim.claimId, token: claim.token } : undefined;
+}
+
 /** Stream a derived recovery bundle to a new local file; no source or ownership is changed. */
 export async function downloadSubmissionSource(location: string, operationId: string, destination: string, env: NodeJS.ProcessEnv = process.env): Promise<{ operationId: string; source: string; sha256: string; bytes: number; path: string }> {
   const token = await runnerToken(env);
@@ -462,6 +531,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     let reattached = true;
     let older = false;
     let requestId: string | undefined;
+    let priorAttempt: Operation | undefined;
     if (landedChange !== undefined) {
       // Only this workspace's own landed change finishes housekeeping here.
       // Operations come newest first.
@@ -469,6 +539,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       if (!operation) throw new Error(`Nothing to land: ${preview.commitId.slice(0, 12)} is already on ${context.integrationBranch}`);
     } else {
       const existing = await operationsFor(target.changeId);
+      priorAttempt = existing[0];
       // Reattach to this commit's open operation, or to one that landed while nobody followed it.
       operation = existing.find((op) => (op.status === "queued" || op.status === "running") && op.commitId === target.commitId)
         ?? existing.find((op) => op.status === "landed" && op.commitId === target.commitId);
@@ -478,6 +549,14 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       if (running) operation = running;
     }
     if (!operation) {
+      const repair = await workspaceRepairProof(context, options.location, repo, target.changeId);
+      if (repair || priorAttempt?.kind === "landing" && priorAttempt.outcome) {
+        const ownership = await request(baseUrl, token, `/v1/operations/${encodeURIComponent(repair?.operationId ?? priorAttempt!.id)}/repair`);
+        if (!ownership.ok) throw new Error("Repair ownership could not be established; source was not submitted");
+        const view = await ownership.json() as { claimed?: boolean; claim?: { claimId: string } };
+        if (repair ? view.claim?.claimId !== repair.claimId : view.claimed)
+          throw new Error("Repair ownership changed or belongs to another claimant; source was not submitted");
+      }
       requestId = await landingRequestIdentity(context, options.location, repo, target.commitId);
       const bookmark = candidateBookmark(target.changeId);
       try { await jj(cwd, ["git", "fetch", "--remote", remote, "--branch", bookmark]); }
@@ -486,8 +565,9 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       await jj(cwd, ["bookmark", "track", `${bookmark}@${remote}`]).catch(() => {});
       try {
         await jj(cwd, ["git", "push", "--remote", remote, "--bookmark", bookmark]);
-      } catch {
-        await jj(cwd, ["git", "push", "--remote", remote, "--named", `${bookmark}=${target.commitId}`]);
+      } catch (pushError) {
+        try { await jj(cwd, ["git", "push", "--remote", remote, "--named", `${bookmark}=${target.commitId}`]); }
+        catch { throw pushError; }
       }
       // Keeping the untracked remote ref would make the candidate immutable, so the next jj
       // command would stack a new working-copy commit on it and a reland would carry both.
@@ -497,7 +577,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       let response: Response;
       try {
         response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
-        headers: { "content-type": "application/json" }, body: JSON.stringify({ ...handoff ? { handoff } : {}, requestId, repo, changeId: target.changeId, commitId: target.commitId, bookmark,
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ ...repair ? { repair } : {}, ...handoff ? { handoff } : {}, requestId, repo, changeId: target.changeId, commitId: target.commitId, bookmark,
           submittedBy: `${hostname()}:${context.current.name}`, identity: {
             type: "identity", submitterKind: env.CODEX_THREAD_ID || env.CLAUDE_SESSION_ID ? "agent" : "unknown",
             submitterId: `${hostname()}:${context.current.name}`, workspace: context.current.name, machine: hostname(),

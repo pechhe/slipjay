@@ -1,5 +1,6 @@
 import { validSubmissionHandoff, handoffDigest } from "./submission-handoff.ts";
-import { timingSafeEqual } from "node:crypto";
+import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "./repair-claim.ts";
+import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
@@ -87,6 +88,41 @@ export function createRunnerHandler(input: {
         input.onSubmitted();
       return json({ paused: pausing });
     }
+    const repairRoute = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)/repair$`));
+    if (repairRoute && (request.method === "POST" || request.method === "GET")) {
+      const operationId = decodeURIComponent(repairRoute[1]!);
+      const operation = input.log.operation(operationId);
+      if (!operation) return json({ error: "Unknown operation" }, 404);
+      if (operation.kind !== "landing") return json({ error: "Repair claims require a landing" }, 409);
+      if (request.method === "GET") {
+        const authority = repairAuthority(input.log, operation.repo, operation.changeId);
+        return json({ claimed: authority.claimed, claim: publicRepairClaim(authority.active) });
+      }
+      const body = await boundedJson(request);
+      if (!body || !["claim", "release", "revoke"].includes(String(body.action)) || !boundedString(body.by)) return json({ error: "Invalid repair request" }, 400);
+      if (body.action === "claim") {
+        if (!boundedString(body.workspace) || typeof body.token !== "string" || !/^[a-f0-9]{64}$/.test(body.token)) return json({ error: "Invalid claim capability" }, 400);
+        const previous = repairAuthority(input.log, operation.repo, operation.changeId).active;
+        if (previous) return previous.operationId === operationId && previous.workspace === body.workspace && previous.tokenSha256 === repairTokenHash(body.token)
+          ? json({ claim: publicRepairClaim(previous) }) : json({ error: "Another repair claimant owns this logical change" }, 409);
+        const refusal = repairEligibility(input.log, operation);
+        if (refusal) return json({ error: refusal }, 409);
+        if (!input.readManifest) return json({ error: "Retained handoff validation is unavailable" }, 501);
+        try { await input.readManifest(operation); } catch { return json({ error: "Retained handoff is missing or invalid" }, 410); }
+        // Retention validation awaited I/O; repeat admission against authoritative current state.
+        const current = input.log.operation(operationId);
+        if (current?.kind !== "landing" || repairEligibility(input.log, current) || repairAuthority(input.log, operation.repo, operation.changeId).active)
+          return json({ error: "Repair ownership or operation state changed during admission" }, 409);
+        input.log.append(operationId, { type: "repair_claimed", claimId: randomUUID(), tokenSha256: repairTokenHash(body.token), source: operation.commitId, workspace: body.workspace, by: body.by });
+        return json({ claim: publicRepairClaim(repairAuthority(input.log, operation.repo, operation.changeId).active) });
+      }
+      const active = repairAuthority(input.log, operation.repo, operation.changeId).active;
+      if (!active || active.operationId !== operationId) return json({ error: "No current claim for this attempt" }, 409);
+      if (body.action === "release" && (body.claimId !== active.claimId || typeof body.token !== "string" || repairTokenHash(body.token) !== active.tokenSha256)) return json({ error: "Stale repair capability" }, 409);
+      if (input.log.operationsForChange(operation.repo, operation.changeId).some((op) => op.status === "queued" || op.status === "running")) return json({ error: "Runner still owns an admitted attempt; wait or cancel it before changing repair ownership" }, 409);
+      input.log.append(operationId, { type: "repair_released", claimId: active.claimId, by: body.by, reason: body.action === "revoke" ? "revoked" : "released" });
+      return json({ claim: null });
+    }
     if (request.method === "POST" && path === `${RUNNER_API}/operations`) {
       let body: unknown;
       try {
@@ -105,10 +141,10 @@ export function createRunnerHandler(input: {
         const repo = repositoryKey(body.repo);
         const requestFact = body.requestId ? { type: "submission_request" as const, requestId: body.requestId, repo,
           changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
-          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {} } : undefined;
+          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {}, ...body.repair ? { repairClaimId: body.repair.claimId } : {} } : undefined;
         const prior = body.requestId ? input.log.submission(repo, body.requestId) : null;
         if (prior) {
-          if ((["changeId", "commitId", "bookmark", "submittedBy", "handoffSha256"] as const).some((key) => prior.request[key] !== requestFact![key]))
+          if ((["changeId", "commitId", "bookmark", "submittedBy", "handoffSha256", "repairClaimId"] as const).some((key) => prior.request[key] !== requestFact![key]))
             return json({ error: "Submission request identity is already bound to another candidate" }, 409);
           return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
         }
@@ -122,6 +158,8 @@ export function createRunnerHandler(input: {
         }
         if (existing?.status === "running")
           return json({ operation: existing }, 409);
+        const repairRefusal = repairAdmission(input.log, body);
+        if (repairRefusal) return json({ error: repairRefusal }, 409);
         const id = newOperationId();
         let retained: Awaited<ReturnType<NonNullable<typeof input.retainSubmission>>> | undefined;
         try { retained = await input.retainSubmission?.(id, body); }
@@ -129,10 +167,13 @@ export function createRunnerHandler(input: {
         // A queued predecessor may have started or been cancelled while capture awaited I/O.
         const active = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
         if (active?.status === "running") return json({ operation: active }, 409);
+        const changedRepair = repairAdmission(input.log, body);
+        if (changedRepair) return json({ error: changedRepair }, 409);
         if (active) input.log.append(active.id, { type: "superseded", by: id });
         input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
           ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {} });
         if (retained) input.log.append(id, retained);
+        if (body.repair) input.log.append(id, { type: "repair_proposed", operationId: body.repair.operationId, claimId: body.repair.claimId, source: body.commitId });
         if (body.identity) input.log.append(id, body.identity);
         if (requestFact) input.log.append(id, requestFact);
         input.onSubmitted();
@@ -331,6 +372,7 @@ function validSubmission(body: unknown): body is SubmitRequest {
   if (typeof body !== "object" || body === null)
     return false;
   const value = body as Record<string, unknown>;
+  if (value.repair !== undefined && !validRepairProof(value.repair)) return false;
   if (value.handoff !== undefined && (!validSubmissionHandoff(value.handoff) || value.handoff.source !== value.commitId)) return false;
   if (value.requestId !== undefined && (typeof value.requestId !== "string" || !/^[a-zA-Z0-9_-]{16,128}$/.test(value.requestId)
     || typeof value.commitId !== "string" || !/^[a-f0-9]{40}$/.test(value.commitId)

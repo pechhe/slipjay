@@ -115,6 +115,9 @@ export type CommandArtifact = { status: "unavailable"; reason: "private-output" 
 };
 export type ArtifactChunk = { version: 1; operationId: string; runId: string; sha256: string; bytes: number; offset: number; nextOffset: number | null; dataBase64: string };
 export type OperationEvent =
+  | { type: "repair_claimed"; claimId: string; tokenSha256: string; source: string; workspace: string; by: string }
+  | { type: "repair_released"; claimId: string; by: string; reason: "released" | "revoked" }
+  | { type: "repair_proposed"; operationId: string; claimId: string; source: string }
   | { type: "attempt_started"; attempt: number; source: string; checkout: string }
   | { type: "attempt_prepared"; attempt: number; source: string; base: string; candidate: string; predecessor?: { operationId: string; attempt: number; candidate: string }; overlap: boolean; checkout: string }
   | { type: "attempt_invalidated"; attempt: number; reason: string }
@@ -131,7 +134,7 @@ export type OperationEvent =
   | { type: "verification_passed"; base: string; candidate: string }
   | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
   /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */
-  | { type: "submission_request"; handoffSha256?: string; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
+  | { type: "submission_request"; repairClaimId?: string; handoffSha256?: string; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */
   | { type: "submitted"; kind?: "landing"; handoffSha256?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A release of `commitId`, the integration commit a human approved. */
@@ -262,7 +265,7 @@ export interface OperationLog {
  * Optional requestId binds a transport retry to one operation, even after it finishes.
  * It acknowledges request identity only, not a durable source handoff.
  */
-export type SubmitRequest = { handoff?: import("./submission-handoff.ts").SubmissionHandoff; requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
+export type SubmitRequest = { repair?: import("./repair-claim.ts").RepairProof; handoff?: import("./submission-handoff.ts").SubmissionHandoff; requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
 
 /**
  * POST /v1/releases body: the full id of a candidate already published on the
