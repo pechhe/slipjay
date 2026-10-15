@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.19.0
+
 - **Map every runner fact to Build receipts truthfully (#70, #60):** admitted landings now
   also report `held`, `failed` for cancel, kill, supersede and policy refusal with their
   recovery, a `published` confirmed after an unknown publication, and each command as a
