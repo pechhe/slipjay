@@ -191,7 +191,10 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 change lands. The runner queues landings and takes each repository's one at a time
 in arrival order by default. For each one it rebases onto the integration tip,
 runs the repository's declared gate in its own warm checkout, then integrates and
-publishes. The authoring machine runs none of the gate. Resets take turns in the
+publishes. A change that contains a merge, such as an upstream update merged into
+the integration line, lands as a merge: only its first-parent line moves onto the
+tip, and the merged-in history is kept rather than copied, so the integration line
+must be the merge's first parent. The authoring machine runs none of the gate. Resets take turns in the
 same repository's queue. A confirmed release verifies in a release queue and a
 checkout of its own, beside the repository's landings, and takes a turn in the
 repository's queue only to publish (see [Release](#release)). A release and a reset

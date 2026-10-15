@@ -93,7 +93,7 @@ export async function prepareLandingCandidate(cwd: string, options: CandidateOpt
   const migration = await migrationCandidate(cwd, context, io, options);
   try {
     options.onStage?.("rebasing");
-    await jj(cwd, ["rebase", "--branch", options.pinnedSource ? target.commitId : target.changeId, "--onto", context.integrationBranch]);
+    await rebaseOntoIntegration(cwd, options.pinnedSource ? target.commitId : target.changeId, context.integrationBranch, jj);
     const rebased = options.pinnedSource ? await revisionFacts(cwd, "@") : await revisionFacts(cwd, target.changeId);
     await assertStackConflictFree(cwd, context.integrationBranch, rebased.commitId);
     const base = await revisionFacts(cwd, context.integrationBranch);
@@ -110,6 +110,28 @@ export async function prepareLandingCandidate(cwd: string, options: CandidateOpt
   } catch (error) {
     return rollbackFailure(error, () => migration.rollback());
   }
+}
+
+/**
+ * Move a candidate onto the integration tip. A plain stack rebases as a branch. A stack holding a
+ * merge, such as an upstream update merged into the integration line, moves only its first-parent
+ * line: its lowest commit trades the parents it had on the integration for the current tip and keeps
+ * its other parents. Rebasing it as a branch would copy every merged-in commit onto the integration.
+ * The integration line must be the merge's first parent, as `git merge` and `jj new <branch> <other>` make it.
+ */
+export async function rebaseOntoIntegration(cwd: string, revision: string, branch: string, jj: LandingIO["jj"]): Promise<void> {
+  const ids = async (revset: string, template = 'commit_id ++ "\\n"') =>
+    (await jj(cwd, ["log", "-r", revset, "--no-graph", "-T", template])).split(/\s+/).filter(Boolean);
+  if ((await ids(`merges() & (${branch}..${revision})`)).length === 0) {
+    await jj(cwd, ["rebase", "--branch", revision, "--onto", branch]);
+    return;
+  }
+  const [root] = await ids(`roots((${branch}..${revision}) & first_ancestors(${revision}))`);
+  if (!root) return;
+  const parents = await ids(root, 'parents.map(|parent| parent.commit_id()).join(" ")');
+  const integrated = new Set(await ids(`(${parents.join(" | ")}) & ::${branch}`));
+  const destinations = [...new Set(parents.map((parent) => integrated.has(parent) ? branch : parent))];
+  await jj(cwd, ["rebase", "--source", root, ...destinations.flatMap((destination) => ["--onto", destination])]);
 }
 
 /** Verify the prepared identity; a dependent can prepare while this exact gate runs. */
