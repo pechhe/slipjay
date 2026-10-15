@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,17 +11,22 @@ import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-con
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 import { importSubmissionSource, retainSubmissionSource } from "../src/lib/submission-source.ts";
 import { readCommandArtifact } from "../src/lib/command-artifact.ts";
-import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
+import { createRunnerQueue, localExecutor, runContainment, runnerWorkers } from "../src/lib/runner-queue.ts";
+import { runBoundedProcess } from "../src/lib/bounded-process.ts";
+import { TEST_SLICE, testExecutor } from "./support/executor.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
 // A committed `hang` file names where to record the pids of the gate, of a child in its
-// process group, and of a tool it starts in its own group (as YardSmith's task runners
-// do); then it never ends.
+// process group, of a tool it starts in its own group (as YardSmith's task runners
+// do) and, under systemd, of a tool in a scope of its own that joins the run's slice
+// (as YardSmith's heavy-check wrapper does); then it never ends.
 const gateFailureOutput = "boom\nFAIL tests/fixture.test.ts > fixture > rejects the candidate\n";
 const gate = `const fs=require("node:fs");if (fs.existsSync("fail")) { process.stderr.write(${JSON.stringify(gateFailureOutput)}); process.exit(3); }`
   + 'if (fs.existsSync("hang")) { const spawn=(detached)=>require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached,stdio:"ignore"});'
-  + 'const child=spawn(false), tool=spawn(true);'
-  + 'fs.writeFileSync(fs.readFileSync("hang","utf8").trim(),JSON.stringify([process.pid,child.pid,tool.pid])); setInterval(()=>{},1000); }';
+  + 'const child=spawn(false), tool=spawn(true), slice=process.env.SLIPJAY_SYSTEMD_SLICE;'
+  + 'const scoped=slice?require("node:child_process").spawn("systemd-run",["--user","--scope","--quiet","--collect","--slice="+slice,"--",process.execPath,"-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}):null;'
+  + 'const record=()=>fs.writeFileSync(fs.readFileSync("hang","utf8").trim(),JSON.stringify([process.pid,child.pid,tool.pid,...scoped?[scoped.pid]:[]]));'
+  + 'setTimeout(record,scoped?500:0); setInterval(()=>{},1000); }';
 const command = `node -e ${gate}`;
 // Late-bound migrations: each generation writes the next numbered file; finalization
 // records which migrations the integrated commit carries, unless `fail-finalize` exists;
@@ -89,7 +94,7 @@ const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never",
 
 // `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
 async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false }: { workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean } = {}) {
+  { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true }: { workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -170,11 +175,14 @@ async function fixture(migrations = false, release = false, deployments?: { minI
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
   const requestedTimeouts: { command: string; timeoutMs: number; migrationContext?: string }[] = [];
-  const local = localExecutor();
-  const executor: Executor = { host: local.host, combinedLimits: verificationDepth === 2, run: (request) => {
+  const local = testExecutor({ home });
+  // Unless told otherwise the fixture stands in for an enforced combined budget, so concurrent paths run on
+  // every platform: without systemd it runs commands directly rather than one at a time.
+  const run = local.combinedLimits ? local.run : runBoundedProcess;
+  const executor: Executor = { ...local, combinedLimits, run: (request) => {
     requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs,
       ...(request.env?.SLIPJAY_MIGRATION_CONTEXT ? { migrationContext: request.env.SLIPJAY_MIGRATION_CONTEXT } : {}) });
-    return local.run(request);
+    return run(request);
   } };
   const unsubscribe = log.subscribe((event) => {
     if (event.event.type !== "submitted") published.push(event);
@@ -239,7 +247,11 @@ async function fixture(migrations = false, release = false, deployments?: { minI
         await mkdir(capture, { recursive: true });
         await writeFile(join(capture, `${root.slice(root.lastIndexOf("/") + 1)}.json`), JSON.stringify(log.events()).split(root).join("[FIXTURE]"));
       }
-      log.close(); await rm(root, { recursive: true, force: true });
+      log.close();
+      // A hanging gate's detached tools outlive a process-group kill where no systemd slice holds them.
+      for (const file of (await readdir(root)).filter((name) => name.endsWith("pids.json")))
+        for (const pid of JSON.parse(await readFile(join(root, file), "utf8").catch(() => "[]")) as number[]) try { process.kill(pid, "SIGKILL"); } catch {}
+      await rm(root, { recursive: true, force: true });
     } };
 }
 
@@ -491,6 +503,10 @@ async function until<T>(check: () => Promise<T | undefined> | T | undefined, tim
   }
 }
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+/** Whether runs get systemd slices here: the runner's production executor. */
+const systemd = process.platform === "linux" && Boolean(process.env.XDG_RUNTIME_DIR);
+/** The cgroup path of a live process (Linux). */
+const cgroupOf = async (pid: number) => (await readFile(`/proc/${pid}/cgroup`, "utf8")).trim().split(":").at(-1)!;
 
 test("the owner's kill stops a running gate: cancelled, never passed, main unchanged, and the queue moves on", async () => {
   const f = await fixture();
@@ -503,9 +519,9 @@ test("the owner's kill stops a running gate: cancelled, never passed, main uncha
     const next = f.submit(await f.candidate("next.txt"));
     assert.deepEqual(f.queue.kill(), { status: "idle" }, "an idle runner has nothing to kill");
     f.queue.wake();
-    const [gatePid, childPid, toolPid] = await until(async () => {
+    const [gatePid, childPid, toolPid, scopedPid] = await until(async () => {
       const text = await readFile(pids, "utf8").catch(() => "");
-      return text ? JSON.parse(text) as [number, number, number] : undefined;
+      return text ? JSON.parse(text) as [number, number, number, number?] : undefined;
     });
     const outcome = f.queue.kill();
     assert.ok(outcome.status === "killed" && outcome.operation.id === killed, JSON.stringify(outcome));
@@ -517,11 +533,172 @@ test("the owner's kill stops a running gate: cancelled, never passed, main uncha
     assert.equal(alive(gatePid), false, "the gate process is gone");
     await until(() => alive(childPid) ? undefined : true, 5_000);
     // A systemd scope reaches the tool's own process group; a bare process group cannot.
-    if (process.platform === "linux" && process.env.XDG_RUNTIME_DIR) assert.equal(alive(toolPid), false, "the gate's detached tool is gone");
-    else process.kill(toolPid, "SIGKILL");
+    if (systemd) {
+      assert.equal(alive(toolPid), false, "the gate's detached tool is gone");
+      assert.equal(alive(scopedPid!), false, "the tool in the gate's own nested scope is gone");
+    } else process.kill(toolPid, "SIGKILL");
     assert.deepEqual(f.queue.kill(), { status: "idle" });
   } finally { await f.dispose(); }
 }, 120_000);
+
+test("without enforced combined limits the runner runs one operation at a time and refuses concurrent workers", async () => {
+  assert.equal(runnerWorkers({}, { combinedLimits: true }), 2);
+  assert.equal(runnerWorkers({ workers: 3 }, { combinedLimits: true }), 3);
+  assert.equal(runnerWorkers({}, {}), 1);
+  assert.equal(runnerWorkers({ workers: 1 }, { combinedLimits: false }), 1);
+  assert.throws(() => runnerWorkers({ workers: 2 }, {}), /2 workers require an executor with enforced combined resource limits/);
+  const f = await fixture(false, false, undefined, false, { other: true, combinedLimits: false });
+  try {
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    const other = f.submit(await f.candidate("other.txt", f.otherAuthor, "fixture/other"));
+    f.queue.wake();
+    await started(pids);
+    assert.equal(f.log.operation(other)!.status, "queued", "another repository's landing does not run beside it");
+    assert.equal(f.queue.kill(stuck).status, "killed");
+    await f.queue.idle();
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("without systemd the executor runs one command at a time, stops each command's group, and recovers a killed runner's group", async () => {
+  const home = await mkdtemp(join(tmpdir(), "runner-group-"));
+  let child: ReturnType<typeof spawn> | undefined;
+  let exited: Promise<unknown> | undefined;
+  try {
+    // No XDG_RUNTIME_DIR: the process-group executor, on every platform.
+    const executor = testExecutor({ env: {}, home });
+    assert.equal(executor.combinedLimits, undefined);
+    const spans = join(home, "spans.jsonl");
+    const span = `const fs=require("node:fs");const start=Date.now();setTimeout(()=>{fs.appendFileSync(${JSON.stringify(spans)},JSON.stringify([start,Date.now()])+"\\n")},300)`;
+    const request = { executable: process.execPath, args: ["-e", span], cwd: home, timeoutMs: 30_000, maxOutputBytes: 65_536 };
+    await Promise.all([executor.run(request), executor.run(request)]);
+    const [first, second] = (await readFile(spans, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as [number, number]);
+    assert.ok(second![0] >= first![1], `the second command started only after the first ended: ${JSON.stringify([first, second])}`);
+    // A command's own group is stopped after it, even when the command itself exits.
+    const pidFile = join(home, "member.pid");
+    const leaves = `const c=require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});require("node:fs").writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref()`;
+    await executor.run({ ...request, args: ["-e", leaves] });
+    const member = Number(await readFile(pidFile, "utf8"));
+    await until(() => alive(member) ? undefined : true, 5_000);
+    // A runner killed outright leaves its command's group; the next process with the same home stops it.
+    const pids = join(home, "pids.json");
+    await writeFile(join(home, "hang"), `${pids}\n`);
+    const driver = `
+      import { localExecutor } from ${JSON.stringify(new URL("../src/lib/runner-queue.ts", import.meta.url).href)};
+      localExecutor({ env: {}, home: ${JSON.stringify(home)} }).run({ executable: process.execPath, args: ["-e", ${JSON.stringify(gate)}], cwd: ${JSON.stringify(home)}, timeoutMs: 60_000, maxOutputBytes: 65_536 });
+      setInterval(() => {}, 1000);
+    `;
+    child = spawn(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", driver], { stdio: "ignore" });
+    exited = new Promise((resolve) => child!.once("exit", resolve));
+    const [gatePid, childPid, toolPid] = await until(async () => {
+      const text = await readFile(pids, "utf8").catch(() => "");
+      return text ? JSON.parse(text) as number[] : undefined;
+    });
+    child.kill("SIGKILL"); await exited;
+    assert.deepEqual([alive(gatePid!), alive(childPid!)], [true, true], "the killed runner's command outlives it");
+    await testExecutor({ env: {}, home }).recover!();
+    await until(() => alive(gatePid!) || alive(childPid!) ? undefined : true, 5_000);
+    assert.deepEqual(await readdir(join(home, "commands")), [], "recovery clears what it stopped");
+    // The tool that left the group is out of the fallback's reach, as documented.
+    process.kill(toolPid!, "SIGKILL");
+  } finally {
+    child?.kill("SIGKILL"); await exited;
+    await rm(home, { recursive: true, force: true });
+  }
+}, 120_000);
+
+test("a run whose processes cannot be shown stopped fails, and every later run waits until they stop", async () => {
+  const { settled, contained } = runContainment();
+  const failures = ["still running", "still running", null];
+  const stop = async () => failures.shift() ?? null;
+  await assert.rejects(contained("run-a", async () => "done", stop), /could not stop the processes of run-a/);
+  await assert.rejects(settled(), /earlier run \(run-a\) could not be stopped: still running/);
+  await settled();
+  assert.equal(await contained("run-b", async () => "done", async () => null), "done");
+  await assert.rejects(contained("run-c", async () => { throw new Error("gate failed"); }, async () => "stuck"), /gate failed/);
+  await assert.rejects(settled(), /run-c/);
+});
+
+(systemd ? test : test.skip)("each run's processes, nested scopes included, stay within the runner's slice and stop with the run", async () => {
+  const home = await mkdtemp(join(tmpdir(), "runner-slice-"));
+  const controller = new AbortController();
+  try {
+    const executor = testExecutor({ home });
+    const pids = join(home, "pids.json");
+    await writeFile(join(home, "hang"), `${pids}\n`);
+    const running = executor.run({ executable: "node", args: ["-e", gate], cwd: home, timeoutMs: 60_000, maxOutputBytes: 65_536, abortSignal: controller.signal });
+    const recorded = await until(async () => {
+      const text = await readFile(pids, "utf8").catch(() => "");
+      return text ? JSON.parse(text) as number[] : undefined;
+    });
+    assert.equal(recorded.length, 4, "the gate started a nested scope");
+    const ownSlice = await cgroupOf(recorded[0]!);
+    for (const pid of recorded) {
+      const cgroup = await cgroupOf(pid);
+      // The budget is the disposable test slice, or the enclosing runner command's slice when nested in one.
+      assert.ok(cgroup.includes(`/${process.env.SLIPJAY_SYSTEMD_SLICE ?? TEST_SLICE}/`), `${pid} is within the combined budget: ${cgroup}`);
+      assert.ok(cgroup.startsWith(ownSlice.slice(0, ownSlice.lastIndexOf("/"))), `${pid} is within its run's slice: ${cgroup}`);
+    }
+    controller.abort();
+    await running;
+    await until(() => recorded.some(alive) ? undefined : true, 10_000);
+  } finally { controller.abort(); await rm(home, { recursive: true, force: true }); }
+}, 120_000);
+
+(systemd ? test : test.skip)("after the runner is killed outright, the next process stops only the commands it left before reusing their checkout", async () => {
+  const f = await fixture(false, false, undefined, false, { durable: true });
+  const bystanderHome = await mkdtemp(join(tmpdir(), "runner-bystander-"));
+  const bystanderStop = new AbortController();
+  let child: ReturnType<typeof spawn> | undefined;
+  let exited: Promise<unknown> | undefined;
+  let stderr = "";
+  try {
+    // Another runner's command on the same host, which recovery must leave alone.
+    const bystanderPids = join(bystanderHome, "pids.json");
+    await writeFile(join(bystanderHome, "hang"), `${bystanderPids}\n`);
+    const bystander = testExecutor({ home: bystanderHome })
+      .run({ executable: "node", args: ["-e", gate], cwd: bystanderHome, timeoutMs: 120_000, maxOutputBytes: 65_536, abortSignal: bystanderStop.signal });
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    const driver = `
+      import { createRunnerQueue, localExecutor } from ${JSON.stringify(new URL("../src/lib/runner-queue.ts", import.meta.url).href)};
+      import { openOperationLog } from ${JSON.stringify(new URL("../src/lib/runner-log.ts", import.meta.url).href)};
+      const log = openOperationLog(${JSON.stringify(f.logPath)});
+      const queue = createRunnerQueue({ log, executor: localExecutor({ home: ${JSON.stringify(f.home)}, slice: ${JSON.stringify(TEST_SLICE)} }), home: ${JSON.stringify(f.home)},
+        config: { repos: { 'Fixture/Repo': { url: ${JSON.stringify(f.origin)} } }, jj: { 'user.name': 'Runner Identity', 'user.email': 'runner@example.com' } } });
+      queue.wake(); setInterval(() => {}, 1000);
+    `;
+    child = spawn(process.execPath, ["--experimental-transform-types", "--input-type=module", "-e", driver], { stdio: ["ignore", "ignore", "pipe"] });
+    child.stderr!.on("data", (data) => { stderr += data.toString(); });
+    exited = new Promise((resolve) => child!.once("exit", resolve));
+    const left = await until(async () => {
+      assert.equal(child!.exitCode, null, stderr);
+      const text = await readFile(pids, "utf8").catch(() => "");
+      return text ? JSON.parse(text) as number[] : undefined;
+    });
+    const others = await until(async () => {
+      const text = await readFile(bystanderPids, "utf8").catch(() => "");
+      return text ? JSON.parse(text) as number[] : undefined;
+    });
+    assert.equal(left.length, 4, "the gate started a nested scope");
+    child.kill("SIGKILL"); await exited;
+    // Nothing stopped the gate: the killed runner had no chance to.
+    assert.deepEqual(left.map(alive), [true, true, true, true], "the killed runner's commands outlive it");
+    await f.queue.recover();
+    assert.deepEqual(left.map(alive), [false, false, false, false], "recovery stopped every command the killed runner left");
+    assert.deepEqual(others.map(alive), [true, true, true, true], "another runner's commands are untouched");
+    assert.equal(f.result(stuck)?.type, "failed", JSON.stringify(f.result(stuck)));
+    assert.match(JSON.stringify(f.result(stuck)), /runner restarted/);
+    assert.equal((await f.land(f.submit(await f.candidate("after.txt"))))?.type, "landed", "the checkout is reused only after recovery");
+    bystanderStop.abort();
+    await bystander;
+    await until(() => others.some(alive) ? undefined : true, 10_000);
+  } finally {
+    child?.kill("SIGKILL"); await exited; bystanderStop.abort();
+    await rm(bystanderHome, { recursive: true, force: true }); await f.dispose();
+  }
+}, 180_000);
 
 test("a kill past verification is refused and the landing completes", async () => {
   const f = await fixture(true);
@@ -2139,7 +2316,7 @@ test("depth-two actual runner process loss retains durable attempts and recovers
       import { createRunnerQueue, localExecutor } from ${JSON.stringify(new URL("../src/lib/runner-queue.ts", import.meta.url).href)};
       import { openOperationLog } from ${JSON.stringify(new URL("../src/lib/runner-log.ts", import.meta.url).href)};
       import { existsSync } from 'node:fs'; import { join } from 'node:path';
-      const local = localExecutor();
+      const local = localExecutor({ slice: ${JSON.stringify(TEST_SLICE)} });
       const executor = { host: local.host, combinedLimits: true, run: (request) => {
         // The worker loses its process while awaiting its external executor: no child gate is orphaned by this fixture.
         if (existsSync(join(request.cwd, 'a.txt')) && !existsSync(join(request.cwd, 'b.txt')))

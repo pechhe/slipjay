@@ -339,6 +339,12 @@ export interface Executor {
   /** Every run and descendant joins the same enforced host budget; failure refuses execution. */
   readonly combinedLimits?: boolean;
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
+  /**
+   * Stop every command an earlier process of this executor's owner left running, before anything
+   * reuses their checkouts; throws when they cannot be shown stopped. Absent when runs cannot outlive
+   * their process's knowledge of them.
+   */
+  recover?(): Promise<void>;
 }
 
 /** Runner-side configuration: `~/.slipjay/runner/config.json`. The token comes from `SLIPJAY_RUNNER_TOKEN`. */
@@ -361,6 +367,12 @@ export type KillOutcome =
 export const RUNNER_DEFAULT_WORKERS = 2;
 /** The systemd slice every run's scope joins, so one set of limits covers every gate, deploy and their children. */
 export const RUNNER_SLICE = "slipjay.slice";
+/**
+ * The systemd user slice a runner command and its processes belong to, set in its environment. A
+ * command that starts a systemd user scope of its own passes it as `--slice` (or a child slice of
+ * it), so that work stays within the run's limits and is stopped with it.
+ */
+export const SYSTEMD_SLICE_ENV = "SLIPJAY_SYSTEMD_SLICE";
 /** The slice's limits unless the config sets `limits`: systemd resource-control values. */
 export const RUNNER_DEFAULT_LIMITS: Readonly<Required<RunnerLimits>> = { memoryHigh: "40G", memoryMax: "48G", cpuQuota: "1400%", tasksMax: 4096 };
 export type RunnerLimits = { memoryHigh?: string; memoryMax?: string; cpuQuota?: string; tasksMax?: number };

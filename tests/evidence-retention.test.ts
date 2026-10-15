@@ -13,6 +13,7 @@ import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import { retainSubmissionSource, submissionStorePath } from "../src/lib/submission-source.ts";
 import type { OperationLog } from "../src/lib/runner-contract.ts";
 import { jj, project } from "./support/workspace-project.ts";
+import { testExecutor } from "./support/executor.ts";
 
 const DAY = 24 * 60 * 60 * 1000;
 const later = (days: number) => new Date(Date.now() + days * DAY);
@@ -27,7 +28,7 @@ async function failedAttempt(log: OperationLog, operationId: string, f: Awaited<
   execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "--force", f.remote, `${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
   const request = { repo: "owner/repo", changeId, commitId, bookmark, submittedBy: "fixture", requestId: randomUUID() };
   log.append(operationId, { type: "submitted", ...request });
-  log.append(operationId, await retainSubmissionSource({ home: f.home, operationId, request, url: f.remote, executor: localExecutor() }));
+  log.append(operationId, await retainSubmissionSource({ home: f.home, operationId, request, url: f.remote, executor: testExecutor() }));
   const artifact = await retainCommandArtifact({ home: f.home, operationId, runId: "run", request: { executable: "bun", args: ["test"], cwd: f.home, timeoutMs: 1000, maxOutputBytes: 1000 },
     result: { stdout: "1 failed", stderr: "", stdoutTruncated: false, stderrTruncated: false, finishedAt: new Date().toISOString(), exitCode: 1, signal: null, timedOut: false, cancelled: false, outputSha256: "x" } });
   log.append(operationId, { type: "run_started", runId: "run", command: "bun test", host: "fixture", timeoutMs: 1000, purpose: "gate" });
@@ -61,7 +62,7 @@ test("retained evidence expires on its documented schedule, leaves ledger record
 
     const h = createRunnerHandler({ log, token: "t", runnerName: "fixture", readLog: async () => "", onSubmitted: () => {}, kill: () => ({ status: "idle" }), subscribe: log.subscribe });
     const get = (path: string) => h(new Request(`http://runner/v1/operations/${path}`, { headers: { authorization: "Bearer t" } }));
-    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: localExecutor(), now: later(31) }), ["op_failed"]);
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: testExecutor(), now: later(31) }), ["op_failed"]);
     assert.doesNotMatch(refs(f.home), new RegExp(log.events({ operationId: "op_failed" }).flatMap((row) => row.event.type === "source_retained" ? [row.event.sourceRef] : [])[0]!));
     assert.equal((await files(join(f.home, "submissions"))).length, 1, "only the unconfirmed attempt's manifest remains");
     assert.equal((await files(join(f.home, "command-artifacts"))).length, 1);
@@ -74,7 +75,7 @@ test("retained evidence expires on its documented schedule, leaves ledger record
       assert.equal(response.status, 410, path);
       assert.match((await response.json() as { error: string }).error, /expired under the runner's unadopted retention policy/);
     }
-    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: localExecutor(), now: later(400) }), [], "expiry is recorded once");
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: testExecutor(), now: later(400) }), [], "expiry is recorded once");
   } finally { log.close(); await f.dispose(); }
 }, 120_000);
 
@@ -101,7 +102,7 @@ test("a repair claim admitted during a retention pass keeps its evidence, and a 
     await failedAttempt(log, "op_first", f);
     jj(f.repo, ["new", "main"]);
     const second = await failedAttempt(log, "op_second", f);
-    const real = localExecutor();
+    const real = testExecutor();
     let first = true;
     const executor = { ...real, run: async (request: Parameters<typeof real.run>[0]) => {
       if (first && request.args.includes("update-ref")) {

@@ -8,6 +8,7 @@ import { retainSubmissionSource, importSubmissionSource, readSubmissionManifest 
 import { localExecutor } from "../src/lib/runner-queue.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import { jj, project } from "./support/workspace-project.ts";
+import { testExecutor } from "./support/executor.ts";
 
 async function sourceFixture() {
   const f = await project();
@@ -28,7 +29,7 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
     const operationId = "retained-source";
     const request = { ...f.request, handoff: { version: 1 as const, source: f.request.commitId, intent: "Repair without author chat",
       scope: ["retained.txt"], spec: null, helpers: [], checks: [], reviews: [], toolchain: [], gaps: ["APP_SECRET=do-not-retain"] } };
-    const input = { home: f.home, operationId, request, url: f.remote, executor: localExecutor() };
+    const input = { home: f.home, operationId, request, url: f.remote, executor: testExecutor() };
     const retained = await retainSubmissionSource(input);
     assert.equal(retained.handoffComplete, false);
     assert.deepEqual(await retainSubmissionSource(input), retained);
@@ -61,7 +62,7 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
 test("retention rejects a moved candidate before recording a manifest", async () => {
   const f = await sourceFixture();
   try {
-    await assert.rejects(retainSubmissionSource({ home: f.home, operationId: "wrong-source", request: { ...f.request, commitId: "f".repeat(40) }, url: f.remote, executor: localExecutor() }), /differs/);
+    await assert.rejects(retainSubmissionSource({ home: f.home, operationId: "wrong-source", request: { ...f.request, commitId: "f".repeat(40) }, url: f.remote, executor: testExecutor() }), /differs/);
     assert.deepEqual(await readdir(join(f.home, "submissions")), []);
   } finally { await f.dispose(); }
 }, 120_000);

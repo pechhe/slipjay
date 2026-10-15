@@ -30,6 +30,8 @@ export type BoundedProcessRequest = {
   fullStdoutHashPrefix?: string | Buffer;
   /** macOS seatbelt profile applied by the host process broker/local runner. */
   sandboxProfile?: string;
+  /** Called with the pid of a locally spawned command, which leads its own process group. */
+  onSpawn?: (pid: number) => void;
 };
 
 export type BoundedProcessResult = BoundedProcessOutput & {
@@ -46,7 +48,7 @@ export type BoundedProcessResult = BoundedProcessOutput & {
 };
 
 /** A serialisable bounded-process request as a host broker receives it. */
-export type ProcessBrokerRequest = Omit<BoundedProcessRequest, "args" | "env" | "input" | "fullStdoutHashPrefix" | "redactOutput" | "abortSignal" | "maxStoredOutputBytes"> & {
+export type ProcessBrokerRequest = Omit<BoundedProcessRequest, "args" | "env" | "input" | "fullStdoutHashPrefix" | "redactOutput" | "abortSignal" | "maxStoredOutputBytes" | "onSpawn"> & {
   args: string[];
   env: Record<string, string>;
   maxOutputBytesPerStream: number;
@@ -189,6 +191,7 @@ export function runBoundedProcess(request: BoundedProcessRequest): Promise<Bound
         });
         child.stderr?.on("data", (chunk: Buffer) => { stderr.add(chunk); stderrDiagnostics?.add(chunk); });
         child.stdin?.on("error", () => {});
+        if (child.pid !== undefined) request.onSpawn?.(child.pid);
         return child;
       },
       catch: (cause) => new ProcessSpawnError({ cause })

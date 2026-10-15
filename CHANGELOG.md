@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Contain nested work and recover it after a crash (#63, #55):** each runner
+  command runs in a systemd slice of its own beneath one named for the runner home,
+  named to the command in `SLIPJAY_SYSTEMD_SLICE` so nested scopes (YardSmith's
+  heavy-check wrapper) can join it. Kill and timeout stop the whole slice, and a
+  restarted runner stops whatever its killed predecessor left before reusing any
+  checkout, and a run that cannot be shown stopped blocks the next command. Without a
+  systemd user manager the runner runs one operation and one command at a time,
+  refuses `workers` above 1, and records each command's process group under the runner
+  home so the next start can stop it. A SlipJay command nested in another nests its
+  slices and leaves the outer limits alone; tests use a disposable budget slice.
+
 - **Keep retained merges intact (#65, #55):** source preparation assembles the
   feature's first-parent changes without copying or flattening merged-in history.
   Both verification depths publish the preserved merge against their exact base;

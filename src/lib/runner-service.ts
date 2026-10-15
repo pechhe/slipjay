@@ -11,7 +11,7 @@ import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProb
 import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
-import { createRunnerQueue, localExecutor } from "./runner-queue.ts";
+import { createRunnerQueue, localExecutor, runnerWorkers } from "./runner-queue.ts";
 
 /** The runner's state directory: config, operation log, run logs and warm checkouts. */
 export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");
@@ -30,8 +30,8 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const problem = runnerConfigProblem(config);
   if (problem) throw new Error(`${problem}; rerun scripts/setup-runner.sh or add it to ${join(home, "config.json")}`);
   mkdirSync(home, { recursive: true });
-  const log = openOperationLog(join(home, "operations.sqlite"), { ...config.workers === undefined ? {} : { workers: config.workers }, lane: (repo) => repositoryLane(config, repo) });
-  const executor = localExecutor(config.name ?? hostname(), env, config.limits);
+  const executor = localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
+  const log = openOperationLog(join(home, "operations.sqlite"), { workers: runnerWorkers(config, executor), lane: (repo) => repositoryLane(config, repo) });
   const queue = createRunnerQueue({
     log, home, config, executor,
     environment: () => env,

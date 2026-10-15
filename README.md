@@ -208,7 +208,10 @@ the runner's `limits` bound concurrent runs together.
 
 - **Workers.** Different repositories share no checkout, branch, reset target or
   environment, so their queues run at once: at most `workers` of them (runner config,
-  default 2; `1` is a single queue for every repository). Repositories whose gates do
+  default 2; `1` is a single queue for every repository). Without a systemd user
+  manager there is no combined budget, so the runner admits one operation at a time,
+  runs every command (deploys and concurrent verification stages included) one at a
+  time, and refuses to start with `workers` above 1. Repositories whose gates do
   share external state (a database, a deploy environment, fixed ports) must share a
   queue: give them the same `lane` in the runner config's `repos` entries. When every
   worker is busy, the next operation of an idle queue waits, oldest first, and names
@@ -221,7 +224,11 @@ the runner's `limits` bound concurrent runs together.
   ceiling, `48G`), `cpuQuota` (`1400%`) and `tasksMax` (`4096`). The runner sets them
   as runtime properties at its first run after each start; if systemd refuses, the
   run fails before its command starts. Dependency installation and post-integration
-  commands use the same executor and budget as gates and deploys.
+  commands use the same executor and budget as gates and deploys. Each run has a
+  slice of its own beneath the runner's, named to its command in
+  `SLIPJAY_SYSTEMD_SLICE`: a command that starts a systemd user scope of its own
+  (such as a memory-capped check) must pass `--slice="$SLIPJAY_SYSTEMD_SLICE"`, or that
+  scope leaves the runner's limits and outlives a kill of the run.
 
 ### Optional depth-two verification
 
@@ -327,11 +334,17 @@ and held state through the existing recovery path.
   runner take no next operation: running ones finish, and queued ones show
   `paused` as their stage until `slipjay runner resume`, then proceed in order. The
   pause is recorded in the operation log, so it survives a restart. Each run's
-  commands go in their own systemd user scope when the runner has a user manager
-  (`XDG_RUNTIME_DIR` set, as under the setup's unit), so a kill also reaches
-  processes a gate tool started in a separate process group; the scope is cleared
-  after every run, so a gate cannot leave processes behind. Elsewhere, such as macOS,
-  only the run's process group is killed.
+  commands go in their own systemd user slice when the runner has a user manager
+  (`XDG_RUNTIME_DIR` set, as under the setup's unit), so a kill or timeout also reaches
+  processes a gate tool started in a separate process group or scope within it; the
+  slice is cleared after every run, so a gate cannot leave processes behind. The
+  slices sit beneath one named for the runner's home, so a runner that was killed
+  outright leaves its commands where its next start finds them: recovery stops them
+  before it touches a checkout, and does not start if it cannot. A run whose
+  processes cannot be shown stopped makes every later command fail until they are.
+  Elsewhere, such as macOS, only the run's process group is killed: after every
+  command, and at the next start for a command the runner home records as running when
+  the runner was killed. Tools that leave the process group are out of reach there.
 - **A release that breaks the runner.** The runner runs the SlipJay version
   installed on its host, so a broken release cannot land its own fix. Reinstall the
   previous tag there (`bun add -g github:pechhe/slipjay#v<previous>`), restart the
