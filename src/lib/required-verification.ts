@@ -29,6 +29,7 @@ export type RequiredVerificationFailureEvidence = {
   stdoutTailTruncated: boolean;
   stderrTailTruncated: boolean;
   outputSha256: string;
+  diagnosticCapture: "selected" | "incomplete" | "unavailable";
   finishedAt: string;
   error?: string;
 };
@@ -70,6 +71,7 @@ function failureEvidence(result: BoundedProcessResult, checkIndex: number, comma
     stdoutTailTruncated: result.stdoutTruncated || Buffer.byteLength(stdoutTail, "utf8") < Buffer.byteLength(stdout, "utf8"),
     stderrTailTruncated: result.stderrTruncated || Buffer.byteLength(stderrTail, "utf8") < Buffer.byteLength(stderr, "utf8"),
     outputSha256: result.outputSha256, finishedAt: result.finishedAt,
+    diagnosticCapture: result.diagnosticOutput ? result.diagnosticOutput.incomplete ? "incomplete" : "selected" : "unavailable",
     ...(result.error ? { error: truncateUtf8(redactVerificationOutput(result.error, root), COMMAND_BYTES) } : {}),
   };
 }
@@ -118,13 +120,16 @@ export async function runRequiredVerification(input: {
     onProgress(`[verify ${index + 1}/${checks.length}] ${command}`);
     const started = Date.now();
     const result = await run({ executable: check.executable, args, cwd: checkCwd,
-      timeoutMs: CHECK_TIMEOUT_MS, maxOutputBytes: OUTPUT_BYTES, env: environment });
+      timeoutMs: CHECK_TIMEOUT_MS, maxOutputBytes: OUTPUT_BYTES, env: environment, captureDiagnostics: true });
     if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error) {
       const accepted = await acceptFailure?.({ ...check, args }, result, environment);
       if (accepted) return { passed: accepted };
-      throw new RequiredVerificationError(failureEvidence(result, index, command, root), summarizeVerificationFailure({
-        stdout: redactVerificationOutput(result.stdout, root), stderr: redactVerificationOutput(result.stderr, root),
-        code: result.exitCode, signal: result.signal, timedOut: result.timedOut }));
+      const evidence = failureEvidence(result, index, command, root);
+      const summary = summarizeVerificationFailure({
+        stdout: redactVerificationOutput(`${result.diagnosticOutput?.stdout ?? ""}\n${result.stdout}`, root),
+        stderr: redactVerificationOutput(`${result.diagnosticOutput?.stderr ?? ""}\n${result.stderr}`, root),
+        code: result.exitCode, signal: result.signal, timedOut: result.timedOut });
+      throw new RequiredVerificationError(evidence, `${summary}\nDiagnostic capture: ${evidence.diagnosticCapture}; selected diagnostics and bounded output only.`);
     }
     onProgress(`[verify ${index + 1}/${checks.length}] passed in ${formatDuration(Date.now() - started)}`);
     return { passed: command };

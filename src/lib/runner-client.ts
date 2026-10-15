@@ -262,10 +262,10 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
   }
 }
 
-/** How to read an operation's full run log from any machine with the runner location. */
+/** How to read retained operation events from any machine with the runner location. */
 export const runLogCommand = (operationId: string): string => `slipjay runner log ${operationId}`;
 
-/** The full run log of one operation. */
+/** Retained events of one operation, including bounded failure diagnostics. */
 export async function readRunLog(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
   const token = await runnerToken(env);
   const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });

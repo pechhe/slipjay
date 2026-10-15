@@ -154,7 +154,9 @@ export function createRunnerQueue(input: {
   function runFinished(runId: string, result: BoundedProcessResult, started: number, request: BoundedProcessRequest, privateOutput = false): OperationEvent {
     return { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
       durationMs: Date.now() - started, outputBytes: Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
-      killed: result.cancelled, ...(privateOutput ? {} : parseFailureOutput(redactMigrationOutput(`${result.stdout}\n${result.stderr}`, request.cwd, request.env))) };
+      killed: result.cancelled, ...(privateOutput ? {} : { diagnosticCapture: result.diagnosticOutput ? result.diagnosticOutput.incomplete ? "incomplete" : "selected" : "unavailable",
+        ...parseFailureOutput(redactMigrationOutput(
+        `${result.diagnosticOutput?.stdout ?? ""}\n${result.diagnosticOutput?.stderr ?? ""}\n${result.stdout}\n${result.stderr}`, request.cwd, request.env)) }) };
   }
   const repoCheckout = (repo: string) => join(home, "repos", repo);
   const checkoutPath = (operation: Operation) => operation.kind === "release" ? join(home, "releases", operation.repo) : repoCheckout(operation.repo);

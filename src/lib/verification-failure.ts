@@ -2,6 +2,8 @@
 // act on without rerunning the check: which tests failed, the first error, whether
 // it timed out, the first lint/type diagnostics, and a short output tail.
 
+import { StringDecoder } from "node:string_decoder";
+
 type VerificationFailureResult = {
   stdout?: string;
   stderr?: string;
@@ -82,7 +84,8 @@ function firstError(lines: string[]): string[] {
 export function diagnostics(lines: string[], limit = MAX_DIAGNOSTICS): string[] {
   const found: string[] = [];
   for (const [index, line] of lines.entries()) {
-    if (!DIAGNOSTIC.test(line) || SCRIPT_EXIT.test(line.trim()) || /^\s*(?:Tests?|Test Files)\b/.test(line)) continue;
+    const location = POSITION.test(line) && /^\s*(?:❯|at\b|test at\b)/.test(line);
+    if ((!DIAGNOSTIC.test(line) && !location) || SCRIPT_EXIT.test(line.trim()) || /^\s*(?:Tests?|Test Files)\b/.test(line)) continue;
     const previous = lines[index - 1]?.trim() ?? "";
     const withPosition = !POSITION.test(line) && POSITION.test(previous) ? `${previous} ${line.trim()}` : line.trim();
     found.push(withPosition);
@@ -94,7 +97,7 @@ export function diagnostics(lines: string[], limit = MAX_DIAGNOSTICS): string[] 
 /** "timeout", "assertion" (both when both occurred), else "diagnostics" or "error". */
 function failureKind(result: VerificationFailureResult, lines: string[], tests: string[]): string {
   const kinds: string[] = [];
-  if (result.timedOut || result.signal === "SIGTERM" || lines.some((line) => TIMEOUT.test(line))) kinds.push("timeout");
+  if (result.timedOut || lines.some((line) => TIMEOUT.test(line))) kinds.push("timeout");
   if (lines.some((line) => ASSERTION.test(line.trim()))) kinds.push("assertion");
   if (kinds.length) return kinds.join(" and ");
   if (!tests.length && diagnostics(lines).length && !lines.some((line) => /^\s*Tests?\b.*\bfailed\b/.test(line))) return "diagnostics";
@@ -120,6 +123,8 @@ export function summarizeVerificationFailure(result: VerificationFailureResult):
     const found = diagnostics(lines);
     if (found.length) sections.push(["First diagnostics:", ...found.map((line) => `  ${clip(line)}`)].join("\n"));
   }
+  const locations = lines.filter((line) => POSITION.test(line) && /^\s*(?:❯|at\b|test at\b)/.test(line));
+  if (locations.length) sections.push(["Locations:", ...[...new Set(locations)].slice(0, MAX_DIAGNOSTICS).map((line) => `  ${clip(line.trim())}`)].join("\n"));
   if (lines.length) sections.push([`Output tail (last ${Math.min(TAIL_LINES, lines.length)} of ${lines.length} lines):`,
     ...lines.slice(-TAIL_LINES).map(clip)].join("\n"));
   const summary = sections.join("\n");
@@ -142,5 +147,78 @@ export function redactVerificationOutput(value: string, checkoutPath?: string): 
   redacted = redacted.replace(/\b(?:cookie|set-cookie|session(?:id|_id)?|csrf(?:token|_token)?)\s*[:=]\s*[^\s;]+/gi, (match: string) => `${match.split(/[:=]/, 1)[0]}=[REDACTED]`);
   redacted = redacted.replace(/\b([A-Z0-9]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY)[A-Z0-9_]*)\s*[:=]\s*["']?[^\s"'&,;]+["']?/gi, "$1=[REDACTED]");
   return redacted;
+}
+
+/** Bounded diagnostic lines selected before the process output's head/tail collector drops them.
+ * A complete line is redacted before selection; split tokens are never persisted piecemeal.
+ * Oversize lines and private-key blocks are discarded rather than retaining partial secrets.
+ */
+export function verificationDiagnosticCollector(redact: (value: string) => string = redactVerificationOutput): {
+  add(chunk: Buffer): void;
+  finish(): { output: string; incomplete: boolean };
+} {
+  const decoder = new StringDecoder("utf8");
+  const limit = 16_384;
+  const retained: string[] = [];
+  let pending = "";
+  let dropping = false;
+  let privateKey = false;
+  let incomplete = false;
+  let bytes = 0;
+  let context = 0;
+  let previous = "";
+  let testFile = "";
+  function retain(line: string): void {
+    const size = Buffer.byteLength(line) + 1;
+    if (bytes + size > limit) { incomplete = true; return; }
+    retained.push(line);
+    bytes += size;
+  }
+  function line(raw: string): void {
+    if (/-----BEGIN [^-]*PRIVATE KEY-----/i.test(raw)) privateKey = true;
+    if (privateKey) {
+      if (/-----END [^-]*PRIVATE KEY-----/i.test(raw)) privateKey = false;
+      incomplete = true;
+      previous = "";
+      context = 0;
+      return;
+    }
+    const value = redactVerificationOutput(redact(raw)).replace(ANSI_ESCAPE, "").trimEnd();
+    const trimmed = value.trim();
+    if (/^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(trimmed)) testFile = trimmed;
+    const relevant = ERROR_START.test(trimmed) || DIAGNOSTIC.test(value) || ASSERTION.test(trimmed) || TIMEOUT.test(value)
+      || /^(?:FAIL\s|[×✖]\s|\(fail\)\s|not ok \d+|test at |error: script |\$ )/.test(trimmed);
+    if (relevant) {
+      if (testFile && context === 0 && testFile !== previous.trim()) retain(testFile);
+      if (previous && context === 0 && (POSITION.test(previous) || /\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(previous.trim()))) retain(previous);
+      retain(value);
+      context = 8;
+    } else if (context > 0) { retain(value); context -= 1; }
+    previous = value;
+  }
+  function consume(value: string): void {
+    for (const part of value.split(/(?<=\n)/)) {
+      const ended = part.endsWith("\n");
+      if (!dropping) {
+        if (pending.length + part.length > limit) {
+          // Do not keep a clipped line: it could cut through a secret value.
+          pending = ""; dropping = true; incomplete = true;
+        } else pending += part;
+      }
+      if (ended) {
+        if (!dropping) line(pending.replace(/\r?\n$/, ""));
+        pending = ""; dropping = false;
+      }
+    }
+  }
+  return {
+    add(chunk) { consume(decoder.write(chunk)); },
+    finish() {
+      consume(decoder.end());
+      if (pending && !dropping) line(pending);
+      pending = "";
+      return { output: retained.join("\n"), incomplete };
+    },
+  };
 }
 

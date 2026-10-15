@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { platform } from "node:os";
 import { Cause, Data, Deferred, Effect, Exit, Option } from "effect";
 import { truncateUtf8 } from "./utf8.ts";
+import { verificationDiagnosticCollector } from "./verification-failure.ts";
 
 export type BoundedProcessOutput = {
   stdout: string;
@@ -23,6 +24,8 @@ export type BoundedProcessRequest = {
   input?: string | Buffer;
   env?: NodeJS.ProcessEnv;
   redactOutput?: (value: string) => string;
+  /** Select bounded verification diagnostics before head/tail truncation (local capture only). */
+  captureDiagnostics?: boolean;
   abortSignal?: AbortSignal;
   fullStdoutHashPrefix?: string | Buffer;
   /** macOS seatbelt profile applied by the host process broker/local runner. */
@@ -37,6 +40,8 @@ export type BoundedProcessResult = BoundedProcessOutput & {
   cancelled: boolean;
   outputSha256: string;
   fullStdoutSha256?: string;
+  /** Selected redacted lines from the untruncated local streams; absent for older/broker capture. */
+  diagnosticOutput?: { stdout: string; stderr: string; incomplete: boolean };
   error?: string;
 };
 
@@ -155,6 +160,8 @@ export function runBoundedProcess(request: BoundedProcessRequest): Promise<Bound
   const fullStdoutHash = request.fullStdoutHashPrefix === undefined ? null : createHash("sha256").update(request.fullStdoutHashPrefix);
   const stdout = boundedOutput(Math.min(maxOutputBytesPerStream, Math.floor(maxOutputBytes / 2)));
   const stderr = boundedOutput(Math.min(maxOutputBytesPerStream, maxOutputBytes - Math.floor(maxOutputBytes / 2)));
+  const stdoutDiagnostics = request.captureDiagnostics ? verificationDiagnosticCollector(request.redactOutput) : undefined;
+  const stderrDiagnostics = request.captureDiagnostics ? verificationDiagnosticCollector(request.redactOutput) : undefined;
   let closed: { exitCode: number | null; signal: NodeJS.Signals | null } | undefined;
   const lifetime = Effect.scoped(Effect.gen(function* () {
     const completion = yield* Deferred.make<void, ProcessSpawnError>();
@@ -178,8 +185,9 @@ export function runBoundedProcess(request: BoundedProcessRequest): Promise<Bound
         child.stdout?.on("data", (chunk: Buffer) => {
           fullStdoutHash?.update(chunk);
           stdout.add(chunk);
+          stdoutDiagnostics?.add(chunk);
         });
-        child.stderr?.on("data", (chunk: Buffer) => stderr.add(chunk));
+        child.stderr?.on("data", (chunk: Buffer) => { stderr.add(chunk); stderrDiagnostics?.add(chunk); });
         child.stdin?.on("error", () => {});
         return child;
       },
@@ -205,8 +213,11 @@ export function runBoundedProcess(request: BoundedProcessRequest): Promise<Bound
     }
     const error = Option.isSome(failure) && failure.value._tag === "ProcessSpawnError" ? redactError(failure.value.cause, request.redactOutput) : undefined;
     const output = finalizeOutput(stdout, stderr, maxStoredOutputBytes, request.redactOutput);
+    const out = stdoutDiagnostics?.finish();
+    const err = stderrDiagnostics?.finish();
     return {
       ...output,
+      ...(out && err ? { diagnosticOutput: { stdout: out.output, stderr: err.output, incomplete: out.incomplete || err.incomplete } } : {}),
       finishedAt: new Date().toISOString(),
       exitCode: error ? null : closed?.exitCode ?? null,
       signal: closed?.signal ?? null,

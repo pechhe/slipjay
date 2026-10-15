@@ -350,6 +350,33 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("middle failure diagnostics survive queue events and durable log retrieval", async () => {
+  const f = await fixture(false, false, undefined, false, { durable: true, prefixGate: () =>
+    `const fs=require('node:fs'); const noise='ordinary progress\\n'.repeat(7000);
+    fs.writeSync(2,noise); fs.writeSync(2,' FAIL tests/hidden.test.ts > rejects stale source\\nAssertionError: stale source was accepted\\n ❯ tests/hidden.test.ts:27:3\\n');
+    fs.writeSync(2,noise); process.exitCode=1;` });
+  try {
+    const before = f.main();
+    const id = f.submit(await f.candidate("diagnostic.txt"));
+    const result = await f.land(id);
+    assert.ok(result?.type === "failed", JSON.stringify(result));
+    assert.match(result.reason, /tests\/hidden.test.ts > rejects stale source/);
+    assert.match(result.reason, /AssertionError: stale source was accepted/);
+    const run = f.log.operation(id)!.runs.at(-1)!;
+    assert.deepEqual(run.failingTests, ["tests/hidden.test.ts > rejects stale source"]);
+    assert.ok(run.diagnostics?.some((line) => line.includes("tests/hidden.test.ts:27:3")));
+    assert.equal(run.diagnosticCapture, "selected");
+    assert.equal(f.main(), before);
+    const reopened = openOperationLog(f.logPath);
+    try {
+      assert.deepEqual(reopened.operation(id)!.runs.at(-1)!.failingTests, run.failingTests);
+      assert.match(JSON.stringify(reopened.events({ operationId: id })), /stale source was accepted/);
+    } finally { reopened.close(); }
+    const retrieved = await f.queue.readLog(id);
+    assert.match(retrieved!, /tests\/hidden.test.ts:27:3/);
+  } finally { await f.dispose(); }
+}, 120_000);
+
 /** Resolves once `check` holds, polling; fails after `timeoutMs`. */
 async function until<T>(check: () => Promise<T | undefined> | T | undefined, timeoutMs = 60_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;

@@ -133,7 +133,7 @@ export type OperationEvent =
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
   | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number }
-  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean }
+  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable" }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
@@ -162,7 +162,7 @@ export type StoredEvent = { seq: number; operationId: string; at: string; event:
 /** One executed command of an operation, projected from its run events. */
 export type RunRecord = {
   runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number;
-  finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean;
+  finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable";
 };
 
 /** Event types that close an operation. */
@@ -274,7 +274,7 @@ export type SubmitResponse = { operation: Operation; reattached: boolean; supers
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,
  *                                                 replaying after `seq`, then live; ends after the terminal event
- * - GET  /v1/operations/:id/log                 → `text/plain` full run log
+ * - GET  /v1/operations/:id/log                 → `text/plain` retained operation events (not complete process output)
  * - POST /v1/operations/:id/cancel              → `{ operation }`; only a queued operation can be cancelled (else 409)
  * - GET  /v1/changes/:changeId?repo=<owner/name> → `{ operations: Operation[] }` newest first
  * - POST /v1/runner/kill                         `{ by }` → `{ operation }`: the running operation as the kill

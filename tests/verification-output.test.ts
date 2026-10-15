@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { summarizeVerificationFailure } from "../src/lib/verification-failure.ts";
+import { summarizeVerificationFailure, verificationDiagnosticCollector } from "../src/lib/verification-failure.ts";
 
 const section = (summary: string, heading: string) => {
   const lines = summary.split("\n");
@@ -138,4 +138,41 @@ test("the summary stays bounded for huge outputs", () => {
   assert.ok(summary.length <= 6_000);
   assert.match(summary, /Failing tests \(500\):/);
   assert.match(summary, /… 490 more/);
+});
+
+test("SIGTERM alone does not diagnose a timeout", () => {
+  assert.match(summarizeVerificationFailure({ signal: "SIGTERM", stderr: "stopped externally" }), /^Failure: error \(signal SIGTERM\)$/m);
+  assert.match(summarizeVerificationFailure({ signal: "SIGTERM", timedOut: true }), /^Failure: timeout \(signal SIGTERM\)$/m);
+});
+
+test("streaming diagnostic selection redacts split secrets, skips private keys and retains nearby file context", () => {
+  const collector = verificationDiagnosticCollector();
+  const secret = "ghp_" + "q".repeat(30);
+  for (const part of ["noise\nsrc/View.svelte:4:2\nError: Authorization: Bear", `er ${secret.slice(0, 10)}`, `${secret.slice(10)}\n`,
+    "-----BEGIN PRIVATE KEY-----\nError: private material\n-----END PRIVATE KEY-----\n",
+    "Error: useful ünicode diagnostic\n"]) collector.add(Buffer.from(part));
+  const result = collector.finish();
+  assert.match(result.output, /src\/View.svelte:4:2\nError: Authorization: Bearer \[REDACTED\]/);
+  assert.match(result.output, /useful ünicode diagnostic/);
+  assert.ok(!result.output.includes(secret));
+  assert.ok(!result.output.includes("private material"));
+  assert.equal(result.incomplete, true);
+});
+
+test("diagnostic selection bounds oversized lines and reports exhausted capacity", () => {
+  const collector = verificationDiagnosticCollector();
+  collector.add(Buffer.from(`Error: SECRET_TOKEN=${"x".repeat(20_000)}\nError: retained afterwards\n`));
+  for (let i = 0; i < 1000; i++) collector.add(Buffer.from(`Error: distinct diagnostic ${i}\n`));
+  const result = collector.finish();
+  assert.ok(Buffer.byteLength(result.output) <= 16_384);
+  assert.ok(!result.output.includes("SECRET_TOKEN"));
+  assert.match(result.output, /retained afterwards/);
+  assert.equal(result.incomplete, true);
+});
+
+test("streaming selection preserves a Bun filename across source and progress noise", () => {
+  const collector = verificationDiagnosticCollector();
+  collector.add(Buffer.from(`tests/bun.test.ts:\n${"source context\\n".repeat(40)}\n(fail) rejects stale source [0.3ms]\n`));
+  const summary = summarizeVerificationFailure({ stderr: collector.finish().output, code: 1 });
+  assert.deepEqual(section(summary, "Failing tests"), ["tests/bun.test.ts > rejects stale source"]);
 });
