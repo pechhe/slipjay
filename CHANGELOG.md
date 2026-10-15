@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Keep retained merges intact (#65, #55):** source preparation assembles the
+  feature's first-parent changes without copying or flattening merged-in history.
+  Both verification depths publish the preserved merge against their exact base;
+  private artifacts accept side parents only from the submitted source ancestry.
+
 - **Preserve repair ownership across repository casing (#64, #55):** equivalent
   repository names resolve to one authority before retained-source admission,
   including the claim recheck and request replay.

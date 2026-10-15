@@ -86,3 +86,29 @@ test("exact-parent publication rejects stale remote tracking even when the updat
     assert.equal(git("--git-dir", f.remote, "rev-parse", "main"), b);
   } finally { await f.dispose(); }
 }, 120_000);
+
+test("merge artifact retention requires its exact first parent and submitted side ancestry", async () => {
+  const f = await project();
+  try {
+    const commit = (revision: string) => jj(f.repo, ["log", "-r", revision, "--no-graph", "-T", "commit_id"]);
+    const base = commit("main");
+    jj(f.repo, ["new", base, "-m", "Upstream"]);
+    await writeFile(join(f.repo, "upstream"), "upstream\n");
+    const upstream = commit("@");
+    jj(f.repo, ["new", base, upstream, "-m", "Merge upstream"]);
+    await writeFile(join(f.repo, "feature"), "feature\n");
+    const source = commit("@");
+    await retainLandingSource(f.repo, "merge", 1, source);
+    const candidate = await duplicateLandingSource(f.repo, source, base);
+    const artifact = { operationId: "merge", attempt: 1, source, base, candidate };
+    await retainLandingArtifact(f.repo, artifact);
+    assert.notEqual(candidate, source, "preparation leaves the original source immutable");
+    assert.equal(jj(f.repo, ["diff", "--from", source, "--to", candidate, "--git"]), "");
+    await assert.rejects(retainLandingArtifact(f.repo, { ...artifact, operationId: "wrong-first-parent", base: upstream }), /exact expected base/);
+    jj(f.repo, ["new", base, "-m", "Unrelated"]);
+    const unrelated = commit("@");
+    jj(f.repo, ["new", base, unrelated, "-m", "Untrusted merge"]);
+    await assert.rejects(retainLandingArtifact(f.repo, { ...artifact, operationId: "untrusted-parent", candidate: commit("@") }), /outside submitted source ancestry/);
+    assert.equal(commit(source), source);
+  } finally { await f.dispose(); }
+}, 120_000);

@@ -2208,6 +2208,52 @@ test("recovery finds a retained submission's integration under its duplicate's c
   } finally { await f.dispose(); }
 }, 120_000);
 
+for (const verificationDepth of [1, 2] as const) {
+  test(`retained merge source preserves ancestry through depth-${verificationDepth} preparation and publication`, async () => {
+    const f = await fixture(false, false, undefined, false, { verificationDepth });
+    try {
+      const initial = f.main();
+      jj(f.author, ["new", initial, "-m", "Upstream one"]);
+      await writeFile(join(f.author, "upstream-one.txt"), "one\n");
+      jj(f.author, ["new", "-m", "Upstream two"]);
+      await writeFile(join(f.author, "upstream-two.txt"), "two\n");
+      const upstream = jj(f.author, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+      jj(f.author, ["new", initial, "-m", "Feature title"]);
+      await writeFile(join(f.author, "feature.txt"), "feature\n");
+      const feature = jj(f.author, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+      jj(f.author, ["new", feature, upstream, "-m", "Merge upstream"]);
+      jj(f.author, ["new", "-m", "Review fix"]);
+      await writeFile(join(f.author, "fix.txt"), "fix\n");
+      const request = await f.push();
+      assert.equal((await f.land(f.submit(await f.candidate("meanwhile.txt"))))?.type, "landed");
+      const base = f.main();
+      const id = f.submit(request);
+      const retained = await retainSubmissionSource({ home: f.home, operationId: id, request, url: f.origin, executor: f.executor });
+      f.log.append(id, retained);
+      const result = await f.land(id);
+      assert.ok(result?.type === "landed", JSON.stringify(result));
+      assert.equal(result.base, base);
+      assert.equal(f.main(), result.commitId);
+      assert.deepEqual(f.parents(result.commitId), [base, upstream], "one assembled feature merge keeps the original upstream parent");
+      const git = (...args: string[]) => execFileSync("git", ["--git-dir", f.origin, ...args], { encoding: "utf8" }).trim();
+      assert.equal(git("diff", "--name-only", request.commitId, result.commitId), "meanwhile.txt",
+        "the full submitted tree is preserved alongside the newer integration change");
+      assert.equal(git("log", "-1", "--format=%s", result.commitId), "Feature title");
+      assert.deepEqual(git("log", `${base}..${result.commitId}`, "--format=%s").split("\n").sort(),
+        ["Feature title", "Upstream one", "Upstream two"], "merged-in commits keep their identity instead of being copied or flattened");
+      for (const [file, content] of [["feature.txt", "feature"], ["fix.txt", "fix"], ["upstream-one.txt", "one"], ["upstream-two.txt", "two"], ["meanwhile.txt", "meanwhile.txt"]])
+        assert.equal(f.remoteFile(file!), content);
+      const passed = f.log.events({ operationId: id }).map(({ event }) => event).find((event) => event.type === "verification_passed");
+      assert.ok(passed?.type === "verification_passed" && passed.base === base && passed.candidate === result.commitId);
+      assert.equal(f.log.operation(id)!.commitId, request.commitId, "submission identity remains the immutable original");
+      const checkout = join(f.home, verificationDepth === 2 ? "verifiers" : "repos", "fixture/repo", ...verificationDepth === 2 ? ["0"] : []);
+      assert.equal(jj(checkout, ["log", "-r", request.commitId, "--no-graph", "-T", "commit_id"]), request.commitId);
+      f.queue.wake(); await f.queue.idle();
+      assert.equal(f.main(), result.commitId, "completed merge publication is not repeated");
+    } finally { await f.dispose(); }
+  }, 120_000);
+}
+
 test("queued retained source lands after author and upstream candidate loss with a cold runner checkout", async () => {
   for (const verificationDepth of [1, 2] as const) {
     const f = await fixture(false, false, undefined, false, { verificationDepth });

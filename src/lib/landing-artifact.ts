@@ -30,9 +30,14 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 async function assertArtifact(cwd: string, artifact: LandingArtifact): Promise<void> {
   artifactBookmark(artifact);
-  const parents = await git(cwd, ["show", "-s", "--format=%P", artifact.candidate]);
-  // A prefix extends exactly one frozen predecessor, rather than a rewritten stack.
-  if (parents !== artifact.base) throw new Error(`Landing artifact does not extend its exact expected base: expected ${artifact.base}, observed ${parents}`);
+  const parents = (await git(cwd, ["show", "-s", "--format=%P", artifact.candidate])).split(" ");
+  // The first parent is the exact frozen predecessor. Other parents may only
+  // preserve history already present in the immutable submitted source.
+  if (parents[0] !== artifact.base) throw new Error(`Landing artifact does not extend its exact expected base: expected ${artifact.base}, observed ${parents.join(" ")}`);
+  for (const parent of parents.slice(1))
+    await git(cwd, ["merge-base", "--is-ancestor", parent, artifact.source]).catch(() => {
+      throw new Error("Landing artifact adds a parent outside submitted source ancestry");
+    });
 }
 
 /** Pin author evidence as soon as it is fetched, including attempts that fail preparation. */
@@ -64,6 +69,18 @@ export async function retainLandingArtifact(cwd: string, artifact: LandingArtifa
 
 /** Duplicate source into a fresh change before rebasing; never rewrite a retained attempt. */
 export async function duplicateLandingSource(cwd: string, source: string, base: string): Promise<string> {
+  const firstLine = `(${base}..${source}) & first_ancestors(${source})`;
+  if (await jj(cwd, ["log", "-r", `merges() & (${base}..${source})`, "--no-graph", "-T", "commit_id"])) {
+    // Assemble only the feature's first-parent line. Duplicating the full graph
+    // would copy upstream history; squashing it would erase the merge parents.
+    const rootParents = (await jj(cwd, ["log", "-r", `roots(${firstLine})`, "--no-graph", "-T", 'parents.map(|parent| parent.commit_id()).join(" ")'])).split(" ");
+    const frontier = (await jj(cwd, ["log", "-r", `parents(${firstLine}) ~ (${firstLine})`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split(/\s+/).filter(Boolean);
+    const parents = [...new Set([rootParents[0]!, ...frontier])];
+    const description = await jj(cwd, ["log", "-r", firstLine, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
+    await jj(cwd, ["new", ...parents, "--message", description]);
+    await jj(cwd, ["restore", "--from", source]);
+    return (await revisionFacts(cwd, "@")).commitId;
+  }
   const before = await jj(cwd, ["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
   // Copy the entire submitted stack; duplicating only its head could omit a helper's work.
   await jj(cwd, ["duplicate", "-r", `${base}..${source}`, "--onto", base]);
@@ -76,7 +93,7 @@ export async function duplicateLandingSource(cwd: string, source: string, base: 
     const beforeSquash = await jj(cwd, ["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
     // First-parent order keeps the feature title above its review fixes, without
     // treating merged-in upstream history as the feature's description.
-    const description = await jj(cwd, ["log", "-r", `(${base}..${source}) & first_ancestors(${source})`, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
+    const description = await jj(cwd, ["log", "-r", firstLine, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
     await jj(cwd, ["squash", "--from", `${base}..${head}`, "--onto", base, "--message", description]);
     candidate = await jj(cwd, ["log", "-r", `heads(all() ~ at_operation(${beforeSquash}, all()))`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
     if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error("Source assembly did not produce exactly one candidate");
