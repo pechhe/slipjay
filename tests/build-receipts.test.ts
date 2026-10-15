@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test, vi } from "vite-plus/test";
 import type { BuildRoute, BuildRouteAnswer } from "../src/lib/build-admission.ts";
 import { createReceiptDrain } from "../src/lib/build-receipts.ts";
-import type { BuildReceiptInput } from "../src/lib/build-receipts.ts";
+import type { BuildChoreInput, BuildReceiptInput, BuildRunInput } from "../src/lib/build-receipts.ts";
 import { candidateBookmark, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
 import type { OperationLog } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
@@ -34,7 +34,16 @@ function landing(log: OperationLog, change: string, end: "landed" | "failed" | "
 function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRouteAnswer | "lost" = () => ({ kind: "accepted", value: null })) {
   const sent: BuildReceiptInput[] = [];
   const recorded = new Map<string, BuildReceiptInput>();
+  const runs: BuildRunInput[] = [], chores: BuildChoreInput[] = [];
   const route: BuildRoute = (action, input) => {
+    // Build reads a run's source from the attempt fact it attaches to, so that fact must exist first.
+    if (action === "recordAttemptRun") {
+      const run = input as BuildRunInput;
+      if (![...recorded.values()].some((fact) => fact.operationId === run.operationId && fact.sequence === run.sequence)) return Promise.resolve({ kind: "unavailable", reason: "run_attempt_unavailable" });
+      runs.push(run);
+      return Promise.resolve({ kind: "accepted", value: null });
+    }
+    if (action === "recordChoreLanding") { chores.push(input as BuildChoreInput); return Promise.resolve({ kind: "accepted", value: null }); }
     assert.equal(action, "recordAttempt");
     const receipt = input as BuildReceiptInput;
     sent.push(receipt);
@@ -42,9 +51,14 @@ function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRout
     if (reply === "lost" || reply.kind === "accepted") recorded.set(`${receipt.operationId}:${receipt.sequence}`, receipt);
     return Promise.resolve(reply === "lost" ? { kind: "unavailable", reason: "Build did not answer in time" } : reply);
   };
-  return { route, sent, recorded };
+  return { route, sent, recorded, runs, chores };
 }
-const settled = (log: OperationLog, id: string) => log.events({ operationId: id }).filter((row) => row.event.type === "build_receipt").map((row) => row.event);
+/** Settled attempt facts of `id`; its runs' settlements, keyed by their `run_started` sequence, are left out. */
+const settled = (log: OperationLog, id: string) => {
+  const events = log.events({ operationId: id });
+  const runs = new Set(events.filter((row) => row.event.type === "run_started").map((row) => row.seq));
+  return events.filter((row) => row.event.type === "build_receipt" && !runs.has(row.event.sequence)).map((row) => row.event);
+};
 const until = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 10 });
 
 test("receipts carry the admitted source tuple and each fact's own sequence and revisions", async () => {
@@ -78,7 +92,8 @@ test("Build down then up: receipts wait, the outage is visible, and they catch u
   const outage = log.snapshot("test").build!;
   assert.equal(outage.state, "unavailable");
   assert.equal(outage.reason, "Build answered HTTP 503");
-  assert.equal(outage.pending, 3);
+  // Three attempt facts, and the gate run of each, which waits for its fact.
+  assert.equal(outage.pending, 6);
   assert.ok(outage.oldestPendingAt);
   // Watch clients see the outage as a runner-wide event.
   assert.ok(log.events({ operationId: RUNNER_CONTROL_ID }).some((row) => row.event.type === "build_delivery" && row.event.state === "unavailable"));

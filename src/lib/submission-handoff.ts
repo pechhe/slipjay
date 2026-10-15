@@ -7,12 +7,15 @@ import { redactMigrationOutput } from "./migration-command-evidence.ts";
  * work with no Tickets. A handoff with no `build` key makes no claim about Build at all.
  */
 export type BuildBinding = { specId: string; ticketIds: string[]; bodyRevision: number | null; bindGeneration: number; sessionId: string };
+/** The author's explicit statement that this work belongs to no Spec: once published, Build records it as a chore. */
+export type BuildUnassociated = { unassociated: true };
+export const isBuildBinding = (build: BuildBinding | BuildUnassociated | undefined): build is BuildBinding => build !== undefined && !("unassociated" in build);
 
 /** Author reports are provenance, never runner verification or repair authority. */
 export type SubmissionHandoff = {
   version: 1; source: string; intent: string; scope: string[];
   spec: { ref: string; bodySha256: string; snapshot: string } | null;
-  build?: BuildBinding;
+  build?: BuildBinding | BuildUnassociated;
   helpers: { revision: string; base: string; scope: string }[];
   checks: { revision: string; command: string; result: "passed" | "failed" | "not-run"; detail: string }[];
   reviews: { revision: string; reference: string; result: "complete" | "incomplete"; detail: string }[];
@@ -46,7 +49,7 @@ export function validSubmissionHandoff(value: unknown): value is SubmissionHando
   const list = (v: unknown, test: (v: unknown) => boolean) => Array.isArray(v) && v.length <= 32 && v.every(test);
   const { build, ...required } = object(value) ? value : { build: undefined };
   if (!object(value) || !keys(required, ["version", "source", "intent", "scope", "spec", "helpers", "checks", "reviews", "toolchain", "gaps"])) return false;
-  if ("build" in value && !validBuildBinding(build)) return false;
+  if ("build" in value && !validBuildBinding(build) && !(object(build) && keys(build, ["unassociated"]) && build.unassociated === true)) return false;
   if (value.version !== 1 || !revision(value.source) || !text(value.intent) || !list(value.scope, (v) => text(v)) || !list(value.gaps, (v) => text(v))) return false;
   const spec = value.spec;
   if (spec !== null && (!object(spec) || !keys(spec, ["ref", "bodySha256", "snapshot"]) || !text(spec.ref, 300)

@@ -4,7 +4,7 @@ import { classifyFailure } from "./failure-classification.ts";
 import { deliveryState } from "./build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { admissionLane, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { admissionLane, recoveryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState } from "./runner-contract.ts";
 
 export function newOperationId(): string {
@@ -231,9 +231,20 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
     },
     paused,
-    buildBound: () => (db.prepare("SELECT DISTINCT operation_id FROM events WHERE type = 'build_admitted' ORDER BY seq").all() as { operation_id: string }[])
+    buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'build_admitted'
+      OR (type = 'submitted' AND json_extract(data, '$.chore') IS NOT NULL) GROUP BY operation_id ORDER BY MIN(seq)`).all() as { operation_id: string }[])
       .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history);
         return operation?.kind === "landing" ? [{ operation, history }] : []; }),
+    publicationRecoveries: () => {
+      const recoveries = new Map<string, StoredEvent[]>();
+      for (const row of db.prepare("SELECT seq, operation_id, at, data FROM events WHERE type = 'integration_recovered' ORDER BY seq").all() as EventRow[]) {
+        const event = JSON.parse(row.data) as OperationEvent;
+        if (event.type !== "integration_recovered") continue;
+        const key = recoveryKey(event.repo, event.commitId);
+        recoveries.set(key, [...recoveries.get(key) ?? [], { seq: row.seq, operationId: row.operation_id, at: row.at, event }]);
+      }
+      return recoveries;
+    },
     close: () => { listeners.clear(); db.close(); },
   };
   return log;

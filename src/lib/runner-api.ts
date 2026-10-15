@@ -1,4 +1,4 @@
-import { validSubmissionHandoff, handoffDigest } from "./submission-handoff.ts";
+import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "./submission-handoff.ts";
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "./repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
@@ -166,6 +166,7 @@ export function createRunnerHandler(input: {
       }
       if (!validSubmission(body))
         return json({ error: "Invalid submission" }, 400);
+      // A chore is reported through the same Build route, so it needs the same configuration.
       if (body.handoff?.build && !input.admitBuild)
         return json({ error: `This runner cannot admit Build-bound submissions: set "build.origin" in its config and ${BUILD_TOKEN_ENV} in its environment` }, 400);
       // Retention adds an await: serialize admission through the append, including deduplication.
@@ -214,10 +215,13 @@ export function createRunnerHandler(input: {
         if (changedRepair) return json({ error: changedRepair }, 409);
         if (active) input.log.append(active.id, { type: "superseded", by: id });
         // Build knows only an operation it admitted, so only that one is named as superseded in its custody.
-        const admission = body.handoff?.build ? admissionRecord({ ...body.handoff, build: body.handoff.build }, body.repair?.operationId ?? null,
+        const build = body.handoff?.build;
+        const admission = body.handoff && isBuildBinding(build) ? admissionRecord({ ...body.handoff, build }, body.repair?.operationId ?? null,
           active?.kind === "landing" && active.admission === "admitted" ? active.id : null) : undefined;
+        const chore = body.handoff && build && !isBuildBinding(build)
+          ? { title: body.handoff.intent, helperRevisions: [...new Set(body.handoff.helpers.map((helper) => helper.revision))] } : undefined;
         input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
-          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {}, ...admission ? { admission } : {} });
+          ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {}, ...admission ? { admission } : {}, ...chore ? { chore } : {} });
         if (retained) input.log.append(id, retained);
         if (body.repair) input.log.append(id, { type: "repair_proposed", operationId: body.repair.operationId, claimId: body.repair.claimId, source: body.commitId });
         if (body.identity) input.log.append(id, body.identity);

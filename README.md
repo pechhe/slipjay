@@ -697,7 +697,9 @@ UUIDs, possibly empty for work with no Tickets), `bodyRevision` (the numeric HQ 
 revision, or `null` when unknown), and `bindGeneration` (an integer of at least 1).
 All five keys are required when `build` is present and are retained exactly as
 supplied; an invalid binding is refused before retention. Omitting `build` records no
-Build claim: nothing is inferred from the Spec ref, the identity's `sessionId` or
+Build claim; `build: { "unassociated": true }` instead states that the work belongs
+to no Spec, so once published it is reported to Build as a chore landing titled by
+the handoff's `intent`, and it is never admitted. Nothing is inferred from the Spec ref, the identity's `sessionId` or
 branch names, and `bodyRevision` and the Spec's `bodySha256` are never coerced into
 each other.
 
@@ -723,8 +725,17 @@ refuses the newer candidate as retryable and leaves the queued one as it was.
 
 **Build receipts.** For each admitted landing the runner owes Build a receipt for each
 fact it reports, named by the operation and that fact's ledger sequence: its admission
-delivers `submitted`, and a `failed` or `landed` outcome is reported as `failed` or
-`published` through `recordAttempt`. Every receipt repeats the admitted source tuple:
+delivers `submitted`; its first held integration is reported `held`; its outcome is
+`published`, or `failed` with how it recovers (`publication_unknown` when it failed at or
+after integration, `cancelled` for an owner cancel or kill, `superseded`,
+`policy_refusal`, `infrastructure_retry`, otherwise `code_repair`); and an integration
+whose publication was unknown is reported `published` once any later reconciliation
+confirms it. Each command it ran is reported through `recordAttemptRun` as a named run
+(`passed`, `failed`, `incomplete` or `cancelled`, with its failing test names), attached to
+the outcome fact and sent only after it; a pass with no recorded verified candidate is
+reported `incomplete` with that gap. Repair linkage comes only from a repair the author
+proposed, never from queue-prefix ancestry. A declared chore reports only its
+publication, through `recordChoreLanding`. Every receipt repeats the admitted source tuple:
 the author's commit as `candidateRevision`, the Spec, Tickets, body revision and hash,
 and the bind generation. An independent drain sends owed receipts in ledger order,
 records each delivery in the ledger, and resends until Build answers, which Build

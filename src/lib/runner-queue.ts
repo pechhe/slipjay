@@ -724,7 +724,7 @@ export function createRunnerQueue(input: {
         runCommand: run,
         adapter: {
           verify: async ({ base, candidate }) => {
-            append(operation.id, { type: "verification_base", base });
+            append(operation.id, { type: "verification_base", base, candidate });
             await recordShape(checkout, candidateContext.integrationBranch, candidate, candidateContext.configuration.migrationFinalization);
             const verification = await runRequiredVerification({
               root: checkout, checks: candidateContext.configuration.requiredLandingVerification,

@@ -130,7 +130,8 @@ export type OperationEvent =
   | ClassifiedFact
   | { type: "held"; repo: string; commitId: string; retries: number; durationMs: number; published: boolean }
   | { type: "client"; id: string; fact: ClientFact }
-  | { type: "verification_base"; base: string }
+  /** `candidate` is the exact revision verified on `base`; rows from before it was recorded lack it. */
+  | { type: "verification_base"; base: string; candidate?: string }
   | { type: "verification_passed"; base: string; candidate: string }
   | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
   /** Retained source, manifest and command artifacts were deleted under the runner's retention policy. */
@@ -140,7 +141,9 @@ export type OperationEvent =
   /** A landing of one change; rows from before releases existed carry no `kind`. */
   | { type: "submitted"; kind?: "landing"; handoffSha256?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string;
       /** Build-bound: the queue starts it only after `build_admitted`. `supersedes` is the admitted operation it replaces in Build's custody. */
-      admission?: import("./build-admission.ts").BuildAdmissionRecord }
+      admission?: import("./build-admission.ts").BuildAdmissionRecord;
+      /** Declared by its author as belonging to no Spec: once published, reported to Build as a chore landing. */
+      chore?: { title: string; helperRevisions: string[] } }
   /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
   | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null }
   /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`. */
@@ -231,7 +234,8 @@ export type LandingOutcome = {
   evidence: { coverage: "partial"; gaps: string[]; logCommand: string; logPath: string };
   recovery: { kind: "follow" | "inspect-failure" | "reconcile-publication" | "already-published" | "owner-stopped" | "superseded" | "policy-refusal"; automaticRetry: false };
   /** Build-bound only. `receipts` concerns delivery to Build, never the landing's own verdict. */
-  build?: { admission: "pending" | "admitted" | "refused"; receipts: "none" | "pending" | "delivered" | "parked" };
+  /** `unassociated`: its author declared it part of no Spec, so it is never admitted and reports only its publication. */
+  build?: { admission: "pending" | "admitted" | "refused" | "unassociated"; receipts: "none" | "pending" | "delivered" | "parked" };
 };
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
@@ -274,10 +278,15 @@ export interface OperationLog {
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
   paused(): { by: string; at: string } | null;
-  /** Every landing Build admitted, with its own events: what receipt delivery reads. */
+  /** Every landing Build admitted or its author declared a chore, with its own events: what receipt delivery reads. */
   buildBound(): { operation: LandingOperation; history: StoredEvent[] }[];
+  /** Every event confirming an integrated commit published, in ledger order, keyed by `recoveryKey(repo, commitId)`. */
+  publicationRecoveries(): Map<string, StoredEvent[]>;
   close(): void;
 }
+
+/** Names one repository's integrated commit: the same commit may exist in several configured repositories. */
+export const recoveryKey = (repo: string, commitId: string) => `${repo}\n${commitId}`;
 
 /** POST /v1/operations body. The commit must already be on the remote as `bookmark`.
  * Optional requestId binds a transport retry to one operation, even after it finishes.

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "vite-plus/test";
 import { validSubmissionHandoff, sanitizedHandoff, prepareSubmissionHandoff, handoffDigest } from "../src/lib/submission-handoff.ts";
-import type { SubmissionHandoff } from "../src/lib/submission-handoff.ts";
+import type { BuildBinding, SubmissionHandoff } from "../src/lib/submission-handoff.ts";
 
 const example = (): SubmissionHandoff => ({ version: 1, source: "a".repeat(40), intent: "Keep restartable source", scope: ["src/lib"],
   spec: { ref: "owner/repo#57", snapshot: "Expected behaviour", bodySha256: createHash("sha256").update("Expected behaviour").digest("hex") },
@@ -40,7 +40,7 @@ test("handoff redacts complete strings and gaps at both ends without mutating au
   assert.throws(() => prepareSubmissionHandoff({ ...handoff, gaps: Array(32).fill("Preserve this gap") }, { APP_SECRET: "secret-value-from-author" }), /capacity/);
 });
 
-const binding = (): NonNullable<SubmissionHandoff["build"]> => ({ specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
+const binding = (): BuildBinding => ({ specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
   ticketIds: ["11111111-2222-4333-8444-555555555555", "66666666-7777-4888-9999-aaaaaaaaaaaa"], bodyRevision: 7, bindGeneration: 2,
   sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" });
 
@@ -68,4 +68,7 @@ test("a malformed Build binding is refused", () => {
     { ...binding(), bindGeneration: 0 }, { ...binding(), bindGeneration: null }, { ...binding(), bodySha256: "a".repeat(64) },
     { ...binding(), extra: true }];
   for (const build of bad) assert.equal(validSubmissionHandoff({ ...base, build }), false, JSON.stringify(build));
+  // The only other shape is the explicit statement that the work belongs to no Spec.
+  assert.equal(validSubmissionHandoff({ ...base, build: { unassociated: true } }), true);
+  for (const build of [{ unassociated: false }, { unassociated: true, specId: binding().specId }]) assert.equal(validSubmissionHandoff({ ...base, build }), false);
 });

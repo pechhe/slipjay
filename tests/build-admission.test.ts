@@ -190,3 +190,19 @@ test("the Build route client maps answers, sends the runner credential and gives
     await new Promise((resolve) => server.close(resolve));
   }
 });
+
+test("a declared chore is queued without admission and keeps its title for the chore receipt; without Build configuration it is refused", async () => {
+  const chore = { ...handoff("a".repeat(40), null), build: { unassociated: true as const } };
+  const f = fixture([]);
+  const { status, body } = await f.submit(submission(undefined, { handoff: chore }));
+  assert.equal(status, 200);
+  assert.equal(f.offered.length, 0);
+  assert.ok(body.operation!.kind === "landing" && body.operation!.admission === undefined && body.operation!.position === 1);
+  const submitted = f.log.events({ operationId: body.operation!.id }).find((row) => row.event.type === "submitted")!.event;
+  assert.ok(submitted.type === "submitted" && submitted.kind === undefined);
+  assert.deepEqual("chore" in submitted && submitted.chore, { title: "Bound work", helperRevisions: ["b".repeat(40)] });
+  assert.equal(f.woken, 1);
+  const g = fixture(null);
+  assert.equal((await g.submit(submission(undefined, { handoff: chore }))).status, 400);
+  f.log.close(); g.log.close();
+});

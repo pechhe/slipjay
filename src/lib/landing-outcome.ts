@@ -51,12 +51,15 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     ...(result.command ? { command: result.command } : {}), ...(result.output !== undefined ? { excerpt: result.output.slice(0, 6000) } : {}),
     excerptTruncated: (result.output?.length ?? 0) > 6000 }
     : result?.type === "cancelled" || result?.type === "declined" ? { reason: result.reason, excerptTruncated: false } : undefined;
-  const bound = events.find((event) => event.type === "submitted" && event.kind !== "release" && event.kind !== "deploy" && event.kind !== "reset" && event.admission);
+  const bound = events.find((event) => event.type === "submitted" && event.kind !== "release" && event.kind !== "deploy" && event.kind !== "reset" && (event.admission || event.chore));
+  // Operation-local: a publication confirmed later by another operation is counted by the drain and the snapshot.
   const owed = bound ? owedReceipts(operation, history) : [];
-  const settled = owed.map((receipt) => receiptSettlement(history, receipt)?.state);
+  const settled = owed.filter((receipt) => receipt.after === undefined || receiptSettlement(history, { operationId: receipt.operationId, key: receipt.after })?.state !== "parked")
+    .map((receipt) => receiptSettlement(history, receipt)?.state);
   // A published landing whose receipt has not reached Build yet is still landed: delivery is reported apart.
   const build: LandingOutcome["build"] = bound ? {
-    admission: events.some((event) => event.type === "build_admitted") ? "admitted" : result?.type === "declined" && result.build ? "refused" : "pending",
+    admission: bound.type === "submitted" && "chore" in bound && bound.chore ? "unassociated" : events.some((event) => event.type === "build_admitted") ? "admitted"
+      : result?.type === "declined" && result.build ? "refused" : "pending",
     receipts: !owed.length ? "none" : settled.includes(undefined) ? "pending" : settled.includes("parked") ? "parked" : "delivered" } : undefined;
   return { version: 1, operationId: operation.id, repo: operation.repo, changeId: operation.changeId, sourceCommitId: operation.commitId,
     status: operation.status, stage: operation.stage, terminal: Boolean(result), asOfSeq: operation.lastSeq,

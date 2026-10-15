@@ -62,7 +62,7 @@ export type BuildRouteAnswer =
   | { kind: "accepted"; value: unknown }
   | { kind: "refused"; code: string }
   | { kind: "unavailable"; reason: string };
-export type BuildRoute = (action: "admitAttempt" | "recordAttempt", input: unknown) => Promise<BuildRouteAnswer>;
+export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding", input: unknown) => Promise<BuildRouteAnswer>;
 
 /** Calls `POST {origin}/api/build/runner`; never throws, and never waits longer than `timeoutMs`. */
 export function buildRoute(options: { origin: string; token: string; timeoutMs?: number; fetch?: typeof fetch }): BuildRoute {

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Map every runner fact to Build receipts truthfully (#70, #60):** admitted landings now
+  also report `held`, `failed` for cancel, kill, supersede and policy refusal with their
+  recovery, a `published` confirmed after an unknown publication, and each command as a
+  named run. A handoff can declare work unassociated (`build: { "unassociated": true }`),
+  which is reported once published as a chore landing. Verification records the candidate
+  it verified.
+
 - **Report a removed workspace's landing by path (#72):** `slipjay landed <path>` prints
   the landing recorded for the workspace at exactly that path, from its sidecar or,
   once the workspace is gone, the integrated-artifact archive, or `null`. T3 Code uses
