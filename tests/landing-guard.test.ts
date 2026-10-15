@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "vite-plus/test";
 import { landingBypass, landingGuardDecision } from "../src/lib/landing-guard.ts";
+import { jj, project } from "./support/workspace-project.ts";
 
 const branches = ["master"];
 
@@ -101,6 +102,31 @@ test("the former filename does not declare guarded branches", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a preserved JJ checkout uses its primary's canonical integration and release governance", async () => {
+  const f = await project({ policy: { releaseBranch: "production", requiredReleaseVerification: [] } });
+  const historical = path.join(f.root, "pre-cutover");
+  try {
+    jj(f.repo, ["workspace", "add", "--name", "pre-cutover", "-r", "main", historical]);
+    await rename(path.join(historical, "slipjay.json"), path.join(historical, "slipway.json"));
+    await writeFile(path.join(historical, "slipway.json"), JSON.stringify({ version: 1, integrationBranch: "retired" }));
+    const nested = path.join(historical, "nested");
+    await mkdir(nested);
+    const decide = (command: string, cwd = nested) => landingGuardDecision({ tool_name: "Bash", cwd, tool_input: { command } });
+    for (const command of ["jj git push -b main", "jj bookmark set main -r @", "git push origin HEAD:main"]) {
+      assert.match((await decide(command))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay land/, command);
+    }
+    assert.match((await decide("git push origin HEAD:production"))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay promote/);
+    assert.match((await decide(`jj -R ${historical} git push -b main`, f.root))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay land/);
+    assert.match((await decide(`git -C ${historical} push origin HEAD:production`, f.root))?.hookSpecificOutput.permissionDecisionReason ?? "", /slipjay promote/);
+    assert.equal(await decide("git push origin feature"), null);
+    assert.equal(await decide("git push origin retired"), null, "the historical filename supplies no governance");
+    await rm(path.join(f.repo, "slipjay.json"));
+    assert.equal(await decide("git push origin retired"), null, "no old-name policy fallback is restored");
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
 
 test("the hook decision applies only to Bash in a governed repository", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "slipjay-landing-guard-"));

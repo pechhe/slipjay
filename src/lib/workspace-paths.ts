@@ -51,10 +51,10 @@ const settled = (path: string): string => { assertCutoverSettled(); return path;
 export const workspaceHome = (): string => settled(join(slipjayHome(), "workspaces"));
 
 /**
- * Every directory workspaces were created in: the current home, then Slipway's,
- * whose existing workspaces stay usable at their recorded paths.
+ * Every directory workspaces were created in. Both state cutovers left existing
+ * checkouts at their recorded paths, including those predating Slipway.
  */
-export const workspaceStorageHomes = (): string[] => [workspaceHome(), legacyWorkspaceHome()];
+export const workspaceStorageHomes = (): string[] => [workspaceHome(), legacyWorkspaceHome(), join(homedir(), ".pi", "workspaces")];
 
 /** Checkout mode (`isolated`/`direct`) chosen through `slipjay mode`. */
 export const modePath = (): string => settled(join(slipjayHome(), "mode.json"));

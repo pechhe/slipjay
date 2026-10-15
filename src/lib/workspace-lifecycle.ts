@@ -196,7 +196,7 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
     const target = (await listWorkspaces(cwd)).find((workspace) => workspace.name === workspaceName);
     if (!target?.root) throw new Error(`Unknown or unavailable JJ workspace: ${workspaceName}`);
     if (!await withinWorkspaceStorage(target.root))
-      throw new Error("Refusing to remove a workspace outside ~/.slipjay/workspaces and ~/.slipway/workspaces");
+      throw new Error("Refusing to remove a workspace outside ~/.slipjay/workspaces, ~/.slipway/workspaces and ~/.pi/workspaces");
     const metadata = await workspaceMetadata(workspaceName);
     // Snapshot once; retirement then refuses a working copy that moved since.
     const judged = await workingCopyCommit(target.root).catch(() => null);
@@ -219,7 +219,7 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
 
 /**
  * Whether a checkout lives beneath slipjay workspace storage (`~/.slipjay/workspaces`,
- * or `~/.slipway/workspaces` for one created before the cutover), the only places cleanup deletes.
+ * or the preserved `~/.slipway/workspaces` and `~/.pi/workspaces` roots), the only places cleanup deletes.
  */
 export async function withinWorkspaceStorage(root: string): Promise<boolean> {
   const canonical = (path: string): Promise<string> => realpath(path).catch(() => resolve(path));

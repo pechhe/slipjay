@@ -11,7 +11,7 @@ import { beforeEach, test } from "vite-plus/test";
 import { assertHermeticHome } from "../scripts/hermetic-home-guard.ts";
 import { cutover } from "../src/lib/cutover.ts";
 import { cleanupLandedWorkspace, createWorkspace, readWorkspaceMode } from "../src/lib/slipjay.ts";
-import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, legacyWorkspaceHome, slipjayHome } from "../src/lib/workspace-paths.ts";
+import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, slipjayHome } from "../src/lib/workspace-paths.ts";
 
 // Every case builds pre-v1.0.0 state in this file's disposable HOME and cuts it
 // over; the guard below makes sure that HOME is never the developer's own.
@@ -42,6 +42,7 @@ async function legacyMachine() {
 
 beforeEach(async () => {
   await rm(join(homedir(), ".slipway"), { recursive: true, force: true });
+  await rm(join(homedir(), ".pi"), { recursive: true, force: true });
   await rm(slipjayHome(), { recursive: true, force: true });
 });
 
@@ -96,14 +97,15 @@ test("the cutover refuses, naming each holder, while locks, slots, writers or ru
   }
 });
 
-test("the cutover moves state, keeps an existing workspace usable through landing, and is idempotent", async () => {
+for (const historicalHome of [".slipway", ".pi"]) test(`the cutover preserves a ${historicalHome} workspace through resume, landing and cleanup, and is idempotent`, async () => {
   const f = await project();
   try {
     await legacyMachine();
-    // A workspace created before v1.0.0 at its recorded path under ~/.slipway/workspaces, bound to Issue 41.
+    // Both state cutovers left older checkouts at their recorded paths.
     const name = "repo-41";
-    const workspacePath = join(legacyWorkspaceHome(), name);
-    await mkdir(legacyWorkspaceHome(), { recursive: true });
+    const storage = join(homedir(), historicalHome, "workspaces");
+    const workspacePath = join(storage, name);
+    await mkdir(storage, { recursive: true });
     jj(f.repo, ["workspace", "add", "--name", name, "-r", "main", workspacePath]);
     await writeJson(legacy("workspaces", `${name}.json`), {
       version: 1, workspaceName: name, workspacePath, integrationRoot: f.repo, issueNumber: 41, task: "Issue #41",

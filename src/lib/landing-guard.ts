@@ -32,7 +32,7 @@ const rawBranch = (raw: string): string | null => {
 };
 
 /** Nearest canonical policy above `cwd` and its guarded branches. */
-async function governance(cwd: string): Promise<Governance | null> {
+async function checkoutGovernance(cwd: string): Promise<Governance | null> {
   for (let dir = cwd; ; dir = dirname(dir)) {
     const texts = new Map<string, string>();
     for (const candidate of EXECUTION_POLICY_PROBE_PATHS) {
@@ -57,7 +57,20 @@ async function governance(cwd: string): Promise<Governance | null> {
   }
 }
 
-/** Nearest policy above `cwd` (`slipjay.json`), with its guarded branches; null when ungoverned. */
+/** A preserved checkout may predate the canonical policy filename. Its JJ
+ * repository's primary checkout still supplies canonical branch governance. */
+async function governance(cwd: string): Promise<Governance | null> {
+  const local = await checkoutGovernance(cwd);
+  if (local) return local;
+  const root = await jjWorkspaceRoot(cwd);
+  if (!root) return null;
+  const listed = await run("jj", ["--color=never", "--ignore-working-copy", "workspace", "list", "-T",
+    'name ++ "\\t" ++ root ++ "\\t" ++ target.change_id() ++ "\\t" ++ target.commit_id() ++ "\\n"'], { cwd: root, timeoutMs: 15_000 });
+  const primary = listed.code === 0 ? parseWorkspaceList(listed.stdout).find((entry) => entry.name === "default") : null;
+  return primary?.root && resolve(primary.root) !== resolve(root) ? checkoutGovernance(primary.root) : null;
+}
+
+/** Canonical checkout or primary-checkout governance; null when ungoverned. */
 export async function governedBranches(cwd: string): Promise<string[] | null> {
   return (await governance(cwd))?.branches ?? null;
 }

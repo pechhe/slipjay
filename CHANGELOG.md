@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Preserve pre-cutover workspace custody (#61, #8):** historical checkouts use
+  their primary checkout's canonical branch governance when they predate
+  `slipjay.json`. Checkouts retained under `~/.pi/workspaces` remain eligible for
+  cleanup, removal and safe missing-checkout recovery alongside the later roots.
+
 ## v3.17.0
 
 - **Landing attribution and recovery (#58, #59):** a renamed integration bookmark

@@ -29,8 +29,10 @@ every command except `status` and `cutover` refuses until the cutover has run.
    post-integration run that a pre-v1.0.0 Slipway left is held or live. Nothing changes.
 2. Moves `~/.slipway/state` and `~/.slipway/mode.json` to `~/.slipjay`, by rename,
    or across devices by copy, verify, then delete. Existing workspaces stay at
-   `~/.slipway/workspaces/...` and keep working through landing and cleanup; new
-   workspaces go to `~/.slipjay/workspaces`.
+   `~/.slipway/workspaces/...` or the older `~/.pi/workspaces/...` and keep working
+   through landing, cleanup and safe recovery; new workspaces go to
+   `~/.slipjay/workspaces`. A preserved checkout without `slipjay.json` gets branch
+   protection from its JJ repository's primary checkout's canonical policy.
 3. Writes `~/.slipjay/cutover.json`. Running `slipjay cutover` again is a no-op.
 
 `slipjay cutover --check` reports what would block or move without changing anything.
