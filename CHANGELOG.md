@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Report a removed workspace's landing by path (#72):** `slipjay landed <path>` prints
+  the landing recorded for the workspace at exactly that path, from its sidecar or,
+  once the workspace is gone, the integrated-artifact archive, or `null`. T3 Code uses
+  it to keep a thread's landed commit after SlipJay removes its workspace.
+
 - **Deliver admitted operations' receipts to Build from an independent drain (#69, #60):**
   each admitted landing's `failed` or `published` receipt is sent to Build's
   `recordAttempt` from the ledger, in order, until Build acknowledges it, with bounded

@@ -23,6 +23,7 @@ import {
   readySpares,
   describeRetention,
   retainedWorkspaceMaterial,
+  readLandedRecord,
   readLandingState,
   removeWorkspace,
   startSpareRefill,
@@ -291,6 +292,9 @@ try {
       ? JSON.stringify({ mode: await readWorkspaceMode(), workspace: { ...context.current, ...(issueNumber ? { issueNumber } : {}) }, integration: context.integration, integrationBranch: context.integrationBranch,
         ...(landing ? { landing: { phase: landing.phase, artifactCommitId: landing.artifactCommitId, ...(landing.primaryCheckout ? { primaryCheckout: landing.primaryCheckout } : {}) } } : {}) }, null, 2)
       : "Not inside a Jujutsu repository");
+  } else if (command === "landed") {
+    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay landed <path>");
+    console.log(JSON.stringify(await readLandedRecord(resolve(rest[0]!))));
   } else if (command === "mode") {
     const requested = rest[0];
     console.log(requested ? await writeWorkspaceMode(requested) : await readWorkspaceMode());

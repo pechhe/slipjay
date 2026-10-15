@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { WorkspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
@@ -268,6 +268,48 @@ export function landingStatePaths(workspaceName: string): [string, string] {
 function isLandingState(value: Record<string, unknown> | null): value is LandingState & { integrationRoot?: string; issueNumber?: number } {
   return Boolean(value && value.version === 1 && typeof value.workspaceName === "string" && typeof value.workspacePath === "string"
     && typeof value.integrationBranch === "string" && typeof value.artifactCommitId === "string");
+}
+
+/** What `slipjay landed <path>` reports: the landing recorded for one workspace path. */
+export type LandedRecord = {
+  workspaceName: string;
+  workspacePath: string;
+  artifactCommitId: string;
+  operationId?: string;
+  issueNumber?: number;
+  landedAt?: string;
+};
+
+/**
+ * The latest landing recorded for the workspace at `workspacePath`: its sidecar while
+ * SlipJay keeps one, else the integrated-artifact archive `prune` moves it to, so it
+ * outlives the workspace. Matched by exact path, since workspace names are reused.
+ * Read-only: an interrupted `prepared` record is not a landing here.
+ */
+export async function readLandedRecord(workspacePath: string): Promise<LandedRecord | null> {
+  const target = resolve(workspacePath);
+  const sidecars: string[] = [];
+  const archived: string[] = [];
+  for (const directory of [stateHome(), landedHome()])
+    for (const file of await readdir(directory).catch(() => [])) {
+      if (file.endsWith(".json")) (file.startsWith("artifact-") ? archived : sidecars).push(join(directory, file));
+    }
+  let latest: (LandingState & { operationId?: unknown; issueNumber?: unknown; landedAt?: unknown }) | null = null;
+  // Sidecars first, so a sidecar wins a tie with its own archived copy.
+  for (const path of [...sidecars, ...archived]) {
+    const state = await readJsonOptional(path);
+    if (!isLandingState(state) || (state.phase ?? "landed") !== "landed" || resolve(state.workspacePath) !== target) continue;
+    if (latest === null || String(state.landedAt ?? "") > String(latest.landedAt ?? "")) latest = state;
+  }
+  if (latest === null) return null;
+  return {
+    workspaceName: latest.workspaceName,
+    workspacePath: latest.workspacePath,
+    artifactCommitId: latest.artifactCommitId,
+    ...typeof latest.operationId === "string" ? { operationId: latest.operationId } : {},
+    ...typeof latest.issueNumber === "number" ? { issueNumber: latest.issueNumber } : {},
+    ...typeof latest.landedAt === "string" ? { landedAt: latest.landedAt } : {},
+  };
 }
 
 /**

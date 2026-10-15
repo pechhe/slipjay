@@ -165,6 +165,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | Command | Effect |
 | --- | --- |
 | `status` | Mode, current workspace and its Issue, integration checkout and landing state (JSON). |
+| `landed <path>` | The landing recorded for the workspace at exactly that path, even after it was removed, as one JSON line (`workspaceName`, `workspacePath`, `artifactCommitId`, and `operationId`, `issueNumber`, `landedAt` when recorded), or `null`. Read-only. |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
 | `list` | Workspaces with their state, Issue and retained material. |
 | `pool [refill]` | Show ready spare workspaces, or provision one (up to `spares`). |

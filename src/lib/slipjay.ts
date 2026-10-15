@@ -10,7 +10,7 @@
 export { explicitIssueNumber, projectPrefix, revisionFacts, taskWorkspaceName, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.ts";
 export {
   assertWorkspaceMutationAllowed, attachWorkspaceIssue, findWorkspace, inspectWorkspace, inspectWorkspaces, landingStatePaths,
-  listWorkspaces, readLandingState, readWorkspaceMode, renameWorkspace, workspaceContinuationState, writeWorkspaceMode,
+  listWorkspaces, readLandedRecord, readLandingState, readWorkspaceMode, renameWorkspace, workspaceContinuationState, writeWorkspaceMode,
 } from "./workspace-state.ts";
 export { createWorkspace, findIssueWorkspace, recoverIssueWorkspace } from "./workspace-create.ts";
 export {
@@ -51,6 +51,7 @@ export type { RevisionFacts, WorkspaceContext, WorkspaceEntry, WorkspaceMetadata
 export type { CreatedWorkspace, WorkspaceCreationHooks } from "./workspace-create.ts";
 export type { RetirementHooks } from "./workspace-lifecycle.ts";
 export type { WorkspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
+export type { LandedRecord } from "./workspace-state.ts";
 export type { LandingAdapter, LandingPublication, LandingRevision, LandingTail, LandingTailOptions } from "./landing-steps.ts";
 export type { RequiredVerificationFailureEvidence } from "./required-verification.ts";
 export type { VerificationEvidence } from "./verification-policy.ts";
