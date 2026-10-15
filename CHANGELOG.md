@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Carry the author's Build binding through submission (#67, #60):** version-1
+  handoff evidence accepts an optional `build` object (Build Spec id, Ticket ids,
+  HQ Docs body revision, bind generation, lead session). The runner validates it,
+  retains it exactly in the manifest and returns it from `slipjay runner handoff`;
+  without it nothing about Build is inferred.
+
 ## v3.18.0
 
 - **Contain nested work and recover it after a crash (#63, #55):** each runner

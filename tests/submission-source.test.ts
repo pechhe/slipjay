@@ -66,3 +66,17 @@ test("retention rejects a moved candidate before recording a manifest", async ()
     assert.deepEqual(await readdir(join(f.home, "submissions")), []);
   } finally { await f.dispose(); }
 }, 120_000);
+
+test("a Build binding survives retention exactly and is absent from an unbound submission", async () => {
+  const f = await sourceFixture();
+  try {
+    const build = { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: null, bindGeneration: 3, sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" };
+    const handoff = { version: 1 as const, source: f.request.commitId, intent: "Bound", scope: [], spec: null, helpers: [], checks: [], reviews: [], toolchain: [], gaps: [] };
+    const manifestOf = async (operationId: string, value: typeof handoff & { build?: typeof build }) => {
+      const retained = await retainSubmissionSource({ home: f.home, operationId, request: { ...f.request, handoff: value }, url: f.remote, executor: testExecutor() });
+      return await readSubmissionManifest(f.home, f.request.repo, operationId, retained) as { handoff: { evidence: { build?: unknown } } };
+    };
+    assert.deepEqual((await manifestOf("bound", { ...handoff, build })).handoff.evidence.build, build);
+    assert.equal("build" in (await manifestOf("unbound", handoff)).handoff.evidence, false);
+  } finally { await rm(f.root, { recursive: true, force: true }); }
+});

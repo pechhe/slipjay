@@ -690,6 +690,16 @@ Helpers have `revision`, `base` and `scope`; checks have `revision`, `command`,
 reports, never runner verification, independent-review approval or repair authority.
 Empty evidence arrays do not establish that a check or review was unnecessary.
 
+An optional `build` object carries the author's Build binding for the Spec work:
+`specId` and the lead execution `sessionId` (UUIDs), `ticketIds` (up to 200 distinct
+UUIDs, possibly empty for work with no Tickets), `bodyRevision` (the numeric HQ Docs
+revision, or `null` when unknown), and `bindGeneration` (an integer of at least 1).
+All five keys are required when `build` is present and are retained exactly as
+supplied; an invalid binding is refused before retention. Omitting `build` records no
+Build claim: nothing is inferred from the Spec ref, the identity's `sessionId` or
+branch names, and `bodyRevision` and the Spec's `bodySha256` are never coerced into
+each other.
+
 The client redacts with its environment before transport, then the runner redacts
 again before retention. Redacted Spec snapshots receive a new snapshot digest and
 a gap preserving the original body digest. Unknown credentials cannot be detected

@@ -1,10 +1,18 @@
 import { createHash } from "node:crypto";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 
+/**
+ * The author's Build binding, retained as supplied. `bodyRevision` is the numeric HQ Docs revision and is
+ * unrelated to the Spec's `bodySha256`; `null` says the author does not know it. An empty `ticketIds` is Spec
+ * work with no Tickets. A handoff with no `build` key makes no claim about Build at all.
+ */
+export type BuildBinding = { specId: string; ticketIds: string[]; bodyRevision: number | null; bindGeneration: number; sessionId: string };
+
 /** Author reports are provenance, never runner verification or repair authority. */
 export type SubmissionHandoff = {
   version: 1; source: string; intent: string; scope: string[];
   spec: { ref: string; bodySha256: string; snapshot: string } | null;
+  build?: BuildBinding;
   helpers: { revision: string; base: string; scope: string }[];
   checks: { revision: string; command: string; result: "passed" | "failed" | "not-run"; detail: string }[];
   reviews: { revision: string; reference: string; result: "complete" | "incomplete"; detail: string }[];
@@ -16,13 +24,29 @@ const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(
 export const handoffDigest = (value: SubmissionHandoff | undefined): string | undefined => value === undefined ? undefined
   : createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const int = (v: unknown, min: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= min && v <= 2_147_483_647;
+function validBuildBinding(value: unknown): value is BuildBinding {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const binding = value as Record<string, unknown>;
+  const names = ["specId", "ticketIds", "bodyRevision", "bindGeneration", "sessionId"];
+  return Object.keys(binding).length === names.length && names.every((name) => name in binding)
+    && typeof binding.specId === "string" && UUID.test(binding.specId)
+    && Array.isArray(binding.ticketIds) && binding.ticketIds.length <= 200
+    && binding.ticketIds.every((id) => typeof id === "string" && UUID.test(id)) && new Set(binding.ticketIds.map((id) => (id as string).toLowerCase())).size === binding.ticketIds.length
+    && (binding.bodyRevision === null || int(binding.bodyRevision, 0)) && int(binding.bindGeneration, 1)
+    && typeof binding.sessionId === "string" && UUID.test(binding.sessionId);
+}
+
 export function validSubmissionHandoff(value: unknown): value is SubmissionHandoff {
   const object = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
   const keys = (v: Record<string, unknown>, names: string[]) => Object.keys(v).length === names.length && names.every((name) => name in v);
   const text = (v: unknown, max = 2000): v is string => typeof v === "string" && v.trim().length > 0 && v.length <= max;
   const revision = (v: unknown) => typeof v === "string" && /^[a-f0-9]{40}$/.test(v);
   const list = (v: unknown, test: (v: unknown) => boolean) => Array.isArray(v) && v.length <= 32 && v.every(test);
-  if (!object(value) || !keys(value, ["version", "source", "intent", "scope", "spec", "helpers", "checks", "reviews", "toolchain", "gaps"])) return false;
+  const { build, ...required } = object(value) ? value : { build: undefined };
+  if (!object(value) || !keys(required, ["version", "source", "intent", "scope", "spec", "helpers", "checks", "reviews", "toolchain", "gaps"])) return false;
+  if ("build" in value && !validBuildBinding(build)) return false;
   if (value.version !== 1 || !revision(value.source) || !text(value.intent) || !list(value.scope, (v) => text(v)) || !list(value.gaps, (v) => text(v))) return false;
   const spec = value.spec;
   if (spec !== null && (!object(spec) || !keys(spec, ["ref", "bodySha256", "snapshot"]) || !text(spec.ref, 300)
