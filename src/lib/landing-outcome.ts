@@ -29,8 +29,10 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     invalidated: run.attempt !== undefined && invalidated.has(run.attempt),
   }));
   const gaps = ["Only recorded commands are listed; skipped or unstarted units are not inventoried",
-    "Complete per-command output artifacts, hashes and retention are unavailable",
     "Spec snapshot, helper/check/review manifest and exclusive repair authority are incomplete"];
+  if (runs.some((run) => run.artifact?.status !== "retained")) gaps.push("Some commands have no retained output artifact");
+  if (runs.some((run) => run.artifact?.status === "retained" && !run.artifact.complete)) gaps.push("Some retained command artifacts contain incomplete output; inspect their truncation metadata");
+  gaps.push("Bounded automatic artifact/source cleanup and repair/adoption retention rules are incomplete");
   if (runs.some((run) => run.commandEvidence?.status !== "recorded")) gaps.push("Some commands lack structured executable/argument/working-directory evidence");
   if (runs.some((run) => run.commandEvidence?.status === "recorded" && (run.commandEvidence.redacted || run.commandEvidence.cwd === null)))
     gaps.push("Some command context is redacted or outside the checkout; it cannot be replayed verbatim");

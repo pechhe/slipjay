@@ -21,6 +21,7 @@ import { admissionLane, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, R
 import { newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { commandEvidence } from "./command-evidence.ts";
+import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "./verification-failure.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
@@ -153,7 +154,7 @@ export function createRunnerQueue(input: {
   function append(id: string, event: OperationEvent): void {
     log.append(id, event);
   }
-  function runFinished(runId: string, result: BoundedProcessResult, started: number, request: BoundedProcessRequest, privateOutput = false): OperationEvent {
+  function runFinished(runId: string, result: BoundedProcessResult, started: number, request: BoundedProcessRequest, privateOutput = false): Extract<OperationEvent, { type: "run_finished" }> {
     return { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
       durationMs: Date.now() - started, outputBytes: Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
       killed: result.cancelled, ...(privateOutput ? {} : { diagnosticCapture: result.diagnosticOutput ? result.diagnosticOutput.incomplete ? "incomplete" : "selected" : "unavailable",
@@ -274,10 +275,10 @@ export function createRunnerQueue(input: {
           const context = commandEvidence(request, checkoutPath(operation));
           append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs, purpose: "deploy", commandEvidence: context });
           const result = await executor.run(request).catch((error: unknown) => {
-            append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
+            append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
             throw error;
           });
-          append(operation.id, runFinished(runId, result, started, request));
+          append(operation.id, { ...runFinished(runId, result, started, request), artifact: await retainCommandArtifact({ home, operationId: operation.id, runId, request, result, privateOutput: true }) });
           return result;
         },
       });
@@ -432,10 +433,12 @@ export function createRunnerQueue(input: {
         runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
       const result = await executor.run({ ...request, env: runEnvironment,
         redactOutput: privateRun ? request.redactOutput : (value) => redactVerificationOutput(value, checkout), abortSignal }).catch((error: unknown) => {
-        append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started });
+        append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
         throw error;
       });
-      append(operation.id, runFinished(runId, result, started, request, privateRun));
+      const finished = runFinished(runId, result, started, request, privateRun);
+      finished.artifact = await retainCommandArtifact({ home, operationId: operation.id, runId, request, result, privateOutput: privateRun });
+      append(operation.id, finished);
       return result;
     }
     // Finalization, then publication, of an integrated commit (completeLanding).

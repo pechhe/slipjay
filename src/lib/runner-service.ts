@@ -3,6 +3,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { retainSubmissionSource } from "./submission-source.ts";
+import { readCommandArtifact } from "./command-artifact.ts";
 import { createRunnerHandler } from "./runner-api.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
@@ -37,6 +38,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const server = await serveRunner(createRunnerHandler({
     log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
     subscribe: log.subscribe,
+    readArtifact: (operationId, runId, reference, offset, limit) => readCommandArtifact(home, operationId, runId, reference, offset, limit),
     async retainSubmission(operationId, request) {
       const repository = Object.entries(config.repos).find(([repo]) => repo.toLowerCase() === request.repo.toLowerCase())?.[1];
       if (!repository) throw new Error("Repository is not configured on this runner");

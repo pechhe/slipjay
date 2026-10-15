@@ -294,6 +294,35 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
 /** How to read retained operation events from any machine with the runner location. */
 export const runLogCommand = (operationId: string): string => `slipjay runner log ${operationId}`;
 
+/** Chunked retrieval verifies bytes against the ledger-backed digest before exposing JSON. */
+export async function readRunArtifact(location: string, operationId: string, runId: string, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const parts: Buffer[] = [];
+    let offset = 0, sha256: string | undefined, size: number | undefined;
+    for (let page = 0; page < 17; page++) {
+      const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/artifacts/${encodeURIComponent(runId)}?offset=${offset}&limit=16384`, { signal: AbortSignal.timeout(15_000) });
+      const chunk = await response.json() as import("./runner-contract.ts").ArtifactChunk;
+      if (chunk.version !== 1 || chunk.operationId !== operationId || chunk.runId !== runId || chunk.offset !== offset
+        || !/^[a-f0-9]{64}$/.test(chunk.sha256) || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > 256 * 1024
+        || (sha256 !== undefined && (chunk.sha256 !== sha256 || chunk.bytes !== size)) || typeof chunk.dataBase64 !== "string" || chunk.dataBase64.length > 21848)
+        throw new Error("Runner returned inconsistent artifact metadata");
+      sha256 = chunk.sha256; size = chunk.bytes;
+      const bytes = Buffer.from(chunk.dataBase64, "base64");
+      if (bytes.length > 16384 || offset + bytes.length > size) throw new Error("Runner returned an invalid artifact chunk");
+      parts.push(bytes); offset += bytes.length;
+      if (chunk.nextOffset === null) {
+        const all = Buffer.concat(parts);
+        if (offset !== size || createHash("sha256").update(all).digest("hex") !== sha256) throw new Error("Artifact bytes do not match retained evidence");
+        return JSON.parse(all.toString("utf8")) as unknown;
+      }
+      if (chunk.nextOffset !== offset || bytes.length === 0) throw new Error("Runner artifact cursor did not advance");
+    }
+    throw new Error("Runner artifact exceeded the bounded retrieval limit");
+  } finally { connection.close(); }
+}
+
 /** Read evidence without following, resubmitting, or claiming repair authority. */
 export async function readLandingOutcome(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<import("./runner-contract.ts").LandingOutcome> {
   const token = await runnerToken(env);

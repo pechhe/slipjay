@@ -109,6 +109,11 @@ export type CommandEvidence = { status: "unavailable"; reason: "capacity" } | {
   status: "recorded"; executable: string; args: string[]; cwd: string | null; environmentNames: string[];
   redacted: boolean; configurationSha256: string;
 };
+export type CommandArtifact = { status: "unavailable"; reason: "private-output" | "capture-failed" } | {
+  status: "retained"; version: 1; sha256: string; bytes: number; complete: boolean;
+  retention: "preserved-no-automatic-deletion";
+};
+export type ArtifactChunk = { version: 1; operationId: string; runId: string; sha256: string; bytes: number; offset: number; nextOffset: number | null; dataBase64: string };
 export type OperationEvent =
   | { type: "attempt_started"; attempt: number; source: string; checkout: string }
   | { type: "attempt_prepared"; attempt: number; source: string; base: string; candidate: string; predecessor?: { operationId: string; attempt: number; candidate: string }; overlap: boolean; checkout: string }
@@ -140,7 +145,7 @@ export type OperationEvent =
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
   | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence }
-  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable" }
+  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
@@ -169,7 +174,7 @@ export type StoredEvent = { seq: number; operationId: string; at: string; event:
 /** One executed command of an operation, projected from its run events. */
 export type RunRecord = {
   runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence;
-  finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable";
+  finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact;
 };
 
 /** Event types that close an operation. */
@@ -307,6 +312,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  *                                                 replaying after `seq`, then live; ends after the terminal event
  * - GET  /v1/operations/:id/log                 → `text/plain` retained operation events (not complete process output)
  * - GET  /v1/operations/:id/outcome             → `{ outcome: LandingOutcome }` (409 for other operation kinds)
+ * - GET  /v1/operations/:id/artifacts/:runId?offset=0&limit=16384 → ArtifactChunk (410 if unavailable; 400 invalid range)
  * - POST /v1/operations/:id/cancel              → `{ operation }`; only a queued operation can be cancelled (else 409)
  * - GET  /v1/changes/:changeId?repo=<owner/name> → `{ operations: Operation[] }` newest first
  * - POST /v1/runner/kill                         `{ by }` → `{ operation }`: the running operation as the kill

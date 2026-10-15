@@ -9,6 +9,7 @@ import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT
 import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 import { retainSubmissionSource } from "../src/lib/submission-source.ts";
+import { readCommandArtifact } from "../src/lib/command-artifact.ts";
 import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
@@ -376,6 +377,11 @@ test("middle failure diagnostics survive queue events and durable log retrieval"
     assert.deepEqual(run.failingTests, ["tests/hidden.test.ts > rejects stale source"]);
     assert.ok(run.diagnostics?.some((line) => line.includes("tests/hidden.test.ts:27:3")));
     assert.equal(run.diagnosticCapture, "selected");
+    assert.equal(run.artifact?.status, "retained");
+    if (run.artifact?.status !== "retained") throw new Error("Expected retained command artifact");
+    assert.equal(run.artifact.complete, false);
+    const artifact = await readCommandArtifact(f.home, id, run.runId, run.artifact, 0, 16384);
+    assert.match(Buffer.from(artifact.dataBase64, "base64").toString("utf8"), /tests\/hidden.test.ts:27:3/);
     assert.equal(f.main(), before);
     const reopened = openOperationLog(f.logPath);
     try {
@@ -384,6 +390,23 @@ test("middle failure diagnostics survive queue events and durable log retrieval"
     } finally { reopened.close(); }
     const retrieved = await f.queue.readLog(id);
     assert.match(retrieved!, /tests\/hidden.test.ts:27:3/);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("artifact capture failure keeps the original failed gate and selected diagnostics", async () => {
+  const f = await fixture();
+  try {
+    await mkdir(f.home, { recursive: true });
+    await writeFile(join(f.home, "command-artifacts"), "storage unavailable");
+    const before = f.main();
+    const id = f.submit(await f.candidate("fail"));
+    const result = await f.land(id);
+    assert.equal(result?.type, "failed");
+    assert.equal(f.main(), before);
+    const run = f.log.operation(id)!.runs[0]!;
+    assert.equal(run.exitCode, 3);
+    assert.deepEqual(run.artifact, { status: "unavailable", reason: "capture-failed" });
+    assert.equal(run.diagnosticCapture, "selected");
   } finally { await f.dispose(); }
 }, 120_000);
 

@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 
 export function createRunnerHandler(input: {
@@ -8,6 +8,7 @@ export function createRunnerHandler(input: {
   token: string;
   runnerName: string;
   readLog(operationId: string): Promise<string | null>;
+  readArtifact?(operationId: string, runId: string, reference: Extract<CommandArtifact, { status: "retained" }>, offset: number, limit: number): Promise<ArtifactChunk>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
@@ -219,6 +220,20 @@ export function createRunnerHandler(input: {
       if (!repo)
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.operationsForChange(repositoryKey(repo), decodeURIComponent(change[1]!)) });
+    }
+    const artifact = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)/artifacts/([^/]+)$`));
+    if (artifact && request.method === "GET") {
+      const operationId = decodeURIComponent(artifact[1]!), runId = decodeURIComponent(artifact[2]!);
+      const operation = input.log.operation(operationId);
+      if (!operation) return json({ error: "Unknown operation" }, 404);
+      const reference = operation.runs.find((run) => run.runId === runId)?.artifact;
+      if (!reference || reference.status !== "retained") return json({ error: "Command artifact unavailable", reason: reference?.status === "unavailable" ? reference.reason : "not-recorded" }, 410);
+      const rawOffset = url.searchParams.get("offset") ?? "0", rawLimit = url.searchParams.get("limit") ?? "16384";
+      if (!/^\d+$/.test(rawOffset) || !Number.isSafeInteger(Number(rawOffset)) || Number(rawOffset) > reference.bytes
+        || !/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 16384) return json({ error: "Invalid artifact range" }, 400);
+      if (!input.readArtifact) return json({ error: "Artifact retrieval unavailable" }, 503);
+      try { return json(await input.readArtifact(operationId, runId, reference, Number(rawOffset), Number(rawLimit))); }
+      catch { return json({ error: "Retained artifact is missing or does not match ledger evidence" }, 410); }
     }
     const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|cancel))?$`));
     if (!route || (route[2] === "cancel" ? request.method !== "POST" : request.method !== "GET"))

@@ -606,8 +606,32 @@ alongside parsed test identities and diagnostics, and the terminal failure inclu
 the compact summary. `slipjay runner log <operation>` retrieves these retained
 events, including after restart; it does not provide complete stdout/stderr.
 An external signal alone does not prove timeout or OOM. Diagnostic text is untrusted
-output, never authority to execute a suggested command. Durable submission manifests,
-retained per-command artifacts and fresh-worker recovery remain separate work in #57.
+output, never authority to execute a suggested command. Complete submission manifests
+and fresh-worker recovery remain separate work in #57.
+
+Run-finished events now reference immutable per-command JSON artifacts outside SQLite.
+`slipjay runner artifact <operation> <run>` retrieves one, verifies the retained hash,
+then prints JSON. Authenticated consumers can page
+`GET /v1/operations/:id/artifacts/:runId?offset=0&limit=16384`: each response names its
+operation/run, SHA-256, total byte length, byte offset, nullable next offset and base64
+bytes. Pages never exceed 16 KiB; every read checks the file against its ledger reference.
+Missing, unavailable or changed artifacts return 410, invalid ranges 400, unknown
+operations 404, and missing credentials 401. The CLI read exits zero after verified
+retrieval regardless of the command's verdict; errors are nonzero and never resubmit.
+
+Artifacts keep at most 8 KiB of each sanitized stdout/stderr stream and of each selected
+diagnostic stream. Small complete streams carry `complete: true`; output already
+truncated by the process collector is withheld, since an edge may contain part of a
+credential. Selected middle diagnostics are retained separately with their own
+incomplete/capacity metadata. Redaction precedes artifact clipping, and the serialized
+file has a hard 256 KiB bound. These artifacts do not recover full noisy command logs.
+Private finalization/reset/deployment output is withheld. Capture failure records
+`unavailable`, preserving the original gate verdict and available diagnostics.
+Files are flushed before their ledger reference is appended; a repeated run identity
+cannot overwrite different bytes. Crash-orphaned files may remain without a ledger
+reference and cannot be retrieved through the API. Artifacts currently stay with the
+runner ledger, without automatic deletion or a total-store retention guarantee;
+bounded cleanup and repair/adoption retention remain outstanding in #57.
 
 `slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
 without following or submitting it. The authenticated API route is
