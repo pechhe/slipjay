@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.15.0
 
 - **Promotion verification no longer holds a repository's landings (#55):** a release
   verifies its pinned candidate in a release queue and checkout of its own
