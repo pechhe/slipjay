@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Preserve repair ownership across repository casing (#64, #55):** equivalent
+  repository names resolve to one authority before retained-source admission,
+  including the claim recheck and request replay.
+
 - **Keep releases and resets moving safely (#62, #55):** shared-lane releases
   publish within their existing turn, and reset/release exclusion covers worker
   reservations before their lane callbacks start, including resume and recovery.

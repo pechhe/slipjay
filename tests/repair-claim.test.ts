@@ -6,7 +6,7 @@ import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
-import { repairAuthority } from "../src/lib/repair-claim.ts";
+import { repairAdmission, repairAuthority } from "../src/lib/repair-claim.ts";
 import type { OperationLog, SubmitRequest } from "../src/lib/runner-contract.ts";
 
 const changeId = "k".repeat(32), source = "a".repeat(40), token = "b".repeat(64);
@@ -66,13 +66,50 @@ test("repair admission rechecks a claim revoked during retained-source capture",
     failed(log);
     const h = handler(log, { retainSubmission: async () => { capturing(); await waiting; return { type: "source_retained", commitId: "c".repeat(40), sourceRef: "retained", manifestSha256: "d".repeat(64), handoffComplete: false }; } });
     const body = await (await call(h, "operations/op_failed/repair", claim)).json() as { claim: { claimId: string } };
-    const pending = call(h, "operations", { ...submission(), repair: { operationId: "op_failed", claimId: body.claim.claimId, token } });
+    const pending = call(h, "operations", { ...submission(), repo: "Owner/Repo", repair: { operationId: "op_failed", claimId: body.claim.claimId, token } });
     await started;
     assert.equal((await call(h, "operations/op_failed/repair", { action: "revoke", by: "owner" })).status, 200);
     finish();
     assert.equal((await pending).status, 409);
     assert.equal(log.operationsForChange("owner/repo", changeId).length, 1);
   } finally { finish?.(); log.close(); }
+});
+
+test("repository casing preserves repair authority, retained admission and request identity", async () => {
+  const log = openOperationLog(":memory:");
+  const captured: SubmitRequest[] = [];
+  const h = handler(log, { retainSubmission: async (_id, request) => {
+    captured.push(request);
+    return { type: "source_retained", commitId: request.commitId, sourceRef: "retained", manifestSha256: "d".repeat(64), handoffComplete: false };
+  } });
+  try {
+    failed(log);
+    const body = await (await call(h, "operations/op_failed/repair", claim)).json() as { claim: { claimId: string } };
+    const repair = { operationId: "op_failed", claimId: body.claim.claimId, token };
+    for (const repo of ["owner/repo", "Owner/Repo", "OWNER/REPO"]) {
+      assert.equal(repairAuthority(log, repo, changeId).active?.claimId, body.claim.claimId);
+      assert.match(repairAdmission(log, { ...submission(), repo }) ?? "", /Repair ownership/);
+      assert.equal((await call(h, "operations", { ...submission(), repo })).status, 409);
+      assert.equal((await call(h, "operations", { ...submission(), repo, repair: { ...repair, token: "e".repeat(64) } })).status, 409);
+    }
+    assert.equal(captured.length, 0, "rejected authors cannot start source retention");
+    const accepted = await call(h, "operations", { ...submission(), repo: "Owner/Repo", repair });
+    assert.equal(accepted.status, 200);
+    const result = await accepted.json() as { operation: { id: string; repo: string } };
+    assert.equal(result.operation.repo, "owner/repo");
+    const replay = await call(h, "operations", { ...submission(), repo: "OWNER/REPO", repair });
+    assert.equal(replay.status, 200);
+    assert.equal((await replay.json() as typeof result).operation.id, result.operation.id);
+    assert.equal(captured.length, 1, "case-only replay reattaches without capturing again");
+    assert.equal(log.operationsForChange("owner/repo", changeId).length, 2);
+    assert.ok(log.events({ operationId: result.operation.id }).some(({ event }) => event.type === "repair_proposed" && event.claimId === body.claim.claimId));
+
+    const ordinary = { ...submission(), repo: "Other/Repo", requestId: "ordinary-mixed-case" };
+    assert.equal((await call(h, "operations", ordinary)).status, 200);
+    const request = log.submission("other/repo", ordinary.requestId!);
+    assert.equal(request?.operation.repo, "other/repo");
+    assert.equal(request?.request.repo, "other/repo");
+  } finally { log.close(); }
 });
 
 test("held, published, killed, migration and paused histories never grant a coding repair claim", async () => {

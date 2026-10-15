@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { repositoryKey } from "./runner-contract.ts";
 import type { LandingOperation, OperationEvent, OperationLog, SubmitRequest } from "./runner-contract.ts";
 
 export type RepairProof = { operationId: string; claimId: string; token: string };
@@ -10,7 +11,7 @@ export const validRepairProof = (v: unknown): v is RepairProof => v !== null && 
 
 /** A logical change's write fence outlives followers and any individual retry. */
 export function repairAuthority(log: OperationLog, repo: string, changeId: string): { claimed: boolean; active: RepairClaim | null } {
-  const operations = log.operationsForChange(repo, changeId);
+  const operations = log.operationsForChange(repositoryKey(repo), changeId);
   const history = operations.flatMap((op) => log.events({ operationId: op.id })).sort((a, b) => a.seq - b.seq);
   const last = history.findLast((row) => row.event.type === "repair_claimed");
   if (last?.event.type !== "repair_claimed") return { claimed: false, active: null };
