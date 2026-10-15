@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.16.0
+
+- **Optional depth-two verification (#56):** a runner repository entry may set
+  `verificationDepth: 2` when its gates are safe in independent checkouts. The queue
+  then verifies the next submission on the exact prefix of the one ahead, in a second
+  warm verifier checkout, and publishes them in order. A dependent never reuses
+  evidence from a predecessor that failed, was killed or changed: it takes one fresh
+  attempt on whatever the predecessor's outcome left. The default stays depth one; a
+  shared `lane` or an uncapped executor refuses depth two.
+- **Landings survive a lost response (#57):** an assigned-workspace `slipjay land`
+  persists a request identity before submitting, and rerunning it reconciles an
+  unknown outcome to the same operation instead of submitting again.
+- **The runner retains what each landing was given and what it ran (#57):** submitted
+  source is pinned before the runner acknowledges it, with an optional
+  `land --handoff` manifest of author evidence. Each run records its sanitized
+  command context and bounded, redacted stdout/stderr artifacts, and failure details
+  are kept before output is truncated. Operation outcomes report this evidence
+  consistently, and `slipjay runner source` exports the exact retained source as a Git
+  bundle.
+- **Repairs go through durable claims (#57):** `slipjay runner repair-claim`,
+  `repair-release` and `repair-revoke` fence one repair worker per failed change; a
+  proposal is a new attempt linked to the original failure.
+- **Retained evidence expires on a schedule (#57):** 14 days after the change
+  publishes, or 30 days after an unadopted outcome, never while an attempt is open,
+  its publication unconfirmed, or a repair claim active. Readers then return 410
+  naming the expiry.
+- **Capped executors fail closed:** when systemd refuses a run's resource caps, the
+  run fails before its command starts rather than running uncapped, and dependency
+  installs and post-integration commands share the gate executor and budget.
+
 ## v3.15.0
 
 - **Promotion verification no longer holds a repository's landings (#55):** a release
