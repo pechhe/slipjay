@@ -133,8 +133,8 @@ export function createRunnerQueue(input: {
   /** Each lane's work holding its checkouts now, and any chained behind it, by `admissionLane`. */
   const lanes = new Map<string, Promise<void>>();
   const laneOf = (repo: string) => repositoryLane(config, repo);
-  /** Operations admitted to a worker, which they hold until they finish. */
-  const admitted = new Set<string>();
+  /** Worker reservations, including operations whose lane callback has not started yet. */
+  const admitted = new Map<string, Operation>();
   // Queue-owned runtime attempts; their immutable evidence lives in the existing log.
   type PreparedPrefix = { artifact: LandingArtifact; checkout: string; overlap: boolean };
   const deferred = <T>() => {
@@ -367,7 +367,7 @@ export function createRunnerQueue(input: {
         const turn: PrefixTurn = { operation, attempt: 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
           prepared: deferred(), completed: deferred(), invalidation: new AbortController(), predecessor: active.at(-1) };
         prefixes.set(operation.repo, [...active, turn]);
-        admitted.add(operation.id);
+        admitted.set(operation.id, operation);
         const pending = processOperation(operation, turn).finally(() => {
           turn.prepared.resolve(null);
           turn.completed.resolve(log.operation(operation.id)?.status === "landed");
@@ -378,7 +378,7 @@ export function createRunnerQueue(input: {
         continue;
       }
       if (active.length || lanes.has(lane) || resetConflict(operation)) continue;
-      admitted.add(operation.id);
+      admitted.set(operation.id, operation);
       void inLane(lane, () => processOperation(operation))
         .finally(() => { admitted.delete(operation.id); wakeMain(); });
     }
@@ -391,7 +391,7 @@ export function createRunnerQueue(input: {
     if (operation.kind === "reset" && (prefixes.get(operation.repo)?.length ?? 0) > 0) return true;
     if (operation.kind === "reset") return lanes.has(admissionLane(laneOf(operation.repo), operation.repo, "release"));
     return operation.kind === "release"
-      && [...running.values()].some((entry) => entry.operation.kind === "reset" && laneOf(entry.operation.repo) === laneOf(operation.repo));
+      && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation, prefix?: PrefixTurn): Promise<void> {
     let stage: RunnerStage = "queued";
@@ -810,6 +810,9 @@ export function createRunnerQueue(input: {
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
         exclusively: (publication) => {
+          // A shared-lane release owns the publication lane for its whole turn.
+          // Rejoining it would wait for this very release to finish.
+          if (admissionLane(laneOf(operation.repo), operation.repo, "release") === laneOf(operation.repo)) return publication();
           if (lanes.has(laneOf(operation.repo))) progress(`Verified; publishing after ${operation.repo}'s running turn`);
           return serially(operation.repo, publication);
         } });

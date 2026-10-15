@@ -1062,20 +1062,53 @@ const seqOf = (f: Awaited<ReturnType<typeof fixture>>, id: string, type: string)
 test("a release of a repository in a shared lane verifies only once the lane's running landing has finished", async () => {
   const f = await fixture(false, true, undefined, false, { other: true, lane: "shared-database" });
   try {
+    const base = f.releaseRef();
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const candidate = f.main();
     const pids = join(f.root, "gate-pids.json");
     const request = await hanging(f, pids, f.otherAuthor, "fixture/other");
     const stuck = f.submit(request);
     f.queue.wake();
     await started(pids);
-    const release = f.submitRelease(f.main());
+    const release = f.submitRelease(candidate);
     f.queue.wake();
     assert.equal(f.log.operation(release)!.waitingFor, `landing ${request.changeId.slice(0, 12)}`);
     assert.equal(f.queue.kill(stuck).status, "killed");
     await f.queue.idle();
-    assert.equal(f.result(release)?.type, "released", JSON.stringify(f.result(release)));
+    const outcome = f.result(release);
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
+    assert.equal(f.releaseRef(), outcome.result.merge);
+    assert.deepEqual(f.parents(f.releaseRef()), [base, candidate]);
     assert.ok(seqOf(f, release, "stage") > seqOf(f, stuck, "cancelled"), "the release started after the shared lane's landing ended");
   } finally { await f.dispose(); }
 }, 120_000);
+
+for (const recover of [false, true]) {
+  for (const first of ["reset", "release"] as const) {
+    test(`paused ${first}-first reset/release admission preserves exclusion${recover ? " after recovery" : ""}`, async () => {
+      const f = await fixture(false, true, undefined, true, { workers: 2 });
+      try {
+        assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+        f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+        const submit = { reset: () => f.submitReset(), release: () => f.submitRelease(f.main()) };
+        const second = first === "reset" ? "release" : "reset";
+        const a = submit[first]();
+        const b = submit[second]();
+        if (recover) await f.queue.recover();
+        f.queue.wake();
+        assert.equal(f.log.operation(a)!.status, "queued");
+        assert.equal(f.log.operation(b)!.status, "queued");
+        f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "owner" });
+        f.queue.wake();
+        await f.queue.idle();
+        assert.equal(f.result(a)?.type, first === "reset" ? "reset" : "released", JSON.stringify(f.result(a)));
+        assert.equal(f.result(b)?.type, second === "reset" ? "reset" : "released", JSON.stringify(f.result(b)));
+        assert.ok(seqOf(f, b, "stage") > seqOf(f, a, first === "reset" ? "reset" : "released"),
+          "the second operation starts only after the first finishes, including pending lane callbacks");
+      } finally { await f.dispose(); }
+    }, 120_000);
+  }
+}
 
 test("a release and a reset of one repository never overlap, and each says which it waits for", async () => {
   const f = await fixture(false, true, undefined, true);

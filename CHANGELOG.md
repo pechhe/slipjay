@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Keep releases and resets moving safely (#62, #55):** shared-lane releases
+  publish within their existing turn, and reset/release exclusion covers worker
+  reservations before their lane callbacks start, including resume and recovery.
+
 - **Preserve pre-cutover workspace custody (#61, #8):** historical checkouts use
   their primary checkout's canonical branch governance when they predate
   `slipjay.json`. Checkouts retained under `~/.pi/workspaces` remain eligible for
