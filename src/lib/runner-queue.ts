@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { integrateLandingCandidate, prepareLandingCandidate, verifyPreparedCandidate, integratePreparedCandidate } from "./landing-candidate.ts";
 import type { PreparedLandingCandidate } from "./landing-candidate.ts";
+import { importSubmissionSource } from "./submission-source.ts";
 import { duplicateLandingSource, retainLandingSource, retainLandingArtifact, importLandingArtifact, RETAINED_ARTIFACT_REVISIONS } from "./landing-artifact.ts";
 import type { LandingArtifact } from "./landing-artifact.ts";
 import { completeLanding, fetchIntegration, landingIO } from "./landing-steps.ts";
@@ -485,9 +486,13 @@ export function createRunnerQueue(input: {
       integrationBranch = context.integrationBranch;
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
-      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" ? ["--branch", operation.bookmark] : []]);
+      const retained = operation.kind === "landing" ? log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event : undefined;
+      const retainedSource = retained?.type === "source_retained" ? retained : undefined;
+      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" && !retainedSource ? ["--branch", operation.bookmark] : []]);
+      if (retainedSource) await importSubmissionSource(home, operation.repo, operation.id, retainedSource, checkout);
+      const sourceRevision = retainedSource ? operation.commitId : operation.kind === "landing" ? operation.bookmark : operation.commitId;
       if (prefix) {
-        if ((await revisionFacts(checkout, `${prefix.operation.bookmark}@${remote}`)).commitId !== operation.commitId)
+        if ((await revisionFacts(checkout, retainedSource ? operation.commitId : `${prefix.operation.bookmark}@${remote}`)).commitId !== operation.commitId)
           throw new Error("Fetched source differs from submitted commit");
         await retainLandingSource(checkout, operation.id, prefix.attempt, operation.commitId);
         append(operation.id, { type: "attempt_started", attempt: prefix.attempt, source: operation.commitId, checkout });
@@ -550,15 +555,15 @@ export function createRunnerQueue(input: {
         verdict = { type: "landed", ...published, branch, remote };
         return;
       }
-      await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
+      if (!retainedSource) await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
       // Drop earlier candidates; never the published integration, which a candidate on an older base does not contain.
-      await jj(checkout, ["abandon", "-r", `mutable() ~ ::${operation.bookmark} ~ ::${branch}@${remote} ~ ${RETAINED_ARTIFACT_REVISIONS}`]);
-      const commits = await jj(checkout, ["log", "-r", operation.bookmark, "--no-graph", "-T", 'commit_id ++ "\\n"']);
+      await jj(checkout, ["abandon", "-r", `mutable() ~ ::${sourceRevision} ~ ::${branch}@${remote} ~ ${RETAINED_ARTIFACT_REVISIONS}`]);
+      const commits = await jj(checkout, ["log", "-r", sourceRevision, "--no-graph", "-T", 'commit_id ++ "\\n"']);
       if (commits !== operation.commitId) throw new Error(`Candidate bookmark ${operation.bookmark} does not resolve to submitted commit ${operation.commitId}`);
       const visible = await jj(checkout, ["log", "-r", `change_id(${operation.changeId})`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
-      if (!prefix && (visible.split("\n").filter(Boolean).length !== 1 || visible !== operation.commitId))
+      if (!prefix && !retainedSource && (visible.split("\n").filter(Boolean).length !== 1 || visible !== operation.commitId))
         throw new Error(`Submitted change ${operation.changeId} must have exactly one visible commit matching ${operation.commitId}`);
-      if (prefix) await duplicateLandingSource(checkout, operation.commitId, branch);
+      if (prefix || retainedSource) await duplicateLandingSource(checkout, operation.commitId, branch);
       else await jj(checkout, ["edit", operation.commitId]);
       const description = await jj(checkout, ["log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
       const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
@@ -567,7 +572,7 @@ export function createRunnerQueue(input: {
       await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
       const candidateOptions = {
-        pinnedSource: Boolean(prefix),
+        pinnedSource: Boolean(prefix || retainedSource),
         environment, onProgress: progress,
         onStage: (next) => { if (next !== "cleaning") setStage(next); },
         runCommand: run,
@@ -596,7 +601,7 @@ export function createRunnerQueue(input: {
             throw error;
           }
         },
-        landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, prefix ? "@" : operation.commitId) }),
+        landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, prefix || retainedSource ? "@" : operation.commitId) }),
         ensureLandingDescription: async (_cwd, _context, target) => target,
         async prepareCandidateDependencies(cwd, candidate, target, onProgress, runCommand) {
           await recordShape(cwd, candidate.integrationBranch, target.commitId, candidate.configuration.migrationFinalization);
@@ -651,8 +656,9 @@ export function createRunnerQueue(input: {
             tip = (await revisionFacts(publisher, `${branch}@${remote}`)).commitId;
           }
           if (tip !== artifact.base) throw new PrefixInvalidated("Remote integration changed; exact-prefix verification is invalidated");
-          await jj(publisher, ["git", "fetch", "--remote", remote!, "--branch", prefix!.operation.bookmark]);
-          if ((await revisionFacts(publisher, `${prefix!.operation.bookmark}@${remote}`)).commitId !== operation.commitId)
+          if (retainedSource) await importSubmissionSource(home, operation.repo, operation.id, retainedSource, publisher);
+          else await jj(publisher, ["git", "fetch", "--remote", remote!, "--branch", prefix!.operation.bookmark]);
+          if ((await revisionFacts(publisher, retainedSource ? operation.commitId : `${prefix!.operation.bookmark}@${remote}`)).commitId !== operation.commitId)
             throw new Error("Submitted source changed; exact-prefix verification is invalidated");
           if (prefix!.invalidation.signal.aborted || controller.signal.aborted) throw new Error("Prefix no longer has publication authority");
           await importLandingArtifact(publisher, checkout, artifact);

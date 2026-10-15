@@ -10,11 +10,14 @@ export function createRunnerHandler(input: {
   readLog(operationId: string): Promise<string | null>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
+  /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
+  retainSubmission?(operationId: string, request: SubmitRequest): Promise<Extract<import("./runner-contract.ts").OperationEvent, { type: "source_retained" }>>;
   kill(operationId?: string): KillOutcome;
   /** A queued operation was cancelled: its candidate bookmark is the queue's to delete. */
   onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
 }): RunnerHandler {
+  let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
   return async (request) => {
     const authorization = Buffer.from(request.headers.get("authorization") ?? "");
@@ -89,30 +92,43 @@ export function createRunnerHandler(input: {
       }
       if (!validSubmission(body))
         return json({ error: "Invalid submission" }, 400);
-      const repo = repositoryKey(body.repo);
-      const requestFact = body.requestId ? { type: "submission_request" as const, requestId: body.requestId, repo,
-        changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy } : undefined;
-      const prior = body.requestId ? input.log.submission(repo, body.requestId) : null;
-      if (prior) {
-        if ((["changeId", "commitId", "bookmark", "submittedBy"] as const).some((key) => prior.request[key] !== requestFact![key]))
-          return json({ error: "Submission request identity is already bound to another candidate" }, 409);
-        return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
-      }
-      const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
-      if (existing?.commitId === body.commitId) {
-        if (requestFact) input.log.append(existing.id, requestFact);
-        return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
-      }
-      if (existing?.status === "running")
-        return json({ operation: existing }, 409);
-      const id = newOperationId();
-      if (existing)
-        input.log.append(existing.id, { type: "superseded", by: id });
-      input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
-      if (body.identity) input.log.append(id, body.identity);
-      if (requestFact) input.log.append(id, requestFact);
-      input.onSubmitted();
-      return json({ operation: input.log.operation(id), reattached: false, ...body.requestId ? { requestId: body.requestId } : {}, ...existing ? { superseded: existing.id } : {} });
+      // Retention adds an await: serialize admission through the append, including deduplication.
+      const preceding = landingAdmission;
+      let release!: () => void;
+      landingAdmission = new Promise<void>((resolve) => { release = resolve; });
+      await preceding;
+      try {
+        const repo = repositoryKey(body.repo);
+        const requestFact = body.requestId ? { type: "submission_request" as const, requestId: body.requestId, repo,
+          changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy } : undefined;
+        const prior = body.requestId ? input.log.submission(repo, body.requestId) : null;
+        if (prior) {
+          if ((["changeId", "commitId", "bookmark", "submittedBy"] as const).some((key) => prior.request[key] !== requestFact![key]))
+            return json({ error: "Submission request identity is already bound to another candidate" }, 409);
+          return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
+        }
+        const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
+        if (existing?.commitId === body.commitId) {
+          if (requestFact) input.log.append(existing.id, requestFact);
+          return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
+        }
+        if (existing?.status === "running")
+          return json({ operation: existing }, 409);
+        const id = newOperationId();
+        let retained: Awaited<ReturnType<NonNullable<typeof input.retainSubmission>>> | undefined;
+        try { retained = await input.retainSubmission?.(id, body); }
+        catch { return json({ error: "Source retention did not complete; submission was not acknowledged" }, 503); }
+        // A queued predecessor may have started or been cancelled while capture awaited I/O.
+        const active = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
+        if (active?.status === "running") return json({ operation: active }, 409);
+        if (active) input.log.append(active.id, { type: "superseded", by: id });
+        input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
+        if (retained) input.log.append(id, retained);
+        if (body.identity) input.log.append(id, body.identity);
+        if (requestFact) input.log.append(id, requestFact);
+        input.onSubmitted();
+        return json({ operation: input.log.operation(id), reattached: false, ...body.requestId ? { requestId: body.requestId } : {}, ...active ? { superseded: active.id } : {} });
+      } finally { release(); }
     }
     if (request.method === "POST" && path === `${RUNNER_API}/releases`) {
       let body: unknown;

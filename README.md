@@ -578,10 +578,23 @@ explicit landing of failed source may create a new attempt. Requests without the
 optional identity retain the existing API behaviour. Direct/default checkouts retain
 the legacy follower contract because they have no assigned-workspace metadata.
 
-The identity acknowledges the request, **not a durable source handoff**. Keep the
-author workspace: retained source before acknowledgement, a handoff manifest and
-fresh-worker recovery are still outstanding. An older runner that does not echo the
-identity cannot certify this contract; the CLI reports the outcome as unknown.
+The runner service pins new submissions in a private bare Git object store under
+its state directory before acknowledging them. A hashed manifest and `source_retained`
+ledger event bind that source to the operation. Verification and publication import
+from those pinned objects, so loss of the author checkout or upstream candidate
+bookmark does not lose the submitted source. Capture never touches an active publisher
+or verifier checkout. Failed capture acknowledges no new operation and does not
+supersede queued work. Admission rechecks queue state after capture, so work that
+started meanwhile is followed rather than superseded.
+
+This is **not a complete durable handoff**. Keep the author workspace until the
+remaining contract exists: the minimal manifest explicitly records missing Spec
+snapshots, helper/check/review evidence and fresh-worker repair ownership. Source
+objects and manifests currently remain with the ledger without automatic deletion;
+bounded cleanup with repair/adoption evidence is still outstanding. Older operations
+without a retention event keep their historical source availability. An older runner
+that does not echo request identity cannot certify request reconciliation; the CLI
+reports the outcome as unknown.
 
 Required verification selects redacted diagnostic lines before local process output
 is reduced to its bounded head and tail. This preserves named failures, nearby error

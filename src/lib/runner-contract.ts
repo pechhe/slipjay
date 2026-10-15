@@ -120,6 +120,7 @@ export type OperationEvent =
   | { type: "client"; id: string; fact: ClientFact }
   | { type: "verification_base"; base: string }
   | { type: "verification_passed"; base: string; candidate: string }
+  | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
   /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */
   | { type: "submission_request"; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */

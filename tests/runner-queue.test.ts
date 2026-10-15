@@ -8,6 +8,7 @@ import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../src/lib/runner-contract.ts";
 import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
+import { retainSubmissionSource } from "../src/lib/submission-source.ts";
 import { createRunnerQueue, localExecutor } from "../src/lib/runner-queue.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
@@ -1931,4 +1932,26 @@ test("depth-two actual runner process loss retains durable attempts and recovers
     for (const event of artifacts)
       assert.equal(jj(event.checkout, ["log", "-r", event.candidate, "--no-graph", "-T", "commit_id"]), event.candidate);
   } finally { child?.kill("SIGKILL"); await exited; await f.dispose(); }
+}, 120_000);
+
+
+test("queued retained source lands after author and upstream candidate loss with a cold runner checkout", async () => {
+  for (const verificationDepth of [1, 2] as const) {
+    const f = await fixture(false, false, undefined, false, { verificationDepth });
+    try {
+      const request = await f.candidate("retained-candidate.txt");
+      const id = f.submit(request);
+      const retained = await retainSubmissionSource({ home: f.home, operationId: id, request, url: f.origin, executor: f.executor });
+      f.log.append(id, retained);
+      execFileSync("git", ["--git-dir", f.origin, "update-ref", "-d", `refs/heads/${request.bookmark}`]);
+      execFileSync("git", ["--git-dir", f.origin, "gc", "--prune=now"]);
+      await rm(f.author, { recursive: true, force: true });
+      const result = await f.land(id);
+      assert.equal(result?.type, "landed", JSON.stringify(result));
+      assert.equal(f.remoteFile("retained-candidate.txt"), "retained-candidate.txt");
+      const before = f.main();
+      f.queue.wake(); await f.queue.idle();
+      assert.equal(f.main(), before, "following/restarting a completed attempt cannot publish it twice");
+    } finally { await f.dispose(); }
+  }
 }, 120_000);

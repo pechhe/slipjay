@@ -17,14 +17,14 @@ function submission(commitId = "commit-1", change = changeId) {
   return { repo: "owner/repo", changeId: change, commitId, bookmark: candidateBookmark(change), submittedBy: "author" };
 }
 
-async function fixture(logPath = ":memory:") {
+async function fixture(logPath = ":memory:", retainSubmission?: Parameters<typeof createRunnerHandler>[0]["retainSubmission"]) {
   const log = openOperationLog(logPath);
   const listeners = new Set<(event: StoredEvent) => void>();
   let submissions = 0;
   let onSubscribe: (() => void) | undefined;
   let killOutcome: ReturnType<Parameters<typeof createRunnerHandler>[0]["kill"]> = { status: "idle" };
   const handler = createRunnerHandler({
-    log, token, runnerName: "test-runner",
+    log, token, runnerName: "test-runner", retainSubmission,
     readLog: (id) => Promise.resolve(id === "missing-log" ? null : "command output\n"),
     onSubmitted: () => { submissions++; },
     kill: () => killOutcome,
@@ -574,4 +574,63 @@ test("request replay preserves cancellation, supersession, publication and held 
     }
     assert.equal(f.submissions, endings.length);
   } finally { await f.close(); }
+});
+
+
+test("submission acknowledgement waits for retained source and retention failure never supersedes queued work", async () => {
+  let started!: () => void;
+  const entered = new Promise<void>((resolve) => { started = resolve; });
+  let release!: () => void;
+  const retained = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  const f = await fixture(":memory:", async (_id, body) => {
+    if (++calls === 1) { started(); await retained; }
+    else throw new Error("fixture storage failure");
+    return { type: "source_retained", commitId: body.commitId, sourceRef: "refs/slipjay/fixture", manifestSha256: "a".repeat(64), handoffComplete: false };
+  });
+  try {
+    const response = f.submit({ ...submission("a".repeat(40)), requestId: randomUUID() });
+    await entered;
+    assert.equal(f.log.openOperations().length, 0);
+    assert.equal(f.submissions, 0);
+    release();
+    const accepted = await submitted(await response);
+    const events = f.log.events({ operationId: accepted.operation.id });
+    assert.ok(events.some((row) => row.event.type === "source_retained"));
+    assert.ok(events.findIndex((row) => row.event.type === "source_retained") < events.findIndex((row) => row.event.type === "submission_request"));
+    const failed = await f.submit({ ...submission("b".repeat(40)), requestId: randomUUID() });
+    assert.equal(failed.status, 503);
+    assert.equal(f.log.operation(accepted.operation.id)?.status, "queued");
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 1);
+    assert.equal(f.submissions, 1);
+  } finally { release(); await f.close(); }
+});
+
+test("retention rechecks a queued predecessor that starts or is cancelled during capture", async () => {
+  for (const transition of ["running", "cancelled"] as const) {
+    let started!: () => void;
+    const entered = new Promise<void>((resolve) => { started = resolve; });
+    let release!: () => void;
+    const wait = new Promise<void>((resolve) => { release = resolve; });
+    let calls = 0;
+    const f = await fixture(":memory:", async (_id, body) => {
+      if (++calls === 2) { started(); await wait; }
+      return { type: "source_retained", commitId: body.commitId, sourceRef: "refs/slipjay/fixture", manifestSha256: "a".repeat(64), handoffComplete: false };
+    });
+    try {
+      const first = await submitted(await f.submit(submission("a".repeat(40))));
+      const next = f.submit({ ...submission("b".repeat(40)), requestId: randomUUID() });
+      await entered;
+      f.append(first.operation.id, transition === "running" ? { type: "stage", stage: "verifying" } : { type: "cancelled", reason: "owner cancelled" });
+      release();
+      const response = await next;
+      assert.equal(response.status, transition === "running" ? 409 : 200);
+      assert.equal(f.log.operation(first.operation.id)?.status, transition);
+      assert.equal(f.log.events({ operationId: first.operation.id }).some((row) => row.event.type === "superseded"), false);
+      if (transition === "running") {
+        assert.equal((await response.json() as { operation: Operation }).operation.id, first.operation.id);
+        assert.equal(f.submissions, 1);
+      } else assert.equal(f.submissions, 2);
+    } finally { release(); await f.close(); }
+  }
 });
