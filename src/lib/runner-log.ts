@@ -1,6 +1,7 @@
 import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { landingOutcome } from "./landing-outcome.ts";
 import { classifyFailure } from "./failure-classification.ts";
+import { deliveryState } from "./build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { admissionLane, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
@@ -180,7 +181,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       }
       return stored;
   }
-  return {
+  const log: OperationLog = {
     append,
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
     latestSeq: () => Number((db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq),
@@ -197,7 +198,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
           recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10),
           recentProductionDeploys: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.environment') = 'production' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is DeployOperation => op.kind === "deploy"),
           lastStagingDeploys: repos.flatMap((repo) => { const latest = projectIds((db.prepare(`SELECT e.operation_id FROM events e WHERE e.type = 'submitted' AND json_extract(e.data, '$.kind') = 'deploy' AND json_extract(e.data, '$.repo') = ? AND json_extract(e.data, '$.environment') = 'staging' AND EXISTS (SELECT 1 FROM events d WHERE d.operation_id = e.operation_id AND d.type IN ${terminalTypes}) ORDER BY e.seq DESC LIMIT 1`).all(repo) as { operation_id: string }[]).map((row) => row.operation_id)).find((op) => op.kind === "deploy"); return latest?.kind === "deploy" ? [latest] : []; }),
-          lastSuite: { status: "unavailable" } };
+          lastSuite: { status: "unavailable" }, build: deliveryState(log) };
       } finally { db.exec("COMMIT"); }
     },
     events,
@@ -230,8 +231,12 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
     },
     paused,
+    buildBound: () => (db.prepare("SELECT DISTINCT operation_id FROM events WHERE type = 'build_admitted' ORDER BY seq").all() as { operation_id: string }[])
+      .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history);
+        return operation?.kind === "landing" ? [{ operation, history }] : []; }),
     close: () => { listeners.clear(); db.close(); },
   };
+  return log;
 }
 
 /** How a queued operation names the one running ahead of it. */

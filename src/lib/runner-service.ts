@@ -7,7 +7,8 @@ import { readSubmissionManifest, retainSubmissionSource } from "./submission-sou
 import { readCommandArtifact } from "./command-artifact.ts";
 import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
-import { BUILD_TOKEN_ENV, buildAdmitter } from "./build-admission.ts";
+import { BUILD_TOKEN_ENV, buildAdmitter, buildRoute } from "./build-admission.ts";
+import { createReceiptDrain } from "./build-receipts.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
@@ -38,11 +39,15 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     environment: () => env,
   });
   await queue.recover();
+  const buildToken = env[BUILD_TOKEN_ENV]?.trim();
+  const build = config.build && buildToken ? buildRoute({ origin: config.build.origin, token: buildToken }) : undefined;
+  // Receipts go from the ledger to Build on their own schedule: publication never waits on HQ.
+  const receipts = build ? createReceiptDrain({ log, route: build }) : undefined;
   const server = await serveRunner(createRunnerHandler({
     log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
     subscribe: log.subscribe,
     // Without both, Build-bound submissions are refused, never queued unadmitted.
-    ...config.build && env[BUILD_TOKEN_ENV]?.trim() ? { admitBuild: buildAdmitter({ origin: config.build.origin, token: env[BUILD_TOKEN_ENV].trim() }) } : {},
+    ...build ? { admitBuild: buildAdmitter(build) } : {},
     async readSource(operation, signal) {
       const retained = log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event;
       if (retained?.type !== "source_retained") throw new Error("No retained submission");
@@ -63,11 +68,12 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   // Queued operations from before a restart resume here.
   queue.wake();
+  receipts?.wake();
   // Retained evidence is bounded: expire it at start and every six hours. One pass at a time.
   let pruning: Promise<unknown> = Promise.resolve();
   const prune = () => { pruning = pruning.then(() => pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] })).catch(() => {}); };
   prune();
   const retention = setInterval(prune, 6 * 60 * 60 * 1000);
   retention.unref();
-  return { url: server.url, close: async () => { clearInterval(retention); await pruning; await server.close(); queue.close(); await queue.idle(); log.close(); } };
+  return { url: server.url, close: async () => { clearInterval(retention); await pruning; await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
 }

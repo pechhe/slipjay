@@ -718,7 +718,26 @@ as retryable (503): running `slipjay land` again resends the same admission, whi
 Build replays, so a lost response never opens a second operation. A newer candidate
 of the same change names the queued one it supersedes to Build; if that one's admission
 never got an answer, the runner resends it first, and while Build stays silent it
-refuses the newer candidate as retryable and leaves the queued one as it was. No Build call is made during integration or publication.
+refuses the newer candidate as retryable and leaves the queued one as it was.
+
+**Build receipts.** For each admitted landing the runner owes Build a receipt for each
+fact it reports, named by the operation and that fact's ledger sequence: its admission
+delivers `submitted`, and a `failed` or `landed` outcome is reported as `failed` or
+`published` through `recordAttempt`. Every receipt repeats the admitted source tuple:
+the author's commit as `candidateRevision`, the Spec, Tickets, body revision and hash,
+and the bind generation. An independent drain sends owed receipts in ledger order,
+records each delivery in the ledger, and resends until Build answers, which Build
+replays, so a Build outage, a runner restart or a lost response delays a receipt but
+never loses it, and catch-up needs no further landing. When Build stops answering the
+drain backs off (1 second, doubling to 5 minutes) and records a runner-wide
+`build_delivery` event, so watch clients see the outage; the queue snapshot's `build`
+reports whether Build is answering, how many receipts are owed and since when, and how
+many are parked. A receipt Build refuses, including one it finds too large, is parked with its code and never holds back
+another operation's; a failure's command lists and excerpt are cut, and the receipt marked truncated,
+to keep each request under 200 KB. A landing's outcome reports its `build` admission and receipt
+state apart from its verdict: a published landing whose receipt is still owed is
+landed, with `receipts: "pending"`. Refused, unadmitted and unbound operations owe
+nothing. No Build call is made during integration or publication.
 
 The client redacts with its environment before transport, then the runner redacts
 again before retention. Redacted Spec snapshots receive a new snapshot digest and

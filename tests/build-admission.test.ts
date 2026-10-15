@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "vite-plus/test";
-import { buildAdmitter } from "../src/lib/build-admission.ts";
+import { buildAdmitter, buildRoute } from "../src/lib/build-admission.ts";
 import type { BuildAdmission, BuildAdmissionRequest } from "../src/lib/build-admission.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark, RUNNER_API } from "../src/lib/runner-contract.ts";
@@ -162,7 +162,7 @@ test("the Build route client maps answers, sends the runner credential and gives
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
-    const admit = buildAdmitter({ origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, token, timeoutMs: 300 });
+    const admit = buildAdmitter(buildRoute({ origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, token, timeoutMs: 300 }));
     const request = { repository: "owner/repo", operationId: "op", sequence: 7, occurredAt: "2026-10-15T21:00:00.000Z", specId: binding.specId, ticketIds: [],
       specBodyRevision: null, specBodyHash: null, candidateRevision: "a".repeat(40), baseRevision: null, helperRevisions: [], repairsOperationId: null,
       bindGeneration: 2, sessionId: binding.sessionId, supersedesOperationId: null } satisfies BuildAdmissionRequest;
@@ -175,6 +175,8 @@ test("the Build route client maps answers, sends the runner credential and gives
     assert.deepEqual(await admit(request), { outcome: "refused", code: "delivery_pending" });
     reply = { status: 422, body: { status: "invalid", code: "attempt_ticket_invalid" } };
     assert.deepEqual(await admit(request), { outcome: "refused", code: "attempt_ticket_invalid" });
+    reply = { status: 413, body: { status: "invalid", code: "runner_body_too_large" } };
+    assert.deepEqual(await admit(request), { outcome: "refused", code: "runner_body_too_large" });
     reply = { status: 503, body: { status: "unavailable", code: "database_unavailable" } };
     assert.equal((await admit(request)).outcome, "unavailable");
     reply = { status: 401, body: { status: "unauthorised", code: "runner_unauthenticated" } };

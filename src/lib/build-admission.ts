@@ -53,30 +53,47 @@ export function admissionRequest(input: { repo: string; operationId: string; seq
 /** Build's refusals the author can retry later unchanged: another delivery of the Spec is still in its custody. */
 export const RETRYABLE_BUILD_REFUSALS: readonly string[] = ["delivery_pending"];
 
+/**
+ * One answer from Build's runner route. `accepted` is a recorded or replayed fact; `refused` is Build's domain
+ * answer (409 conflict or block, 422 an input it will never accept) with its code; `unavailable` means no answer
+ * that settles anything, so the same request is sent again later.
+ */
+export type BuildRouteAnswer =
+  | { kind: "accepted"; value: unknown }
+  | { kind: "refused"; code: string }
+  | { kind: "unavailable"; reason: string };
+export type BuildRoute = (action: "admitAttempt" | "recordAttempt", input: unknown) => Promise<BuildRouteAnswer>;
+
 /** Calls `POST {origin}/api/build/runner`; never throws, and never waits longer than `timeoutMs`. */
-export function buildAdmitter(options: { origin: string; token: string; timeoutMs?: number; fetch?: typeof fetch }): BuildAdmitter {
+export function buildRoute(options: { origin: string; token: string; timeoutMs?: number; fetch?: typeof fetch }): BuildRoute {
   const call = options.fetch ?? fetch;
   const url = new URL("/api/build/runner", options.origin).toString();
-  return async (request) => {
+  return async (action, input) => {
     let response: Response;
-    let body: { status?: unknown; code?: unknown; value?: { admission?: { sequence?: unknown; sessionId?: unknown; recordedAt?: unknown } | null } } | null;
+    let body: { status?: unknown; code?: unknown; value?: unknown } | null;
     try {
       response = await call(url, { method: "POST", redirect: "error", signal: AbortSignal.timeout(options.timeoutMs ?? BUILD_ADMISSION_TIMEOUT_MS),
         headers: { "content-type": "application/json", authorization: `Bearer ${options.token}` },
-        body: JSON.stringify({ action: "admitAttempt", input: request }) });
+        body: JSON.stringify({ action, input }) });
       body = await response.json().catch(() => null) as typeof body;
     } catch (error) {
-      return { outcome: "unavailable", reason: (error as Error).name === "TimeoutError" ? "Build did not answer in time" : "Build could not be reached" };
+      return { kind: "unavailable", reason: (error as Error).name === "TimeoutError" ? "Build did not answer in time" : "Build could not be reached" };
     }
-    if (response.status === 200 && (body?.status === "succeeded" || body?.status === "duplicate")) {
-      const admission = body.value?.admission;
-      return { outcome: "admitted", sequence: request.sequence, sessionId: request.sessionId,
-        recordedAt: typeof admission?.recordedAt === "string" ? admission.recordedAt : null };
-    }
-    // Build's domain answers: a conflict or block (409) or an input it will never accept (422).
-    if ((response.status === 409 || response.status === 422) && typeof body?.code === "string" && body.code.trim())
-      return { outcome: "refused", code: body.code.slice(0, 200) };
-    if (response.status === 401 || response.status === 403) return { outcome: "unavailable", reason: "Build refused the runner's credential" };
-    return { outcome: "unavailable", reason: `Build answered HTTP ${response.status}` };
+    if (response.status === 200 && (body?.status === "succeeded" || body?.status === "duplicate")) return { kind: "accepted", value: body.value ?? null };
+    // Build's domain answers, and its refusal of a request it will never accept (400 malformed, 413 too large).
+    if ([400, 409, 413, 422].includes(response.status) && typeof body?.code === "string" && body.code.trim())
+      return { kind: "refused", code: body.code.slice(0, 200) };
+    if (response.status === 401 || response.status === 403) return { kind: "unavailable", reason: "Build refused the runner's credential" };
+    return { kind: "unavailable", reason: `Build answered HTTP ${response.status}` };
+  };
+}
+
+export function buildAdmitter(route: BuildRoute): BuildAdmitter {
+  return async (request) => {
+    const answer = await route("admitAttempt", request);
+    if (answer.kind === "unavailable") return { outcome: "unavailable", reason: answer.reason };
+    if (answer.kind === "refused") return { outcome: "refused", code: answer.code };
+    const recordedAt = (answer.value as { admission?: { recordedAt?: unknown } | null } | null)?.admission?.recordedAt;
+    return { outcome: "admitted", sequence: request.sequence, sessionId: request.sessionId, recordedAt: typeof recordedAt === "string" ? recordedAt : null };
   };
 }

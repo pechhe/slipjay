@@ -1,4 +1,5 @@
 import type { LandingOperation, LandingOutcome, StoredEvent } from "./runner-contract.ts";
+import { owedReceipts, receiptSettlement } from "./build-receipts.ts";
 
 /** Pure operation-local history: publication elsewhere is never inferred from age or a failed push. */
 export function landingOutcome(operation: LandingOperation, history: StoredEvent[]): LandingOutcome {
@@ -50,11 +51,18 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     ...(result.command ? { command: result.command } : {}), ...(result.output !== undefined ? { excerpt: result.output.slice(0, 6000) } : {}),
     excerptTruncated: (result.output?.length ?? 0) > 6000 }
     : result?.type === "cancelled" || result?.type === "declined" ? { reason: result.reason, excerptTruncated: false } : undefined;
+  const bound = events.find((event) => event.type === "submitted" && event.kind !== "release" && event.kind !== "deploy" && event.kind !== "reset" && event.admission);
+  const owed = bound ? owedReceipts(operation, history) : [];
+  const settled = owed.map((receipt) => receiptSettlement(history, receipt)?.state);
+  // A published landing whose receipt has not reached Build yet is still landed: delivery is reported apart.
+  const build: LandingOutcome["build"] = bound ? {
+    admission: events.some((event) => event.type === "build_admitted") ? "admitted" : result?.type === "declined" && result.build ? "refused" : "pending",
+    receipts: !owed.length ? "none" : settled.includes(undefined) ? "pending" : settled.includes("parked") ? "parked" : "delivered" } : undefined;
   return { version: 1, operationId: operation.id, repo: operation.repo, changeId: operation.changeId, sourceCommitId: operation.commitId,
     status: operation.status, stage: operation.stage, terminal: Boolean(result), asOfSeq: operation.lastSeq,
     submittedAt: operation.submittedAt, ...(operation.finishedAt ? { finishedAt: operation.finishedAt } : {}),
     ...(identity ? { identity } : {}), ...(request ? { requestId: request.requestId } : {}), ...(retained ? { sourceRetention: retained } : {}), ...(expired ? { evidenceExpired: expired } : {}),
     ...(attempt ? { attempt } : {}), publication, ...(failure ? { failure } : {}), ...(classification ? { classification } : {}), runs,
     evidence: { coverage: "partial", gaps, logCommand: `slipjay runner log ${operation.id}`, logPath: `/v1/operations/${encodeURIComponent(operation.id)}/log` },
-    recovery: { kind: recovery, automaticRetry: false } };
+    recovery: { kind: recovery, automaticRetry: false }, ...build ? { build } : {} };
 }

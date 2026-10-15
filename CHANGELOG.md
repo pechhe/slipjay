@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Deliver admitted operations' receipts to Build from an independent drain (#69, #60):**
+  each admitted landing's `failed` or `published` receipt is sent to Build's
+  `recordAttempt` from the ledger, in order, until Build acknowledges it, with bounded
+  backoff while Build is down. Refused receipts are parked without blocking others. The
+  queue snapshot reports receipt lag and Build's availability, and each landing's outcome
+  reports receipt state apart from its verdict.
+
 - **Admit Build-bound submissions through Build before queueing them (#68, #60):** a
   submission carrying a Build binding is recorded as awaiting admission and offered to
   Build's `admitAttempt` at its real ledger sequence (bounded to 10 s). The queue never

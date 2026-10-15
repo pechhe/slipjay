@@ -143,6 +143,10 @@ export type OperationEvent =
       admission?: import("./build-admission.ts").BuildAdmissionRecord }
   /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
   | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null }
+  /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`. */
+  | { type: "build_receipt"; sequence: number; state: "delivered" | "parked"; code?: string }
+  /** Runner-wide, under RUNNER_CONTROL_ID: Build stopped (or resumed) answering receipt delivery. */
+  | { type: "build_delivery"; state: "available" | "unavailable"; reason?: string }
   /** A release of `commitId`, the integration commit a human approved. */
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
@@ -226,6 +230,8 @@ export type LandingOutcome = {
   runs: (RunRecord & { outcome: "passed" | "failed" | "incomplete" | "killed"; invalidated: boolean })[];
   evidence: { coverage: "partial"; gaps: string[]; logCommand: string; logPath: string };
   recovery: { kind: "follow" | "inspect-failure" | "reconcile-publication" | "already-published" | "owner-stopped" | "superseded" | "policy-refusal"; automaticRetry: false };
+  /** Build-bound only. `receipts` concerns delivery to Build, never the landing's own verdict. */
+  build?: { admission: "pending" | "admitted" | "refused"; receipts: "none" | "pending" | "delivered" | "parked" };
 };
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
@@ -268,6 +274,8 @@ export interface OperationLog {
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
   paused(): { by: string; at: string } | null;
+  /** Every landing Build admitted, with its own events: what receipt delivery reads. */
+  buildBound(): { operation: LandingOperation; history: StoredEvent[] }[];
   close(): void;
 }
 
@@ -458,4 +466,6 @@ export type QueueSnapshot = {
   paused: { by: string; at: string } | null; held: HeldIntegrationState[];
   recentReleases: ReleaseOperation[]; recentProductionDeploys: DeployOperation[]; lastStagingDeploys: DeployOperation[];
   lastSuite: { status: "unavailable" };
+  /** Receipt delivery to Build; null while the runner has never admitted a Build-bound landing. */
+  build: import("./build-receipts.ts").BuildDeliveryState | null;
 };
