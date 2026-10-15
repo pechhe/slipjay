@@ -90,9 +90,19 @@ export function createRunnerHandler(input: {
       if (!validSubmission(body))
         return json({ error: "Invalid submission" }, 400);
       const repo = repositoryKey(body.repo);
+      const requestFact = body.requestId ? { type: "submission_request" as const, requestId: body.requestId, repo,
+        changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy } : undefined;
+      const prior = body.requestId ? input.log.submission(repo, body.requestId) : null;
+      if (prior) {
+        if ((["changeId", "commitId", "bookmark", "submittedBy"] as const).some((key) => prior.request[key] !== requestFact![key]))
+          return json({ error: "Submission request identity is already bound to another candidate" }, 409);
+        return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
+      }
       const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
-      if (existing?.commitId === body.commitId)
-        return json({ operation: existing, reattached: true });
+      if (existing?.commitId === body.commitId) {
+        if (requestFact) input.log.append(existing.id, requestFact);
+        return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
+      }
       if (existing?.status === "running")
         return json({ operation: existing }, 409);
       const id = newOperationId();
@@ -100,8 +110,9 @@ export function createRunnerHandler(input: {
         input.log.append(existing.id, { type: "superseded", by: id });
       input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy });
       if (body.identity) input.log.append(id, body.identity);
+      if (requestFact) input.log.append(id, requestFact);
       input.onSubmitted();
-      return json({ operation: input.log.operation(id), reattached: false, ...existing ? { superseded: existing.id } : {} });
+      return json({ operation: input.log.operation(id), reattached: false, ...body.requestId ? { requestId: body.requestId } : {}, ...existing ? { superseded: existing.id } : {} });
     }
     if (request.method === "POST" && path === `${RUNNER_API}/releases`) {
       let body: unknown;
@@ -269,6 +280,9 @@ function validSubmission(body: unknown): body is SubmitRequest {
   if (typeof body !== "object" || body === null)
     return false;
   const value = body as Record<string, unknown>;
+  if (value.requestId !== undefined && (typeof value.requestId !== "string" || !/^[a-zA-Z0-9_-]{16,128}$/.test(value.requestId)
+    || typeof value.commitId !== "string" || !/^[a-f0-9]{40}$/.test(value.commitId)
+    || typeof value.repo !== "string" || !/^[\w.-]+\/[\w.-]+$/.test(value.repo))) return false;
   if (value.identity !== undefined) {
     if (!value.identity || typeof value.identity !== "object" || Array.isArray(value.identity)) return false;
     const identity = value.identity as Record<string, unknown>;

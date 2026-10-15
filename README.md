@@ -567,6 +567,22 @@ held integrations, attempts per change, and flake candidates. The default range
 starts at midnight UTC today. Older operations retain their original evidence;
 missing instrumentation is not synthesized as a measured fact.
 
+Assigned-workspace landings persist a request identity in local workspace metadata
+before submitting. A lost or unreadable submission response is an **unknown outcome**:
+run `slipjay land` again from the same workspace to reconcile it. The runner binds
+`requestId` to its operation in the existing ledger and echoes it in the submission
+response. Replaying that identity returns the same operation even after failure,
+cancellation, supersession or publication; using it for different source or submitter
+returns HTTP 409 without another attempt. Once the response is acknowledged, a later
+explicit landing of failed source may create a new attempt. Requests without the
+optional identity retain the existing API behaviour. Direct/default checkouts retain
+the legacy follower contract because they have no assigned-workspace metadata.
+
+The identity acknowledges the request, **not a durable source handoff**. Keep the
+author workspace: retained source before acknowledgement, a handoff manifest and
+fresh-worker recovery are still outstanding. An older runner that does not echo the
+identity cannot certify this contract; the CLI reports the outcome as unknown.
+
 Required verification selects redacted diagnostic lines before local process output
 is reduced to its bounded head and tail. This preserves named failures, nearby error
 text and file locations even when progress noise surrounds them. Each stream keeps

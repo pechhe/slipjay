@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark, RUNNER_API, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
-import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitResponse } from "../src/lib/runner-contract.ts";
+import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitRequest, SubmitResponse } from "../src/lib/runner-contract.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 
@@ -16,8 +17,8 @@ function submission(commitId = "commit-1", change = changeId) {
   return { repo: "owner/repo", changeId: change, commitId, bookmark: candidateBookmark(change), submittedBy: "author" };
 }
 
-async function fixture() {
-  const log = openOperationLog(":memory:");
+async function fixture(logPath = ":memory:") {
+  const log = openOperationLog(logPath);
   const listeners = new Set<(event: StoredEvent) => void>();
   let submissions = 0;
   let onSubscribe: (() => void) | undefined;
@@ -37,7 +38,7 @@ async function fixture() {
   const request = (path: string, init: RequestInit = {}) => fetch(`${server.url}${RUNNER_API}${path}`, {
     ...init, headers: { authorization: `Bearer ${token}`, ...init.headers }, signal: init.signal ?? AbortSignal.timeout(10_000),
   });
-  const submit = (body = submission()) => request("/operations", { method: "POST", body: JSON.stringify(body) });
+  const submit = (body: SubmitRequest = submission()) => request("/operations", { method: "POST", body: JSON.stringify(body) });
   const append = (id: string, event: OperationEvent) => {
     const stored = log.append(id, event);
     for (const listener of listeners)
@@ -510,4 +511,67 @@ test("cancel rechecks state after a delayed request body", async () => {
       assert.equal(log.events({ operationId: stage }).some((event) => event.event.type === "cancelled"), false);
     }
   } finally { log.close(); }
+});
+
+
+test("request replay survives terminal failure and a SQLite/server restart without a new attempt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "sj-request-"));
+  const path = join(root, "ledger.sqlite");
+  const body = { ...submission("a".repeat(40)), requestId: randomUUID() };
+  let f = await fixture(path);
+  try {
+    const first = await submitted(await f.submit(body));
+    f.append(first.operation.id, { type: "failed", stage: "verifying", reason: "fixture assertion failed" });
+    await f.close();
+    f = await fixture(path);
+    const replay = await submitted(await f.submit(body));
+    assert.equal(replay.operation.id, first.operation.id);
+    assert.equal(replay.operation.status, "failed");
+    assert.equal(replay.reattached, true);
+    assert.equal(replay.requestId, body.requestId);
+    assert.equal(f.submissions, 0);
+    const conflict = await f.submit({ ...body, commitId: "b".repeat(40) });
+    assert.equal(conflict.status, 409);
+    assert.match((await conflict.json() as { error: string }).error, /another candidate/);
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 1);
+    const retry = await submitted(await f.submit({ ...body, requestId: randomUUID() }));
+    assert.notEqual(retry.operation.id, first.operation.id);
+  } finally { await f.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("concurrent matching request identities attach to one operation and invalid identities are refused", async () => {
+  const f = await fixture();
+  try {
+    const body = { ...submission("a".repeat(40)), requestId: randomUUID() };
+    const responses = await Promise.all([f.submit(body), f.submit(body)]);
+    const results = await Promise.all(responses.map(submitted));
+    assert.equal(results[0]!.operation.id, results[1]!.operation.id);
+    assert.equal(f.submissions, 1);
+    for (const requestId of ["short", "x".repeat(129), "x".repeat(16) + "/path", 123])
+      assert.equal((await f.request("/operations", { method: "POST", body: JSON.stringify({ ...submission(), requestId }) })).status, 400);
+  } finally { await f.close(); }
+});
+
+
+test("request replay preserves cancellation, supersession, publication and held integration", async () => {
+  const f = await fixture();
+  try {
+    const endings: OperationEvent[][] = [
+      [{ type: "cancelled", reason: "killed by the owner" }],
+      [{ type: "superseded", by: "newer-attempt" }],
+      [{ type: "landed", base: "base", commitId: "published", branch: "main", remote: "origin" }],
+      [{ type: "stage", stage: "publishing" }, { type: "integrated", base: "base", commitId: "held" }],
+    ];
+    for (const [index, ending] of endings.entries()) {
+      const body = { ...submission(String(index + 1).repeat(40), String.fromCharCode(107 + index).repeat(32)), requestId: randomUUID() };
+      const first = await submitted(await f.submit(body));
+      for (const event of ending) f.append(first.operation.id, event);
+      const before = f.log.operation(first.operation.id);
+      const replay = await submitted(await f.submit(body));
+      assert.equal(replay.operation.id, first.operation.id);
+      assert.deepEqual(replay.operation, before);
+      assert.equal(replay.reattached, true);
+    }
+    assert.equal(f.submissions, endings.length);
+  } finally { await f.close(); }
 });

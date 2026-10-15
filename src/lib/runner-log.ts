@@ -25,7 +25,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     at TEXT NOT NULL,
     type TEXT NOT NULL,
     data TEXT NOT NULL
-  ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type)`);
+  ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type);
+    CREATE UNIQUE INDEX IF NOT EXISTS events_submission_request ON events(json_extract(data, '$.repo'), json_extract(data, '$.requestId')) WHERE type = 'submission_request'`);
   const listeners = new Set<(event: StoredEvent) => void>();
   const insert = db.prepare("INSERT INTO events (operation_id, at, type, data) VALUES (?, ?, ?, ?)");
   const select = db.prepare(`SELECT seq, operation_id, at, data FROM events
@@ -198,6 +199,13 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     },
     events,
     operation,
+    submission(repo, requestId) {
+      const row = db.prepare("SELECT operation_id, data FROM events WHERE type = 'submission_request' AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.requestId') = ? ORDER BY seq LIMIT 1").get(repo, requestId) as { operation_id: string; data: string } | undefined;
+      if (!row) return null;
+      const current = operation(row.operation_id);
+      if (current?.kind !== "landing") throw new Error("Submission request lost its landing operation");
+      return { operation: current, request: JSON.parse(row.data) as Extract<OperationEvent, { type: "submission_request" }> };
+    },
     operationsForChange: (repo, changeId) => {
       const open = queue();
       return projectIds((changeIds.all(repo, changeId) as { operation_id: string }[]).map((row) => row.operation_id))

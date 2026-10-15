@@ -12,7 +12,7 @@ import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { configureLocalGithubTransport, jj, project } from "./support/workspace-project.ts";
 
-async function fixture(dropStream = false, racedSubmission = false) {
+async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 = false) {
   const f = await project();
   const transport = await configureLocalGithubTransport(f);
   try {
@@ -36,6 +36,7 @@ async function fixture(dropStream = false, racedSubmission = false) {
     });
     const streamRequests: number[] = [];
     let droppedSeq = 0;
+    const requestIds: string[] = [];
     const route = async (request: Request) => {
       if (request.method === "GET" && new URL(request.url).pathname.endsWith("/events")) {
         streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
@@ -46,7 +47,16 @@ async function fixture(dropStream = false, racedSubmission = false) {
           return new Response(`data: ${JSON.stringify(stored)}\n\n`, { headers: { "content-type": "text/event-stream" } });
         }
       }
+      const isSubmission = request.method === "POST" && new URL(request.url).pathname.endsWith("/operations");
+      if (isSubmission) requestIds.push((await request.clone().json() as { requestId: string }).requestId);
+      if (isSubmission && typeof loseSubmissionResponse === "number")
+        return Response.json({ error: "fixture refusal" }, { status: loseSubmissionResponse });
       const response = await handler(request);
+      if (loseSubmissionResponse && isSubmission && requestIds.length === 1) {
+        const body = await response.json() as { operation: Operation };
+        append(body.operation.id, { type: "failed", stage: "verifying", reason: "fixture gate failed before response recovery" });
+        return new Response("lost response body", { status: 200 });
+      }
       if (racedSubmission && request.method === "POST" && new URL(request.url).pathname.endsWith("/operations")) {
         const body = await response.json() as { operation: Operation; reattached: boolean };
         return Response.json({ ...body, reattached: true });
@@ -65,7 +75,7 @@ async function fixture(dropStream = false, racedSubmission = false) {
       onLine: (line: string) => { lines.push(line); } };
     return { ...f, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
       setKill: (outcome: KillOutcome) => { killed = outcome; },
-      killRequests,
+      killRequests, requestIds,
       dispose: async () => {
         try { await server.close(); log.close(); }
         finally { try { transport.restore(); } finally { await f.dispose(); } }
@@ -536,5 +546,49 @@ test("cancel uses the authenticated transport and attributes the hostname, prese
     assert.deepEqual(bodies, [{ by: hostname() }]);
   } finally {
     await server.close();
+  }
+});
+
+
+test("a fresh landing invocation reconciles a lost terminal response with the persisted identity", async () => {
+  const f = await fixture(false, false, true);
+  try {
+    await assert.rejects(landThroughRunner(f.cwd, f.options), /outcome is unknown/);
+    // Read the operation from the durable submission events; the fixture transport uses its configured repo.
+    const submittedEvents = f.log.events().filter((row) => row.event.type === "submitted");
+    assert.equal(submittedEvents.length, 1);
+    const id = submittedEvents[0]!.operationId;
+    const recovered = await landThroughRunner(f.cwd, f.options);
+    assert.equal(recovered.operation.id, id);
+    assert.equal(recovered.operation.status, "failed");
+    assert.equal(recovered.ok, false);
+    assert.equal(f.requestIds.length, 2);
+    assert.equal(f.requestIds[0], f.requestIds[1]);
+    assert.match(f.requestIds[0]!, /^[a-f0-9-]{36}$/);
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 1);
+    // A later explicit invocation, after the failed response was acknowledged, is a new attempt.
+    const retry = landThroughRunner(f.cwd, f.options);
+    await waitFor(() => f.log.openOperations().length === 1);
+    const next = f.log.openOperations()[0]!;
+    assert.notEqual(next.id, id);
+    assert.notEqual(f.requestIds.at(-1), f.requestIds[0]);
+    f.append(next.id, { type: "cancelled", reason: "fixture done" });
+    await retry;
+  } finally { await f.dispose(); }
+});
+
+
+test("an explicit submission refusal is not described as an unknown transport outcome", async () => {
+  for (const status of [400, 401] as const) {
+    const f = await fixture(false, false, status);
+    try {
+      await assert.rejects(landThroughRunner(f.cwd, f.options), (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.doesNotMatch(error.message, /unknown/);
+        assert.match(error.message, /refus/);
+        return true;
+      });
+      assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 0);
+    } finally { await f.dispose(); }
   }
 });

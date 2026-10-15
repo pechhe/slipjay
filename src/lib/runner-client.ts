@@ -39,6 +39,30 @@ async function updatePendingFacts(context: WorkspaceContext, update: (pending: P
   }, { waitMs: 1000 });
 }
 
+/** Keep ambiguous requests across process restarts; only a known response releases the identity. */
+async function landingRequestIdentity(context: WorkspaceContext, location: string, repo: string, commitId: string, acknowledge?: string): Promise<string | undefined> {
+  // Direct/default checkouts have no assigned-workspace metadata; they retain the legacy follower contract.
+  if (context.current.name === "default") return undefined;
+  const key = createHash("sha256").update(JSON.stringify([runnerBinding(location), repo, commitId])).digest("hex");
+  return withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
+    const metadata = await workspaceMetadata(context.current.name);
+    if (!metadata) throw new Error("Cannot persist landing request identity: workspace metadata is missing");
+    const pending = { ...(metadata.pendingLandingRequests as Record<string, string> | undefined) };
+    if (acknowledge) {
+      if (pending[key] !== acknowledge) return undefined;
+      delete pending[key];
+      await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, pendingLandingRequests: pending });
+      return undefined;
+    }
+    if (pending[key]) return pending[key];
+    if (Object.keys(pending).length >= 32) throw new Error("Too many unresolved landing requests; reconcile earlier submissions before submitting more source");
+    const id = randomUUID();
+    pending[key] = id;
+    await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, pendingLandingRequests: pending });
+    return id;
+  }, { waitMs: 1000 });
+}
+
 async function retainForwardFailure(cwd: string, location: string, error: unknown, env: NodeJS.ProcessEnv): Promise<void> {
   try {
     const context = await workspaceContext(cwd);
@@ -115,15 +139,20 @@ export async function runnerToken(env: NodeJS.ProcessEnv = process.env): Promise
   throw new Error("Set SLIPJAY_RUNNER_TOKEN or save the Bitwarden key SLIPJAY_RUNNER_TOKEN");
 }
 
+class RunnerRequestRefused extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
+
 async function request(baseUrl: string, token: string, path: string, init: RequestInit = {}): Promise<Response> {
   const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
     ...init, headers: { ...init.headers, authorization: `Bearer ${token}` },
   });
-  if (response.status === 401) throw new Error("runner refused the credential; check SLIPJAY_RUNNER_TOKEN");
+  if (response.status === 401) throw new RunnerRequestRefused(401, "runner refused the credential; check SLIPJAY_RUNNER_TOKEN");
   if (response.ok || response.status === 409) return response;
   // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner.
   const refusal = response.status === 400 ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
-  throw new Error(`Runner request failed: HTTP ${response.status}${typeof refusal === "string" ? `: ${refusal}` : ""}`);
+  if (response.status === 400) throw new RunnerRequestRefused(400, `Runner request refused: ${typeof refusal === "string" ? refusal : "invalid request"}`);
+  throw new Error(`Runner request failed: HTTP ${response.status}`);
 }
 
 export async function connectRunner(location: string, env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): Promise<{ baseUrl: string; name: string; close(): void }> {
@@ -328,6 +357,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     let operation: Operation | undefined;
     let reattached = true;
     let older = false;
+    let requestId: string | undefined;
     if (landedChange !== undefined) {
       // Only this workspace's own landed change finishes housekeeping here.
       // Operations come newest first.
@@ -344,6 +374,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       if (running) operation = running;
     }
     if (!operation) {
+      requestId = await landingRequestIdentity(context, options.location, repo, target.commitId);
       const bookmark = candidateBookmark(target.changeId);
       try { await jj(cwd, ["git", "fetch", "--remote", remote, "--branch", bookmark]); }
       catch (error) { if (!/nothing|no matching|does not exist|not found/i.test(String(error))) throw error; }
@@ -359,18 +390,30 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       // Forgotten through the colocated integration checkout, which also drops the Git ref:
       // forgotten from a secondary workspace, the next command there would re-import it.
       await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", bookmark]);
-      const response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
-        headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, changeId: target.changeId, commitId: target.commitId, bookmark,
+      let response: Response;
+      try {
+        response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
+        headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId, repo, changeId: target.changeId, commitId: target.commitId, bookmark,
           submittedBy: `${hostname()}:${context.current.name}`, identity: {
             type: "identity", submitterKind: env.CODEX_THREAD_ID || env.CLAUDE_SESSION_ID ? "agent" : "unknown",
             submitterId: `${hostname()}:${context.current.name}`, workspace: context.current.name, machine: hostname(),
             ...(env.CODEX_THREAD_ID ? { harness: "codex", sessionId: env.CODEX_THREAD_ID } : env.CLAUDE_SESSION_ID ? { harness: "claude", sessionId: env.CLAUDE_SESSION_ID } : {}),
           } }) });
-      const submitted = await response.json() as { operation: Operation; reattached?: boolean };
+      } catch (error) {
+        if (error instanceof RunnerRequestRefused) throw error;
+        throw new Error(`Landing submission outcome is unknown${requestId ? ` (request ${requestId})` : ""}; run slipjay land again from this workspace to reconcile. Do not assume it failed.`);
+      }
+      let submitted: { operation: Operation; reattached?: boolean; requestId?: string };
+      try { submitted = await response.json() as typeof submitted; }
+      catch { throw new Error("Landing submission response was unreadable; outcome is unknown. Run slipjay land again from this workspace to reconcile."); }
+      if (!submitted.operation?.id) throw new Error("Runner refused landing request reconciliation; keep the unresolved request identity and inspect the candidate before retrying.");
+      if (requestId && response.status !== 409 && submitted.requestId !== requestId)
+        throw new Error("Runner did not acknowledge the persisted request identity; outcome is unknown. Keep this workspace and reconcile with slipjay land before retrying source.");
       operation = submitted.operation;
       reattached = submitted.reattached === true || response.status === 409;
       older = response.status === 409;
     }
+    if (!older && requestId) await landingRequestIdentity(context, options.location, repo, target.commitId, requestId);
     await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.

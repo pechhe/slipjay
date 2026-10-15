@@ -120,6 +120,8 @@ export type OperationEvent =
   | { type: "client"; id: string; fact: ClientFact }
   | { type: "verification_base"; base: string }
   | { type: "verification_passed"; base: string; candidate: string }
+  /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */
+  | { type: "submission_request"; requestId: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A landing of one change; rows from before releases existed carry no `kind`. */
   | { type: "submitted"; kind?: "landing"; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string }
   /** A release of `commitId`, the integration commit a human approved. */
@@ -210,6 +212,8 @@ export interface OperationLog {
   /** Events after `afterSeq` (exclusive), optionally for one operation, in seq order. */
   events(options?: { operationId?: string; afterSeq?: number; limit?: number }): StoredEvent[];
   operation(id: string): Operation | null;
+  /** A persisted landing request, including terminal operations, scoped to its repository. */
+  submission(repo: string, requestId: string): { operation: LandingOperation; request: Extract<OperationEvent, { type: "submission_request" }> } | null;
   /** Every operation of a change, newest first. */
   operationsForChange(repo: string, changeId: string): LandingOperation[];
   /** Open (queued or running) operations of a repository, oldest first: the queue. */
@@ -227,8 +231,11 @@ export interface OperationLog {
   close(): void;
 }
 
-/** POST /v1/operations body. The commit must already be on the remote as `bookmark`. */
-export type SubmitRequest = { repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
+/** POST /v1/operations body. The commit must already be on the remote as `bookmark`.
+ * Optional requestId binds a transport retry to one operation, even after it finishes.
+ * It acknowledges request identity only, not a durable source handoff.
+ */
+export type SubmitRequest = { requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
 
 /**
  * POST /v1/releases body: the full id of a candidate already published on the
@@ -254,13 +261,15 @@ export type ResetResponse = { operation: ResetOperation; reattached: boolean };
 
 /**
  * POST /v1/operations response.
+ * - A known requestId returns its original operation, including a terminal result.
+ *   Reusing it for different source/attribution returns 409 `{ error }` without submitting.
  * - No open operation for the change: a new one (`reattached: false`).
  * - An open one for the same commit: that one (`reattached: true`), never a second.
  * - A queued one for an older commit: superseded by a new one (`superseded` names it).
  * - A running one for a different commit: HTTP 409 with that operation, so the client
  *   follows it and tells the author to land again afterwards.
  */
-export type SubmitResponse = { operation: Operation; reattached: boolean; superseded?: string };
+export type SubmitResponse = { requestId?: string; operation: Operation; reattached: boolean; superseded?: string };
 
 /**
  * Routes (all require `Authorization: Bearer <token>`; anything else is 401):
