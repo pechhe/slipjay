@@ -845,6 +845,52 @@ test("a verified release publishes only after the repository's running landing, 
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a release killed while it waits for the repository's running landing publishes nothing when the landing ends", async () => {
+  const f = await fixture(false, true);
+  try {
+    const base = f.releaseRef();
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const candidate = f.main();
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    f.queue.wake();
+    await started(pids);
+    const release = f.submitRelease(candidate);
+    f.queue.wake();
+    await until(() => f.log.events({ operationId: release }).some((stored) => stored.event.type === "progress" && /^Verified; publishing after /.test(stored.event.line)) || undefined);
+    assert.equal(f.queue.kill(release).status, "killed");
+    assert.equal(f.queue.kill(stuck).status, "killed");
+    await f.queue.idle();
+    assert.deepEqual(f.result(release), { type: "cancelled", reason: OWNER_KILL_REASON });
+    assert.equal(f.result(stuck)?.type, "cancelled");
+    assert.equal(f.releaseRef(), base, "a killed release publishes nothing once the lane frees");
+    for (const pid of JSON.parse(await readFile(pids, "utf8")) as number[]) try { process.kill(pid, "SIGKILL"); } catch {}
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a pause lets a verifying release publish but admits no new landing until resumed", async () => {
+  const f = await fixture(false, true);
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const candidate = f.main();
+    await writeFile(join(f.root, "hold-release"), "");
+    const release = f.submitRelease(candidate);
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    const behind = f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    assert.equal(f.log.operation(behind)!.stage, "paused");
+    await rm(join(f.root, "hold-release"));
+    await until(() => f.result(release));
+    assert.equal(f.result(release)?.type, "released", JSON.stringify(f.result(release)));
+    assert.equal(f.log.operation(behind)!.status, "queued", "the pause still holds the landing");
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "owner" });
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
 /** The log position of `id`'s first event of `type`. */
 const seqOf = (f: Awaited<ReturnType<typeof fixture>>, id: string, type: string) =>
   f.log.events({ operationId: id }).find((stored) => stored.event.type === type)!.seq;
