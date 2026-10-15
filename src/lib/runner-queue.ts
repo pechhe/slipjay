@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { stat, mkdir } from "node:fs/promises";
-import { hostname } from "node:os";
+import { stat, mkdir, rm } from "node:fs/promises";
+import { hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { integrateLandingCandidate } from "./landing-candidate.ts";
@@ -13,7 +13,7 @@ import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHave
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { admissionLane, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { redactVerificationOutput } from "./verification-failure.ts";
@@ -90,12 +90,15 @@ export function localExecutor(host = hostname(), env: NodeJS.ProcessEnv = proces
 
 /**
  * Each repository has one serial lane that owns its warm checkout and every transition
- * of its integration and release branches: its landings, releases and resets of the
- * target landings finalize against take turns in arrival order. Different repositories
- * share no checkout, branch, target or environment, so their lanes run at once, at most
- * `workers` of them; an operation waiting for a worker is admitted oldest first.
- * Deploys take turns in a separate lane that only reads the warm store, so a deploy
- * that waits minutes on its build never holds a landing.
+ * of its integration and release branches: its landings, resets of the target landings
+ * finalize against, and the publication of its releases take turns in arrival order.
+ * A release verifies its pinned candidate first, in a release lane with a checkout of
+ * its own, beside the repository's landings (but never beside its reset, nor in a shared
+ * lane: see `admissionLane`), and joins the repository lane only to publish. Different repositories share no checkout, branch, target or environment, so
+ * their lanes run at once. At most `workers` operations run at once, a release counting
+ * as one until it has published; an operation waiting for a worker is admitted oldest
+ * first. Deploys take turns in a separate lane that only reads the warm store, so a
+ * deploy that waits minutes on its build never holds a landing.
  */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
@@ -115,7 +118,7 @@ export function createRunnerQueue(input: {
 } {
   const { log, executor, home, config, environment } = input;
   const workers = Math.max(1, Math.floor(config.workers ?? RUNNER_DEFAULT_WORKERS));
-  /** Each lane's work holding its repositories' checkouts now, and any chained behind it, by `repositoryLane`. */
+  /** Each lane's work holding its checkouts now, and any chained behind it, by `admissionLane`. */
   const lanes = new Map<string, Promise<void>>();
   const laneOf = (repo: string) => repositoryLane(config, repo);
   /** Operations admitted to a worker, which they hold until they finish. */
@@ -134,7 +137,13 @@ export function createRunnerQueue(input: {
       killed: result.cancelled, ...(privateOutput ? {} : parseFailureOutput(redactMigrationOutput(`${result.stdout}\n${result.stderr}`, request.cwd, request.env))) };
   }
   const repoCheckout = (repo: string) => join(home, "repos", repo);
-  const checkoutPath = (operation: Operation) => repoCheckout(operation.repo);
+  const checkoutPath = (operation: Operation) => operation.kind === "release" ? join(home, "releases", operation.repo) : repoCheckout(operation.repo);
+  /**
+   * The temporary directory of every gate command run in `checkout`, emptied at each turn.
+   * It isolates a checkout's temporary state from other operations', including any lock a
+   * gate keeps there: the runner's own limits bound concurrent runs together.
+   */
+  const scratchOf = (checkout: string) => join(tmpdir(), `slipjay-${createHash("sha256").update(checkout).digest("hex").slice(0, 12)}`);
   /** The published integration of an earlier submission of this exact commit, if any. */
   async function publishedIntegration(checkout: string, operation: LandingOperation, branch: string, remote: string): Promise<{ base: string; commitId: string } | null> {
     for (const earlier of log.operationsForChange(operation.repo, operation.changeId)) {
@@ -280,7 +289,7 @@ export function createRunnerQueue(input: {
       reason: `rollback incomplete: ${unrecovered.map((project) => project.activated === "unknown"
         ? `${project.name} activation or recovery outcome is unknown (${project.reason ?? "no earlier deployment"})`
         : `${project.name} still serves the promotion (${project.reason ?? "no earlier deployment"})`).join(", ")}; the release branch stays on the release` };
-    const returned = await serially(operation.repo, () => returnRelease(checkoutPath(operation), merge));
+    const returned = await serially(operation.repo, () => returnRelease(repoCheckout(operation.repo), { merge, candidate: operation.commitId }));
     return returned.returned
       ? { automatic: true, releaseBranch: returned.releaseBranch, reason: `rolled back: production serves what it served before, and the release branch is back on ${returned.releaseBranch.slice(0, 12)}` }
       : { automatic: false, reason: `rollback incomplete: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
@@ -288,7 +297,7 @@ export function createRunnerQueue(input: {
   /** Run `work` in the repository's lane, after its running turn, and resume the queue after it. */
   function serially<T>(repo: string, work: () => Promise<T>): Promise<T> {
     let value: T;
-    const pending = inLane(repo, async () => { value = await work(); });
+    const pending = inLane(laneOf(repo), async () => { value = await work(); });
     // Submissions that woke the queue while `work` held the lane are taken up after it.
     pending.then(wakeMain, wakeMain);
     return pending.then(() => value);
@@ -313,18 +322,29 @@ export function createRunnerQueue(input: {
   }
   /**
    * Admit queued landings, releases and resets, oldest first, while a worker is free: each
-   * to its repository's lane once that lane is idle, so a repository's operations keep
-   * their order. A pause admits nothing new; running operations finish.
+   * to its lane once that lane is idle, so a lane's operations keep their order. A pause
+   * admits nothing new; running operations finish.
    */
   function wakeMain(): void {
     if (recovering || log.paused()) return;
     for (const operation of log.openOperations()) {
       if (admitted.size >= workers) return;
-      if (operation.kind === "deploy" || operation.status !== "queued" || lanes.has(laneOf(operation.repo))) continue;
+      if (operation.kind === "deploy" || operation.status !== "queued") continue;
+      const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
+      if (lanes.has(lane) || resetConflict(operation)) continue;
       admitted.add(operation.id);
-      void inLane(operation.repo, () => processOperation(operation))
+      void inLane(lane, () => processOperation(operation))
         .finally(() => { admitted.delete(operation.id); wakeMain(); });
     }
+  }
+  /**
+   * A reset rewrites the external state a release may verify against, so a release
+   * verifying beside its repository lane and a reset of that repository never overlap.
+   */
+  function resetConflict(operation: Operation): boolean {
+    if (operation.kind === "reset") return lanes.has(admissionLane(laneOf(operation.repo), operation.repo, "release"));
+    return operation.kind === "release"
+      && [...running.values()].some((entry) => entry.operation.kind === "reset" && laneOf(entry.operation.repo) === laneOf(operation.repo));
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation): Promise<void> {
     let stage: RunnerStage = "queued";
@@ -338,6 +358,7 @@ export function createRunnerQueue(input: {
     running.set(operation.id, { operation, stage, controller });
     let verdict: OperationEvent | undefined;
     const checkout = checkoutPath(operation);
+    const scratch = scratchOf(checkout);
     let remote: string | undefined;
     let integrationBranch: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
@@ -347,7 +368,7 @@ export function createRunnerQueue(input: {
       const started = Date.now();
       append(operation.id, { type: "run_started", runId, command: [request.executable, ...request.args].join(" "), host: executor.host, timeoutMs: request.timeoutMs, purpose: purpose ?? (stage === "resetting" ? "reset" : "gate") });
       const abortSignal = request.abortSignal ? AbortSignal.any([request.abortSignal, controller.signal]) : controller.signal;
-      const runEnvironment = stage === "resetting" ? request.env : sanitizedProcessEnv(request.env);
+      const runEnvironment = stage === "resetting" ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
       if ((purpose === "migration_generate" || purpose === "migration_verify") && request.env?.SLIPJAY_MIGRATION_CONTEXT)
         runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
       const result = await executor.run({ ...request, env: runEnvironment,
@@ -387,6 +408,8 @@ export function createRunnerQueue(input: {
       const repository = configuredRepository(config, operation.repo);
       if (!repository) throw new Error(`Repository ${operation.repo} is not configured on this runner`);
       setStage("fetching");
+      await rm(scratch, { recursive: true, force: true });
+      await mkdir(scratch, { recursive: true, mode: 0o700 });
       if (!await stat(checkout).then(() => true, (error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return false;
         throw error;
@@ -404,6 +427,12 @@ export function createRunnerQueue(input: {
       // jj's default trunk() names only main, master or trunk: published integration history on any
       // other branch would be mutable, and the candidate cleanup below would abandon it.
       await jj(checkout, ["config", "set", "--repo", 'revset-aliases."trunk()"', `${branch}@${remote}`]);
+      // The release checkout holds no integration: what the repository lane finishes is not its concern.
+      if (operation.kind === "release") {
+        await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
+        await release(operation);
+        return;
+      }
       const recordedHold = log.snapshot(executor.host).held.find((entry) => entry.repo === operation.repo);
       if (recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: recordedHold.commitId });
@@ -424,10 +453,6 @@ export function createRunnerQueue(input: {
       if (!context) throw new Error("Runner checkout context is unavailable");
       if (operation.kind === "reset") {
         verdict = await reset(branch);
-        return;
-      }
-      if (operation.kind === "release") {
-        await release(operation);
         return;
       }
       // A reland of a submission whose integration has since been published (by the
@@ -568,6 +593,9 @@ export function createRunnerQueue(input: {
      * A candidate that declares a production deployment is a promotion: it must be a
      * commit staging deployed, and once the release branch holds it, production deploys
      * exactly that commit in the deploy lane, so a slow deploy never holds a landing.
+     * Only publication takes the repository lane. The approval is this operation, which
+     * only a kill ends once it runs, and staging evidence is never withdrawn, so neither
+     * changes during verification; `confirmRelease` rechecks the planned release base.
      */
     async function release(operation: ReleaseOperation): Promise<void> {
       const { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), operation.commitId);
@@ -577,7 +605,11 @@ export function createRunnerQueue(input: {
         return;
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
-        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
+        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
+        exclusively: (publication) => {
+          if (lanes.has(laneOf(operation.repo))) progress(`Verified; publishing after ${operation.repo}'s running turn`);
+          return serially(operation.repo, publication);
+        } });
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.status === "released" || result.status === "released_by") {
         append(operation.id, { type: "released", result, ...promotes ? { deploy: productionDeploy(operation, result) } : {} });
@@ -685,9 +717,8 @@ export function createRunnerQueue(input: {
       } catch { /* An unavailable checkout cannot prove recovery; retain recorded holds. */ }
     }
   }
-  /** Run `work` in the repository's lane, after whatever holds it. A failure of earlier work does not stop it. */
-  function inLane(repo: string, work: () => Promise<void>): Promise<void> {
-    const lane = laneOf(repo);
+  /** Run `work` in `lane`, after whatever holds it. A failure of earlier work does not stop it. */
+  function inLane(lane: string, work: () => Promise<void>): Promise<void> {
     const previous = lanes.get(lane) ?? Promise.resolve();
     const pending = previous.catch(() => {}).then(work).finally(() => {
       if (lanes.get(lane) === pending) lanes.delete(lane);
@@ -710,7 +741,7 @@ export function createRunnerQueue(input: {
     cancelled(operation) {
       if (operation.kind !== "landing") return;
       // A submission that woke the queue while this cleanup held the lane is admitted after it.
-      void inLane(operation.repo, async () => {
+      void inLane(laneOf(operation.repo), async () => {
         const checkout = checkoutPath(operation);
         const context = await workspaceContext(checkout).catch(() => null);
         if (context) await cleanup(operation, checkout, context.configuration.remote ?? "origin");

@@ -28,10 +28,17 @@ const finalize = (root: string) => `const fs=require("node:fs");
 while (fs.existsSync(${JSON.stringify(join(root, "hold-finalize"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
 if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
 fs.appendFileSync(${JSON.stringify(join(root, "development.jsonl"))}, JSON.stringify({ commit: process.env.SLIPJAY_FINALIZATION_COMMIT, migrations: fs.existsSync("migrations") ? fs.readdirSync("migrations").sort() : [] }) + "\\n");`;
-// The release check records where it ran and fails while `fail-release` exists.
-const releaseCheck = (root: string) => `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(join(root, "release-verified.log"))}, process.cwd() + "\\n");
-if (fs.existsSync(${JSON.stringify(join(root, "fail-release"))})) { process.stderr.write("release boom\\n"); process.exit(4); }
-if (fs.existsSync(${JSON.stringify(join(root, "hang-release"))})) { fs.writeFileSync(${JSON.stringify(join(root, "release-started"))}, ""); setInterval(()=>{},1000); }`;
+// The release check records where it ran, and its temporary directory with whether an earlier
+// turn's file was left there; it fails while `fail-release` exists. It writes `release-started`,
+// then holds while `hold-release` exists; with `hang-release` it never ends.
+const releaseCheck = (root: string) => `const fs=require("node:fs");const at=(name)=>require("node:path").join(${JSON.stringify(root)}, name);
+fs.appendFileSync(at("release-verified.log"), process.cwd() + "\\n");
+const tmp=require("node:os").tmpdir(), left=require("node:path").join(tmp, "left-by-release");
+fs.appendFileSync(at("release-tmp.jsonl"), JSON.stringify({ tmp, stale: fs.existsSync(left) }) + "\\n"); fs.writeFileSync(left, "");
+if (fs.existsSync(at("fail-release"))) { process.stderr.write("release boom\\n"); process.exit(4); }
+fs.writeFileSync(at("release-started"), "");
+while (fs.existsSync(at("hold-release"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+if (fs.existsSync(at("hang-release"))) setInterval(()=>{},1000);`;
 // The reset step records what it was given and the source it ran in, and prints the declared key, which must
 // stay out of the log (the command line itself never names it). It writes `reset-started` and holds while `hold-reset` exists, and fails while `fail-reset` exists,
 // handing SlipJay a reason line with a control character and a second line. Its probe names another
@@ -785,28 +792,146 @@ test("unknown repositories and stale submitted commits fail without publishing",
 const stagesOf = (f: Awaited<ReturnType<typeof fixture>>, id: string) =>
   f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []);
 
-test("a release takes its turn, verifies the exact candidate on the runner and publishes the release branch", async () => {
+test("a release verifies its exact candidate in a checkout of its own while the repository's landings go on, then publishes the release branch", async () => {
   const f = await fixture(false, true);
   try {
     const base = f.releaseRef();
     assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
     const candidate = f.main();
+    await writeFile(join(f.root, "hold-release"), "");
     const release = f.submitRelease(candidate);
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    // The landing submitted behind the release lands while the release is still verifying.
     const behind = f.submit(await f.candidate("b.txt"));
-    f.queue.wake(); await f.queue.idle();
+    f.queue.wake();
+    await until(() => f.result(behind));
+    assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
+    assert.equal(f.log.operation(release)!.stage, "verifying");
+    await rm(join(f.root, "hold-release"));
+    await f.queue.idle();
     const outcome = f.result(release);
     assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
     assert.equal(f.releaseRef(), outcome.result.merge);
-    assert.deepEqual(f.parents(outcome.result.merge), [base, candidate]);
+    assert.deepEqual(f.parents(outcome.result.merge), [base, candidate], "the pinned candidate, not the newer integration");
     assert.deepEqual(stagesOf(f, release), ["fetching", "installing", "verifying", "publishing", "finalizing"]);
-    // The check ran once, through the executor, in the runner's warm checkout.
-    assert.deepEqual(await f.lines("release-verified.log"), [join(f.home, "repos", "fixture/repo")]);
+    // The check ran once, through the executor, in the runner's release checkout.
+    assert.deepEqual(await f.lines("release-verified.log"), [join(f.home, "releases", "fixture/repo")]);
     assert.equal(f.log.operation(release)!.runs.length, 1);
     assert.equal(f.log.operation(release)!.runs[0]!.exitCode, 0);
-    // The landing submitted behind the release waited for it.
-    assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
-    const order = f.published.filter((stored) => ["released", "landed"].includes(stored.event.type)).map((stored) => stored.operationId);
-    assert.deepEqual(order.slice(-2), [release, behind]);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a verified release publishes only after the repository's running landing, and says it is waiting", async () => {
+  const f = await fixture(false, true);
+  try {
+    const base = f.releaseRef();
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    const candidate = f.main();
+    const pids = join(f.root, "gate-pids.json");
+    const stuck = f.submit(await hanging(f, pids));
+    f.queue.wake();
+    await started(pids);
+    const release = f.submitRelease(candidate);
+    f.queue.wake();
+    await until(() => f.log.events({ operationId: release }).some((stored) => stored.event.type === "progress" && /^Verified; publishing after /.test(stored.event.line)) || undefined);
+    assert.equal(f.releaseRef(), base, "nothing publishes while the landing holds the repository lane");
+    assert.equal(f.queue.kill(stuck).status, "killed");
+    await f.queue.idle();
+    assert.equal(f.result(stuck)?.type, "cancelled");
+    const outcome = f.result(release);
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
+    assert.deepEqual(f.parents(f.releaseRef()), [base, candidate]);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+/** The log position of `id`'s first event of `type`. */
+const seqOf = (f: Awaited<ReturnType<typeof fixture>>, id: string, type: string) =>
+  f.log.events({ operationId: id }).find((stored) => stored.event.type === type)!.seq;
+
+test("a release of a repository in a shared lane verifies only once the lane's running landing has finished", async () => {
+  const f = await fixture(false, true, undefined, false, { other: true, lane: "shared-database" });
+  try {
+    const pids = join(f.root, "gate-pids.json");
+    const request = await hanging(f, pids, f.otherAuthor, "fixture/other");
+    const stuck = f.submit(request);
+    f.queue.wake();
+    await started(pids);
+    const release = f.submitRelease(f.main());
+    f.queue.wake();
+    assert.equal(f.log.operation(release)!.waitingFor, `landing ${request.changeId.slice(0, 12)}`);
+    assert.equal(f.queue.kill(stuck).status, "killed");
+    await f.queue.idle();
+    assert.equal(f.result(release)?.type, "released", JSON.stringify(f.result(release)));
+    assert.ok(seqOf(f, release, "stage") > seqOf(f, stuck, "cancelled"), "the release started after the shared lane's landing ended");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a release and a reset of one repository never overlap, and each says which it waits for", async () => {
+  const f = await fixture(false, true, undefined, true);
+  try {
+    await writeFile(join(f.root, "hold-reset"), "");
+    const reset = f.submitReset();
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "reset-started")).then(() => true, () => undefined));
+    const release = f.submitRelease(f.main());
+    f.queue.wake();
+    assert.equal(f.log.operation(release)!.waitingFor, `reset ${f.log.operation(reset)!.commitId.slice(0, 12)}`);
+    await rm(join(f.root, "hold-reset"));
+    await f.queue.idle();
+    assert.equal(f.result(reset)?.type, "reset", JSON.stringify(f.result(reset)));
+    assert.equal(f.result(release)?.type, "released", JSON.stringify(f.result(release)));
+    assert.ok(seqOf(f, release, "stage") > seqOf(f, reset, "reset"), "the release verified after the reset ended");
+
+    await writeFile(join(f.root, "hold-release"), "");
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    await rm(join(f.root, "release-started"), { force: true });
+    const second = f.submitRelease(f.main());
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    const again = f.submitReset();
+    f.queue.wake();
+    assert.equal(f.log.operation(again)!.waitingFor, `release ${f.main().slice(0, 12)}`);
+    await rm(join(f.root, "hold-release"));
+    await f.queue.idle();
+    assert.equal(f.result(second)?.type, "released", JSON.stringify(f.result(second)));
+    assert.equal(f.result(again)?.type, "reset", JSON.stringify(f.result(again)));
+    assert.ok(seqOf(f, again, "stage") > seqOf(f, second, "released"), "the reset ran after the release published");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a release whose release branch moved while it verified publishes nothing", async () => {
+  const f = await fixture(false, true);
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    await writeFile(join(f.root, "hold-release"), "");
+    const release = f.submitRelease(f.main());
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    const git = (args: string[]) => execFileSync("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "--git-dir", f.origin, ...args], { encoding: "utf8" }).trim();
+    const moved = git(["commit-tree", "release^{tree}", "-p", "release", "-m", "Hotfix"]);
+    git(["update-ref", "refs/heads/release", moved]);
+    await rm(join(f.root, "hold-release"));
+    await f.queue.idle();
+    const outcome = f.result(release);
+    assert.ok(outcome?.type === "failed" && /release@origin moved during the release; rerun it/.test(outcome.reason), JSON.stringify(outcome));
+    assert.equal(f.releaseRef(), moved);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("gate commands get a temporary directory of their own checkout, emptied at each turn", async () => {
+  const f = await fixture(false, true);
+  try {
+    for (const file of ["a.txt", "b.txt"]) {
+      assert.equal((await f.land(f.submit(await f.candidate(file))))?.type, "landed");
+      const outcome = await f.land(f.submitRelease(f.main()));
+      assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
+    }
+    const turns = (await f.lines("release-tmp.jsonl")).map((line) => JSON.parse(line) as { tmp: string; stale: boolean });
+    assert.equal(turns.length, 2);
+    assert.equal(turns[0]!.tmp, turns[1]!.tmp);
+    assert.notEqual(turns[0]!.tmp, tmpdir());
+    assert.deepEqual(turns.map((turn) => turn.stale), [false, false]);
   } finally { await f.dispose(); }
 }, 120_000);
 

@@ -354,9 +354,18 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   return null;
 };
 
-/** The serial lane a repository's landings, releases and resets take turns in. */
+/** The serial lane a repository's landings, resets and release publications take turns in. */
 export const repositoryLane = (config: Pick<RunnerConfig, "repos">, repo: string): string =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1].lane?.trim() ?? repositoryKey(repo);
+
+/**
+ * The lane an operation of `kind` in `repo` is admitted to, given the repository's `lane`. A
+ * release of a repository with a lane of its own verifies in a release lane beside it and
+ * joins the repository lane only to publish. A shared lane declares external state its
+ * repositories' gates share, so a release there verifies in the shared lane itself.
+ */
+export const admissionLane = (lane: string, repo: string, kind: Operation["kind"]): string =>
+  kind === "release" && lane === repositoryKey(repo) ? `${lane}\0release` : lane;
 
 /** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */
 export const repositoryKey = (name: string): string => name.toLowerCase();

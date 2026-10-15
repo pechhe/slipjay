@@ -99,7 +99,7 @@ test("queue positions follow submitted sequence within each repository and close
   }
 });
 
-test("a release is an operation in the same queue, and queued work names the operation it waits behind", () => {
+test("a release verifies in a lane of its own, and queued work waits behind it only while it publishes", () => {
   const log = openOperationLog(":memory:");
   try {
     const candidate = "c".repeat(40);
@@ -112,7 +112,8 @@ test("a release is an operation in the same queue, and queued work names the ope
     assert.ok(release.kind === "release" && release.migrationsReady);
     assert.equal(release.waitingFor, undefined);
     assert.deepEqual(log.openOperations().map((op) => [op.id, op.position, op.waitingFor]),
-      [["release", 1, undefined], ["landing", 2, `release ${candidate.slice(0, 12)}`]]);
+      [["release", 1, undefined], ["landing", 1, undefined]]);
+    log.append("release", { type: "stage", stage: "publishing" });
     assert.equal(log.operation("landing")?.waitingFor, `release ${candidate.slice(0, 12)}`);
     assert.deepEqual(log.operationsForChange("owner/repo", "k".repeat(32)).map((op) => op.id), ["landing"], "releases are not changes");
     log.append("release", { type: "failed", stage: "verifying", reason: "test terminal" });

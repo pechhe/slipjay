@@ -198,19 +198,19 @@ test("queued positions and stage changes name the runner", async () => {
 test("a release confirm waits behind running work, follows its release to the verdict and reattaches on a rerun", async () => {
   const f = await fixture();
   try {
-    f.append("ahead", { type: "submitted", repo: "fixture/project", changeId: "kkkkkkkkkkkk", commitId: "older", bookmark: candidateBookmark("kkkkkkkkkkkk"), submittedBy: "fixture" });
+    f.append("ahead", { type: "submitted", kind: "release", repo: "fixture/project", commitId: "o".repeat(40), migrationsReady: false, submittedBy: "fixture" });
     f.append("ahead", { type: "stage", stage: "verifying" });
     const candidate = "c".repeat(40);
     const options = { ...f.options, candidate, remote: "origin", migrationsReady: false };
     const following = new AbortController();
     const detached = releaseThroughRunner(f.cwd, { ...options, signal: following.signal });
-    await waitFor(() => f.lines.includes("[runner test-runner] queued (position 2, behind landing kkkkkkkkkkkk)"));
+    await waitFor(() => f.lines.includes("[runner test-runner] queued (position 2, behind release oooooooooooo)"));
     following.abort(new Error("detached"));
     await assert.rejects(detached, /detached/);
-    const release = f.log.openOperations().find((op) => op.kind === "release")!;
+    const release = f.log.openOperations().find((op) => op.kind === "release" && op.commitId === candidate)!;
     const rerun = releaseThroughRunner(f.cwd, options);
     await waitFor(() => f.lines.includes(`[runner test-runner] following the open release of ${candidate.slice(0, 12)}`));
-    assert.equal(f.log.openOperations().filter((op) => op.kind === "release").length, 1, "the rerun submitted no second release");
+    assert.equal(f.log.openOperations().filter((op) => op.kind === "release" && op.commitId === candidate).length, 1, "the rerun submitted no second release");
     f.append("ahead", { type: "cancelled", reason: "fixture" });
     f.append(release.id, { type: "stage", stage: "verifying" });
     f.append(release.id, { type: "failed", stage: "verifying", reason: "Required verification failed", command: "bun run verify:release", output: "boom\n" });

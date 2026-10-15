@@ -2,7 +2,7 @@ import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { classifyFailure } from "./failure-classification.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { admissionLane, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState } from "./runner-contract.ts";
 
 export function newOperationId(): string {
@@ -60,17 +60,23 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   }
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
-  // Lanes in submission order: each repository lane's landings with its releases and resets,
-  // and deploys. Queued work names the lane's running operation; with none, the lane's first
-  // queued operation, while every worker is busy, names the operations holding them.
+  // Lanes in submission order: each repository lane's landings with its resets, its release
+  // lane, and deploys. Queued work names the lane's running operation, or what else holds
+  // it: a release publishing in its repository lane, and a release and a reset of one
+  // repository, which never overlap. With none, the lane's first queued operation, while
+  // every worker is busy, names the operations holding them.
   function queue(): Operation[] {
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
     const held = paused() !== null;
     const serial = open.filter((operation) => operation.kind !== "deploy");
     const busy = serial.filter((operation) => operation.status === "running");
-    const lanes = [...new Set(serial.map((operation) => lane(operation.repo)))].map((key) => serial.filter((operation) => lane(operation.repo) === key));
+    const admittedTo = (operation: Operation) => admissionLane(lane(operation.repo), operation.repo, operation.kind);
+    const holding = (first: Operation | undefined) => first && first.kind !== "deploy" ? busy.find((operation) => lane(operation.repo) === lane(first.repo) && (
+      first.kind === "release" ? operation.kind === "reset"
+        : operation.kind === "release" && (first.kind === "reset" || operation.stage === "publishing" || operation.stage === "finalizing"))) : undefined;
+    const lanes = [...new Set(serial.map(admittedTo))].map((key) => serial.filter((operation) => admittedTo(operation) === key));
     for (const entries of [...lanes, open.filter((operation) => operation.kind === "deploy")]) {
-      const running = entries.find((operation) => operation.status === "running");
+      const running = entries.find((operation) => operation.status === "running") ?? holding(entries[0]);
       entries.forEach((operation, index) => {
         operation.position = index + 1;
         if (operation.status !== "queued") return;
@@ -81,8 +87,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     }
     return open;
   }
-  /** The lane an operation queues in: its repository's serial lane, or the deploys. */
-  const laneOf = (operation: Operation) => queue().filter((entry) => entry.kind === "deploy" ? operation.kind === "deploy" : operation.kind !== "deploy" && lane(entry.repo) === lane(operation.repo));
+  /** The lane an operation queues in: its admission lane, or the deploys. */
+  const laneOf = (operation: Operation) => queue().filter((entry) => entry.kind === "deploy" ? operation.kind === "deploy"
+    : operation.kind !== "deploy" && admissionLane(lane(entry.repo), entry.repo, entry.kind) === admissionLane(lane(operation.repo), operation.repo, operation.kind));
   // An open operation carries its queue fields; a closed one is its bare projection.
   function placed<T extends Operation>(projected: T, open: Operation[]): T {
     return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;

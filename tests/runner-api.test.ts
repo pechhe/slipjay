@@ -218,7 +218,7 @@ test("release submissions queue a release, reattach to the open release of the s
     assert.equal(first.reattached, false);
     assert.equal(first.operation.kind, "release");
     assert.equal(first.operation.commitId, candidate);
-    assert.equal(first.operation.position, 2, "a release queues behind earlier work");
+    assert.equal(first.operation.position, 1, "a release verifies in its own lane, not behind the landing");
     assert.equal(f.submissions, 2);
     const again = await (await release({ ...body, repo: "owner/repo" })).json() as ReleaseResponse;
     assert.equal(again.reattached, true);
@@ -228,7 +228,7 @@ test("release submissions queue a release, reattach to the open release of the s
       assert.equal((await release(invalid)).status, 400);
     f.append(landing.operation.id, { type: "stage", stage: "verifying" });
     assert.equal((await (await f.request(`/operations/${first.operation.id}`)).json() as { operation: Operation }).operation.waitingFor,
-      `landing ${changeId.slice(0, 12)}`);
+      undefined, "a running landing does not hold a release's verification");
   } finally {
     await f.close();
   }

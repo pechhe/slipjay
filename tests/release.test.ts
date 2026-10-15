@@ -207,9 +207,9 @@ test("a returned release moves the release branch back to before its merge, only
     const base = remoteRef(f, "release");
     const released = await confirmRelease(f.repo, { candidate });
     assert.ok(released.status === "released", JSON.stringify(released));
-    assert.deepEqual(await returnRelease(f.repo, released.merge), { returned: true, releaseBranch: base });
+    assert.deepEqual(await returnRelease(f.repo, { merge: released.merge, candidate }), { returned: true, releaseBranch: base });
     assert.equal(remoteRef(f, "release"), base);
-    const again = await returnRelease(f.repo, released.merge);
+    const again = await returnRelease(f.repo, { merge: released.merge, candidate });
     assert.ok(!again.returned && /has moved on/.test(again.reason), JSON.stringify(again));
     assert.equal(remoteRef(f, "release"), base);
   } finally {

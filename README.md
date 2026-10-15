@@ -191,8 +191,16 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 change lands. The runner queues landings and takes each repository's one at a time
 in arrival order. For each one it rebases onto the integration tip,
 runs the repository's declared gate in its own warm checkout, then integrates and
-publishes. The authoring machine runs none of the gate. Confirmed releases and
-resets take turns in the same repository's queue (see [Release](#release)).
+publishes. The authoring machine runs none of the gate. Resets take turns in the
+same repository's queue. A confirmed release verifies in a release queue and a
+checkout of its own, beside the repository's landings, and takes a turn in the
+repository's queue only to publish (see [Release](#release)). A release and a reset
+of one repository never overlap, and a repository in a shared `lane` verifies its
+releases in that lane, since its gates share external state.
+
+Each gate command gets a temporary directory (`TMPDIR`) of its checkout's own, emptied
+at each turn, so a lock or file a gate keeps there never makes another operation wait:
+the runner's `limits` bound concurrent runs together.
 
 - **Workers.** Different repositories share no checkout, branch, reset target or
   environment, so their queues run at once: at most `workers` of them (runner config,
@@ -201,7 +209,8 @@ resets take turns in the same repository's queue (see [Release](#release)).
   queue: give them the same `lane` in the runner config's `repos` entries. When every
   worker is busy, the next operation of an idle queue waits, oldest first, and names
   what holds the workers (`a worker (landing …)`); one waiting behind its own queue
-  names the running operation.
+  names the running operation, or the release or reset holding it. A release holds a
+  worker from verification until it has published.
 - **Limits.** On a systemd host every run, deploys included, joins `slipjay.slice`, so
   the workers' gates and everything they start share one cap: `limits` in the runner
   config sets `memoryHigh` (throttled above, default `40G`), `memoryMax` (the hard
@@ -280,7 +289,7 @@ resets take turns in the same repository's queue (see [Release](#release)).
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs. A reset's step output goes to the owner-only
     `logs/<operation>.reset-output` beside it, never into the log.
-  - `repos/<owner>/<name>`: the warm checkouts.
+  - `repos/<owner>/<name>`: the warm checkouts; `releases/<owner>/<name>`: each repository's release checkout.
   - Finalization receipts and target outcomes stay in
     `~/.slipjay/state/post-integration`. Held-integration retries rely on them; move them with the runner.
 
@@ -484,12 +493,16 @@ nothing, so it rolls back and restores earlier projects as usual.
    branch (and, for a release that is not a promotion and carries migration
    artifacts, that `--migrations-ready` was given), then
    submits it to the runner (see [Runner](#runner)); a confirm needs a runner
-   location. The release takes its turn in its repository's queue on the runner: a landing
-   submitted behind it waits, printing `queued (position 2, behind release
-   16bea7013436)`, and so does a release behind a landing. In its turn the runner
-   checks the exact candidate out in its warm checkout, prepares its dependencies
-   and runs the checks; their failure publishes nothing and prints the failing
-   command and its output verbatim. If the install or a check changed tracked
+   location. Releases take turns in their repository's release queue on the runner,
+   beside its landings: the runner checks the exact candidate out in the release
+   checkout, prepares its dependencies and runs the checks while landings go on.
+   Their failure publishes nothing and prints the failing command and its output
+   verbatim. A verified release then waits for the repository's running landing or
+   reset (its progress says `Verified; publishing after <repo>'s running turn`), and
+   a landing submitted meanwhile waits behind its publication, printing `queued
+   (position 1, behind release 16bea7013436)`. Publication rechecks that the release
+   branch is still the planned base, so a release branch moved during verification
+   publishes nothing. If the install or a check changed tracked
    source, the verified tree is not the candidate's: the release publishes nothing,
    lists the changed paths and restores the candidate. The terminal follows the stages (`verifying`,
    `publishing`, `finalizing`); Ctrl-C stops following, and rerunning the same

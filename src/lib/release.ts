@@ -5,11 +5,11 @@
  * remote), the base (the release branch on the remote), the commits between them,
  * any migration artifacts and any half-built Specs (warned about, never refused).
  *
- * `confirmRelease` runs on the runner, in its warm checkout, for the candidate
+ * `confirmRelease` runs on the runner, in a checkout of its own, for the candidate
  * commit a human approved: it checks that exact commit out, runs
  * `requiredReleaseVerification`, builds the release merge, refuses unless its tree
- * is the verified tree, and publishes it. The runner's serial queue orders releases
- * against each other and against landings.
+ * is the verified tree, and publishes it. Verification runs beside the repository's
+ * landings; the runner orders only publication against them and other releases.
  *
  * jj commands ignore working copies, except checking the candidate out.
  */
@@ -107,6 +107,12 @@ export type ConfirmReleaseOptions = {
   run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   environment?: () => NodeJS.ProcessEnv;
   graphql?: GraphqlRunner;
+  /**
+   * Runs publication, which moves the release branch, once nothing else may move it (the
+   * runner's repository lane). Its own recheck that the release branch is still the
+   * planned base keeps a verification that ran beside other work valid.
+   */
+  exclusively?: <T>(publication: () => Promise<T>) => Promise<T>;
 };
 
 const COMMIT_PREFIX = /^[a-f0-9]{12,64}$/;
@@ -462,14 +468,16 @@ async function publish(plan: ReleasePlan, merge: string): Promise<void> {
 /**
  * Undo a published release whose production deploy failed: move the release branch from
  * `merge` back to its first parent, the release branch before it. Refused, moving
- * nothing, when the release branch has moved on since (a later release).
+ * nothing, when the release branch has moved on since (a later release). `checkout` need
+ * not hold the merge, which it fetches: the policy comes from the released `candidate`,
+ * whose tree the merge's is.
  */
-export async function returnRelease(checkout: string, merge: string): Promise<{ returned: true; releaseBranch: string } | { returned: false; reason: string }> {
+export async function returnRelease(checkout: string, { merge, candidate }: { merge: string; candidate: string }): Promise<{ returned: true; releaseBranch: string } | { returned: false; reason: string }> {
   try {
-    const { policy } = await readExecutionPolicyAtCommit(checkout, merge);
+    const { policy } = await readExecutionPolicyAtCommit(checkout, candidate);
     const releaseBranch = policy?.releaseBranch;
     const remote = policy?.remote;
-    if (!releaseBranch || !remote) refuse(`slipjay.json at ${merge.slice(0, 12)} declares no release branch and remote`);
+    if (!releaseBranch || !remote) refuse(`slipjay.json at ${candidate.slice(0, 12)} declares no release branch and remote`);
     const fetched = await fetch(checkout, remote, releaseBranch);
     if (fetched.code !== 0) refuse(`Could not fetch ${releaseBranch}: ${fetched.stderr.trim()}`);
     const published = `${symbol(releaseBranch)}@${symbol(remote)}`;
@@ -588,11 +596,11 @@ async function requireCandidateTree(checkout: string, candidate: string): Promis
 
 /**
  * Verify and publish the approved `candidate` from `checkout`, which this call owns
- * for its duration (the runner's warm checkout: it checks the candidate out there).
+ * for its duration (the runner's release checkout: it checks the candidate out there).
  * A candidate the release branch already holds verifies nothing.
  */
 export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
-  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql } = options;
+  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql, exclusively = (publication) => publication() } = options;
   try {
     const plan = await planRelease(checkout, { candidate });
     if (!plan.commits.length) {
@@ -613,15 +621,17 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
         ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
       : { passed: [], gaps: [] };
     await requireCandidateTree(checkout, plan.candidate);
-    onStage("publishing");
-    // The base must still be what was planned: a moved release branch needs a new plan.
-    await fetch(plan.root, plan.remote, plan.releaseBranch);
-    const base = await commitOf(plan.root, `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`);
-    if (base !== plan.base) refuse(`${plan.releaseBranch}@${plan.remote} moved during the release; rerun it`);
-    const merge = await buildMerge(plan);
-    await publish(plan, merge);
-    onStage("finalizing");
-    return { ok: true, status: "released", ...summary, merge, verification, releasedAt: new Date().toISOString() };
+    return await exclusively(async () => {
+      onStage("publishing");
+      // The base must still be what was planned: a moved release branch needs a new plan.
+      await fetch(plan.root, plan.remote, plan.releaseBranch);
+      const base = await commitOf(plan.root, `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`);
+      if (base !== plan.base) refuse(`${plan.releaseBranch}@${plan.remote} moved during the release; rerun it`);
+      const merge = await buildMerge(plan);
+      await publish(plan, merge);
+      onStage("finalizing");
+      return { ok: true, status: "released", ...summary, merge, verification, releasedAt: new Date().toISOString() } as const;
+    });
   } catch (error) {
     return refusalOf(error);
   }

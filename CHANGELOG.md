@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **Promotion verification no longer holds a repository's landings (#55):** a release
+  verifies its pinned candidate in a release queue and checkout of its own
+  (`releases/<owner>/<name>` in the runner home), beside the repository's landings, and
+  takes the repository's queue only to publish, where it rechecks the planned release
+  base. It holds a worker until it has published. A release and a reset of one
+  repository never overlap, and a repository in a shared `lane` keeps its releases in it. Rollback reads its policy from the
+  released candidate, so the warm checkout need not hold the release merge.
+- **Each runner checkout's gate commands get their own `TMPDIR`, emptied at each turn:**
+  a lock a gate keeps in its temporary directory (YardSmith's heavy-check lock) no
+  longer makes the release and landings of one repository wait on each other; the
+  runner's `limits` bound them together.
+
 ## v3.14.1
 
 - **The runner never abandons published integration history:** a runner checkout now
