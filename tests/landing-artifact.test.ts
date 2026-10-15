@@ -11,8 +11,8 @@ test("assembled prefix preserves every source-stack change in one exact-parent a
   const f = await project();
   try {
     const base = jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-    await writeFile(join(f.repo, "first"), "first\n"); jj(f.repo, ["describe", "-m", "first"]);
-    jj(f.repo, ["new", "@", "-m", "assembled candidate"]);
+    await writeFile(join(f.repo, "first"), "first\n"); jj(f.repo, ["describe", "-m", "feat: first\n\nFeature details.\n\nIssue: pechhe/slipjay#59"]);
+    jj(f.repo, ["new", "@", "-m", "fix: review feedback\n\nFix details."]);
     await writeFile(join(f.repo, "second"), "second\n");
     const source = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
     await retainLandingSource(f.repo, "stack", 1, source);
@@ -21,7 +21,8 @@ test("assembled prefix preserves every source-stack change in one exact-parent a
     assert.equal(jj(f.repo, ["file", "show", "-r", candidate, "first"]), "first");
     assert.equal(jj(f.repo, ["file", "show", "-r", candidate, "second"]), "second");
     assert.equal(jj(f.repo, ["log", "-r", `${candidate}-`, "--no-graph", "-T", "commit_id"]), base);
-    assert.equal(jj(f.repo, ["log", "-r", candidate, "--no-graph", "-T", "description.first_line()"]), "assembled candidate");
+    assert.equal(jj(f.repo, ["log", "-r", candidate, "--no-graph", "-T", "description"]),
+      "feat: first\n\nFeature details.\n\nIssue: pechhe/slipjay#59\n\nfix: review feedback\n\nFix details.");
     assert.equal(jj(f.repo, ["file", "show", "-r", source, "first"]), "first", "original source remains recoverable");
   } finally { await f.dispose(); }
 }, 120_000);

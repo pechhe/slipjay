@@ -295,6 +295,75 @@ test("queued candidates land in arrival order on the previous candidate, with ru
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a renamed integration bookmark is fetched and tracked without deleting the old bookmark", async () => {
+  const f = await fixture();
+  try {
+    jj(f.author, ["new", "main"]);
+    const policyPath = join(f.author, "slipjay.json");
+    const policy = JSON.parse(await readFile(policyPath, "utf8"));
+    await writeFile(policyPath, JSON.stringify({ ...policy, integrationBranch: "renamed" }));
+    jj(f.author, ["describe", "-m", "Rename integration"]);
+    const rename = await f.land(f.submit(await f.push()));
+    assert.equal(rename?.type, "landed", JSON.stringify(rename));
+    const oldTip = f.main();
+    jj(f.author, ["git", "fetch", "--remote", "origin", "--branch", "main"]);
+    jj(f.author, ["git", "push", "--remote", "origin", "--named", "renamed=main@origin"]);
+    const checkout = join(f.home, "repos", "fixture/repo");
+    assert.equal(jj(checkout, ["log", "--no-graph", "-r", 'bookmarks("renamed")', "-T", "commit_id"]), "");
+    const next = await f.land(f.submit(await f.candidate("after-rename.txt")));
+    assert.equal(next?.type, "landed", JSON.stringify(next));
+    if (next?.type !== "landed") throw new Error("Expected renamed landing");
+    assert.equal(next.branch, "renamed");
+    assert.equal(execFileSync("git", ["--git-dir", f.origin, "rev-parse", "renamed"], { encoding: "utf8" }).trim(), next.commitId);
+    assert.equal(f.main(), oldTip, "old remote bookmark remains unchanged");
+    assert.equal(jj(checkout, ["log", "--no-graph", "-r", "main", "-T", "commit_id"]), oldTip, "old local bookmark remains unchanged");
+    assert.equal(jj(checkout, ["log", "--no-graph", "-r", 'tracked_remote_bookmarks(exact:"renamed")', "-T", "commit_id"]), next.commitId);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a missing renamed integration bookmark names the local and remote failure", async () => {
+  const f = await fixture();
+  try {
+    jj(f.author, ["new", "main"]);
+    const policyPath = join(f.author, "slipjay.json");
+    const policy = JSON.parse(await readFile(policyPath, "utf8"));
+    await writeFile(policyPath, JSON.stringify({ ...policy, integrationBranch: "missing" }));
+    jj(f.author, ["describe", "-m", "Rename integration"]);
+    assert.equal((await f.land(f.submit(await f.push())))?.type, "landed");
+    const oldTip = f.main();
+    const next = await f.land(f.submit(await f.candidate("after-rename.txt")));
+    assert.equal(next?.type, "failed", JSON.stringify(next));
+    assert.match(JSON.stringify(next), /integration bookmark 'missing'.*locally.*remote 'origin'/);
+    assert.equal(f.main(), oldTip);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+for (const verificationDepth of [1, 2] as const) test(`a two-commit landing preserves feature attribution at depth ${verificationDepth}`, async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth });
+  try {
+    const base = f.main();
+    jj(f.author, ["new", "main", "-m", "feat: deliver the feature\n\nFeature body.\n\nIssue: pechhe/slipjay#59"]);
+    await writeFile(join(f.author, "feature.txt"), "feature\n");
+    jj(f.author, ["new", "@", "-m", "fix: answer review\n\nReview body."]);
+    await writeFile(join(f.author, "review.txt"), "review\n");
+    const result = await f.land(f.submit(await f.push()));
+    assert.equal(result?.type, "landed", JSON.stringify(result));
+    const description = execFileSync("git", ["--git-dir", f.origin, "show", "-s", "--format=%B", f.main()], { encoding: "utf8" }).trim();
+    if (verificationDepth === 2) {
+      assert.equal(description, "feat: deliver the feature\n\nFeature body.\n\nIssue: pechhe/slipjay#59\n\nfix: answer review\n\nReview body.");
+      assert.equal(f.parents(f.main())[0], base, "folded artifact extends integration directly");
+    } else {
+      assert.equal(description, "fix: answer review\n\nReview body.");
+      const first = f.parents(f.main())[0]!;
+      assert.equal(execFileSync("git", ["--git-dir", f.origin, "show", "-s", "--format=%B", first], { encoding: "utf8" }).trim(),
+        "feat: deliver the feature\n\nFeature body.\n\nIssue: pechhe/slipjay#59");
+      assert.equal(f.parents(first)[0], base, "serial landing preserves both commits");
+    }
+    assert.equal(f.remoteFile("feature.txt"), "feature");
+    assert.equal(f.remoteFile("review.txt"), "review");
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("a rebase conflict in the policy returns the runner to integration before an independent landing", async () => {
   const f = await fixture();
   try {

@@ -488,7 +488,9 @@ export function createRunnerQueue(input: {
         await mkdir(dirname(checkout), { recursive: true });
         await jj(dirname(checkout), ["git", "clone", repository.url, checkout]);
       }
-      let context = await workspaceContext(checkout);
+      // Recover a committed rename while resolving policy, before requiring its
+      // local bookmark. Fetch and track only the new target; never delete the old one.
+      let context = await workspaceContext(checkout, undefined, { fetchMissingBookmarks: true });
       if (!context || context.current.name !== "default") throw new Error("Runner checkout must be the default jj workspace");
       for (const [key, value] of Object.entries({ ...RUNNER_JJ_DEFAULTS, ...config.jj })) await jj(checkout, ["config", "set", "--repo", key, value]);
       integrationBranch = context.integrationBranch;

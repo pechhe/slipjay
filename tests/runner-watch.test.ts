@@ -151,7 +151,7 @@ test("watch refreshes a replaced connection without skipping replay and emits JS
       };
     },
   });
-  assert.equal(envelopes[0]?.type, "snapshot");
+  assert.deepEqual(envelopes[0], { version: 1, type: "connection", state: "connecting", cursor: 0 });
   assert.deepEqual(cursors, [5, 6]);
   assert.deepEqual(
     envelopes.filter((e) => e.type === "event").map((e) => e.event.seq),
@@ -161,6 +161,19 @@ test("watch refreshes a replaced connection without skipping replay and emits JS
   assert.equal(opened, 2);
   assert.equal(closed, 2);
   assert.equal(cancelled, 1);
+});
+
+test("failed first attempts report public connection states at cursor zero", async () => {
+  const controller = new AbortController();
+  const envelopes: WatchEnvelope[] = [];
+  let attempts = 0;
+  await watchRunner({ signal: controller.signal,
+    emit(value) { envelopes.push(value); },
+    async connect() { attempts++; throw new Error("private credential and transport detail"); },
+    async retry() { if (attempts === 2) controller.abort(); },
+  });
+  assert.deepEqual(envelopes, ["connecting", "disconnected", "connecting", "disconnected"].map(state =>
+    ({ version: 1, type: "connection", state, cursor: 0 })));
 });
 
 test("watch cancellation releases a reader blocked on a quiet live stream", async () => {

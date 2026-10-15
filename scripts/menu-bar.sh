@@ -9,14 +9,14 @@ compile() {
   mkdir -p "$app/Contents/MacOS"
   sdk=$(xcrun --sdk macosx --show-sdk-path)
   arch=$(uname -m)
-  xcrun swiftc -sdk "$sdk" -target "$arch-apple-macosx13.0" -parse-as-library "$root/macos/RunnerModel.swift" "$root/macos/StatusPolicy.swift" "$root/macos/ControlPolicy.swift" "$root/macos/App.swift" -o "$app/Contents/MacOS/SlipJay"
+  xcrun swiftc -sdk "$sdk" -target "$arch-apple-macosx13.0" -parse-as-library "$root/macos/RunnerContract.generated.swift" "$root/macos/RunnerModel.swift" "$root/macos/StatusPolicy.swift" "$root/macos/ControlPolicy.swift" "$root/macos/App.swift" -o "$app/Contents/MacOS/SlipJay"
   cp "$root/macos/Info.plist" "$app/Contents/Info.plist"
 }
 case "${1:-}" in
   build) compile ;;
   test)
     mkdir -p "$build"
-    xcrun swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" -target "$(uname -m)-apple-macosx13.0" "$root/macos/RunnerModel.swift" "$root/macos/StatusPolicy.swift" "$root/macos/ControlPolicy.swift" "$root/macos/Tests.swift" -o "$build/tests"
+    xcrun swiftc -sdk "$(xcrun --sdk macosx --show-sdk-path)" -target "$(uname -m)-apple-macosx13.0" "$root/macos/RunnerContract.generated.swift" "$root/macos/RunnerModel.swift" "$root/macos/StatusPolicy.swift" "$root/macos/ControlPolicy.swift" "$root/macos/Tests.swift" -o "$build/tests"
     "$build/tests" "$root/macos/fixtures/lifecycle.jsonl"
     ;;
   install)

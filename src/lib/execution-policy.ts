@@ -366,8 +366,10 @@ export function jjIntegrationProbes(repo: string): Required<IntegrationBranchPro
  * working policy (`hintRoot`) only suggests which bookmark to read first; the
  * committed policy decides, and a bookmark whose policy names another one is
  * followed once and must then name itself.
+ * The runner opts into fetching and tracking a missing committed target;
+ * ordinary callers remain read-only.
  */
-export async function readIntegrationPolicy(repo: string, { hintRoot }: { hintRoot?: string } = {}): Promise<{ integrationBranch: string; commitId: string; policy: ExecutionPolicy | null }> {
+export async function readIntegrationPolicy(repo: string, { hintRoot, fetchMissingBookmarks = false }: { hintRoot?: string; fetchMissingBookmarks?: boolean } = {}): Promise<{ integrationBranch: string; commitId: string; policy: ExecutionPolicy | null }> {
   const probes = jjIntegrationProbes(repo);
   let fallback: { branch: string | null } | undefined;
   const undeclared = async () => (fallback ??= { branch: await resolveIntegrationBranch(probes) }).branch;
@@ -395,6 +397,17 @@ export async function readIntegrationPolicy(repo: string, { hintRoot }: { hintRo
   const first = await readExecutionPolicyAtCommit(repo, revision);
   const target = first.policy?.integrationBranch ?? await undeclared();
   if (target === start && revision === start) return { integrationBranch: start, ...first };
+  if (target && !await probes.exists(target) && fetchMissingBookmarks) {
+    const remote = first.policy?.remote ?? "origin";
+    const fetched = await jjRead(repo, ["git", "fetch", "--remote", remote, "--branch", target]);
+    if (fetched.code !== 0)
+      throw new Error(`Configured integration bookmark '${target}' does not exist locally; could not fetch it from remote '${remote}': ${fetched.stderr.trim()}`);
+    const found = await jjRead(repo, ["log", "--no-graph", "-r", `${symbol(target)}@${symbol(remote)}`, "-T", "commit_id"]);
+    if (found.code !== 0 || !/^[a-f0-9]{40,64}$/.test(found.stdout.trim()))
+      throw new Error(`Configured integration bookmark '${target}' does not exist locally or on remote '${remote}'`);
+    const tracked = await jjRead(repo, ["bookmark", "track", `${target}@${remote}`]);
+    if (tracked.code !== 0) throw new Error(`Could not track integration bookmark '${target}' from remote '${remote}': ${tracked.stderr.trim()}`);
+  }
   if (!target || !await probes.exists(target)) throw new Error(`Configured integration bookmark '${target}' does not exist locally`);
   const second = await readExecutionPolicyAtCommit(repo, target);
   const confirmed = second.policy?.integrationBranch ?? await undeclared();

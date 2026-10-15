@@ -2,6 +2,12 @@
   [
     {
       "version": 1,
+      "type": "connection",
+      "state": "connecting",
+      "cursor": 0
+    },
+    {
+      "version": 1,
       "type": "snapshot",
       "snapshot": {
         "version": 1,

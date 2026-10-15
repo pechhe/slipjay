@@ -15,30 +15,36 @@ struct ModelTests {
             try state.consume(line: line, receivedAt: now.addingTimeInterval(Double(index)))
         }
         expect(state.snapshot?.runner == "fixture-runner", "snapshot decoded")
-        expect(state.snapshot?.lanes.serial.first?.timing?.amberAfterMs == 2_000, "runner timing retained")
+        expect(state.snapshot?.lanes.serial.first?.timing?.samples == 0, "runner timing retained")
         expect(state.operations["release-1"]?.kind == "release", "terminal release identity retained")
         expect(state.operations["release-1"]?.status == "released", "terminal result retained")
         expect(state.connection == "connected", "connection decoded")
-        expect(state.lastContact == now.addingTimeInterval(5), "contact uses receipt rather than payload time")
+        expect(state.lastContact == now.addingTimeInterval(Double(lines.count - 1)), "contact uses receipt rather than payload time")
         expect(state.lastEvent == nil, "heartbeat and connection clear stale events")
+        expect(state.operations["release-1"]?.result?["result"]?["candidate"]?.string == "approved-candidate", "real singular release candidate decoded")
+        for terminal in RunnerContract.terminalEventTypes {
+            let id = terminal == "released" ? "release-1" : "terminal-\(terminal)"
+            expect(state.operations[id]?.status == terminal, "every canonical terminal closes its operation: \(terminal)")
+            expect(state.operations[id]?.finishedAt != nil, "every terminal keeps its event date")
+        }
         let lastContact = state.lastContact
         state.consume(.connection(state: "disconnected", cursor: state.cursor), receivedAt: now.addingTimeInterval(500))
         expect(state.lastContact == lastContact, "connection state does not fabricate contact")
-        let event = StoredEvent(seq: 10, operationId: "release-1", at: "old", event: .object(["type": .string("failed"), "reason": .string("fixture")]))
+        let event = StoredEvent(seq: state.cursor + 1, operationId: "release-1", at: "old", event: .object(["type": .string("failed"), "reason": .string("fixture")]))
         state.consume(.event(event), receivedAt: now)
-        expect(state.lastEvent?.seq == 10, "new event admitted")
+        expect(state.lastEvent?.seq == event.seq, "new event admitted")
         state.consume(.event(event), receivedAt: now)
         expect(state.lastEvent == nil, "replayed event not admitted twice")
         try state.consume(line: "{\"version\":1,\"type\":\"future-envelope\"}", receivedAt: now)
         expect(state.lastEvent == nil, "unknown envelope tolerated")
-        let future = StoredEvent(seq: 11, operationId: "release-1", at: "old", event: .object(["type": .string("future-kind"), "extra": .array([.bool(true)])]))
+        let future = StoredEvent(seq: state.cursor + 1, operationId: "release-1", at: "old", event: .object(["type": .string("future-kind"), "extra": .array([.bool(true)])]))
         let roundtrip = try JSONDecoder().decode(WatchEnvelope.self, from: JSONEncoder().encode(WatchEnvelope.event(future)))
         expect(roundtrip == .event(future), "future event payload roundtrip")
         var rejected = false
         do { try state.consume(line: "{\"version\":2,\"type\":\"future\"}", receivedAt: now) } catch { rejected = true }
         expect(rejected, "unsupported protocol version rejected")
         var cached = RunnerState(now: now)
-        try cached.consume(line: lines[3], receivedAt: now)
+        cached.consume(.snapshot(try runningReleaseSnapshot(lines: lines)), receivedAt: now)
         for seq in 1...300 {
             cached.consume(.event(StoredEvent(seq: seq, operationId: "cache-\(seq)", at: "fixture", event: .object(["type": .string("submitted"), "repo": .string("fixture"), "commitId": .string("commit")]))), receivedAt: now)
         }
@@ -50,11 +56,85 @@ struct ModelTests {
         expect(cached.operations["production"]?.status == "failed", "restart snapshot carries terminal production outcome")
         try deployedNoticeTests(now: now)
         try backlogTests(now: now)
+        noticeHistoryTests()
         try controlTests(now: now)
         try policyTests(now: now)
+        try presentationTests(now: now)
         try watchRestartTests(now: now)
+        try reconnectTests(now: now)
         print("Runner model and policy tests passed")
     }
+}
+
+func presentationTests(now: Date) throws {
+    let lines = try String(contentsOfFile: "macos/fixtures/lifecycle.jsonl", encoding: .utf8).split(separator: "\n").map(String.init)
+    var state = RunnerState(now: now)
+    try state.consume(line: lines[0], receivedAt: now)
+    state.consume(.connection(state: "connected", cursor: 0), receivedAt: now)
+    var snapshot = state.snapshot!
+    var failed = Operation(id: "failed-production", kind: "deploy", repo: "fixture/app", commitId: "failed-commit", submittedBy: "owner", status: "failed", stage: "deploying", submittedAt: "2026-10-15T00:00:00Z", lastSeq: 1, environment: "production")
+    snapshot.recentProductionDeploys = [failed]
+    state.consume(.snapshot(snapshot), receivedAt: now)
+    expect(statusPresentation(state: state, now: now).title == "Production deploy failed", "a standalone Production failure needs attention without any release")
+    var retry = failed; retry.id = "retry"; retry.status = "running"
+    snapshot.recentProductionDeploys = [retry, failed]
+    state.consume(.snapshot(snapshot), receivedAt: now)
+    expect(statusPresentation(state: state, now: now).needsAttention, "a running retry does not erase the previous Production failure")
+    retry.status = "deployed"
+    snapshot.recentProductionDeploys = [retry, failed]
+    state.consume(.snapshot(snapshot), receivedAt: now)
+    expect(!statusPresentation(state: state, now: now).needsAttention, "a successful retry clears that repository's earlier failure")
+    retry.repo = "fixture/other"
+    snapshot.recentProductionDeploys = [retry, failed]
+    state.consume(.snapshot(snapshot), receivedAt: now)
+    expect(statusPresentation(state: state, now: now).needsAttention, "another repository's successful deploy does not hide the failure")
+    snapshot.recentReleases = (0..<10).map { index in
+        var release = failed; release.id = "release-\(index)"; release.kind = "release"; release.status = "released"; return release
+    }
+    snapshot.recentProductionDeploys = (0..<10).map { index in
+        var deploy = failed; deploy.id = "deploy-\(index)"; return deploy
+    }
+    expect(snapshot.displayedReleases.map(\.id) == ["release-0", "release-1", "release-2"], "menu shows only the latest three releases in runner order")
+    expect(snapshot.displayedProductionDeploys.map(\.id) == ["deploy-0", "deploy-1", "deploy-2"], "menu includes the latest three Production deploys")
+    expect(snapshot.recentReleases.count == 10, "menu limits do not discard runner history")
+    var active = failed; active.id = "active"; active.status = "running"
+    snapshot.recentReleases.insert(active, at: 0)
+    snapshot.recentProductionDeploys?.insert(active, at: 0)
+    expect(snapshot.displayedReleases.first?.id == "release-0" && snapshot.displayedProductionDeploys.first?.id == "deploy-0", "recent outcomes do not duplicate active lane entries")
+    var landing = failed; landing.kind = "landing"; landing.changeId = String(repeating: "z", count: 32)
+    expect(operationReference(landing) == "change zzzzzzzzzzzz", "landings display their stable change identifier")
+    landing.changeId = nil
+    expect(operationReference(landing) == "change unavailable", "missing change identity is explicit")
+    expect(operationReference(failed) == "failed-commi", "deploys retain their commit identity")
+    landing.status = "queued"
+    expect(operationStatusText(landing) == "Queued", "queued work has a queue state rather than an outcome")
+    landing.status = "running"
+    expect(operationStatusText(landing) == "Running", "running work has no terminal outcome")
+    failed.result = .object(["deployment": .object(["rollback": .object(["automatic": .bool(true)])])])
+    expect(operationStatusText(failed) == "Rolled back", "a failed Production attempt retains the automatic rollback outcome")
+    for (seconds, expected) in [(5.0, "5s ago"), (60, "1m ago"), (3600, "1h ago"), (86400, "1d ago")] {
+        expect(relativeAge(now.addingTimeInterval(-seconds), now: now) == expected, "ages use readable units at boundaries")
+    }
+    expect(relativeAge(now.addingTimeInterval(60), now: now) == "just now", "future timestamps do not print negative ages")
+    expect(relativeAge(nil, now: now) == "unavailable", "missing timestamp is explicit")
+    expect(staleSnapshotNotice(state: state, now: now) == nil, "connected fresh snapshots have no stale marker")
+    expect(staleSnapshotNotice(state: state, now: now.addingTimeInterval(60))?.hasPrefix("No recent contact") == true, "quiet stale connections mark cached state")
+    state.consume(.connection(state: "disconnected", cursor: 0), receivedAt: now)
+    expect(staleSnapshotNotice(state: state, now: now)?.hasPrefix("Disconnected") == true, "disconnected lanes are marked as last known")
+    state.consume(.connection(state: "connecting", cursor: 0), receivedAt: now)
+    expect(staleSnapshotNotice(state: state, now: now)?.hasPrefix("Reconnecting") == true, "reconnection keeps cached lanes explicitly stale")
+}
+
+func noticeHistoryTests() {
+    let accepted = (0..<2050).map { "notice-\($0)" }
+    var history = NoticeHistory(accepted)
+    expect(history.ids == Array(accepted.suffix(2048)), "restore keeps latest 2048 accepted identities")
+    history.record("newly-accepted")
+    expect(history.ids.count == 2048 && history.ids.first == "notice-3" && history.ids.last == "newly-accepted", "successful delivery evicts oldest accepted identity")
+    history.record("notice-100")
+    expect(history.ids.count == 2048 && history.ids.first == "notice-3" && history.ids.last == "notice-100", "repeat acceptance refreshes order without evicting another identity")
+    expect(!history.contains("notice-2") && history.contains("newly-accepted"), "dedup membership follows retained identities")
+    expect(NoticeHistory(["first", "second", "first"]).ids == ["second", "first"], "restored duplicate identities keep their latest acceptance")
 }
 
 func watchRestartTests(now: Date) throws {
@@ -67,7 +147,7 @@ func watchRestartTests(now: Date) throws {
     func consume(_ session: [WatchEnvelope]) {
         for envelope in session {
             state.consume(envelope, receivedAt: now)
-            backlog.update(notices(state: state, now: now, landingFailures: false), accepted: accepted)
+            backlog.update(notices(state: state, now: now, landingFailures: false), accepted: accepted, now: now)
         }
     }
     consume(sessions[0])
@@ -98,7 +178,7 @@ func policyTests(now: Date) throws {
     var state = RunnerState(now: now)
     try state.consume(line: fixture[0], receivedAt: now)
     expect(statusPresentation(state: state, now: now).kind == "idle", "idle presentation")
-    try state.consume(line: fixture[3], receivedAt: now)
+    state.consume(.snapshot(try runningReleaseSnapshot(lines: fixture)), receivedAt: now)
     var snapshot = state.snapshot!
     var operation = snapshot.lanes.serial[0]
     operation.kind = "landing"
@@ -137,13 +217,25 @@ func policyTests(now: Date) throws {
     operation.stage = "publishing"; operation.kill = Kill(allowed: false, reason: "past verification")
     expect(operation.kill?.allowed == false && operation.kill?.reason != nil, "unsafe kill disabled with reason")
     var delivered = Set<String>()
+    state = RunnerState(now: now)
     let eventLines = try String(contentsOfFile: "macos/fixtures/notification-events.jsonl", encoding: .utf8).split(separator: "\n").map(String.init)
     var titles: [String] = []
+    var deliveredNotices: [String: Notice] = [:]
     for line in eventLines {
         try state.consume(line: line, receivedAt: now)
-        for notice in notices(state: state, now: now, landingFailures: false) where delivered.insert(notice.id).inserted { titles.append(notice.title) }
+        for notice in notices(state: state, now: now, landingFailures: false) where delivered.insert(notice.id).inserted {
+            titles.append(notice.title); deliveredNotices[notice.title] = notice
+        }
     }
-    expect(titles == ["Release verification started", "Release failed", "Release published", "Production deployed", "Production rolled back", "Release combined with a newer candidate", "Release resubmitted as fallback", "Hourly suite failed"], "release notice defaults and explicit future fixtures")
+    expect(titles == ["Release verification started", "Release failed", "Release published", "Production deployed", "Production rolled back"], "notices decode the real runner ledger contract")
+    expect(deliveredNotices["Release failed"]?.operationId == "release-failure", "failed release keeps its own operation")
+    expect(deliveredNotices["Production deployed"]?.body == "fixture/repo\nMerge: release-merg\nCandidates shipped: approved-can", "deployed notice keeps the approved candidate and release merge")
+    expect(deliveredNotices["Production rolled back"]?.operationId == "rollback" && deliveredNotices["Production rolled back"]?.body.contains("Migrations: applied") == true, "rollback notice keeps its failed operation and migration outcome")
+    expect(notices(state: state, now: now, landingFailures: false).isEmpty, "superseding a landing does not claim a release shipped")
+    for (index, kind) in ["coalesced", "release_coalesced", "fallback", "release_fallback", "suite_failed"].enumerated() {
+        state.consume(.event(StoredEvent(seq: 50 + index, operationId: "release", at: "fixture", event: .object(["type": .string(kind)]))), receivedAt: now)
+        expect(notices(state: state, now: now, landingFailures: false).isEmpty, "unbuilt producers do not trigger notices")
+    }
     let deliveredBeforeReplay = delivered
     for line in eventLines { try state.consume(line: line, receivedAt: now); for notice in notices(state: state, now: now, landingFailures: false) { delivered.insert(notice.id) } }
     expect(delivered == deliveredBeforeReplay, "reconnect dedup")
@@ -203,29 +295,79 @@ func controlTests(now: Date) throws {
 }
 
 func backlogTests(now: Date) throws {
-    let notice = Notice(id: "event:release:1:published", title: "Published", body: "fixture", operationId: "release")
+    let notice = Notice(id: "event:release:1:published", title: "Published", body: "fixture", operationId: "release", occurredAt: now)
     let condition = Notice(id: "held:fixture:commit:time", title: "Held", body: "fixture", operationId: nil)
     var backlog = NoticeBacklog()
-    backlog.update([notice, condition], accepted: [])
+    backlog.update([notice, condition], accepted: [], now: now)
     expect(backlog.pending.count == 2, "event and current condition proposed")
-    backlog.update([], accepted: [])
+    backlog.update([], accepted: [], now: now)
     expect(backlog.pending == [notice], "denied or failed delivery retains event, obsolete condition removed")
     backlog = try JSONDecoder().decode(NoticeBacklog.self, from: JSONEncoder().encode(backlog))
     expect(backlog.pending == [notice], "undelivered event survives restart")
     backlog.accepted(notice.id)
     expect(backlog.pending.isEmpty, "successful OS acceptance clears event")
-    backlog.update([notice], accepted: [notice.id])
+    backlog.update([notice], accepted: [notice.id], now: now)
     expect(backlog.pending.isEmpty, "accepted identity stays deduplicated")
+    backlog.update([notice], accepted: [], now: now)
+    backlog.prune(now: now.addingTimeInterval(86_399))
+    expect(backlog.pending == [notice], "denied event remains deliverable just before 24 hours")
+    backlog = try JSONDecoder().decode(NoticeBacklog.self, from: JSONEncoder().encode(backlog))
+    backlog.prune(now: now.addingTimeInterval(86_400))
+    expect(backlog.pending.isEmpty, "permission granted at 24 hours cannot deliver an expired event after restart")
+    backlog.update([notice, condition], accepted: [], now: now.addingTimeInterval(86_401))
+    expect(backlog.pending == [condition], "stale replay is rejected while current conditions remain")
+    let undated = Notice(id: "event:legacy:1:published", title: "Published", body: "old", operationId: "legacy")
+    backlog.update([undated], accepted: [], now: now)
+    expect(backlog.pending.isEmpty, "undated old pending events are never presented as fresh")
+    let legacy = #"{"events":{"event:legacy:1:published":{"id":"event:legacy:1:published","title":"Published","body":"old","operationId":"legacy"}},"conditions":{}}"#
+    backlog = try JSONDecoder().decode(NoticeBacklog.self, from: Data(legacy.utf8))
+    backlog.prune(now: now)
+    expect(backlog.pending.isEmpty, "compatible legacy persisted state discards undated events")
     let contact = now.addingTimeInterval(-400)
-    let original = RunnerState(now: now, lastContact: contact, startedAt: now.addingTimeInterval(-500))
-    let restored = RunnerState(now: now.addingTimeInterval(10), lastContact: contact, startedAt: original.startedAt)
-    let first = notices(state: original, now: now, landingFailures: false).first { $0.id.hasPrefix("unreachable:") }!
-    let again = notices(state: restored, now: now, landingFailures: false).first { $0.id.hasPrefix("unreachable:") }!
+    let original = RunnerState(now: now, lastContact: contact)
+    let restored = RunnerState(now: now.addingTimeInterval(10), lastContact: contact)
+    let first = notices(state: original, now: now.addingTimeInterval(70), landingFailures: false).first { $0.id.hasPrefix("unreachable:") }!
+    let again = notices(state: restored, now: now.addingTimeInterval(70), landingFailures: false).first { $0.id.hasPrefix("unreachable:") }!
     expect(first.id == again.id, "unreachable occurrence survives restart")
     var reconnected = restored
     reconnected.consume(.heartbeat(at: "fixture", seq: 0), receivedAt: now)
     let later = notices(state: reconnected, now: now.addingTimeInterval(301), landingFailures: false).first { $0.id.hasPrefix("unreachable:") }!
     expect(later.id != first.id, "real contact creates next unreachable occurrence")
+}
+
+func reconnectTests(now: Date) throws {
+    let fresh = RunnerState(now: now)
+    expect(fresh.startedAt == now, "never connected uses this launch as origin")
+    expect(notices(state: fresh, now: now.addingTimeInterval(299), landingFailures: false).isEmpty, "never connected has five minutes from launch")
+    expect(statusPresentation(state: fresh, now: now.addingTimeInterval(300)).needsAttention, "never connected eventually unreachable")
+    let oldContact = now.addingTimeInterval(-1000)
+    var state = RunnerState(now: now, lastContact: oldContact, cursor: 7)
+    expect(state.lastContact == oldContact, "launch preserves persisted contact provenance")
+    expect(!statusPresentation(state: state, now: now.addingTimeInterval(59)).needsAttention, "persisted silence suppressed during launch grace")
+    expect(notices(state: state, now: now.addingTimeInterval(59), landingFailures: false).isEmpty, "launch grace suppresses unreachable proposal")
+    expect(statusPresentation(state: state, now: now.addingTimeInterval(60)).needsAttention, "launch grace expires at sixty seconds")
+    let lines = try String(contentsOfFile: "macos/fixtures/lifecycle.jsonl", encoding: .utf8).split(separator: "\n").map(String.init)
+    state.consume(.snapshot(try runningReleaseSnapshot(lines: lines)), receivedAt: now)
+    let wake = now.addingTimeInterval(1000)
+    let cursor = state.cursor
+    let snapshot = state.snapshot
+    var backlog = NoticeBacklog()
+    let event = Notice(id: "event:pending:1:failed", title: "Failure", body: "fixture", operationId: "pending", occurredAt: now)
+    backlog.update([event], accepted: [], now: now)
+    state.reconnect(now: wake)
+    expect(state.cursor == cursor && state.snapshot == snapshot && state.lastContact == now, "wake preserves cursor, work and successful contact")
+    expect(state.connection == "connecting", "wake starts connecting")
+    expect(!statusPresentation(state: state, now: wake.addingTimeInterval(59)).needsAttention, "wake running work gets grace")
+    let proposals = notices(state: state, now: wake.addingTimeInterval(59), landingFailures: false)
+    expect(!proposals.contains { $0.id.hasPrefix("silent:") || $0.id.hasPrefix("unreachable:") }, "wake grace suppresses both silence notices")
+    backlog.update(proposals, accepted: [], now: now)
+    expect(backlog.pending.contains(event), "wake retains pending event notices")
+    expect(notices(state: state, now: wake.addingTimeInterval(60), landingFailures: false).contains { $0.id.hasPrefix("silent:") }, "running work silence returns when grace expires")
+    let recovery = wake.addingTimeInterval(61)
+    state.consume(.heartbeat(at: "old payload", seq: cursor), receivedAt: recovery)
+    expect(state.lastContact == recovery, "recovery records receipt time")
+    expect(!statusPresentation(state: state, now: recovery).needsAttention, "recovery clears silence attention")
+    expect(!notices(state: state, now: recovery, landingFailures: false).contains { $0.id.hasPrefix("silent:") || $0.id.hasPrefix("unreachable:") }, "recovery clears silence proposals")
 }
 
 func deployedNoticeTests(now: Date) throws {
@@ -239,4 +381,12 @@ func deployedNoticeTests(now: Date) throws {
     state.operations.removeValue(forKey: "release")
     let unavailable = notices(state: state, now: now, landingFailures: false).first!
     expect(unavailable.body.contains("Merge: fallback-com") && unavailable.body.contains("Candidates shipped: unavailable"), "deployed notice preserves commit with explicit missing candidate evidence")
+}
+
+func runningReleaseSnapshot(lines: [String]) throws -> Snapshot {
+    for line in lines {
+        if case .snapshot(let snapshot) = try JSONDecoder().decode(WatchEnvelope.self, from: Data(line.utf8)),
+           snapshot.lanes.serial.contains(where: { $0.id == "release-1" && $0.status == "running" }) { return snapshot }
+    }
+    fatalError("generated lifecycle must include a running release snapshot")
 }

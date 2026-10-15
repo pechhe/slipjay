@@ -234,6 +234,29 @@ test("atomic watch snapshot includes both lanes, cursor, holds and subscriptions
   } finally { log.close(); }
 });
 
+test("watch snapshots retain every queued and running operation in order in both lanes", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append("serial-running", submission("owner/a", "first"));
+    log.append("deploy-running", { type: "submitted", kind: "deploy", repo: "owner/a", environment: "staging", commitId: "first", submittedBy: "owner" });
+    log.append("serial-running", { type: "stage", stage: "verifying" });
+    log.append("deploy-running", { type: "stage", stage: "deploying" });
+    for (const index of [1, 2, 3]) {
+      log.append(`serial-queued-${index}`, submission("owner/a", `change-${index}`));
+      log.append(`deploy-queued-${index}`, { type: "submitted", kind: "deploy", repo: "owner/a", environment: "staging", commitId: `commit-${index}`, submittedBy: "owner" });
+    }
+    const snapshot = log.snapshot("runner");
+    for (const [lane, prefix] of [[snapshot.lanes.serial, "serial"], [snapshot.lanes.deploy, "deploy"]] as const) {
+      assert.deepEqual(lane.map((operation) => [operation.id, operation.status, operation.position]), [
+        [`${prefix}-running`, "running", 1],
+        [`${prefix}-queued-1`, "queued", 2],
+        [`${prefix}-queued-2`, "queued", 3],
+        [`${prefix}-queued-3`, "queued", 4],
+      ]);
+    }
+  } finally { log.close(); }
+});
+
 test("snapshot hold SQL preserves repository lifecycle and ignores obsolete recovery", () => {
   const log = openOperationLog(":memory:");
   try {

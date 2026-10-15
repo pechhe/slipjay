@@ -114,8 +114,16 @@ enum WatchEnvelope: Codable, Equatable {
 
 struct RunnerState {
     var startedAt: Date
-    init(now: Date = Date(), lastContact: Date? = nil, startedAt: Date? = nil, cursor: Int? = nil) {
-        self.startedAt = startedAt ?? now; self.lastContact = lastContact; self.cursor = cursor ?? 0
+    var reconnectGraceUntil: Date
+    init(now: Date = Date(), lastContact: Date? = nil, cursor: Int? = nil) {
+        self.startedAt = now; self.lastContact = lastContact; self.cursor = cursor ?? 0
+        self.reconnectGraceUntil = now.addingTimeInterval(60)
+    }
+    func isReconnecting(at now: Date) -> Bool { now < reconnectGraceUntil }
+    mutating func reconnect(now: Date) {
+        reconnectGraceUntil = now.addingTimeInterval(60)
+        connection = "connecting"
+        lastEvent = nil
     }
     var snapshot: Snapshot?
     var operations: [String: Operation] = [:]
@@ -144,7 +152,7 @@ struct RunnerState {
             } else if var operation = operations[value.operationId] {
                 operation.lastSeq = value.seq
                 if value.type == "stage", let stage = value.event["stage"]?.string { operation.stage = stage }
-                if ["landed", "released", "deployed", "reset", "failed", "declined", "superseded", "cancelled"].contains(value.type) {
+                if RunnerContract.terminalEventTypes.contains(value.type) {
                     operation.status = value.type; operation.result = value.event; operation.finishedAt = value.at
                 }
                 operations[value.operationId] = operation

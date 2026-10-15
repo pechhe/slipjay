@@ -74,7 +74,9 @@ export async function duplicateLandingSource(cwd: string, source: string, base: 
   let candidate = head;
   if (ancestors) {
     const beforeSquash = await jj(cwd, ["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
-    const description = await jj(cwd, ["log", "-r", source, "--no-graph", "-T", "description"]);
+    // First-parent order keeps the feature title above its review fixes, without
+    // treating merged-in upstream history as the feature's description.
+    const description = await jj(cwd, ["log", "-r", `(${base}..${source}) & first_ancestors(${source})`, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
     await jj(cwd, ["squash", "--from", `${base}..${head}`, "--onto", base, "--message", description]);
     candidate = await jj(cwd, ["log", "-r", `heads(all() ~ at_operation(${beforeSquash}, all()))`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
     if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error("Source assembly did not produce exactly one candidate");

@@ -170,7 +170,7 @@ async function sameDirectory(left: string, right: string): Promise<boolean> {
   return a === b;
 }
 
-export async function workspaceContext(cwd: string = process.cwd(), integratedBranch?: string): Promise<WorkspaceContext | null> {
+export async function workspaceContext(cwd: string = process.cwd(), integratedBranch?: string, options: { fetchMissingBookmarks?: boolean } = {}): Promise<WorkspaceContext | null> {
   const currentRoot = await jjWorkspaceRoot(cwd);
   if (!currentRoot) return null;
   let output: string;
@@ -201,7 +201,7 @@ export async function workspaceContext(cwd: string = process.cwd(), integratedBr
   if (!integration?.root) throw new Error("The canonical jj workspace named 'default' is missing or unavailable");
   if (integratedBranch) return { current, integration, integrationBranch: integratedBranch, configuration: { ...UNDECLARED_POLICY, integrationBranch: integratedBranch } };
   // D3: the policy committed on the integration bookmark, not the primary checkout's working files.
-  const { integrationBranch, policy } = await readIntegrationPolicy(cwd, { hintRoot: integration.root });
+  const { integrationBranch, policy } = await readIntegrationPolicy(cwd, { hintRoot: integration.root, ...options });
   return { current, integration, integrationBranch, configuration: policy ?? UNDECLARED_POLICY };
 }
 

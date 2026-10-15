@@ -39,8 +39,8 @@ export async function watchRunner(input: {
     let connection: WatchConnection | undefined;
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
-      if (cursor !== undefined)
-        input.emit({ version: 1, type: "connection", state: "connecting", cursor });
+      input.emit({ version: 1, type: "connection", state: "connecting", cursor: cursor ?? 0 });
+      if (input.signal.aborted) break;
       connection = await input.connect();
       if (input.signal.aborted) break;
       let snapshot = await connection.snapshot(input.signal);
@@ -129,8 +129,7 @@ export async function watchRunner(input: {
       connection?.close();
     }
     if (input.signal.aborted) break;
-    if (cursor !== undefined)
-      input.emit({ version: 1, type: "connection", state: "disconnected", cursor });
+    input.emit({ version: 1, type: "connection", state: "disconnected", cursor: cursor ?? 0 });
     try {
       await input.retry?.(input.signal);
     } catch {
