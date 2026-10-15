@@ -1,6 +1,8 @@
 import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-handoff.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { spawn } from "node:child_process";
+import { open, link, rm, lstat } from "node:fs/promises";
+import { SOURCE_BUNDLE_MAX_BYTES } from "./submission-source-export.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
@@ -336,6 +338,48 @@ export async function readLandingOutcome(location: string, operationId: string, 
     if (body.outcome?.version !== 1 || body.outcome.operationId !== operationId) throw new Error("Runner returned an unsupported or mismatched landing outcome");
     return body.outcome;
   } finally { connection.close(); }
+}
+
+/** Stream a derived recovery bundle to a new local file; no source or ownership is changed. */
+export async function downloadSubmissionSource(location: string, operationId: string, destination: string, env: NodeJS.ProcessEnv = process.env): Promise<{ operationId: string; source: string; sha256: string; bytes: number; path: string }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  const temporary = `${destination}.${randomUUID()}.tmp`;
+  try {
+    if (await lstat(destination).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; }))
+      throw new Error("EEXIST: recovery destination already exists");
+    const expected = await (await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`, { signal: AbortSignal.timeout(15000) })).json() as { outcome?: import("./runner-contract.ts").LandingOutcome };
+    const source = expected.outcome?.sourceCommitId;
+    if (!source || !/^[a-f0-9]{40}$/.test(source) || expected.outcome?.operationId !== operationId || expected.outcome.sourceRetention?.commitId !== source)
+      throw new Error("Operation has no exact retained source acknowledgement");
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/source`, { signal: AbortSignal.timeout(300000) });
+    const sha256 = response.headers.get("x-slipjay-sha256") ?? "", size = Number(response.headers.get("content-length"));
+    if (!response.ok || !response.body || response.headers.get("x-slipjay-operation") !== operationId || response.headers.get("x-slipjay-source") !== source
+      || !/^[a-f0-9]{64}$/.test(sha256) || !Number.isSafeInteger(size) || size < 1 || size > SOURCE_BUNDLE_MAX_BYTES) {
+      await response.body?.cancel();
+      throw new Error("Source export metadata is unavailable or inconsistent");
+    }
+    const reader = response.body.getReader();
+    let bytes = 0;
+    try {
+      const file = await open(temporary, "wx", 0o600);
+      try {
+        const hash = createHash("sha256");
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          bytes += chunk.value.length;
+          if (bytes > size) throw new Error("Source export exceeded its declared size");
+          hash.update(chunk.value);
+          await file.writeFile(chunk.value);
+        }
+        if (bytes !== size || hash.digest("hex") !== sha256) throw new Error("Source export does not match its integrity evidence");
+        await file.sync();
+      } finally { await file.close(); }
+    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+    await link(temporary, destination);
+    return { operationId, source, sha256, bytes, path: destination };
+  } finally { try { await rm(temporary, { force: true }); } finally { connection.close(); } }
 }
 
 /** Read-only author evidence; never starts a repair or changes operation ownership. */

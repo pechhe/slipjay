@@ -1,3 +1,4 @@
+import { submissionSourceResponse } from "./submission-source-export.ts";
 import { readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -38,6 +39,12 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const server = await serveRunner(createRunnerHandler({
     log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
     subscribe: log.subscribe,
+    async readSource(operation, signal) {
+      const retained = log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event;
+      if (retained?.type !== "source_retained") throw new Error("No retained submission");
+      return submissionSourceResponse({ home, repo: operation.repo, operationId: operation.id, retained, executor, env, signal,
+        gitExecutable: config.jj?.["git.executable-path"] });
+    },
     async readManifest(operation) {
       const retained = log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event;
       if (retained?.type !== "source_retained") throw new Error("No retained submission");

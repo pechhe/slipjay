@@ -679,6 +679,31 @@ Read failure exits nonzero. This read never creates a repair claim or resubmits.
 Retained manifests remain partial handoffs: exclusive repair fencing, full
 reproduction prerequisites and bounded lifetime cleanup are still outstanding.
 
+`slipjay runner source <operation> <bundle-file>` downloads a self-contained Git
+bundle of the exact retained source, including ancestry, into a **new** local file.
+It checks the operation's retained-source acknowledgement, declared size and SHA-256
+while streaming to a private temporary file, then installs the completed file without
+overwriting an existing destination. Source bundles are authenticated repository
+content, not sanitized diagnostic logs. No author chat or warm checkout is needed.
+
+The API is `GET /v1/operations/:id/source`; success streams `application/x-git-bundle`
+with `Content-Length`, `X-SlipJay-Source`, `X-SlipJay-Operation` and `X-SlipJay-Sha256`.
+Generation uses the existing bounded executor (120-second command deadline), validates
+the bundle's ref/source and rejects completed bundles above 128MiB. This is an export
+size limit, not a hard temporary disk quota while Git builds the bundle. The client
+has a five-minute request deadline. Unsupported export is 501, unavailable/capacity or
+missing retained evidence is 410, non-landing is 409 and unknown operations are 404.
+An interrupted export can be requested again without retrying the landing. Normal
+completion/failure/disconnect removes the derived server bundle; a process crash may
+leave a temporary file. The retained private source ref and manifest are preserved.
+
+The public `importSourceBundle(bundle, assignedCheckout, operationId, sourceCommitId)`
+validates the bundle's exact operation ref and imports immutable objects into an
+already assigned authoring checkout. It leaves the working revision unchanged. It
+does not grant repair ownership, execute source, retry verification or publish.
+Exclusive repair claims/fencing still need completion before concurrent recovery
+workers can safely author and submit corrections.
+
 `slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
 without following or submitting it. The authenticated API route is
 `GET /v1/operations/:id/outcome` (`{ outcome }`); the same object appears on landing

@@ -9,8 +9,8 @@ import type { Executor, OperationEvent, SubmitRequest } from "./runner-contract.
 
 export type RetainedSubmission = Extract<OperationEvent, { type: "source_retained" }>;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
-const sourceRef = (operationId: string) => `refs/slipjay/submissions/${digest(operationId)}`;
-const storePath = (home: string, repo: string) => join(home, "sources", `${digest(repositoryKey(repo))}.git`);
+export const submissionSourceRef = (operationId: string) => `refs/slipjay/submissions/${digest(operationId)}`;
+export const submissionStorePath = (home: string, repo: string) => join(home, "sources", `${digest(repositoryKey(repo))}.git`);
 const manifestPath = (home: string, operationId: string) => join(home, "submissions", `${digest(operationId)}.json`);
 
 /** Capture touches only a bare Git object store, never a publisher or verifier checkout. */
@@ -20,7 +20,7 @@ export async function retainSubmissionSource(input: {
   const { home, operationId, request, executor } = input;
   if (!/^[a-f0-9]{40}$/.test(request.commitId)) throw new Error("Submission retention requires an exact commit id");
   if (request.handoff && (!validSubmissionHandoff(request.handoff) || request.handoff.source !== request.commitId)) throw new Error("Invalid handoff or source mismatch");
-  const store = storePath(home, request.repo);
+  const store = submissionStorePath(home, request.repo);
   await mkdir(join(home, "sources"), { recursive: true, mode: 0o700 });
   await mkdir(join(home, "submissions"), { recursive: true, mode: 0o700 });
   const command = async (executable: string, args: string[]) => {
@@ -34,7 +34,7 @@ export async function retainSubmissionSource(input: {
   const gitExecutable = input.gitExecutable ?? await command("jj", ["config", "get", "git.executable-path"]);
   const run = (args: string[]) => command(gitExecutable, args);
   await run(["init", "--bare", store]);
-  const ref = sourceRef(operationId);
+  const ref = submissionSourceRef(operationId);
   const existing = await run(["--git-dir", store, "for-each-ref", "--format=%(objectname)", ref]);
   if (existing && existing !== request.commitId) throw new Error("Retained submission identity changed");
   if (!existing) {
@@ -77,7 +77,7 @@ export async function importSubmissionSource(home: string, repo: string, operati
   await readSubmissionManifest(home, repo, operationId, retained);
   const gitRoot = await jj(checkout, ["--ignore-working-copy", "git", "root"]);
   const name = `refs/heads/slipjay-private/artifacts/submission-${digest(operationId)}`;
-  const result = await runWorkspaceCommand("git", ["--git-dir", gitRoot, "fetch", "--no-tags", "--no-write-fetch-head", storePath(home, repo), `${retained.sourceRef}:${name}`], { cwd: checkout });
+  const result = await runWorkspaceCommand("git", ["--git-dir", gitRoot, "fetch", "--no-tags", "--no-write-fetch-head", submissionStorePath(home, repo), `${retained.sourceRef}:${name}`], { cwd: checkout });
   if (result.code !== 0) throw new Error("Could not restore retained submission source");
   await jj(checkout, ["git", "import"]);
   const observed = await jj(checkout, ["log", "-r", name.slice("refs/heads/".length), "--no-graph", "-T", "commit_id"]);
@@ -89,6 +89,6 @@ export async function readSubmissionManifest(home: string, repo: string, operati
   const bytes = await readFile(manifestPath(home, operationId), "utf8");
   const manifest = JSON.parse(bytes);
   if (digest(bytes) !== retained.manifestSha256 || manifest.source !== retained.commitId || manifest.operationId !== operationId
-    || manifest.repo !== repositoryKey(repo) || retained.sourceRef !== sourceRef(operationId)) throw new Error("Retained submission manifest does not match ledger evidence");
+    || manifest.repo !== repositoryKey(repo) || retained.sourceRef !== submissionSourceRef(operationId)) throw new Error("Retained submission manifest does not match ledger evidence");
   return manifest;
 }

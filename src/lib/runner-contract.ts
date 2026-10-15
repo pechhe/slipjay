@@ -307,6 +307,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - GET  /v1/resets?repo=<owner/name>           → `{ operations: ResetOperation[] }` newest first
  * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
  * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first
+ * - GET  /v1/operations/:id/source              → authenticated bounded Git bundle (no mutation)
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,
  *                                                 replaying after `seq`, then live; ends after the terminal event

@@ -58,7 +58,9 @@ export type { ExecutionPolicy } from "./execution-policy.ts";
 export type { PostIntegrationInput, PostIntegrationResult } from "./post-integration-finalization.ts";
 export type { BoundedProcessRequest, BoundedProcessResult, ProcessBroker } from "./bounded-process.ts";
 
-export { landThroughRunner, readLandingOutcome, readLandingHandoff, readRunArtifact, runnerLocation, recordClientFacts, readMetricsEvents } from "./runner-client.ts";
+export { landThroughRunner, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, readRunArtifact, runnerLocation, recordClientFacts, readMetricsEvents } from "./runner-client.ts";
 export type { ArtifactChunk, CommandArtifact, CommandEvidence, LandingOutcome, CauseClass, ClassifiedFact, ClientFact, OperationEvent, StoredEvent } from "./runner-contract.ts";
 
 export type { SubmissionHandoff } from "./submission-handoff.ts";
+
+export { importSourceBundle } from "./submission-source-export.ts";

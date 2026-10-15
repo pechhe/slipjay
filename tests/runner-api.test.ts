@@ -650,6 +650,7 @@ test("handoff admission binds immutable author evidence and refuses changed repl
     assert.equal((await f.request("/operations", { method: "POST", body: JSON.stringify({ ...body, padding: "x".repeat(75000) }) })).status, 400);
     assert.equal(f.submissions, 1);
     assert.equal((await f.request(`/operations/${first.operation.id}/handoff`)).status, 501);
+    assert.equal((await f.request(`/operations/${first.operation.id}/source`)).status, 501);
     const legacyChange = "z".repeat(32);
     const withoutRequestId = { ...submission(handoff.source, legacyChange), handoff };
     await submitted(await f.submit(withoutRequestId));

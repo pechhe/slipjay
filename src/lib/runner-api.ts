@@ -9,6 +9,7 @@ export function createRunnerHandler(input: {
   token: string;
   runnerName: string;
   readLog(operationId: string): Promise<string | null>;
+  readSource?(operation: Extract<Operation, { kind: "landing" }>, signal: AbortSignal): Promise<Response>;
   readManifest?(operation: Extract<Operation, { kind: "landing" }>): Promise<unknown>;
   readArtifact?(operationId: string, runId: string, reference: Extract<CommandArtifact, { status: "retained" }>, offset: number, limit: number): Promise<ArtifactChunk>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
@@ -242,7 +243,7 @@ export function createRunnerHandler(input: {
       try { return json(await input.readArtifact(operationId, runId, reference, Number(rawOffset), Number(rawLimit))); }
       catch { return json({ error: "Retained artifact is missing or does not match ledger evidence" }, 410); }
     }
-    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|handoff|cancel))?$`));
+    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|handoff|source|cancel))?$`));
     if (!route || (route[2] === "cancel" ? request.method !== "POST" : request.method !== "GET"))
       return json({ error: "Not found" }, 404);
     const id = decodeURIComponent(route[1]!);
@@ -250,6 +251,11 @@ export function createRunnerHandler(input: {
     if (!operation)
       return json({ error: "Unknown operation" }, 404);
     switch (route[2]) {
+      case "source":
+        if (operation.kind !== "landing") return json({ error: "Source recovery supports landing operations only" }, 409);
+        if (!input.readSource) return json({ error: "Source export is unsupported" }, 501);
+        try { return await input.readSource(operation, request.signal); }
+        catch { return json({ error: "Source export unavailable; retained source was not changed" }, 410); }
       case "handoff":
         if (operation.kind !== "landing") return json({ error: "Handoff supports landing operations only" }, 409);
         if (!input.readManifest) return json({ error: "Handoff retrieval is unavailable" }, 501);
