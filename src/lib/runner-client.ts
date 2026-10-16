@@ -2,10 +2,12 @@ import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-h
 import type { RepairProof } from "./repair-claim.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { spawn } from "node:child_process";
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { open, link, rm, lstat } from "node:fs/promises";
 import { SOURCE_BUNDLE_MAX_BYTES } from "./submission-source-export.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createConnection, createServer } from "node:net";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,7 +23,7 @@ import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { metadataPath, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
-import { machineConfigPath } from "./workspace-paths.ts";
+import { machineConfigPath, poolRefillLogPath, stateHome } from "./workspace-paths.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 import type { SweepResult } from "./workspace-sweep.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -688,6 +690,35 @@ export async function recordClientFacts(cwd: string, facts: ClientFact[], env: N
     const { id } = await response.json() as { id: string };
     for (const fact of facts) await postClientFact(connection.baseUrl, token, id, fact);
   } finally { connection.close(); }
+}
+
+/**
+ * `recordClientFacts` without making the caller wait for the runner: a detached child
+ * (`client-facts.ts`, beside this module in source and in the installed bundle) opens
+ * the connection and posts the facts, so a slow or unreachable runner never delays a
+ * start. Facts are best effort and this never rejects: the child's failure, and a failure
+ * to launch it, are one line in the background-work log (a log that cannot be opened is
+ * reported on stderr). Nothing runs without a runner location.
+ */
+export async function recordClientFactsInBackground(cwd: string, facts: ClientFact[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if (!runnerLocation(env)) return;
+  try {
+    mkdirSync(stateHome(), { recursive: true, mode: 0o700 });
+    const log = openSync(poolRefillLogPath(), "a", 0o600);
+    try {
+      const child = spawn(process.execPath, [fileURLToPath(new URL("./client-facts.ts", import.meta.url)), cwd, JSON.stringify(facts)], {
+        cwd, env, detached: true, stdio: ["ignore", log, log],
+      });
+      const failure = await new Promise<Error | null>((settle) => {
+        child.once("spawn", () => settle(null));
+        child.once("error", (error) => settle(error));
+      });
+      if (failure) writeSync(log, `${new Date().toISOString()} runner client facts not recorded: ${failure.message}\n`);
+      else child.unref();
+    } finally { closeSync(log); }
+  } catch (error) {
+    console.error(`Runner client facts not recorded: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export async function readMetricsEvents(location: string, env: NodeJS.ProcessEnv = process.env): Promise<StoredEvent[]> {

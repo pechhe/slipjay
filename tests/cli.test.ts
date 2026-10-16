@@ -1,12 +1,17 @@
-import { jj, project } from "./support/workspace-project.ts";
+import { configureLocalGithubTransport, jj, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { realpath, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import type { Socket } from "node:net";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
+import { recordClientFactsInBackground } from "../src/lib/runner-client.ts";
+import { poolRefillLogPath } from "../src/lib/workspace-paths.ts";
 
 const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 const BUN_VERSION = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
@@ -88,6 +93,68 @@ test("a fixture's teardown stops a process still running against it", async () =
   await f.dispose();
   assert.throws(() => process.kill(pid, 0), "the process is gone before the checkout is removed");
   assert.ok(!existsSync(f.root));
+});
+
+test("a start returns without waiting on a runner that never answers", async () => {
+  const f = await project();
+  const github = await configureLocalGithubTransport(f);
+  const sockets = new Set<Socket>();
+  // A runner that passes its health check and then never answers a client operation, as a hung one would.
+  let operations = 0;
+  const runner = createServer((request, response) => {
+    if (request.url === "/v1/health") { response.setHeader("content-type", "application/json"); response.end(JSON.stringify({ runner: "fixture" })); return; }
+    operations += 1;
+  });
+  runner.on("connection", (socket) => { sockets.add(socket); socket.on("error", () => {}); });
+  await new Promise<void>((listening) => runner.listen(0, "127.0.0.1", listening));
+  const environment = { runner: process.env.SLIPJAY_RUNNER, token: process.env.SLIPJAY_RUNNER_TOKEN };
+  process.env.SLIPJAY_RUNNER = `http://127.0.0.1:${(runner.address() as AddressInfo).port}`;
+  process.env.SLIPJAY_RUNNER_TOKEN = "fixture-token";
+  try {
+    const started = await slipjay(f.repo, ["start", "--integration", "--json", "unanswered runner"]);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(JSON.parse(started.stdout).created, true);
+    const deadline = Date.now() + 10_000;
+    while (!operations && Date.now() < deadline) await new Promise((settle) => setTimeout(settle, 50));
+    assert.ok(operations > 0, "the facts are still sent, in the background");
+  } finally {
+    for (const [name, value] of [["SLIPJAY_RUNNER", environment.runner], ["SLIPJAY_RUNNER_TOKEN", environment.token]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    for (const socket of sockets) socket.destroy();
+    runner.close();
+    github.restore();
+    await f.dispose();
+  }
+});
+
+test("a start still prints its workspace when the background-work log cannot be opened", async () => {
+  const f = await project();
+  const runner = process.env.SLIPJAY_RUNNER;
+  process.env.SLIPJAY_RUNNER = "http://127.0.0.1:1";
+  process.env.SLIPJAY_RUNNER_TOKEN ??= "fixture-token";
+  try {
+    // A directory where the log belongs: opening it for appending fails.
+    await rm(poolRefillLogPath(), { force: true });
+    await mkdir(poolRefillLogPath(), { recursive: true });
+    const started = await slipjay(f.repo, ["start", "--integration", "--json", "unwritable log"]);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal(JSON.parse(started.stdout).created, true);
+    assert.match(started.stderr, /Runner client facts not recorded/);
+  } finally {
+    if (runner === undefined) delete process.env.SLIPJAY_RUNNER;
+    else process.env.SLIPJAY_RUNNER = runner;
+    await rm(poolRefillLogPath(), { recursive: true, force: true });
+    await f.dispose();
+  }
+});
+
+test("a recorder that cannot be launched leaves a line in the background-work log", async () => {
+  await rm(poolRefillLogPath(), { recursive: true, force: true });
+  await recordClientFactsInBackground(join(tmpdir(), "no-such-checkout"), [], { ...process.env, SLIPJAY_RUNNER: "http://127.0.0.1:1" });
+  assert.match(await readFile(poolRefillLogPath(), "utf8"), /runner client facts not recorded: .*ENOENT/);
+  await rm(poolRefillLogPath(), { force: true });
 });
 
 test("start rejects an unknown flag, a missing task and an invalid Issue number", async () => {

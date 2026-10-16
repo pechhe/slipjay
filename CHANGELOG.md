@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A start no longer waits on the runner:** `slipjay start` posted its metrics to the runner
+  before printing the workspace, over a connection with no timeout on the main request, so a
+  slow runner added seconds to every start and a hung one stalled it. A detached process now
+  posts them, and a failure is one line in `pool-refill.log`.
+
 ## v3.22.2
 
 - **A vendored manifest no longer stops a spare's dependencies being reused:** the

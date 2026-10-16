@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, readMetricsEvents } from "../lib/runner-client.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents } from "../lib/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
@@ -357,10 +357,11 @@ try {
       const spareCount = (await readySpares(root)).length;
       const task = options.task || `Issue #${options.issueNumber}`;
       const result = await createWorkspace(task, root, options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {});
-      await recordClientFacts(result.workspacePath, [
+      // The runner is told in the background: a slow or unreachable one never delays the workspace.
+      await recordClientFactsInBackground(result.workspacePath, [
         { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
         ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started }] : []),
-      ]).catch((error: unknown) => console.error(`Runner client facts not recorded: ${error instanceof Error ? error.message : String(error)}`));
+      ]);
       // Prepare the next session's spare in the background, so its start can claim it.
       // Every new workspace, claimed or fresh, tops the pool up: a miss on an empty pool fills it for the next start.
       const refill = options.refill || result.created ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
