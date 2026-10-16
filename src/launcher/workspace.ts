@@ -362,8 +362,8 @@ try {
         ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started }] : []),
       ]).catch((error: unknown) => console.error(`Runner client facts not recorded: ${error instanceof Error ? error.message : String(error)}`));
       // Prepare the next session's spare in the background, so its start can claim it.
-      // A claimed spare is replaced in the background too, so a burst of starts finds the pool refilled.
-      const refill = options.refill || result.pooled ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
+      // Every new workspace, claimed or fresh, tops the pool up: a miss on an empty pool fills it for the next start.
+      const refill = options.refill || result.created ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
       if (refill && !refill.started) console.error(`Spare refill not started: ${refill.reason}`);
       if (options.resultFd === undefined) console.log(result.workspacePath);
       else {

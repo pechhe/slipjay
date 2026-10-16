@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **An empty pool fills itself:** a `start` that finds no ready spare and adds a fresh
+  workspace now starts a background refill, as a claim already did. Before, a repository
+  whose pool was empty never refilled, so every start stayed cold.
+
 ## v3.22.0
 
 - **Remove the native Mac menu bar:** T3 Code now shows the runner's lanes, deploys and

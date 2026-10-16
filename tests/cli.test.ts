@@ -60,6 +60,26 @@ test("start --json prints only the result while install output goes to stderr, a
   }
 });
 
+test("a start that misses an empty pool refills it, so the next start claims a spare", async () => {
+  const f = await project();
+  try {
+    const miss = await slipjay(f.repo, ["start", "--integration", "--json", "first"]);
+    assert.equal(miss.code, 0, miss.stderr);
+    const first = JSON.parse(miss.stdout);
+    assert.equal(first.pooled, false);
+    assert.equal(first.refill?.started, true, "a fresh start refills the pool");
+    const deadline = Date.now() + 60_000;
+    while (!(await slipjay(f.repo, ["pool"])).stdout.startsWith("ready")) {
+      assert.ok(Date.now() < deadline, "the refill prepared a spare");
+      await new Promise((settle) => setTimeout(settle, 200));
+    }
+    const hit = JSON.parse((await slipjay(f.repo, ["start", "--integration", "--json", "second"])).stdout);
+    assert.equal(hit.pooled, true);
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("start rejects an unknown flag, a missing task and an invalid Issue number", async () => {
   const f = await project();
   try {
