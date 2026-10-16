@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Stop a local executor's empty owner slice when it has no runs (#66):** under a systemd
+  user manager the executor stops its owner slice whenever its last run ends, retrying a
+  failed stop while it stays idle; a run starting meanwhile waits for the stop, so the stop
+  never reaches it.
+
 ## v3.20.0
 
 - **Settle Build admission independently, and supersede only after Build admits (#73, #60):**

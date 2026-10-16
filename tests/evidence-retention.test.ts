@@ -8,7 +8,6 @@ import { retainCommandArtifact } from "../src/lib/command-artifact.ts";
 import { expiredEvidence, pruneRetainedEvidence } from "../src/lib/evidence-retention.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
-import { localExecutor } from "../src/lib/runner-queue.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import { retainSubmissionSource, submissionStorePath } from "../src/lib/submission-source.ts";
 import type { OperationLog } from "../src/lib/runner-contract.ts";

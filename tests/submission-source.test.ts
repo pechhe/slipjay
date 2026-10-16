@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { test } from "vite-plus/test";
 import { retainSubmissionSource, importSubmissionSource, readSubmissionManifest } from "../src/lib/submission-source.ts";
-import { localExecutor } from "../src/lib/runner-queue.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import { jj, project } from "./support/workspace-project.ts";
 import { testExecutor } from "./support/executor.ts";

@@ -10,7 +10,6 @@ import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { serveRunner } from "../src/lib/runner-http.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
-import { localExecutor } from "../src/lib/runner-queue.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import { retainSubmissionSource } from "../src/lib/submission-source.ts";
 import { submissionSourceResponse, importSourceBundle } from "../src/lib/submission-source-export.ts";

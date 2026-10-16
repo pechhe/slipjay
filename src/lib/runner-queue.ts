@@ -69,7 +69,7 @@ export type LocalExecutorOptions = {
  * scopes that a group signal never reaches. Under a systemd user manager each
  * run therefore gets a slice of its own beneath its owner's slice, its command
  * runs in a scope there, and killing the slice kills everything in it, on abort
- * and after every run. Commands learn their slice from SYSTEMD_SLICE_ENV; a
+ * and after every run; the owner's slice itself is stopped whenever no run is in progress. Commands learn their slice from SYSTEMD_SLICE_ENV; a
  * command that starts its own systemd user scope passes it as `--slice`, so the
  * scope stays inside the run and its limits. The owner's slice is named from
  * `home`, so a later process of the same runner can stop whatever an earlier one
@@ -115,6 +115,20 @@ export function localExecutor({ host = hostname(), env = process.env, limits = {
     sliced = undefined;
     throw new Error(`SlipJay runner: could not enforce the limits of ${budget}: ${failure}`);
   });
+  // The owner's slice is stopped whenever its last run ends, so no empty slice outlives the runs.
+  // A run that starts meanwhile waits for that stop, so the stop never reaches it. A stop that
+  // leaves the slice active is retried, with backoff, for as long as no run is in progress.
+  let active = 0;
+  let released: Promise<unknown> = Promise.resolve();
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const release = (delayMs = 1_000) => {
+    released = systemctl(["stop", ownerSlice]).then(async () => {
+      const { failure, stdout } = await systemctl(["show", "--property=ActiveState", "--value", ownerSlice]);
+      if ((failure === null && stdout === "inactive") || active > 0) return;
+      retry = setTimeout(() => { retry = undefined; if (active === 0) release(Math.min(delayMs * 2, 60_000)); }, delayMs);
+      retry.unref();
+    });
+  };
   return {
     host,
     combinedLimits: true,
@@ -124,16 +138,24 @@ export function localExecutor({ host = hostname(), env = process.env, limits = {
     } },
     async run(request) {
       await enforce();
-      await settled();
-      const id = randomUUID().replaceAll("-", "");
-      const runSlice = `${ownerSlice.slice(0, -".slice".length)}-${id}.slice`;
-      const stop = () => { void quiesce(runSlice); };
-      request.abortSignal?.addEventListener("abort", stop, { once: true });
-      return contained(runSlice, () => runBoundedProcess({
-        ...request, executable: "systemd-run",
-        args: ["--user", "--scope", "--quiet", "--collect", `--slice=${runSlice}`, `--unit=slipjay-run-${id}.scope`, "--", request.executable, ...request.args],
-        env: { ...request.env ?? sanitizedProcessEnv(), XDG_RUNTIME_DIR: runtimeDir, [SYSTEMD_SLICE_ENV]: runSlice },
-      }).finally(() => request.abortSignal?.removeEventListener("abort", stop)), () => quiesce(runSlice));
+      active += 1;
+      clearTimeout(retry);
+      try {
+        await released;
+        await settled();
+        const id = randomUUID().replaceAll("-", "");
+        const runSlice = `${ownerSlice.slice(0, -".slice".length)}-${id}.slice`;
+        const stop = () => { void quiesce(runSlice); };
+        request.abortSignal?.addEventListener("abort", stop, { once: true });
+        return await contained(runSlice, () => runBoundedProcess({
+          ...request, executable: "systemd-run",
+          args: ["--user", "--scope", "--quiet", "--collect", `--slice=${runSlice}`, `--unit=slipjay-run-${id}.scope`, "--", request.executable, ...request.args],
+          env: { ...request.env ?? sanitizedProcessEnv(), XDG_RUNTIME_DIR: runtimeDir, [SYSTEMD_SLICE_ENV]: runSlice },
+        }).finally(() => request.abortSignal?.removeEventListener("abort", stop)), () => quiesce(runSlice));
+      } finally {
+        active -= 1;
+        if (active === 0) release();
+      }
     },
   };
 }

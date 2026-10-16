@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { rmSync, writeFileSync } from "node:fs";
@@ -646,6 +646,56 @@ test("a run whose processes cannot be shown stopped fails, and every later run w
     await until(() => recorded.some(alive) ? undefined : true, 10_000);
   } finally { controller.abort(); await rm(home, { recursive: true, force: true }); }
 }, 120_000);
+
+(systemd ? test : test.skip)("the owner's slice is stopped once its last run ends, and a run starting during that stop is unaffected", async () => {
+  const home = await mkdtemp(join(tmpdir(), "runner-owner-"));
+  try {
+    const executor = testExecutor({ home });
+    const cgroups = join(home, "cgroups");
+    const record = `require("node:fs").appendFileSync(${JSON.stringify(cgroups)},require("node:fs").readFileSync("/proc/self/cgroup","utf8").trim().split(":").at(-1)+"\\n");setTimeout(()=>console.log("finished"),200)`;
+    const request = { executable: "node", args: ["-e", record], cwd: home, timeoutMs: 30_000, maxOutputBytes: 65_536 };
+    // Each run after the first starts while the previous one's owner-slice stop is in flight.
+    for (let run = 0; run < 3; run += 1) {
+      const result = await executor.run(request);
+      assert.deepEqual([result.exitCode, result.stdout.trim()], [0, "finished"], "the run completed, untouched by the stop");
+    }
+    const runSlice = (await readFile(cgroups, "utf8")).trim().split("\n")[0]!.split("/").at(-2)!;
+    const ownerSlice = `${runSlice.slice(0, runSlice.lastIndexOf("-"))}.slice`;
+    const state = () => new Promise<string>((resolve) => execFile("systemctl", ["--user", "show", "--property=ActiveState", "--value", ownerSlice],
+      (_error, stdout) => resolve(stdout.trim())));
+    await until(async () => await state() === "inactive" ? true : undefined, 10_000);
+  } finally { await rm(home, { recursive: true, force: true }); }
+}, 60_000);
+
+(systemd ? test : test.skip)("a failed stop of the owner's slice is retried while no run is in progress", async () => {
+  const home = await mkdtemp(join(tmpdir(), "runner-owner-retry-"));
+  const path = process.env.PATH;
+  try {
+    // A systemctl that refuses the first two stops of an owner's slice (its name ends in the 12-hex home hash).
+    const bin = join(home, "bin");
+    await mkdir(bin);
+    const real = execFileSync("sh", ["-c", "command -v systemctl"], { encoding: "utf8" }).trim();
+    const refusals = join(home, "refusals");
+    await writeFile(join(bin, "systemctl"), `#!/bin/sh
+if [ "$2" = stop ] && printf %s "$3" | grep -Eq -- '-[0-9a-f]{12}[.]slice$' && [ "$(wc -l < ${JSON.stringify(refusals)} 2>/dev/null || echo 0)" -lt 2 ]; then
+  echo refused >> ${JSON.stringify(refusals)}; exit 1
+fi
+exec ${JSON.stringify(real)} "$@"
+`, { mode: 0o755 });
+    process.env.PATH = `${bin}:${path}`;
+    const executor = testExecutor({ home });
+    const cgroups = join(home, "cgroups");
+    const record = `require("node:fs").appendFileSync(${JSON.stringify(cgroups)},require("node:fs").readFileSync("/proc/self/cgroup","utf8").trim().split(":").at(-1)+"\\n")`;
+    const result = await executor.run({ executable: "node", args: ["-e", record], cwd: home, timeoutMs: 30_000, maxOutputBytes: 65_536 });
+    assert.equal(result.exitCode, 0);
+    const runSlice = (await readFile(cgroups, "utf8")).trim().split("/").at(-2)!;
+    const ownerSlice = `${runSlice.slice(0, runSlice.lastIndexOf("-"))}.slice`;
+    const state = () => new Promise<string>((resolve) => execFile(real, ["--user", "show", "--property=ActiveState", "--value", ownerSlice],
+      (_error, stdout) => resolve(stdout.trim())));
+    await until(async () => await state() === "inactive" ? true : undefined, 15_000);
+    assert.equal((await readFile(refusals, "utf8")).trim().split("\n").length, 2, "the stop was refused twice, then retried until it succeeded");
+  } finally { process.env.PATH = path; await rm(home, { recursive: true, force: true }); }
+}, 60_000);
 
 (systemd ? test : test.skip)("after the runner is killed outright, the next process stops only the commands it left before reusing their checkout", async () => {
   const f = await fixture(false, false, undefined, false, { durable: true });
