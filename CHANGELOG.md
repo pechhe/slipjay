@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v3.23.2
+
+- **An unknown Build number is skipped, not mistaken for an outage:** Build answers a read of
+  an item that does not exist with HTTP 503 and the code `build_item_unavailable`. SlipJay now
+  reads that as Build's refusal, so promotion skips the number instead of reporting that it
+  could not check. Any other 503 still means Build did not answer.
+
 ## v3.23.1
 
 - **Imported closed Build items count as closed:** a Build-tracked repository treats an item

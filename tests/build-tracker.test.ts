@@ -10,7 +10,8 @@ import { withIssueTrailer } from "../src/lib/issue-references.ts";
 import { commitIssue, halfBuiltSpecs } from "../src/lib/release-specs.ts";
 import { readBuildThroughRunner } from "../src/lib/runner-client.ts";
 import { createWorkspace } from "../src/lib/slipjay.ts";
-import { buildItemClosed, trackerOf, workItemClosed, workItemTitle } from "../src/lib/tracker.ts";
+import { buildRoute } from "../src/lib/build-admission.ts";
+import { BuildRefusal, buildItemClosed, trackerOf, workItemClosed, workItemTitle } from "../src/lib/tracker.ts";
 import type { BuildItem, BuildReader } from "../src/lib/tracker.ts";
 import { landThroughTestRunner, project, withTestRunner } from "./support/workspace-project.ts";
 
@@ -24,7 +25,7 @@ function build(items: BuildItem[]): { read: BuildReader; calls: string[] } {
     calls.push(`${action} ${JSON.stringify(input)}`);
     if (action === "list") return items.filter((entry) => entry.parentId === input.parentId && entry.kind === input.kind);
     const found = items.find((entry) => entry.number === input.number || entry.id === input.itemId);
-    if (!found) throw new Error("Build refused read: hq_build_item_not_found");
+    if (!found) throw new BuildRefusal("read", "build_item_unavailable");
     return found;
   };
   return { read, calls };
@@ -43,7 +44,8 @@ async function buildServer(token: string, items: BuildItem[]) {
       requests.push({ action, input });
       const found = items.find((entry) => entry.number === input.number);
       if (action !== "read") return reply(400, { status: "invalid", code: "runner_action_invalid" });
-      return found ? reply(200, { status: "succeeded", value: found }) : reply(409, { status: "refused", code: "hq_build_item_not_found" });
+      // As Build does: an unknown item is its `unavailable` outcome, which the route sends as 503.
+      return found ? reply(200, { status: "succeeded", value: found }) : reply(503, { status: "unavailable", code: "build_item_unavailable" });
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -97,8 +99,11 @@ test("promotion reports a Build-tracked release's open parent Specs with their T
   assert.equal(calls.filter((call) => call.startsWith(`read {"itemId":"${open.id}"`)).length, 1, "each parent Spec is read once");
 
   assert.deepEqual(await halfBuiltSpecs("o/r", ["A\n\nBuild: #11"], { tracker: "build" }), { checked: false, reason: "could not check Build for half-built Specs: no Build reader" });
-  const failing = await halfBuiltSpecs("o/r", ["A\n\nBuild: #99"], { tracker: "build", readBuild: read });
-  assert.equal(failing.checked, false);
+  // A number Build does not know serves no Spec; Build not answering means the check could not run.
+  assert.deepEqual(await halfBuiltSpecs("o/r", ["A\n\nBuild: #99"], { tracker: "build", readBuild: read }), { checked: true, specs: [] });
+  const down: BuildReader = async () => { throw new Error("Build did not answer: Build answered HTTP 503"); };
+  assert.deepEqual(await halfBuiltSpecs("o/r", ["A\n\nBuild: #11"], { tracker: "build", readBuild: down }),
+    { checked: false, reason: "could not check Build for half-built Specs: Build did not answer: Build answered HTTP 503" });
 });
 
 test("a client reads Build only through the runner, and only Build's read actions", async () => {
@@ -108,7 +113,7 @@ test("a client reads Build only through the runner, and only Build's read action
   try {
     await withTestRunner(f, async ({ location, env }) => {
       assert.equal(((await readBuildThroughRunner("read", { number: 77 }, env)) as BuildItem).title, "From Build");
-      await assert.rejects(readBuildThroughRunner("read", { number: 78 }, env), /Build refused read: hq_build_item_not_found/);
+      await assert.rejects(readBuildThroughRunner("read", { number: 78 }, env), /Build refused read: build_item_unavailable/);
       const refuse = await fetch(`${location}/v1/build/read`, { method: "POST", headers: { authorization: "Bearer test-token", "content-type": "application/json" },
         body: JSON.stringify({ action: "setStatus", input: {} }) });
       assert.equal(refuse.status, 400);
@@ -142,3 +147,11 @@ test("a Build-tracked landing with no description takes its item's title from Bu
   }
 }, 120_000);
 
+
+test("Build's 503 for an unknown item is its refusal; any other 503 is no answer", async () => {
+  const answering = (status: number, body: unknown) => buildRoute({ origin: "https://hq.example.com", token: "t",
+    fetch: async () => new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers: { "content-type": "application/json" } }) });
+  assert.deepEqual(await answering(503, { status: "unavailable", code: "build_item_unavailable" })("read", { number: 1 }), { kind: "refused", code: "build_item_unavailable" });
+  assert.equal((await answering(503, { status: "unavailable", code: "hq_build_store_unavailable" })("read", { number: 1 })).kind, "unavailable");
+  assert.equal((await answering(503, "<html>Service Unavailable</html>")("read", { number: 1 })).kind, "unavailable");
+});

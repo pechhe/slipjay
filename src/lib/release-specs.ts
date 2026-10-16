@@ -128,12 +128,13 @@ async function halfBuiltBuildSpecs(descriptions: string[], readBuild: BuildReade
     const read = readBuild;
     const parents = new Set<string>();
     for (const number of numbers) {
+      // A number Build does not know serves no Spec.
       const item = await readBuildItem(read, { number });
-      if (item.parentId) parents.add(item.parentId);
+      if (item?.parentId) parents.add(item.parentId);
     }
     for (const parentId of parents) {
       const spec = await readBuildItem(read, { itemId: parentId });
-      if (spec.kind !== "spec" || buildItemClosed(spec)) continue;
+      if (!spec || spec.kind !== "spec" || buildItemClosed(spec)) continue;
       const tickets = await read("list", { parentId, kind: "ticket" }) as BuildItem[];
       const completed = tickets.filter(buildItemClosed).length;
       specs.set(spec.id, { number: spec.number, title: spec.title, url: null, closedTickets: completed, totalTickets: tickets.length,

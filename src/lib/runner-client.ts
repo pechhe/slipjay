@@ -1,6 +1,7 @@
 import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-handoff.ts";
 import type { RepairProof } from "./repair-claim.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
+import { BuildRefusal } from "./tracker.ts";
 import type { BuildReadAction } from "./tracker.ts";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
@@ -491,7 +492,7 @@ export async function readBuildThroughRunner(action: BuildReadAction, input: Rec
     const response = await request(connection.baseUrl, token, "/v1/build/read", { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ action, input }), signal: AbortSignal.timeout(30_000) });
     const body = await response.json() as { value?: unknown; code?: string };
-    if (response.status === 409) throw new Error(`Build refused ${action}: ${body.code ?? "refused"}`);
+    if (response.status === 409) throw new BuildRefusal(action, body.code ?? "refused");
     return body.value ?? null;
   } finally { connection.close(); }
 }

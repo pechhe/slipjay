@@ -1,5 +1,6 @@
 import type { BuildBinding, SubmissionHandoff } from "./submission-handoff.ts";
 import type { OperationLog, StoredEvent } from "./runner-contract.ts";
+import { BUILD_ITEM_UNAVAILABLE, BuildRefusal } from "./tracker.ts";
 import type { BuildReadAction, BuildReader } from "./tracker.ts";
 
 /** The runner's dedicated credential for Build's runner route, from its `bws run` environment. */
@@ -103,7 +104,7 @@ export type BuildRouteAnswer =
 export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding" | BuildReadAction, input: unknown) => Promise<BuildRouteAnswer>;
 
 /** Calls `POST {origin}/api/build/runner`; never throws, and never waits longer than `timeoutMs`. */
-export function buildRoute(options: { origin: string; token: string; timeoutMs?: number; fetch?: typeof fetch }): BuildRoute {
+export function buildRoute(options: { origin: string; token: string; timeoutMs?: number; fetch?: (url: string, init: RequestInit) => Promise<Response> }): BuildRoute {
   const call = options.fetch ?? fetch;
   const url = new URL("/api/build/runner", options.origin).toString();
   return async (action, input) => {
@@ -121,6 +122,9 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
     // Build's domain answers, and its refusal of a request it will never accept (400 malformed, 413 too large).
     if ([400, 409, 413, 422].includes(response.status) && typeof body?.code === "string" && body.code.trim())
       return { kind: "refused", code: body.code.slice(0, 200) };
+    // Build answers a read of an item that does not exist with its `unavailable` outcome, which its route sends as 503;
+    // the body's code tells it from an outage, which never carries one.
+    if (response.status === 503 && body?.status === "unavailable" && body.code === BUILD_ITEM_UNAVAILABLE) return { kind: "refused", code: BUILD_ITEM_UNAVAILABLE };
     if (response.status === 401 || response.status === 403) return { kind: "unavailable", reason: "Build refused the runner's credential" };
     return { kind: "unavailable", reason: `Build answered HTTP ${response.status}` };
   };
@@ -131,7 +135,8 @@ export function buildReader(route: BuildRoute): BuildReader {
   return async (action, input) => {
     const answer = await route(action, input);
     if (answer.kind === "accepted") return answer.value;
-    throw new Error(answer.kind === "refused" ? `Build refused ${action}: ${answer.code}` : `Build did not answer: ${answer.reason}`);
+    if (answer.kind === "refused") throw new BuildRefusal(action, answer.code);
+    throw new Error(`Build did not answer: ${answer.reason}`);
   };
 }
 

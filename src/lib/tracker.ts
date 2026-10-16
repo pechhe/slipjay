@@ -16,8 +16,17 @@ export const trackerOf = (policy: { tracker?: unknown } | null | undefined): Tra
 /** Build's read-only actions the runner forwards; nothing else crosses that seam. */
 export const BUILD_READ_ACTIONS = ["read", "list", "waits"] as const;
 export type BuildReadAction = (typeof BUILD_READ_ACTIONS)[number];
-/** Reads Build, throwing when Build gives no answer or refuses. */
+/** Reads Build, throwing a `BuildRefusal` when Build refuses and any other error when it gives no answer. */
 export type BuildReader = (action: BuildReadAction, input: Record<string, unknown>) => Promise<unknown>;
+/** Build's answer to a read of an item that does not exist. */
+export const BUILD_ITEM_UNAVAILABLE = "build_item_unavailable";
+export class BuildRefusal extends Error {
+  readonly code: string;
+  constructor(action: string, code: string) {
+    super(`Build refused ${action}: ${code}`);
+    this.code = code;
+  }
+}
 
 /** The fields of a Build item SlipJay reads. */
 export type BuildItem = { id: string; number: number; kind: string; status: string; parentId: string | null; title: string };
@@ -26,8 +35,14 @@ const CLOSED_STATUSES = new Set(["landed", "accepted", "dropped", "achieved", "s
 /** Closed: nothing is left to deliver. A `legacy` item, imported closed from GitHub, is closed whatever its status. */
 export const buildItemClosed = (item: Pick<BuildItem, "kind" | "status">): boolean => item.kind === "legacy" || CLOSED_STATUSES.has(item.status);
 
-export async function readBuildItem(read: BuildReader, reference: { number: number } | { itemId: string }): Promise<BuildItem> {
-  return await read("read", reference) as BuildItem;
+/** The item, or null when Build says it does not exist; throws when Build cannot answer. */
+export async function readBuildItem(read: BuildReader, reference: { number: number } | { itemId: string }): Promise<BuildItem | null> {
+  try {
+    return await read("read", reference) as BuildItem;
+  } catch (error) {
+    if (error instanceof BuildRefusal && error.code === BUILD_ITEM_UNAVAILABLE) return null;
+    throw error;
+  }
 }
 
 /** The work item's title, or null when it cannot be read. */
@@ -35,7 +50,7 @@ export async function workItemTitle(root: string, tracker: Tracker, number: numb
   if (tracker === "build") {
     if (!read) return null;
     try {
-      return (await readBuildItem(read, { number })).title?.trim() || null;
+      return (await readBuildItem(read, { number }))?.title?.trim() || null;
     } catch { return null; }
   }
   const result = await run("gh", ["issue", "view", String(number), "--json", "title", "-q", ".title"], { cwd: root });
@@ -47,7 +62,8 @@ export async function workItemClosed(root: string, tracker: Tracker, number: num
   if (tracker === "build") {
     if (!read) return null;
     try {
-      return buildItemClosed(await readBuildItem(read, { number }));
+      const item = await readBuildItem(read, { number });
+      return item ? buildItemClosed(item) : null;
     } catch { return null; }
   }
   const result = await run("gh", ["issue", "view", String(number), "--json", "state", "-q", ".state"], { cwd: root, timeoutMs: 20_000 });
