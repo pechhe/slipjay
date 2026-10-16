@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A vendored manifest no longer stops a spare's dependencies being reused:** the
+  install-input fingerprint judges lifecycle scripts only for the manifests an install runs
+  them for, the root and its declared workspace members (`workspaces`, or `packages:` in
+  `pnpm-workspace.yaml`). Before, a tracked `package.json` outside them, such as a vendored
+  repository under `.repos/` with a `prepare` script using `--filter`, made the fingerprint
+  unavailable, so every claim of that repository's spares reinstalled. Every manifest is still
+  hashed, and a repository with no readable workspace list is judged as before.
+
 ## v3.22.1
 
 - **An empty pool fills itself:** a `start` that finds no ready spare and adds a fresh

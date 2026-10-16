@@ -79,6 +79,73 @@ interface PackageManifest {
   [field: string]: unknown;
 }
 
+/** A workspace list this module cannot read exactly: the caller then judges every manifest. */
+class UnsupportedWorkspaceList extends Error {}
+
+/** Whether `directory` matches a workspace pattern: literal segments, `*` within one, and `**` for any number of segments (including none). */
+function matchesWorkspacePattern(pattern: string, directory: string): boolean {
+  if (!/^[\w.@*/-]+$/.test(pattern)) throw new UnsupportedWorkspaceList(`workspace pattern ${pattern}`);
+  const match = (patternSegments: string[], segments: string[]): boolean => {
+    const [head, ...rest] = patternSegments;
+    if (head === undefined) return segments.length === 0;
+    if (head === "**") return match(rest, segments) || (segments.length > 0 && match(patternSegments, segments.slice(1)));
+    if (segments.length === 0) return false;
+    const segment = new RegExp(`^${head.split("*").map((literal) => literal.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")}$`);
+    return segment.test(segments[0]!) && match(rest, segments.slice(1));
+  };
+  return match(posix.normalize(pattern).replace(/\/+$/, "").split("/"), directory.split("/"));
+}
+
+/**
+ * The `packages:` list of a `pnpm-workspace.yaml`: null when it declares none, and
+ * unsupported when it uses any form beyond plain, quoted or commented list items.
+ */
+function pnpmWorkspacePackages(source: string): string[] | null {
+  const lines = source.split("\n");
+  const start = lines.findIndex((line) => /^packages\b/.test(line));
+  if (start < 0) return null;
+  if (!/^packages\s*:\s*(?:#.*)?$/.test(lines[start]!)) throw new UnsupportedWorkspaceList("inline packages list");
+  const patterns: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    if (/^\S/.test(line)) break;
+    const item = /^\s+-\s+(?:"([^"]+)"|'([^']+)'|([\w.@*/!-]+))\s*(?:#.*)?$/.exec(line);
+    if (!item) throw new UnsupportedWorkspaceList(`workspace list line ${line.trim()}`);
+    patterns.push(item[1] ?? item[2] ?? item[3]!);
+  }
+  if (!patterns.length) throw new UnsupportedWorkspaceList("empty packages list");
+  return patterns;
+}
+
+/**
+ * The manifests an install runs lifecycle scripts for: the root and its declared workspace
+ * members (`workspaces` in the root `package.json`, or `packages:` in `pnpm-workspace.yaml`).
+ * A tracked manifest outside them, such as a vendored repository under `.repos/`, is never
+ * installed, so its scripts are no input. When no workspace list is declared, or one cannot
+ * be read exactly, every manifest is judged: the fingerprint may be refused for it, never
+ * trusted wrongly.
+ */
+async function installedManifests(workspacePath: string, manifests: string[]): Promise<string[]> {
+  const read = (path: string) => readFile(join(workspacePath, path), "utf8").catch(() => null);
+  try {
+    const root: PackageManifest | null = JSON.parse(await read("package.json") ?? "null");
+    const declared = root?.workspaces;
+    const listed: unknown[] = Array.isArray(declared) ? declared : Array.isArray((declared as { packages?: unknown } | undefined)?.packages) ? (declared as { packages: unknown[] }).packages : [];
+    if (listed.some((pattern) => typeof pattern !== "string")) throw new UnsupportedWorkspaceList("workspaces entry");
+    const all = [...(listed as string[]), ...(pnpmWorkspacePackages(await read("pnpm-workspace.yaml") ?? "") ?? [])];
+    if (!all.length) return manifests;
+    const included = all.filter((pattern) => !pattern.startsWith("!"));
+    const excluded = all.filter((pattern) => pattern.startsWith("!")).map((pattern) => pattern.slice(1));
+    return manifests.filter((manifest) => {
+      const directory = posix.dirname(manifest);
+      return directory === "." || (included.some((pattern) => matchesWorkspacePattern(pattern, directory)) && !excluded.some((pattern) => matchesWorkspacePattern(pattern, directory)));
+    });
+  } catch (error) {
+    if (error instanceof UnsupportedWorkspaceList) return manifests;
+    throw error;
+  }
+}
+
 /** The tracked inputs a set of manifests and their install lifecycle reach, beyond the manifests themselves. */
 async function referencedInputs(workspacePath: string, entries: Map<string, TreeEntry>, manifests: string[]): Promise<Set<string>> {
   const selected = new Set<string>();
@@ -180,7 +247,7 @@ export async function installInputFingerprint(workspacePath: string, { snapshot 
       if (entry.type === "blob" && INPUT_NAMES.has(posix.basename(path))) selected.add(path);
       if (path === "patches") selected.add(path);
     }
-    const manifests = [...selected].filter((path) => posix.basename(path) === "package.json");
+    const manifests = await installedManifests(workspacePath, [...selected].filter((path) => posix.basename(path) === "package.json"));
     for (const path of await referencedInputs(workspacePath, entries, manifests)) selected.add(path);
     const hash = createHash("sha256").update("peach-install-inputs/v1\n");
     for (const line of await installEnvironment(workspacePath)) hash.update(`${line}\n`);
