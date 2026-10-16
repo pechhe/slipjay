@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.22.2
+
 - **A vendored manifest no longer stops a spare's dependencies being reused:** the
   install-input fingerprint judges lifecycle scripts only for the manifests an install runs
   them for, the root and its declared workspace members (`workspaces`, or `packages:` in
