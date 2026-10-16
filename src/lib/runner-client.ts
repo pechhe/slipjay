@@ -7,7 +7,7 @@ import { SOURCE_BUNDLE_MAX_BYTES } from "./submission-source-export.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
-import { homedir, hostname } from "node:os";
+import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "./bounded-process.ts";
@@ -21,6 +21,7 @@ import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { metadataPath, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
+import { machineConfigPath } from "./workspace-paths.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 import type { SweepResult } from "./workspace-sweep.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -123,7 +124,7 @@ export function runnerLocation(env: NodeJS.ProcessEnv = process.env): string | n
 
 function readRunnerConfiguration(): string | null {
   try {
-    const config = JSON.parse(readFileSync(join(homedir(), ".slipjay/config.json"), "utf8"));
+    const config = JSON.parse(readFileSync(machineConfigPath(), "utf8"));
     return typeof config.runner === "string" && config.runner ? config.runner : null;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

@@ -18,7 +18,7 @@ import {
 import { readIntegrationPolicy, UNDECLARED_POLICY } from "./execution-policy.ts";
 import { fetchIntegration, publicationRemote } from "./landing-steps.ts";
 import { forgetWorkspace } from "./workspace-lifecycle.ts";
-import { claimSpare, installSeededDependencies } from "./workspace-pool.ts";
+import { claimSpare, refreshDependencies } from "./workspace-pool.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
@@ -84,9 +84,11 @@ async function addWorkspace(hooks: WorkspaceCreationHooks, integrationRoot: stri
   await jj(integrationRoot, ["workspace", "add", "--name", name, "--revision", baseSha, workspacePath]);
 }
 
-const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string) => hooks.prepare
+// Default preparation records the install inputs it made ready, so this checkout can seed others (see
+// refreshDependencies); a claimed spare's stale dependencies are replaced by a clone when another checkout has current ones.
+const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, pooled = false) => hooks.prepare
   ? hooks.prepare(integrationRoot, workspacePath)
-  : installSeededDependencies(integrationRoot, workspacePath);
+  : refreshDependencies(integrationRoot, workspacePath, { replace: pooled });
 
 function acquired(hooks: WorkspaceCreationHooks, context: WorkspaceContext, issueNumber: number | undefined) {
   hooks.onAcquired?.({ workspaceName: context.current.name, projectRoot: context.integration.root, issueNumber: issueNumber ?? null });
@@ -350,7 +352,11 @@ async function describeAssignedWorkspace(context: WorkspaceContext, task: string
 /** Make an allocated workspace's checkout ready and report its acquisition. */
 async function ready({ hooks, context, issueNumber, prepared, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
   if (prepared) console.error(`[deps] ${basename(context.current.root)}: install inputs unchanged since the spare was prepared; reusing its dependencies`);
-  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root);
+  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root, workspace.pooled);
+  const { state, packageManager, installInputs } = (hooks.prepare ? {} : readiness) as { state?: string; packageManager?: string | null; installInputs?: string | null };
+  if (installInputs) {
+    await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs } });
+  }
   acquired(hooks, context, issueNumber);
   return { ...workspace, readiness };
 }

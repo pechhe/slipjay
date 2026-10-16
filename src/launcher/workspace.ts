@@ -19,8 +19,9 @@ import {
   readWorkspaceMode,
   workspaceContext,
   writeWorkspaceMode,
-  provisionSpare,
+  refillPool,
   readySpares,
+  spareAllowance,
   describeRetention,
   retainedWorkspaceMaterial,
   readLandedRecord,
@@ -290,6 +291,7 @@ try {
     const issueNumber = context ? (await workspaceMetadata(context.current.name))?.issueNumber : undefined;
     console.log(context
       ? JSON.stringify({ mode: await readWorkspaceMode(), workspace: { ...context.current, ...(issueNumber ? { issueNumber } : {}) }, integration: context.integration, integrationBranch: context.integrationBranch,
+        spares: await spareAllowance(context),
         ...(landing ? { landing: { phase: landing.phase, artifactCommitId: landing.artifactCommitId, ...(landing.primaryCheckout ? { primaryCheckout: landing.primaryCheckout } : {}) } } : {}) }, null, 2)
       : "Not inside a Jujutsu repository");
   } else if (command === "landed") {
@@ -319,7 +321,7 @@ try {
     for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);
     if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0) console.log("No empty workspaces to prune.");
   } else if (command === "pool") {
-    if (rest[0] === "refill") console.log(JSON.stringify(await provisionSpare(), null, 2));
+    if (rest[0] === "refill") await refillPool(process.cwd(), (outcome) => console.log(JSON.stringify(outcome)));
     else if (rest.length === 0) {
       const spares = await readySpares(process.cwd());
       console.log(spares.length ? spares.map((spare) => `ready\t${spare.name}\t${spare.root}`).join("\n") : "No ready spare workspace.");

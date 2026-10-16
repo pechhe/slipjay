@@ -114,6 +114,11 @@ async function cloneNodeModules(source: string, workspacePath: string): Promise<
   return created.length ? created : null;
 }
 
+/** Remove every `node_modules` tree of the workspace's tracked packages, so a later install can be seeded afresh. */
+export async function removeNodeModules(workspacePath: string): Promise<void> {
+  for (const manifest of await trackedManifests(workspacePath) ?? []) await rm(join(workspacePath, dirname(manifest), "node_modules"), { recursive: true, force: true });
+}
+
 /**
  * Install the workspace's dependencies. With `recordInputs`, the result also
  * carries the install-input fingerprint (see install-inputs.ts) of the tree it

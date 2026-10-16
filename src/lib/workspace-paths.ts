@@ -20,6 +20,9 @@ interface CodedError extends Error {
 /** slipjay's home: `~/.slipjay`. */
 export const slipjayHome = (): string => join(homedir(), ".slipjay");
 
+/** This machine's SlipJay configuration: the runner location and machine-local limits. */
+export const machineConfigPath = (): string => join(slipjayHome(), "config.json");
+
 /** Written as the last step of `slipjay cutover`; its presence settles the cutover. */
 export const cutoverMarkerPath = (): string => join(slipjayHome(), "cutover.json");
 

@@ -5,7 +5,9 @@ import { existsSync, lstatSync, readlinkSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, provisionSpare, readySpares, startSpareRefill } from "../src/lib/slipjay.ts";
+import { createWorkspace, provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance, startSpareRefill } from "../src/lib/slipjay.ts";
+import { workspaceContext } from "../src/lib/workspace-jj.ts";
+import { machineConfigPath } from "../src/lib/workspace-paths.ts";
 import { listWorkspaces } from "../src/lib/workspace-state.ts";
 import { metadataPath, workspaceMetadata } from "../src/lib/workspace-state.ts";
 import { installInputFingerprint } from "../src/lib/install-inputs.ts";
@@ -45,8 +47,10 @@ async function bunProject(policy?: Record<string, unknown>) {
       'import { appendFileSync } from "node:fs";',
       "export function record() {",
       "  const delay = Number(process.env.FIXTURE_INSTALL_DELAY_MS) || 0;",
+      "  const start = Date.now();",
       "  if (delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);",
       '  appendFileSync(process.env.FIXTURE_INSTALL_LOG, process.cwd() + "\\n");',
+      '  if (process.env.FIXTURE_INSTALL_SPANS) appendFileSync(process.env.FIXTURE_INSTALL_SPANS, JSON.stringify([start, Date.now()]) + "\\n");',
       "}",
       "",
     ].join("\n"),
@@ -80,7 +84,8 @@ test("a claimed spare reuses its dependencies when the refresh leaves install in
     assert.equal(await f.count(), 1, "no install ran on claim");
     assert.ok(existsSync(join(created.workspacePath, "node_modules", ".bun")), "the provisioned node_modules is in place");
     assert.equal(await readFile(join(created.workspacePath, "README.md"), "utf8"), "changed\n", "the claim refreshed to the integration head");
-    assert.equal((await workspaceMetadata(created.current.name))?.preparedDependencies, undefined);
+    const recorded = (await workspaceMetadata(created.current.name))?.preparedDependencies as { installInputs?: string } | undefined;
+    assert.equal(recorded?.installInputs, await installInputFingerprint(created.workspacePath), "the claimed workspace records its install inputs, so it can seed others");
   } finally {
     await f.dispose();
   }
@@ -444,3 +449,150 @@ test("an install with no spare to claim clones node_modules from the primary che
     await f.dispose();
   }
 }, 180_000);
+
+/** Set this machine's spare limits (~/.slipjay/config.json) for the duration of `body`. */
+async function withMachineSpares<T>(spares: Record<string, unknown>, body: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(machineConfigPath()), { recursive: true });
+  await writeFile(machineConfigPath(), JSON.stringify({ spares }));
+  try { return await body(); } finally { await rm(machineConfigPath(), { force: true }); }
+}
+
+const refill = async (repo: string) => {
+  const outcomes: object[] = [];
+  await refillPool(repo, (outcome) => outcomes.push(outcome));
+  return outcomes;
+};
+
+test("this machine's limit lowers a repository's declared spares, never raises them, and 0 disables the pool here", async () => {
+  const f = await bunProject({ spares: 8 });
+  try {
+    const context = (await workspaceContext(f.repo))!;
+    await withMachineSpares({ [f.repo]: 3 }, async () => {
+      await refill(f.repo);
+      assert.equal((await readySpares(f.repo)).length, 3, "the pool stops at the machine's limit");
+    });
+    await withMachineSpares({ [f.repo]: 2 }, async () => {
+      assert.deepEqual(await spareAllowance(context), { spares: 2, declared: 8, machineLimit: 2 });
+      const outcomes = await refill(f.repo);
+      assert.equal(outcomes.filter((outcome) => "retired" in outcome).length, 1, "lowering the limit retires the excess spare");
+      assert.equal((await readySpares(f.repo)).length, 2);
+      const created = await createWorkspace("task", f.repo);
+      assert.equal(created.pooled, true, "a claim still takes a ready spare");
+    });
+    await withMachineSpares({ [f.repo]: 0 }, async () => {
+      assert.deepEqual(await provisionSpare(f.repo), { provisioned: false, reason: "pool-disabled" });
+    });
+    await withMachineSpares({ "/elsewhere/other": 0 }, async () => {
+      assert.deepEqual(await spareAllowance(context), { spares: 8, declared: 8, machineLimit: null }, "another checkout's limit does not apply");
+    });
+  } finally {
+    await f.dispose();
+  }
+  const g = await bunProject({ spares: 1 });
+  try {
+    const context = (await workspaceContext(g.repo))!;
+    await withMachineSpares({ [g.repo]: 3 }, async () => {
+      assert.deepEqual(await spareAllowance(context), { spares: 1, declared: 1, machineLimit: 3 });
+    });
+    await withMachineSpares({ [g.repo]: 9 }, async () => {
+      await assert.rejects(spareAllowance(context), /spares must be an integer from 0 to 8/);
+    });
+    await withMachineSpares([] as unknown as Record<string, unknown>, async () => {
+      await assert.rejects(spareAllowance(context), /must map integration checkout paths to spare counts/);
+    });
+  } finally {
+    await g.dispose();
+  }
+}, 240_000);
+
+test("after an install-input change, a refill refreshes stale spares with one install and clones the rest", async () => {
+  const f = await bunProject({ spares: 3 });
+  try {
+    await refill(f.repo);
+    assert.equal((await readySpares(f.repo)).length, 3);
+    await write(f.repo, { "README.md": "changed\n" });
+    advance(f.repo, "Change non-install files");
+    const unchanged = await f.count();
+    assert.deepEqual((await refreshSpares(f.repo)).map((spare) => spare.dependencies), ["reused", "reused", "reused"]);
+    assert.equal(await f.count(), unchanged, "nothing installed when install inputs are unchanged");
+    assert.deepEqual(await refreshSpares(f.repo), [], "spares already on the integration head are left alone");
+
+    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "d" }) });
+    advance(f.repo, "Change an install input");
+    // No checkout has the new inputs installed, so the first refresh must install.
+    await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
+    const before = await f.count();
+    const refreshed = await refreshSpares(f.repo);
+    assert.deepEqual(refreshed.map((spare) => spare.dependencies), ["installed", "seeded", "seeded"], "one install, then clones of it");
+    assert.equal(await f.count(), before + 3, "each clone was verified by the frozen install");
+    const spares = await readySpares(f.repo);
+    assert.equal(spares.length, 3, "every spare is ready again");
+    for (const spare of spares) {
+      const inputs = (spare.metadata?.preparedDependencies as { installInputs?: string } | undefined)?.installInputs;
+      assert.equal(inputs, await installInputFingerprint(spare.root), `${spare.name} recorded its current install inputs`);
+      assert.match(await readFile(join(spare.root, "packages/x/package.json"), "utf8"), /"description"/, `${spare.name} is on the integration head`);
+    }
+
+    // A claim of a stale spare installs in place, and the refill then clones that claim's install.
+    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "e" }) });
+    advance(f.repo, "Change an install input again");
+    await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
+    const created = await createWorkspace("task", f.repo);
+    assert.equal(created.pooled, true);
+    assert.equal((created.readiness as { seeded?: boolean }).seeded, undefined, "no checkout had the new inputs, so the claim installed");
+    assert.deepEqual((await refreshSpares(f.repo)).map((spare) => spare.dependencies), ["seeded", "seeded"], "the remaining spares cloned the claim's install");
+  } finally {
+    await f.dispose();
+  }
+}, 300_000);
+
+test("refills of two repositories install one after the other, and a claim never waits for them", async () => {
+  const a = await bunProject({ spares: 2 });
+  const b = await bunProject({ spares: 1 });
+  const spans = join(a.root, "spans.jsonl");
+  try {
+    await provisionSpare(a.repo);
+    process.env.FIXTURE_INSTALL_SPANS = spans;
+    process.env.FIXTURE_INSTALL_DELAY_MS = "3000";
+    const refills = Promise.all([refill(a.repo), refill(b.repo)]);
+    const claimedAt = Date.now();
+    const created = await createWorkspace("task", a.repo);
+    assert.equal(created.pooled, true, "the claim took the ready spare");
+    assert.ok(Date.now() - claimedAt < 3_000, "the claim did not wait for a refill's install");
+    await refills;
+    const installs = (await readFile(spans, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as [number, number]).sort((x, y) => x[0] - y[0]);
+    assert.ok(installs.length >= 2, `both repositories installed: ${installs.length}`);
+    for (let index = 1; index < installs.length; index += 1) {
+      assert.ok(installs[index]![0] >= installs[index - 1]![1], `installs did not overlap: ${JSON.stringify(installs)}`);
+    }
+  } finally {
+    delete process.env.FIXTURE_INSTALL_SPANS;
+    delete process.env.FIXTURE_INSTALL_DELAY_MS;
+    await a.dispose();
+    await b.dispose();
+  }
+}, 300_000);
+
+test("concurrent claims of stale spares install one at a time, and the later one clones the earlier install", async () => {
+  const f = await bunProject({ spares: 2 });
+  const spans = join(f.root, "spans.jsonl");
+  try {
+    await refill(f.repo);
+    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "d" }) });
+    advance(f.repo, "Change an install input");
+    await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
+    process.env.FIXTURE_INSTALL_SPANS = spans;
+    process.env.FIXTURE_INSTALL_DELAY_MS = "2000";
+    const claims = await Promise.all([createWorkspace("first", f.repo), createWorkspace("second", f.repo)]);
+    assert.deepEqual(claims.map((claim) => claim.pooled), [true, true]);
+    assert.deepEqual(claims.map((claim) => Boolean((claim.readiness as { seeded?: boolean }).seeded)).sort(), [false, true],
+      "one claim installed and the other cloned it");
+    const installs = (await readFile(spans, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as [number, number]).sort((x, y) => x[0] - y[0]);
+    assert.equal(installs.length, 2);
+    assert.ok(installs[1]![0] >= installs[0]![1], `the installs did not overlap: ${JSON.stringify(installs)}`);
+  } finally {
+    delete process.env.FIXTURE_INSTALL_SPANS;
+    delete process.env.FIXTURE_INSTALL_DELAY_MS;
+    await f.dispose();
+  }
+}, 300_000);

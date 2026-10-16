@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Limit spares per machine and refresh stale spares once (#75):** `spares` in
+  `~/.slipjay/config.json`, keyed by integration checkout path, lowers a repository's
+  declared spare count on that machine (`0` disables the pool there; spares beyond it are
+  retired), and `slipjay status` reports the count in force. Refills hold a machine-wide
+  lock, so they install one at a time, and they move stale spares onto the integration
+  head: after a lockfile change one checkout installs and the spares clone its `node_modules`.
+
 - **Stop a local executor's empty owner slice when it has no runs (#66):** under a systemd
   user manager the executor stops its owner slice whenever its last run ends, retrying a
   failed stop while it stays idle; a run starting meanwhile waits for the stop, so the stop

@@ -16,7 +16,7 @@ export { createWorkspace, findIssueWorkspace, recoverIssueWorkspace } from "./wo
 export {
   cleanupLandedWorkspace, describeRetention, removeWorkspace, retainedWorkspaceMaterial, retireWorkspace,
 } from "./workspace-lifecycle.ts";
-export { provisionSpare, readySpares, startSpareRefill } from "./workspace-pool.ts";
+export { provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance, startSpareRefill } from "./workspace-pool.ts";
 export { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 export { withWorkspaceTransaction } from "./workspace-transaction.ts";
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
