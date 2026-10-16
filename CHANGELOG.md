@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.22.3
+
 - **A start no longer waits on the runner:** `slipjay start` posted its metrics to the runner
   before printing the workspace, over a connection with no timeout on the main request, so a
   slow runner added seconds to every start and a hung one stalled it. A detached process now
