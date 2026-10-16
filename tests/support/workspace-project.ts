@@ -71,7 +71,27 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   jj(repo, ["config", "set", "--repo", "user.email", "fixture@example.com"]);
   jj(repo, ["bookmark", "track", "main", "--remote", "origin"]);
   const remoteFile = (path: string) => execFileSync("git", ["--git-dir", remote, "show", `main:${path}`], { encoding: "utf8" });
-  return { root, repo, remote, verified, remoteFile, dispose: () => rm(root, { recursive: true, force: true }) };
+  return { root, repo, remote, verified, remoteFile, dispose: async () => { await stopFixtureProcesses(root); await rm(root, { recursive: true, force: true }); } };
+}
+
+/**
+ * Stop what a test left running against the fixture, such as the detached spare refill a cold
+ * `slipjay start` launches, so removing the checkout does not race its writes. Waits for the
+ * processes to exit, and kills what ignores the polite request.
+ */
+async function stopFixtureProcesses(root: string): Promise<void> {
+  const running = (): number[] => {
+    try {
+      return execFileSync("pgrep", ["-f", root], { encoding: "utf8" }).split("\n").filter(Boolean).map(Number).filter((pid) => pid !== process.pid);
+    } catch { return []; }
+  };
+  const stop = (pid: number, signal: NodeJS.Signals) => { try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* already gone */ } } };
+  for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+    for (const pid of running()) stop(pid, signal);
+    const deadline = Date.now() + 5_000;
+    while (running().length && Date.now() < deadline) await new Promise((settle) => setTimeout(settle, 50));
+    if (!running().length) return;
+  }
 }
 
 /** Expose a genuine GitHub origin while JJ's Git subprocesses use the local bare fixture. Restore before disposing it. */

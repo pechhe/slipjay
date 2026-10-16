@@ -1,6 +1,6 @@
 import { jj, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { realpath, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -78,6 +78,16 @@ test("a start that misses an empty pool refills it, so the next start claims a s
   } finally {
     await f.dispose();
   }
+});
+
+test("a fixture's teardown stops a process still running against it", async () => {
+  const f = await project();
+  const child = spawn("node", ["-e", "setTimeout(() => {}, 120000)", f.repo], { detached: true, stdio: "ignore" });
+  child.unref();
+  const pid = child.pid!;
+  await f.dispose();
+  assert.throws(() => process.kill(pid, 0), "the process is gone before the checkout is removed");
+  assert.ok(!existsSync(f.root));
 });
 
 test("start rejects an unknown flag, a missing task and an invalid Issue number", async () => {
