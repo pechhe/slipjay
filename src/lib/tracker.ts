@@ -22,7 +22,7 @@ export type BuildReader = (action: BuildReadAction, input: Record<string, unknow
 /** The fields of a Build item SlipJay reads. */
 export type BuildItem = { id: string; number: number; kind: string; status: string; parentId: string | null; title: string };
 
-const CLOSED_STATUSES = new Set(["landed", "accepted", "dropped", "achieved", "superseded"]);
+const CLOSED_STATUSES = new Set(["landed", "accepted", "dropped", "achieved", "superseded", "imported_closed"]);
 /** Closed: nothing is left to deliver. A `legacy` item, imported closed from GitHub, is closed whatever its status. */
 export const buildItemClosed = (item: Pick<BuildItem, "kind" | "status">): boolean => item.kind === "legacy" || CLOSED_STATUSES.has(item.status);
 

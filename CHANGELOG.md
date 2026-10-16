@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## v3.23.1
+
+- **Imported closed Build items count as closed:** a Build-tracked repository treats an item
+  with Build's `imported_closed` status, given to Specs and Tickets imported closed from
+  GitHub, as delivered, like `landed` or `dropped`.
+
 ## v3.23.0
 
 - **HQ Build as a repository's tracker:** `"tracker": "build"` in `slipjay.json` makes a

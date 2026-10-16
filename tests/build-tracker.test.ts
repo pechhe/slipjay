@@ -71,7 +71,7 @@ test("a Build-tracked landing names its item in a Build trailer, which promotion
 });
 
 test("a Build item is closed once nothing is left to deliver, and a legacy item always is", async () => {
-  for (const status of ["landed", "accepted", "dropped", "achieved", "superseded"]) assert.equal(buildItemClosed({ kind: "ticket", status }), true, status);
+  for (const status of ["landed", "accepted", "dropped", "achieved", "superseded", "imported_closed"]) assert.equal(buildItemClosed({ kind: "ticket", status }), true, status);
   for (const status of ["inbox", "shaping", "ready", "in_progress", "open", "proposed"]) assert.equal(buildItemClosed({ kind: "spec", status }), false, status);
   assert.equal(buildItemClosed({ kind: "legacy", status: "ready" }), true);
 
