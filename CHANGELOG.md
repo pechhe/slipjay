@@ -7,6 +7,11 @@
   Swift fixtures are gone. Uninstall an existing copy with `launchctl bootout
   gui/$(id -u) ~/Library/LaunchAgents/com.pechhe.slipjay-menubar.plist`, then delete that
   plist and `~/Applications/SlipJay.app`.
+- **Start a helper's workspace on a lead's revision:** `slipjay start --base <revision>`
+  (implies `--integration`) claims a spare, or adds a fresh workspace, on that revision of
+  the current checkout instead of the integration head, so a parallel helper sees the
+  lead's unlanded work without waiting for a cold start. The revision must be one commit
+  other than the caller's working copy (`jj new`, then pass `@-`).
 
 ## v3.21.0
 

@@ -40,7 +40,8 @@ export type CreatedWorkspace<Readiness = unknown> = WorkspaceContext & {
   readiness: Readiness;
 };
 
-type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; hooks?: WorkspaceCreationHooks<Readiness> };
+/** `base` is the commit a new workspace starts from instead of the integration head (see `resolveStartBase`). */
+type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; hooks?: WorkspaceCreationHooks<Readiness> };
 type RecoveryIdentity = { changeId?: string; commitId?: string };
 type AssignmentOptions = {
   issueNumber?: number;
@@ -299,6 +300,20 @@ export async function recoverIssueWorkspace(cwd: string, options: { issueNumber:
 }
 
 /**
+ * The commit `revision` names in the checkout at `cwd`, as a start base: a lead's
+ * revision for a helper that must see its unlanded work. The caller's own
+ * working-copy commit is refused, since every snapshot rewrites it and jj would
+ * rebase the helper's checkout under it; commit first (`jj new`) and pass `@-`.
+ */
+export async function resolveStartBase(cwd: string, revision: string): Promise<string> {
+  const [resolved, ...more] = (await jj(cwd, ["log", "-r", revision, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n").filter(Boolean);
+  if (!resolved || more.length) throw new Error(`Start base '${revision}' must name exactly one commit`);
+  const workingCopy = await jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+  if (resolved === workingCopy) throw new Error(`Start base '${revision}' is this checkout's working copy, which jj rewrites on every snapshot: run \`jj new\` and pass @-`);
+  return resolved;
+}
+
+/**
  * Assign an isolated workspace for `task`. From an isolated workspace, that
  * workspace is bound (unless it has landed). With `issueNumber`, the Issue's
  * workspace is resumed, or its surviving checkout recovered, before a new one is
@@ -409,9 +424,13 @@ async function newWorkspaceName(cwd: string, root: string, issueNumber: number |
 }
 
 async function createWorkspaceUnlocked(task: string, cwd: string, options: WorkspaceCreationOptions): Promise<AssignedWorkspace> {
-  const { issueNumber, hooks = {} } = options;
+  const { issueNumber, base, hooks = {} } = options;
   const context = await workspaceContext(cwd);
   if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
+  // A base only shapes a new workspace: binding the current one or resuming an Issue's would ignore it.
+  if (base && (issueNumber || context.current.name !== "default")) {
+    throw new Error("A start base needs a new workspace: start from the integration checkout and without an Issue");
+  }
   if (context.current.name !== "default") {
     await assertWorkspaceMutationAllowed(context);
     return assigned(hooks, context, task, { issueNumber, created: false, reused: false });
@@ -429,8 +448,9 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   await assertIssueAvailable(cwd, issueNumber, name);
   // A surviving Issue checkout at its deterministic path is recovered, never replaced by a spare.
   const survivor = Boolean(issueNumber) && exists(join(workspaceHome(), name));
-  if (!survivor) await refreshIntegration(context);
-  const spare = survivor ? null : await claimSpare(cwd, name);
+  // A pinned base is already local, so a helper claiming a spare never waits on the remote.
+  if (!survivor && !base) await refreshIntegration(context);
+  const spare = survivor ? null : await claimSpare(cwd, name, base);
   if (spare) name = spare.name;
   const workspacePath = spare?.root ?? join(workspaceHome(), name);
   await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });
@@ -439,7 +459,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
     return assigned(hooks, recovered, task, { issueNumber, created: false, reused: true, workspacePath });
   }
   if (!spare) {
-    const baseSha = await jj(cwd, ["log", "-r", context.integrationBranch, "--no-graph", "-T", "commit_id"]);
+    const baseSha = base ?? await jj(cwd, ["log", "-r", context.integrationBranch, "--no-graph", "-T", "commit_id"]);
     await addWorkspace(hooks, context.integration.root, workspacePath, baseSha, name);
   }
   // A fresh or claimed workspace is a new generation even under a reused Issue name

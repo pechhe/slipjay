@@ -12,6 +12,7 @@ import {
   attachWorkspaceIssue,
   cleanupLandedWorkspace,
   createWorkspace,
+  resolveStartBase,
   inspectWorkspaces,
   landingPreview,
   releaseIntegration,
@@ -53,22 +54,31 @@ async function integrationRoot(cwd: string): Promise<string> {
   return context.integration.root;
 }
 
-type StartOptions = { integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; resultFd: number | undefined; task: string };
+type StartOptions = { integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; base: string | undefined; resultFd: number | undefined; task: string };
 
 /**
  * `start` flags, which precede the task: `--integration` allocates from the
  * integration checkout even inside a workspace; `--issue <n>` creates or resumes
- * that Issue's workspace; `--refill` then starts a background spare refill;
- * `--json` prints one JSON result object. Null when the arguments are invalid.
+ * that Issue's workspace; `--base <revision>` starts a new workspace (from the
+ * integration checkout) on that revision of the current checkout instead of the
+ * integration head, and takes no Issue; `--refill` then starts a background spare
+ * refill; `--json` prints one JSON result object. Null when the arguments are invalid.
  */
 function startOptions(args: string[]): StartOptions | null {
-  const options: StartOptions = { integration: false, json: false, refill: false, issueNumber: undefined, resultFd: undefined, task: "" };
+  const options: StartOptions = { integration: false, json: false, refill: false, issueNumber: undefined, base: undefined, resultFd: undefined, task: "" };
   let index = 0;
   for (; index < args.length; index += 1) {
     const flag = args[index];
     if (flag === "--integration") options.integration = true;
     else if (flag === "--json") options.json = true;
     else if (flag === "--refill") options.refill = true;
+    else if (flag === "--base") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) return null;
+      options.base = value;
+      options.integration = true;
+      index += 1;
+    }
     else if (flag === "--issue" || flag === "--result-fd") {
       const value = Number(args[index + 1]);
       if (!Number.isSafeInteger(value) || value <= 0) return null;
@@ -80,6 +90,7 @@ function startOptions(args: string[]): StartOptions | null {
   options.task = args.slice(index).join(" ").trim();
   // A flag is a request for help or a typo, never a task to start a workspace for.
   if (options.task.startsWith("-") || (!options.task && !options.issueNumber)) return null;
+  if (options.base && options.issueNumber) return null;
   return options;
 }
 
@@ -333,17 +344,19 @@ try {
   } else if (command === "start") {
     const options = startOptions(rest);
     if (!options) {
-      console.error('Usage: slipjay start [--integration] [--issue <n>] [--refill] [--json] ["task"]');
+      console.error('Usage: slipjay start [--integration] [--issue <n> | --base <revision>] [--refill] [--json] ["task"]');
       process.exitCode = 2;
     } else if (options.json && options.resultFd === undefined) {
       process.exitCode = await startForJson(rest);
     } else {
+      // The base names a revision of the caller's checkout, so it resolves there before moving to the integration root.
+      const base = options.base ? await resolveStartBase(process.cwd(), options.base) : undefined;
       const root = options.integration ? await integrationRoot(process.cwd()) : process.cwd();
       const startedAt = new Date().toISOString();
       const started = Date.now();
       const spareCount = (await readySpares(root)).length;
       const task = options.task || `Issue #${options.issueNumber}`;
-      const result = await createWorkspace(task, root, options.issueNumber ? { issueNumber: options.issueNumber } : {});
+      const result = await createWorkspace(task, root, options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {});
       await recordClientFacts(result.workspacePath, [
         { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
         ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started }] : []),

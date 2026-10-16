@@ -12,7 +12,7 @@ export {
   assertWorkspaceMutationAllowed, attachWorkspaceIssue, findWorkspace, inspectWorkspace, inspectWorkspaces, landingStatePaths,
   listWorkspaces, readLandedRecord, readLandingState, readWorkspaceMode, renameWorkspace, workspaceContinuationState, writeWorkspaceMode,
 } from "./workspace-state.ts";
-export { createWorkspace, findIssueWorkspace, recoverIssueWorkspace } from "./workspace-create.ts";
+export { createWorkspace, findIssueWorkspace, recoverIssueWorkspace, resolveStartBase } from "./workspace-create.ts";
 export {
   cleanupLandedWorkspace, describeRetention, removeWorkspace, retainedWorkspaceMaterial, retireWorkspace,
 } from "./workspace-lifecycle.ts";

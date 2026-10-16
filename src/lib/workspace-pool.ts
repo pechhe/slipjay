@@ -316,19 +316,19 @@ async function reusableDependencies(root: string, prepared: PreparedDependencies
  * waited for); the caller then provisions synchronously. Never falls back to the
  * primary checkout.
  */
-export async function claimSpare(cwd: string, name: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
+export async function claimSpare(cwd: string, name: string, base?: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
   const context = await workspaceContext(cwd);
   if (!context) return null;
   // The pool is held only briefly (a claim, or a refill registering a name), so a short wait suffices.
-  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(cwd, context, name), { waitMs: 3000 })
+  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(cwd, context, name, base), { waitMs: 3000 })
     .catch((error: unknown) => { if ((error as { code?: string } | null | undefined)?.code === "ELOCKED") return null; throw error; });
 }
 
-async function claimReadySpare(cwd: string, context: WorkspaceContext, name: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
+async function claimReadySpare(cwd: string, context: WorkspaceContext, name: string, base?: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
   const [spare] = await readySpares(cwd);
   if (!spare) return null;
   const { name: assigned } = await renameWorkspace(spare.root, name);
-  await jj(spare.root, ["new", context.integrationBranch]);
+  await jj(spare.root, ["new", base ?? context.integrationBranch]);
   const dependencies = await reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | null | undefined);
   const { spare: _released, prepared: _prepared, preparedDependencies: _dependencies, createdAt: _created, ...metadata } =
     (await workspaceMetadata(assigned)) ?? {};
