@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Remove the native Mac menu bar:** T3 Code now shows the runner's lanes, deploys and
+  releases from `slipjay watch --json`, so the SwiftUI app, its install script and its
+  Swift fixtures are gone. Uninstall an existing copy with `launchctl bootout
+  gui/$(id -u) ~/Library/LaunchAgents/com.pechhe.slipjay-menubar.plist`, then delete that
+  plist and `~/Applications/SlipJay.app`.
+
 ## v3.21.0
 
 - **Limit spares per machine and refresh stale spares once (#75):** `spares` in

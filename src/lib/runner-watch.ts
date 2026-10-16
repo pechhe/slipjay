@@ -16,7 +16,7 @@ export type WatchConnection = {
   close(): void;
 };
 
-/** Bound catch-up by global events, so at most this many can propose notifications. */
+/** Bound catch-up by global events, so a follower replays at most this many. */
 export const WATCH_REPLAY_LIMIT = 100;
 
 export function watchCursor(raw: string | undefined): number | undefined {

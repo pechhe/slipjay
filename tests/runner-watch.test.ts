@@ -3,7 +3,6 @@ import { test } from "vite-plus/test";
 import { watchCursor, watchRunner, WATCH_REPLAY_LIMIT, type WatchEnvelope } from "../src/lib/runner-watch.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
-import { readFileSync, writeFileSync } from "node:fs";
 import type { QueueSnapshot, StoredEvent } from "../src/lib/runner-contract.ts";
 
 test("watch cursor accepts only non-negative safe integers", () => {
@@ -63,12 +62,6 @@ test("real watch contract: first install, restart catch-up, dedup and replaced-l
     await session(appliedCursor, () => { submit("replacement"); log.append("replacement", { type: "failed", stage: "verifying", reason: "new log failure" }); });
     assert.deepEqual(requests, [[initialCursor], [initialCursor], [appliedCursor], [appliedCursor, 0]]);
     assert.deepEqual(sessions[3]!.filter((item) => item.type === "event").map((item) => item.event.seq), log.events().map((item) => item.seq));
-    // Share actual CLI envelopes with Swift, removing only wall-clock timestamps.
-    const normalized = JSON.parse(JSON.stringify(sessions, (key, value: unknown) =>
-      ["at", "observedAt", "submittedAt", "finishedAt", "stageStartedAt"].includes(key) ? "2026-10-14T00:00:00Z" : value));
-    const path = new URL("../macos/fixtures/watch-restart.json", import.meta.url);
-    if (process.env.SLIPJAY_UPDATE_WATCH_FIXTURE === "1") writeFileSync(path, JSON.stringify(normalized, null, 2) + "\n");
-    assert.deepEqual(normalized, JSON.parse(readFileSync(path, "utf8")));
   } finally {
     log.close();
     if (originalCursor === undefined) delete process.env.SLIPJAY_WATCH_CURSOR;
