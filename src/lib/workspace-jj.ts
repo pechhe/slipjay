@@ -239,18 +239,6 @@ export function workspaceSlug(value: string, limit: number = 40): string {
   );
 }
 
-export async function issueTitle(repositoryRoot: string, issueNumber: number): Promise<string | null> {
-  const result = await run(
-    "gh",
-    ["issue", "view", String(issueNumber), "--json", "title", "-q", ".title"],
-    {
-      cwd: repositoryRoot,
-    },
-  );
-  if (result.code !== 0) return null;
-  return result.stdout.trim() || null;
-}
-
 /** Stable short project prefix used in workspace names, e.g. "ys". */
 export async function projectPrefix(cwd: string = process.cwd()): Promise<string | null> {
   const context = await workspaceContext(cwd);
@@ -283,13 +271,6 @@ export async function workspaceHasUnintegratedWork(
 /** The workspace's working-copy commit id, snapshotting the on-disk tree first. */
 export async function workingCopyCommit(workspaceRoot: string): Promise<string> {
   return jj(workspaceRoot, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
-}
-
-/** Issue state (`OPEN`/`CLOSED`) as `gh` reports it, or null when it cannot be read. */
-export async function issueState(repositoryRoot: string, issueNumber: number): Promise<string | null> {
-  const result = await run("gh", ["issue", "view", String(issueNumber), "--json", "state", "-q", ".state"],
-    { cwd: repositoryRoot, timeoutMs: 20_000 });
-  return result.code === 0 ? result.stdout.trim() || null : null;
 }
 
 /** The working-copy description `start` gives a new workspace: `wip: <task> (#<issue>)`. */

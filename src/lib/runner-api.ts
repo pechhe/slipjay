@@ -5,7 +5,9 @@ import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMIN
 import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "./build-admission.ts";
-import type { BuildAdmitter } from "./build-admission.ts";
+import type { BuildAdmitter, BuildRoute } from "./build-admission.ts";
+import { BUILD_READ_ACTIONS } from "./tracker.ts";
+import type { BuildReadAction } from "./tracker.ts";
 
 export function createRunnerHandler(input: {
   log: OperationLog;
@@ -27,6 +29,8 @@ export function createRunnerHandler(input: {
   admitBuild?: BuildAdmitter;
   /** Build gave no answer to an admission: whoever retries admissions independently should start. */
   onAdmissionUnresolved?(): void;
+  /** Build's runner route, for clients' read-only Build reads; absent, the runner has no Build connection. */
+  readBuild?: BuildRoute;
 }): RunnerHandler {
   let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
@@ -61,6 +65,17 @@ export function createRunnerHandler(input: {
       const id = newOperationId();
       input.log.append(id, { type: "client_operation", repo: repositoryKey(body.repo), workspace: body.workspace, machine: body.machine });
       return json({ id });
+    }
+    // A client reads Build only through here, so the Build credential never leaves the runner.
+    if (request.method === "POST" && path === `${RUNNER_API}/build/read`) {
+      const body = await boundedJson(request);
+      if (!body || !(BUILD_READ_ACTIONS as readonly unknown[]).includes(body.action) || !body.input || typeof body.input !== "object" || Array.isArray(body.input))
+        return json({ error: `Invalid Build read: action must be one of ${BUILD_READ_ACTIONS.join(", ")} with an input object` }, 400);
+      if (!input.readBuild) return json({ error: "This runner has no Build connection: set \"build.origin\" in its config and its Build token in its environment" }, 400);
+      const answer = await input.readBuild(body.action as BuildReadAction, body.input);
+      if (answer.kind === "accepted") return json({ value: answer.value });
+      if (answer.kind === "refused") return json({ code: answer.code }, 409);
+      return json({ error: `Build did not answer: ${answer.reason}`, retryable: true }, 503);
     }
     const clientRoute = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)/events$`));
     if (request.method === "POST" && clientRoute) {

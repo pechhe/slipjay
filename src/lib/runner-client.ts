@@ -1,6 +1,7 @@
 import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-handoff.ts";
 import type { RepairProof } from "./repair-claim.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
+import type { BuildReadAction } from "./tracker.ts";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { open, link, rm, lstat } from "node:fs/promises";
@@ -480,6 +481,21 @@ export async function readRunLog(location: string, operationId: string, env: Nod
   } finally { connection.close(); }
 }
 
+/** One read-only Build action through the runner, which holds the Build credential; throws unless Build answered. */
+export async function readBuildThroughRunner(action: BuildReadAction, input: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
+  const location = runnerLocation(env);
+  if (!location) throw new Error("Reading Build needs a SlipJay runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, "/v1/build/read", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action, input }), signal: AbortSignal.timeout(30_000) });
+    const body = await response.json() as { value?: unknown; code?: string };
+    if (response.status === 409) throw new Error(`Build refused ${action}: ${body.code ?? "refused"}`);
+    return body.value ?? null;
+  } finally { connection.close(); }
+}
+
 /**
  * The owner's controls: kill a running operation (until it passes verification),
  * or pause and resume the queue. A kill names the operation it means; unnamed, it kills
@@ -523,7 +539,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
   await fetchIntegration(cwd, remote, context.integrationBranch);
   const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
-  const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview) : preview;
+  const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env)) : preview;
   if (options.handoff && (!validSubmissionHandoff(options.handoff) || options.handoff.source !== target.commitId))
     throw new Error("Handoff must contain valid evidence for the exact landing source");
   const handoff = options.handoff ? prepareSubmissionHandoff(options.handoff, { ...process.env, ...env }) : undefined;
@@ -640,7 +656,8 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
         await dropSupersededCandidate(cwd, context.current.root, target, result.commitId, onLine);
       await finishLandedWorkspace(context, state);
       // Release other delivered or idle checkouts; the sweep never fails the landing.
-      sweep = await sweepDisposableWorkspaces(context.integration.root, { protectedRoots: [cwd, context.current.root] }).catch(() => undefined);
+      sweep = await sweepDisposableWorkspaces(context.integration.root, { protectedRoots: [cwd, context.current.root],
+        readBuild: (action, input) => readBuildThroughRunner(action, input, env) }).catch(() => undefined);
       for (const removed of sweep?.removed ?? []) onLine(`Removed workspace: ${removed}`);
       // An undelivered checkout kept by its session is the normal case; a delivered one is a leftover.
       for (const skipped of sweep?.skipped ?? []) if (skipped.landed) onLine(`Kept landed workspace ${skipped.name}: ${skipped.reason}`);

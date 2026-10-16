@@ -41,10 +41,10 @@ test("an idle empty workspace is swept, but not while recent, occupied or claime
     await mkdir(join(lockPath(locked.current.name), ".."), { recursive: true });
     await writeFile(lockPath(locked.current.name), JSON.stringify({ version: 1, pid: process.pid }));
 
-    const recent = await sweepDisposableWorkspaces(f.repo, { issueState: () => null });
+    const recent = await sweepDisposableWorkspaces(f.repo, { issueClosed: () => null });
     assert.deepEqual(recent.removed, [], "nothing is removed before the idle threshold");
 
-    const swept = await sweepDisposableWorkspaces(f.repo, { now: later(), issueState: () => null });
+    const swept = await sweepDisposableWorkspaces(f.repo, { now: later(), issueClosed: () => null });
     assert.deepEqual(swept.removed, [idle.current.name]);
     assert.equal(existsSync(idle.workspacePath), false);
     const reasons = Object.fromEntries(swept.skipped.map(({ name, reason }) => [name, reason]));
@@ -67,7 +67,7 @@ test("a workspace with unique untracked files is kept by sweep and prune", async
     const kept = await createWorkspace("kept", f.repo);
     await mkdir(join(kept.workspacePath, "notes"));
     await writeFile(join(kept.workspacePath, "notes", "draft.md"), "mine\n");
-    const swept = await sweepDisposableWorkspaces(f.repo, { now: later(), issueState: () => null });
+    const swept = await sweepDisposableWorkspaces(f.repo, { now: later(), issueClosed: () => null });
     assert.deepEqual(swept.removed, []);
     assert.match(swept.skipped[0]?.reason ?? "", /notes\/draft\.md/);
     assert.deepEqual((await pruneEmptyWorkspaces(f.repo)).removed, []);
@@ -85,7 +85,7 @@ test("a link into the primary checkout does not keep a workspace, but a link els
     await symlink(join(f.repo, ".env"), join(linked.workspacePath, ".env"));
     const elsewhere = await createWorkspace("elsewhere", f.repo);
     await symlink(join(f.repo, "..", "outside.env"), join(elsewhere.workspacePath, ".env"));
-    const swept = await sweepDisposableWorkspaces(f.repo, { now: later(), issueState: () => null });
+    const swept = await sweepDisposableWorkspaces(f.repo, { now: later(), issueClosed: () => null });
     assert.deepEqual(swept.removed, [linked.current.name]);
     assert.match(swept.skipped.find(({ name }) => name === elsewhere.current.name)?.reason ?? "", /\.env/);
     assert.equal(await readFile(join(f.repo, ".env"), "utf8"), "SECRET=1\n", "the link's target is untouched");

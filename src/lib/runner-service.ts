@@ -7,7 +7,7 @@ import { readSubmissionManifest, retainSubmissionSource } from "./submission-sou
 import { readCommandArtifact } from "./command-artifact.ts";
 import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
-import { BUILD_TOKEN_ENV, buildAdmitter, buildRoute } from "./build-admission.ts";
+import { BUILD_TOKEN_ENV, buildAdmitter, buildReader, buildRoute } from "./build-admission.ts";
 import { createReceiptDrain } from "./build-receipts.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
@@ -34,13 +34,14 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   mkdirSync(home, { recursive: true });
   const executor = localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
   const log = openOperationLog(join(home, "operations.sqlite"), { workers: runnerWorkers(config, executor), lane: (repo) => repositoryLane(config, repo) });
+  const buildToken = env[BUILD_TOKEN_ENV]?.trim();
+  const build = config.build && buildToken ? buildRoute({ origin: config.build.origin, token: buildToken }) : undefined;
   const queue = createRunnerQueue({
     log, home, config, executor,
     environment: () => env,
+    ...build ? { readBuild: buildReader(build) } : {},
   });
   await queue.recover();
-  const buildToken = env[BUILD_TOKEN_ENV]?.trim();
-  const build = config.build && buildToken ? buildRoute({ origin: config.build.origin, token: buildToken }) : undefined;
   // Receipts go from the ledger to Build on their own schedule: publication never waits on HQ.
   // Admissions Build never answered are settled there too, and each answer may let queued work start.
   const receipts = build ? createReceiptDrain({ log, route: build, onAdmissionSettled: queue.wake }) : undefined;
@@ -48,7 +49,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
     subscribe: log.subscribe,
     // Without both, Build-bound submissions are refused, never queued unadmitted.
-    ...build ? { admitBuild: buildAdmitter(build), onAdmissionUnresolved: () => receipts?.wake() } : {},
+    ...build ? { admitBuild: buildAdmitter(build), onAdmissionUnresolved: () => receipts?.wake(), readBuild: build } : {},
     async readSource(operation, signal) {
       const retained = log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event;
       if (retained?.type !== "source_retained") throw new Error("No retained submission");

@@ -44,7 +44,9 @@ import { finishLanding } from "./landing-candidate.ts";
 import { finalizePostIntegration } from "./post-integration-finalization.ts";
 import { githubRepository, withIssueTrailer } from "./issue-references.ts";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
-import { issueTitle, jj, revisionExists, revisionFacts, run, workspaceContext } from "./workspace-jj.ts";
+import { jj, revisionExists, revisionFacts, run, workspaceContext } from "./workspace-jj.ts";
+import { trackerOf, workItemTitle } from "./tracker.ts";
+import type { BuildReader } from "./tracker.ts";
 import { stateHome } from "./workspace-paths.ts";
 import { readJsonOptional, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -120,7 +122,8 @@ async function prepareCandidateDependencies(cwd: string, context: CandidateConte
   throw new Error("Dependency preparation changed the landing candidate's source; it was restored. Fix the install script and rerun landing");
 }
 
-async function ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision): Promise<LandingRevision> {
+/** `readBuild` reads a Build-tracked workspace's item title for a missing description. */
+async function ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader): Promise<LandingRevision> {
   const metadata = await workspaceMetadata(context.current.name);
   const issueNumber = typeof metadata?.issueNumber === "number" ? metadata.issueNumber : null;
   // The exact text `start` generated is no description: it is replaced, never published.
@@ -134,7 +137,7 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   let description = generated && target.description.trim() === generated ? "" : target.description.trim();
   if (!description) {
     const issueDescription = issueNumber
-      ? await issueTitle(context.integration.root, issueNumber)
+      ? await workItemTitle(context.integration.root, trackerOf(context.configuration), issueNumber, readBuild)
       : null;
     const taskDescription = typeof metadata?.task === "string" ? metadata.task.trim() : "";
     description = (issueDescription?.trim() || taskDescription).slice(0, 500);
@@ -143,7 +146,7 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   }
   // The landed commit names its Issue itself, so attribution survives machine-local state.
   const remotes = issueNumber ? await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]).catch(() => "") : "";
-  const described = withIssueTrailer(description, issueNumber, githubRepository(remotes, context.configuration.remote));
+  const described = withIssueTrailer(description, issueNumber, githubRepository(remotes, context.configuration.remote), trackerOf(context.configuration));
   if (described === target.description.trim() && target.description.trim()) return target;
   await jj(cwd, ["describe", "-r", target.changeId, "-m", described]);
   return revisionFacts(cwd, target.changeId);

@@ -1,3 +1,5 @@
+import type { Tracker } from "./tracker.ts";
+
 /** GitHub repository and Issue references a landing reads from remotes and descriptions. */
 
 const githubRemoteRepository = (remote: string): string | null => {
@@ -40,13 +42,24 @@ export function referencesIssue(description: string | null | undefined, issueNum
   return new RegExp(`(?<![\\w&])#${issueNumber}(?!\\d)|[\\w.-]+/[\\w.-]+#${issueNumber}(?!\\d)`).test(description ?? "");
 }
 
-/** `description` plus an `Issue: owner/repo#N` git trailer, unless it has no Issue or already names it. */
-export function withIssueTrailer(description: string, issueNumber: number | null | undefined, repository: string | null): string {
+/**
+ * `description` plus a git trailer naming its work item, unless it has none or already names it:
+ * `Issue: owner/repo#N` for a GitHub Issue, or `Build: #N` for a Build item. A Build item is named only
+ * by that trailer, since `#N` in a description may be a GitHub reference, so promotion always finds it.
+ */
+export function withIssueTrailer(description: string, issueNumber: number | null | undefined, repository: string | null, tracker: Tracker = "github"): string {
   const text = (description ?? "").trimEnd();
-  if (!Number.isInteger(issueNumber) || issueNumber! <= 0 || referencesIssue(text, issueNumber!)) return text;
-  const trailer = `Issue: ${repository ?? ""}#${issueNumber}`;
+  if (!Number.isInteger(issueNumber) || issueNumber! <= 0) return text;
+  if (tracker === "build" ? buildTrailerItem(text) === issueNumber : referencesIssue(text, issueNumber!)) return text;
+  const trailer = tracker === "build" ? `Build: #${issueNumber}` : `Issue: ${repository ?? ""}#${issueNumber}`;
   const paragraphs = text.split(/\n\s*\n/);
   const inTrailerBlock = paragraphs.length > 1 && paragraphs.at(-1)!.split("\n").every((line) => /^[A-Za-z][\w-]*: \S/.test(line));
   return `${text}${inTrailerBlock ? "\n" : "\n\n"}${trailer}`;
 }
 
+
+/** The Build item a description's `Build: #N` trailer names, or null. */
+export function buildTrailerItem(description: string | null | undefined): number | null {
+  const match = /^Build: #(\d+)\s*$/m.exec(description ?? "");
+  return match ? Number(match[1]) : null;
+}

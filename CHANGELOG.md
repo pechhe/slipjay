@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **HQ Build as a repository's tracker:** `"tracker": "build"` in `slipjay.json` makes a
+  repository's work-item numbers HQ Build numbers; GitHub Issues stay the default. A landing
+  names its item in a `Build: #N` trailer and, with no description, takes its title from Build;
+  the workspace sweep and `prune --empty` treat a closed Build item (or any `legacy` item) as
+  delivered; and `promote` reports half-built Build Specs. Clients read Build only through the
+  runner's new `POST /v1/build/read`, which forwards Build's read-only `read`, `list` and
+  `waits` and refuses anything else, so the Build credential stays on the runner.
+- **Removed `selectImplementationIssue` and `assertCompletedIssueDelivered`:** the library's
+  GitHub-only Issue-board selection had no caller in SlipJay or its known consumers, and
+  would have read GitHub for a Build-tracked repository.
+
 ## v3.22.3
 
 - **A start no longer waits on the runner:** `slipjay start` posted its metrics to the runner

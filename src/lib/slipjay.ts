@@ -20,7 +20,6 @@ export { provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance,
 export { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 export { withWorkspaceTransaction } from "./workspace-transaction.ts";
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
-export { assertCompletedIssueDelivered, selectImplementationIssue } from "./issue-eligibility.ts";
 
 // The one-time move of Slipway's state from ~/.slipway to ~/.slipjay (CLI, hosts that report it).
 export { cutover } from "./cutover.ts";

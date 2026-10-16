@@ -129,15 +129,17 @@ process.exit(result.status ?? 1);
  * fixture's root, stopped afterwards. `env` names it (SLIPJAY_RUNNER) and carries
  * its token, so `body` can land through the library or the CLI.
  */
-export async function withTestRunner<T>(f: { root: string; repo: string; remote: string }, body: (runner: { location: string; env: NodeJS.ProcessEnv }) => Promise<T>): Promise<T> {
+export async function withTestRunner<T>(f: { root: string; repo: string; remote: string }, body: (runner: { location: string; env: NodeJS.ProcessEnv }) => Promise<T>,
+  options: { build?: { origin: string; token: string } } = {}): Promise<T> {
   const transport = await configureLocalGithubTransport(f);
   try {
     // A runner commits as the identity its config names for the commits it rewrites.
     const home = join(f.root, "runner");
     await mkdir(home, { recursive: true });
     await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: transport.github } },
-      jj: { "user.name": "Fixture", "user.email": "fixture@example.com" } }));
-    const runner = await startRunner({ home, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" }, port: 0 });
+      jj: { "user.name": "Fixture", "user.email": "fixture@example.com" }, ...options.build ? { build: { origin: options.build.origin } } : {} }));
+    const runner = await startRunner({ home, port: 0,
+      env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token", ...options.build ? { YARDSMITH_SLIPJAY_BUILD_TOKEN: options.build.token } : {} } });
     try {
       return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });
     } finally { await runner.close(); }
@@ -151,7 +153,7 @@ export async function withTestRunner<T>(f: { root: string; repo: string; remote:
  * `keep` holds the workspace with another process while it lands, so the landing
  * keeps it as it would any workspace in use; `direct` lands the primary checkout.
  */
-export function landThroughTestRunner(f: { root: string; repo: string; remote: string }, cwd: string, options: { direct?: boolean; keep?: boolean } = {}) {
+export function landThroughTestRunner(f: { root: string; repo: string; remote: string }, cwd: string, options: { direct?: boolean; keep?: boolean; build?: { origin: string; token: string } } = {}) {
   return withTestRunner(f, async ({ location, env }) => {
     // Its own process group: the landing ignores its caller's group as it would the CLI's.
     const holder = options.keep ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd, stdio: "ignore", detached: true }) : null;
@@ -162,5 +164,5 @@ export function landThroughTestRunner(f: { root: string; repo: string; remote: s
     } finally {
       holder?.kill();
     }
-  });
+  }, options.build ? { build: options.build } : {});
 }

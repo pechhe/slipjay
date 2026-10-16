@@ -1,4 +1,5 @@
 import type { MigrationFinalizationPolicy } from "./execution-policy.ts";
+import type { BuildReader } from "./tracker.ts";
 import type { LandingAdapter, LandingRevision } from "./landing-steps.ts";
 import type { WorkspaceContext } from "./workspace-jj.ts";
 import type { VerificationEvidence } from "./verification-policy.ts";
@@ -9,7 +10,7 @@ export type CandidateContext = {
   integration: { name: string; root: string };
   integrationBranch: string;
   /** Verification, publication and migration policy read by landing steps. */
-  configuration: { requiredLandingVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null };
+  configuration: { requiredLandingVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null; tracker?: "github" | "build" };
 };
 /** What an Isolated landing did with the primary checkout; it never blocks integration or push. */
 export type PrimaryCheckoutOutcome = {
@@ -34,7 +35,7 @@ export type CandidateOptions = {
 /** Host operations used by the shared candidate transition. */
 export type LandingIO = {
   landingPreview(cwd: string): Promise<{ context: CandidateContext; target: LandingRevision }>;
-  ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision): Promise<LandingRevision>;
+  ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader): Promise<LandingRevision>;
   assertStackConflictFree(cwd: string, branch: string, changeId: string): Promise<unknown>;
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;

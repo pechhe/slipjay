@@ -36,6 +36,8 @@ export type ExecutionPolicy = {
   reset?: ResetPolicy;
   /** Environments the runner deploys; undefined when undeclared. */
   deployments?: DeploymentPolicy;
+  /** Where the repository's work is tracked (see `tracker.ts`); GitHub Issues when undeclared. */
+  tracker?: "github" | "build";
 };
 
 export type IntegrationBranchProbes = {
@@ -255,6 +257,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   if (parsed.reset !== undefined && parsed.integrationBranch == null) fail("declares reset without an integrationBranch");
   const reset = resetPolicy(parsed.reset);
   const deployments = deploymentPolicy(parsed.deployments);
+  if (parsed.tracker !== undefined && parsed.tracker !== "github" && parsed.tracker !== "build") fail('declares a tracker other than "github" or "build"');
   generatedPathMatchers(parsed.generatedPaths);
   const sharedPaths = sharedPathList(parsed.sharedPaths);
   const spares = spareCount(parsed.spares);

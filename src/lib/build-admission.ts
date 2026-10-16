@@ -1,5 +1,6 @@
 import type { BuildBinding, SubmissionHandoff } from "./submission-handoff.ts";
 import type { OperationLog, StoredEvent } from "./runner-contract.ts";
+import type { BuildReadAction, BuildReader } from "./tracker.ts";
 
 /** The runner's dedicated credential for Build's runner route, from its `bws run` environment. */
 export const BUILD_TOKEN_ENV = "YARDSMITH_SLIPJAY_BUILD_TOKEN";
@@ -99,7 +100,7 @@ export type BuildRouteAnswer =
   | { kind: "accepted"; value: unknown }
   | { kind: "refused"; code: string }
   | { kind: "unavailable"; reason: string };
-export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding", input: unknown) => Promise<BuildRouteAnswer>;
+export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding" | BuildReadAction, input: unknown) => Promise<BuildRouteAnswer>;
 
 /** Calls `POST {origin}/api/build/runner`; never throws, and never waits longer than `timeoutMs`. */
 export function buildRoute(options: { origin: string; token: string; timeoutMs?: number; fetch?: typeof fetch }): BuildRoute {
@@ -122,6 +123,15 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
       return { kind: "refused", code: body.code.slice(0, 200) };
     if (response.status === 401 || response.status === 403) return { kind: "unavailable", reason: "Build refused the runner's credential" };
     return { kind: "unavailable", reason: `Build answered HTTP ${response.status}` };
+  };
+}
+
+/** Build's read-only actions over its runner route, throwing unless Build answered. */
+export function buildReader(route: BuildRoute): BuildReader {
+  return async (action, input) => {
+    const answer = await route(action, input);
+    if (answer.kind === "accepted") return answer.value;
+    throw new Error(answer.kind === "refused" ? `Build refused ${action}: ${answer.code}` : `Build did not answer: ${answer.reason}`);
   };
 }
 

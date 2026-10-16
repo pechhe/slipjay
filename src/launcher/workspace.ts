@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents } from "../lib/runner-client.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents } from "../lib/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
@@ -158,7 +158,7 @@ async function runPromote(args: string[]): Promise<number> {
   const location = runnerLocation();
   if (options.confirm === undefined) {
     const plan = await releaseIntegration(process.cwd(),
-      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }) } : {});
+      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }), readBuild: (action, input) => readBuildThroughRunner(action, input) } : {});
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
   }
@@ -326,7 +326,7 @@ try {
     }
   } else if (command === "prune") {
     if (rest[0] !== "--empty") throw new Error("Usage: slipjay prune --empty");
-    const result = await pruneEmptyWorkspaces();
+    const result = await pruneEmptyWorkspaces(process.cwd(), runnerLocation() ? { readBuild: (action, input) => readBuildThroughRunner(action, input) } : {});
     for (const name of result.removed) console.log(`Removed empty workspace: ${name}`);
     for (const path of result.pruned) console.log(`Pruned state: ${path}`);
     for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);

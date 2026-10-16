@@ -17,6 +17,7 @@ import { runReset } from "./reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "./deploy.ts";
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
+import type { BuildReader } from "./tracker.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { admissionLane, awaitingReplacement, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
@@ -271,6 +272,8 @@ export function runnerWorkers(config: Pick<RunnerConfig, "workers">, executor: P
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
   environment?: () => NodeJS.ProcessEnv;
+  /** Reads Build for a Build-tracked release's half-built Spec check; absent, that check reports it could not run. */
+  readBuild?: BuildReader;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
@@ -284,7 +287,7 @@ export function createRunnerQueue(input: {
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment } = input;
+  const { log, executor, home, config, environment, readBuild } = input;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   const workers = runnerWorkers(config, executor);
@@ -967,7 +970,7 @@ export function createRunnerQueue(input: {
         return;
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
-        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
+        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), ...(readBuild ? { readBuild } : {}),
         exclusively: (publication) => {
           // A shared-lane release owns the publication lane for its whole turn.
           // Rejoining it would wait for this very release to finish.

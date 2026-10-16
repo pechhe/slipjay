@@ -1,6 +1,8 @@
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
 import { readFile, stat } from "node:fs/promises";
-import { issueState, workspaceContext } from "./workspace-jj.ts";
+import { workspaceContext } from "./workspace-jj.ts";
+import { trackerOf, workItemClosed } from "./tracker.ts";
+import type { BuildReader } from "./tracker.ts";
 import { inspectWorkspaces, lockPath } from "./workspace-state.ts";
 import { cleanupLandedWorkspace, describeRetention, removeWorkspace, retainedWorkspaceMaterial } from "./workspace-lifecycle.ts";
 import { describeHolders, processAlive, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
@@ -35,8 +37,10 @@ export interface SweepOptions {
   protectedRoots?: string[];
   now?: number;
   pruneState?: boolean;
-  /** Reads an Issue's state (`CLOSED` qualifies its empty workspace); defaults to `gh`. */
-  issueState?: (repositoryRoot: string, issueNumber: number) => Promise<string | null> | string | null;
+  /** Whether a work item is closed (which qualifies its empty workspace), null when unknown; defaults to the repository's tracker. */
+  issueClosed?: (repositoryRoot: string, issueNumber: number) => Promise<boolean | null> | boolean | null;
+  /** Reads Build for the default `issueClosed` in a Build-tracked repository; without it a Build item's state is unknown. */
+  readBuild?: BuildReader;
 }
 
 async function lockOwnerAlive(workspaceName: string) {
@@ -66,18 +70,19 @@ async function assignedAt(workspace: WorkspaceEntry) {
  * directories cannot be read, nothing is removed.
  */
 export async function sweepDisposableWorkspaces(cwd: string = process.cwd(), options: SweepOptions = {}): Promise<SweepResult> {
-  const { emptyIdleMs = EMPTY_IDLE_MS, protectedRoots = [], now = Date.now(), issueState: readIssueState = issueState } = options;
+  const { emptyIdleMs = EMPTY_IDLE_MS, protectedRoots = [], now = Date.now(), issueClosed, readBuild } = options;
   const removed: string[] = [];
   const skipped: SweepResult["skipped"] = [];
   const context = await workspaceContext(cwd);
   if (!context) return { removed, skipped, pruned: [] };
-  const result = await sweepCandidates(context, { emptyIdleMs, protectedRoots, now, readIssueState, removed, skipped });
+  const readIssueClosed = issueClosed ?? ((root: string, issueNumber: number) => workItemClosed(root, trackerOf(context.configuration), issueNumber, readBuild));
+  const result = await sweepCandidates(context, { emptyIdleMs, protectedRoots, now, readIssueClosed, removed, skipped });
   return { ...result, pruned: options.pruneState === false ? [] : await pruneWorkspaceState() };
 }
 
-async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protectedRoots, now, readIssueState, removed, skipped }: {
+async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protectedRoots, now, readIssueClosed, removed, skipped }: {
   emptyIdleMs: number; protectedRoots: string[]; now: number;
-  readIssueState: NonNullable<SweepOptions["issueState"]>;
+  readIssueClosed: NonNullable<SweepOptions["issueClosed"]>;
   removed: string[]; skipped: SweepResult["skipped"];
 }): Promise<Pick<SweepResult, "removed" | "skipped">> {
   const result = { removed, skipped };
@@ -91,10 +96,10 @@ async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protect
     return result;
   }
   const guarded = [...protectedRoots, process.cwd()];
-  const issueStates = new Map<number, string | null>();
+  const issueStates = new Map<number, boolean | null>();
   const closed = async (issueNumber: number) => {
-    if (!issueStates.has(issueNumber)) issueStates.set(issueNumber, await Promise.resolve(readIssueState(context.integration.root, issueNumber)).catch(() => null));
-    return issueStates.get(issueNumber) === "CLOSED";
+    if (!issueStates.has(issueNumber)) issueStates.set(issueNumber, await Promise.resolve(readIssueClosed(context.integration.root, issueNumber)).catch(() => null));
+    return issueStates.get(issueNumber) === true;
   };
   for (const workspace of candidates) {
     const skip = (reason: string) => skipped.push({ name: workspace.name, landed: workspace.landed, reason });
@@ -131,6 +136,6 @@ async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protect
 }
 
 /** Explicit `prune --empty`: every unused empty or delivered workspace now, with the same safety checks. */
-export async function pruneEmptyWorkspaces(cwd: string = process.cwd()): Promise<SweepResult> {
-  return sweepDisposableWorkspaces(cwd, { emptyIdleMs: 0 });
+export async function pruneEmptyWorkspaces(cwd: string = process.cwd(), { readBuild }: Pick<SweepOptions, "readBuild"> = {}): Promise<SweepResult> {
+  return sweepDisposableWorkspaces(cwd, { emptyIdleMs: 0, readBuild });
 }

@@ -25,6 +25,8 @@ import type { GraphqlRunner, HalfBuiltSpecs } from "./release-specs.ts";
 import type { RunnerStage } from "./runner-contract.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 import type { WorkspaceCommandResult } from "./workspace-command.ts";
+import { trackerOf } from "./tracker.ts";
+import type { BuildReader, Tracker } from "./tracker.ts";
 
 export type ReleasePlan = {
   root: string;
@@ -46,6 +48,8 @@ export type ReleasePlan = {
   promotes: boolean;
   /** The candidate's production deployment declares `migrations`: the runner applies the promotion's migrations itself. */
   appliesMigrations: boolean;
+  /** Where the candidate's policy says its work is tracked, for the half-built Spec check. */
+  tracker: Tracker;
 };
 
 /**
@@ -107,6 +111,8 @@ export type ConfirmReleaseOptions = {
   run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   environment?: () => NodeJS.ProcessEnv;
   graphql?: GraphqlRunner;
+  /** Reads Build for a Build-tracked candidate's half-built Spec check; defaults to reading through the runner. */
+  readBuild?: BuildReader;
   /**
    * Runs publication, which moves the release branch, once nothing else may move it (the
    * runner's repository lane). Its own recheck that the release branch is still the
@@ -396,7 +402,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
     if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
   }
   const production = policy.deployments?.environments.production;
-  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks,
+  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks, tracker: trackerOf(policy),
     promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations) };
 }
 
@@ -501,7 +507,7 @@ export async function returnRelease(checkout: string, { merge, candidate }: { me
 }
 
 /** The result fields describing `plan`; the Spec check runs again on every call, as a Spec's Tickets may have closed in between. */
-async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefined): Promise<ReleaseSummary> {
+async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefined, readBuild: BuildReader | undefined): Promise<ReleaseSummary> {
   const summary: ReleaseSummary = { integrationBranch: plan.integrationBranch, releaseBranch: plan.releaseBranch, remote: plan.remote,
     base: plan.base, candidate: plan.candidate, commits: plan.commits.length, migrationArtifacts: plan.migrationArtifacts,
     nonAdditiveMigrations: plan.nonAdditiveMigrations, paths: plan.paths,
@@ -509,7 +515,7 @@ async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefine
   if (!plan.commits.length) return summary;
   const remotes = await jjRun(plan.root, ["git", "remote", "list"]);
   summary.halfBuiltSpecs = await halfBuiltSpecs(remotes.code === 0 ? githubRepository(remotes.stdout, plan.remote) : null,
-    plan.commits.map((commit) => commit.description), { graphql });
+    plan.commits.map((commit) => commit.description), { graphql, tracker: plan.tracker, readBuild });
   return summary;
 }
 
@@ -542,8 +548,8 @@ const refusalOf = (error: unknown): ReleaseResult => {
  * commit staging is green on, read through `readPromotion` (the runner), and the plan
  * carries the delta since an earlier approval the candidate has moved past.
  */
-export async function releaseIntegration(cwd = process.cwd(), { graphql, readPromotion }: {
-  graphql?: GraphqlRunner; readPromotion?: () => Promise<PromotionState>;
+export async function releaseIntegration(cwd = process.cwd(), { graphql, readBuild, readPromotion }: {
+  graphql?: GraphqlRunner; readBuild?: BuildReader; readPromotion?: () => Promise<PromotionState>;
 } = {}): Promise<ReleaseResult> {
   try {
     let plan = await planRelease(cwd);
@@ -556,7 +562,7 @@ export async function releaseIntegration(cwd = process.cwd(), { graphql, readPro
       delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
     }
-    const summary = { ...await describePlan(plan, graphql), ...delta ? { delta } : {} };
+    const summary = { ...await describePlan(plan, graphql, readBuild), ...delta ? { delta } : {} };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
     return { ok: true, status: "planned", ...summary, subjects: (delta?.commits ?? plan.commits).map((commit) => commit.subject),
       next: `After explicit human approval: slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
@@ -600,7 +606,7 @@ async function requireCandidateTree(checkout: string, candidate: string): Promis
  * A candidate the release branch already holds verifies nothing.
  */
 export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
-  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql, exclusively = (publication) => publication() } = options;
+  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql, readBuild, exclusively = (publication) => publication() } = options;
   try {
     const plan = await planRelease(checkout, { candidate });
     if (!plan.commits.length) {
@@ -608,10 +614,10 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
       onProgress(`[release] ${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}`
         + (releasedBy ? `, released by ${releasedBy.slice(0, 12)}` : ""));
       onStage("finalizing");
-      return { ok: true, status: "released_by", ...await describePlan(plan, graphql), merge, releasedBy };
+      return { ok: true, status: "released_by", ...await describePlan(plan, graphql, readBuild), merge, releasedBy };
     }
     requireMigrationsReady(plan, migrationsReady);
-    const summary = await describePlan(plan, graphql);
+    const summary = await describePlan(plan, graphql, readBuild);
     onStage("installing");
     await jj(checkout, ["new", plan.candidate]);
     await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand, ...(environment ? { env: environment() } : {}) });
