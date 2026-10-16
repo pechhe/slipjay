@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test, vi } from "vite-plus/test";
-import type { BuildRoute, BuildRouteAnswer } from "../src/lib/build-admission.ts";
+import type { BuildAdmissionRequest, BuildRoute, BuildRouteAnswer } from "../src/lib/build-admission.ts";
 import { createReceiptDrain } from "../src/lib/build-receipts.ts";
 import type { BuildChoreInput, BuildReceiptInput, BuildRunInput } from "../src/lib/build-receipts.ts";
 import { candidateBookmark, RUNNER_CONTROL_ID } from "../src/lib/runner-contract.ts";
@@ -30,9 +30,11 @@ function landing(log: OperationLog, change: string, end: "landed" | "failed" | "
   return id;
 }
 
-/** A controlled Build: records each fact once per (operation, sequence), and answers as `answer` says. */
-function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRouteAnswer | "lost" = () => ({ kind: "accepted", value: null })) {
+/** A controlled Build: records each fact once per (operation, sequence), and answers as `answer` (and `admit`) says. */
+function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRouteAnswer | "lost" = () => ({ kind: "accepted", value: null }),
+  admit: (input: BuildAdmissionRequest) => BuildRouteAnswer = () => ({ kind: "accepted", value: { admission: { recordedAt: null } } })) {
   const sent: BuildReceiptInput[] = [];
+  const admissions: BuildAdmissionRequest[] = [];
   const recorded = new Map<string, BuildReceiptInput>();
   const runs: BuildRunInput[] = [], chores: BuildChoreInput[] = [];
   const route: BuildRoute = (action, input) => {
@@ -44,6 +46,7 @@ function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRout
       return Promise.resolve({ kind: "accepted", value: null });
     }
     if (action === "recordChoreLanding") { chores.push(input as BuildChoreInput); return Promise.resolve({ kind: "accepted", value: null }); }
+    if (action === "admitAttempt") { admissions.push(input as BuildAdmissionRequest); return Promise.resolve(admit(input as BuildAdmissionRequest)); }
     assert.equal(action, "recordAttempt");
     const receipt = input as BuildReceiptInput;
     sent.push(receipt);
@@ -51,7 +54,7 @@ function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRout
     if (reply === "lost" || reply.kind === "accepted") recorded.set(`${receipt.operationId}:${receipt.sequence}`, receipt);
     return Promise.resolve(reply === "lost" ? { kind: "unavailable", reason: "Build did not answer in time" } : reply);
   };
-  return { route, sent, recorded, runs, chores };
+  return { route, sent, recorded, runs, chores, admissions };
 }
 /** Settled attempt facts of `id`; its runs' settlements, keyed by their `run_started` sequence, are left out. */
 const settled = (log: OperationLog, id: string) => {
@@ -159,20 +162,54 @@ test("a published landing whose receipt is still owed reads as landed with its r
   log.close();
 });
 
-test("only admitted operations send anything: refused, unadmitted and unbound ones owe no receipt", async () => {
+test("refused and unbound operations send nothing", async () => {
   const log = openOperationLog(":memory:");
   const refused = landing(log, "a", "open", "refused");
-  const pending = landing(log, "e", "landed", "pending");
   landing(log, "f", "landed", "unbound");
   const build = fakeBuild();
   const drain = createReceiptDrain({ log, route: build.route });
   drain.wake(); await drain.idle();
-  assert.deepEqual(build.sent, []);
+  assert.deepEqual([build.sent, build.admissions], [[], []]);
   const declined = log.operation(refused)!;
   assert.ok(declined.kind === "landing" && declined.outcome?.build?.admission === "refused");
-  const unadmitted = log.operation(pending)!;
-  assert.ok(unadmitted.kind === "landing" && unadmitted.outcome?.build?.receipts === "none");
-  assert.equal(log.snapshot("test").build, null);
+  assert.deepEqual(log.snapshot("test").build, { state: "available", since: null, reason: null, pending: 0, oldestPendingAt: null, parked: 0 });
+  drain.close(); log.close();
+});
+
+test("an admission Build never answered is offered until it is, even once its operation closed, so Build's custody is settled", async () => {
+  const log = openOperationLog(":memory:");
+  /** Submitted for admission, whose answer was lost; then cancelled by its owner or simply left queued. */
+  const unanswered = (change: string, cancelled: boolean) => {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", repo: "owner/repo", changeId: change.repeat(32), commitId: change.repeat(40), bookmark: candidateBookmark(change.repeat(32)), submittedBy: "author", admission });
+    if (cancelled) log.append(id, { type: "cancelled", reason: "cancelled by the author" });
+    return id;
+  };
+  const cancelled = unanswered("a", true), refusedLate = unanswered("e", true), abandoned = unanswered("f", false);
+  let down = true, settledWakes = 0;
+  const build = fakeBuild(undefined, (input) => down ? { kind: "unavailable", reason: "Build could not be reached" }
+    : input.operationId === refusedLate ? { kind: "refused", code: "bind_generation_stale" } : { kind: "accepted", value: { admission: { recordedAt: null } } });
+  const drain = createReceiptDrain({ log, route: build.route, initialBackoffMs: 5, maxBackoffMs: 20, onAdmissionSettled: () => { settledWakes++; } });
+  drain.wake(); await drain.idle();
+  // While Build is down, every unanswered admission is owed and visible.
+  assert.deepEqual([log.snapshot("test").build?.state, log.snapshot("test").build?.pending], ["unavailable", 3]);
+  down = false;
+  await until(() => log.snapshot("test").build?.pending === 0);
+  const submittedSeq = (id: string) => log.events({ operationId: id }).find((row) => row.event.type === "submitted")!.seq;
+  assert.ok([cancelled, refusedLate, abandoned].every((id) => build.admissions.some((request) => request.operationId === id && request.sequence === submittedSeq(id))));
+  // The cancelled one Build admitted now reports how it ended, which releases Build's custody.
+  await until(() => build.sent.some((receipt) => receipt.operationId === cancelled));
+  assert.deepEqual(build.sent.filter((receipt) => receipt.operationId === cancelled).map((receipt) => [receipt.event, receipt.failure?.recovery]), [["failed", "cancelled"]]);
+  // The one Build refused after it closed is settled once and owes nothing more.
+  assert.deepEqual(log.events({ operationId: refusedLate }).filter((row) => row.event.type === "build_receipt").map((row) => row.event),
+    [{ type: "build_receipt", sequence: submittedSeq(refusedLate), state: "parked", code: "bind_generation_stale" }]);
+  // The one left queued is admitted without its author, and the queue is woken to start it.
+  const left = log.operation(abandoned)!;
+  assert.ok(left.kind === "landing" && left.admission === "admitted" && left.status === "queued");
+  assert.equal(settledWakes, 3);
+  const offered = build.admissions.length;
+  drain.wake(); await drain.idle();
+  assert.equal(build.admissions.length, offered);
   drain.close(); log.close();
 });
 

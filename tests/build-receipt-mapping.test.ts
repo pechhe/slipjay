@@ -148,7 +148,7 @@ test("repair linkage comes only from the repair the author proposed, never from 
   log.close();
 });
 
-test("no-Ticket, multi-Ticket and unresolved scope pass through unchanged, with one terminal fact per operation", () => {
+test("no-Ticket, multi-Ticket and unknown-body-revision scope pass through unchanged, with one terminal fact per operation", () => {
   const log = openOperationLog(":memory:");
   const landed: OperationEvent[] = [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
     { type: "landed", base: "b".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin" }];

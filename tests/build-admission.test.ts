@@ -24,9 +24,9 @@ const submission = (commitId = "a".repeat(40), extra: Partial<SubmitRequest> = {
 function fixture(answers: BuildAdmission[] | null) {
   const log = openOperationLog(":memory:");
   const offered: BuildAdmissionRequest[] = [];
-  let woken = 0;
+  let woken = 0, unresolved = 0;
   const handler = createRunnerHandler({
-    log, token, runnerName: "test-runner", readLog: () => Promise.resolve(""), onSubmitted: () => { woken++; },
+    log, token, runnerName: "test-runner", readLog: () => Promise.resolve(""), onSubmitted: () => { woken++; }, onAdmissionUnresolved: () => { unresolved++; },
     kill: () => ({ status: "idle" }), subscribe: () => () => {},
     ...answers ? { admitBuild: (request: BuildAdmissionRequest) => { offered.push(request); return Promise.resolve(answers.shift() ?? { outcome: "unavailable", reason: "unscripted" }); } } : {},
   });
@@ -34,7 +34,7 @@ function fixture(answers: BuildAdmission[] | null) {
     const response = await handler(new Request(`http://runner${RUNNER_API}/operations`, { method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(body) }));
     return { status: response.status, body: await response.json() as { operation?: Operation; error?: string; retryable?: boolean; superseded?: string } };
   };
-  return { log, offered, answers, submit, get woken() { return woken; } };
+  return { log, offered, answers, submit, get woken() { return woken; }, get unresolved() { return unresolved; } };
 }
 const admitted = (request?: Partial<BuildAdmissionRequest>): BuildAdmission => ({ outcome: "admitted", sequence: request?.sequence ?? 0, sessionId: binding.sessionId, recordedAt: "2026-10-15T21:00:00.000Z" });
 
@@ -67,7 +67,6 @@ test("Build's refusals end the operation without running it and name Build's cod
     // Only another delivery in Build's custody is worth retrying unchanged later.
     assert.equal(result.build.retryable, code === "delivery_pending");
     if (code === "delivery_pending") assert.match(result.reason, /land again once it has finished/);
-    assert.equal(f.woken, 0);
     assert.equal(f.log.openOperations().length, 0);
     f.log.close();
   }
@@ -134,6 +133,30 @@ test("a newer candidate names the queued one it supersedes, first resolving an a
   assert.equal(h.log.operationsForChange("owner/repo", changeId).length, 1);
   assert.ok(h.log.operation(pendingA)!.kind === "landing" && (h.log.operation(pendingA) as { admission?: string }).admission === "pending");
   f.log.close(); g.log.close(); h.log.close();
+});
+
+test("a newer candidate replaces the admitted queued one only once Build admits it; refused or unanswered, that one keeps its place", async () => {
+  // Refused (a stale bind): nothing is lost, and the admitted candidate still runs.
+  const f = fixture([admitted(), { outcome: "refused", code: "bind_generation_stale" }]);
+  const a = (await f.submit(submission("a".repeat(40)))).body.operation!.id;
+  const stale = await f.submit(submission("e".repeat(40)));
+  assert.equal(stale.body.operation!.status, "declined");
+  assert.equal(stale.body.superseded, undefined);
+  assert.equal(f.offered[1]!.supersedesOperationId, a);
+  const kept = f.log.operation(a)!;
+  assert.ok(kept.status === "queued" && kept.position === 1 && kept.waitingFor === undefined);
+  // Unanswered: the admitted candidate neither runs nor is superseded until Build answers, and the drain is asked to keep offering.
+  const g = fixture([admitted(), { outcome: "unavailable", reason: "Build could not be reached" }, admitted()]);
+  const first = (await g.submit(submission("a".repeat(40)))).body.operation!.id;
+  assert.equal((await g.submit(submission("e".repeat(40)))).status, 503);
+  assert.equal(g.unresolved, 1);
+  const waiting = g.log.operation(first)!;
+  assert.ok(waiting.status === "queued" && waiting.position === undefined && waiting.waitingFor === "Build admission of a newer candidate");
+  // Admitted on a later offer: only now is the earlier candidate superseded.
+  const retried = await g.submit(submission("e".repeat(40)));
+  assert.ok(retried.body.operation!.kind === "landing" && retried.body.operation!.admission === "admitted");
+  assert.equal(g.log.operation(first)!.status, "superseded");
+  f.log.close(); g.log.close();
 });
 
 test("a runner without Build configuration refuses bound submissions and still accepts unbound ones", async () => {

@@ -1,3 +1,4 @@
+import { admissionSettled, buildAdmitter, settleAdmission } from "./build-admission.ts";
 import type { BuildAdmissionRecord, BuildRoute } from "./build-admission.ts";
 import { recoveryKey, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { LandingOperation, OperationEvent, OperationLog, RunnerStage, StoredEvent } from "./runner-contract.ts";
@@ -180,6 +181,12 @@ function failureOf(operation: LandingOperation, events: readonly StoredEvent[], 
   };
 }
 
+/** The `submitted` fact of a Build-bound landing whose admission Build has not answered: the first receipt it owes. */
+export function owedAdmission(history: readonly StoredEvent[]): StoredEvent | undefined {
+  const submitted = history.find((row) => row.event.type === "submitted");
+  return submitted?.event.type === "submitted" && "admission" in submitted.event && submitted.event.admission && !admissionSettled(history) ? submitted : undefined;
+}
+
 /** Whether a receipt has been settled: delivered, or parked because Build will never accept it. */
 export const receiptSettlement = (history: readonly StoredEvent[], receipt: Pick<BuildReceipt, "operationId" | "key">) =>
   history.findLast((row) => row.operationId === receipt.operationId && row.event.type === "build_receipt" && row.event.sequence === receipt.key)?.event as
@@ -197,6 +204,10 @@ export function deliveryState(log: OperationLog): BuildDeliveryState | null {
   if (!bound.length && !control) return null;
   const recoveries = log.publicationRecoveries();
   let pending = 0, parked = 0, oldest: string | null = null;
+  for (const { history } of bound) {
+    const admission = owedAdmission(history);
+    if (admission) { pending++; if (oldest === null || admission.at < oldest) oldest = admission.at; }
+  }
   for (const { operation, history } of bound) for (const receipt of owedReceipts(operation, history, recoveries)) {
     const settled = receiptSettlement(history, receipt);
     // A run attached to a parked fact can never be sent; the parked fact already says why.
@@ -210,12 +221,15 @@ export function deliveryState(log: OperationLog): BuildDeliveryState | null {
 }
 
 /**
- * Delivers owed receipts in ledger order, independently of landing and publication. A receipt Build refuses is
- * parked with its code and never blocks another; when Build gives no answer the drain backs off and resends the
- * same receipts, which Build replays, so a restart or a lost response delays delivery but never loses it.
+ * Delivers owed receipts in ledger order, independently of landing and publication. Admissions Build never
+ * answered come first, including those of operations closed meanwhile, so Build's custody is always settled. A
+ * receipt Build refuses is parked with its code and never blocks another; when Build gives no answer the drain backs
+ * off and resends the same receipts, which Build replays, so a restart or a lost response delays delivery but never
+ * loses it.
  */
-export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute; initialBackoffMs?: number; maxBackoffMs?: number }) {
+export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute; initialBackoffMs?: number; maxBackoffMs?: number; onAdmissionSettled?(): void }) {
   const { log, route } = input;
+  const admit = buildAdmitter(route);
   const initial = input.initialBackoffMs ?? 1_000, ceiling = input.maxBackoffMs ?? 300_000;
   let backoff = initial, timer: ReturnType<typeof setTimeout> | undefined, running: Promise<void> | undefined, again = false, closed = false;
   const latestDelivery = () => log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "build_delivery")?.event;
@@ -225,7 +239,20 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
     const current = latest?.type === "build_delivery" ? latest.state : "available";
     if (current !== state) log.append(RUNNER_CONTROL_ID, { type: "build_delivery", state, ...reason ? { reason } : {} });
   };
+  const unavailable = (reason: string) => {
+    mark("unavailable", reason);
+    schedule(backoff);
+    backoff = Math.min(backoff * 2, ceiling);
+  };
   async function pass(): Promise<void> {
+    for (const { operation, history } of log.buildBound()) {
+      if (closed) return;
+      if (!owedAdmission(history)) continue;
+      const result = await settleAdmission(log, admit, operation.id);
+      if (!result.resolved) return unavailable(result.reason);
+      // Admitted, it may start; refused, the candidate it would have replaced may.
+      input.onAdmissionSettled?.();
+    }
     // A delivered attempt fact makes its runs sendable, so pass again until nothing more is.
     for (let delivered = true; delivered && !closed;) {
       delivered = false;
@@ -234,12 +261,7 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
       for (const receipt of owed) {
         if (closed) return;
         const answer = await route(receipt.action, receipt.input);
-        if (answer.kind === "unavailable") {
-          mark("unavailable", answer.reason);
-          schedule(backoff);
-          backoff = Math.min(backoff * 2, ceiling);
-          return;
-        }
+        if (answer.kind === "unavailable") return unavailable(answer.reason);
         log.append(receipt.operationId, answer.kind === "accepted" ? { type: "build_receipt", sequence: receipt.key, state: "delivered" }
           : { type: "build_receipt", sequence: receipt.key, state: "parked", code: answer.code });
         delivered ||= answer.kind === "accepted";

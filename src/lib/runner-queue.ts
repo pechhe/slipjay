@@ -18,7 +18,7 @@ import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHave
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
-import { admissionLane, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { admissionLane, awaitingReplacement, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { commandEvidence } from "./command-evidence.ts";
@@ -489,9 +489,10 @@ export function createRunnerQueue(input: {
    */
   function wakeMain(): void {
     if (recovering || log.paused()) return;
-    for (const operation of log.openOperations()) {
+    const open = log.openOperations();
+    for (const operation of open) {
       if (admitted.size >= workers) return;
-      if (operation.kind === "deploy" || operation.status !== "queued" || (operation.kind === "landing" && operation.admission === "pending")) continue;
+      if (operation.kind === "deploy" || operation.status !== "queued" || (operation.kind === "landing" && operation.admission === "pending") || awaitingReplacement(operation, open)) continue;
       const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
       const active = prefixes.get(operation.repo) ?? [];
       const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
@@ -590,7 +591,7 @@ export function createRunnerQueue(input: {
       if (!tail.postIntegration.ok)
         throw new HeldIntegration(commitId, "finalizing", `Post-integration ${tail.postIntegration.status}: ${tail.postIntegration.reason ?? "no reason recorded"}`, tail.postIntegration.output);
       if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed");
-      if (log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === commitId))
+      if (log.held().some((entry) => entry.repo === operation.repo && entry.commitId === commitId))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId, retried: true });
     }
     const setStage = (next: RunnerStage) => {
@@ -652,7 +653,7 @@ export function createRunnerQueue(input: {
         await release(operation);
         return;
       }
-      const recordedHold = log.snapshot(executor.host).held.find((entry) => entry.repo === operation.repo);
+      const recordedHold = log.held().find((entry) => entry.repo === operation.repo);
       if (!prefix && recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: recordedHold.commitId });
       // A commit integrated by an earlier turn but never published (a failed push, or
@@ -660,7 +661,7 @@ export function createRunnerQueue(input: {
       // Finish it before anything moves the bookmark: dropping it would orphan that state.
       if (!prefix && await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
         const held = (await revisionFacts(checkout, branch)).commitId;
-        if (!log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === held))
+        if (!log.held().some((entry) => entry.repo === operation.repo && entry.commitId === held))
           append(operation.id, { type: "integration_held", repo: operation.repo, commitId: held, reason: "An earlier integration is not yet published" });
         progress(`Finishing ${held.slice(0, 12)}, integrated by an earlier landing but not yet published`);
         await finishIntegration(context, held);
@@ -992,7 +993,7 @@ export function createRunnerQueue(input: {
       let verdict: OperationEvent = { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; land again` };
       let integrated = log.events({ operationId: operation.id }).map((stored) => stored.event).findLast((event) => event.type === "integrated");
       const retainUnresolved = () => {
-        if (integrated && !log.snapshot(executor.host).held.some((entry) => entry.repo === operation.repo && entry.commitId === integrated!.commitId))
+        if (integrated && !log.held().some((entry) => entry.repo === operation.repo && entry.commitId === integrated!.commitId))
           append(operation.id, { type: "integration_held", repo: operation.repo, commitId: integrated.commitId, reason: "Publication of the retained integration is unconfirmed after restart" });
       };
       retainUnresolved();
@@ -1057,7 +1058,7 @@ export function createRunnerQueue(input: {
         if (!context) continue;
         const branch = context.integrationBranch;
         const remote = context.configuration.remote ?? "origin";
-        let known = log.snapshot(executor.host).held.find((entry) => entry.repo === repo);
+        let known = log.held().find((entry) => entry.repo === repo);
         // Local evidence survives even when a remote outage prevents confirmation.
         const ahead = await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"]);
         if (ahead) {
@@ -1067,7 +1068,7 @@ export function createRunnerQueue(input: {
         }
         const fetched = await fetchIntegration(checkout, remote, branch);
         if (fetched.code !== 0) continue;
-        known = log.snapshot(executor.host).held.find((entry) => entry.repo === repo);
+        known = log.held().find((entry) => entry.repo === repo);
         if (known && await revisionExists(checkout, `${known.commitId} & ::${branch}@${remote}`))
           append(RUNNER_CONTROL_ID, { type: "integration_recovered", repo, commitId: known.commitId });
       } catch { /* An unavailable checkout cannot prove recovery; retain recorded holds. */ }

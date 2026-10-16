@@ -717,15 +717,21 @@ the operation as `declined` with Build's code, and nothing runs. Only `delivery_
 is marked retryable: another delivery of the Spec is still in Build's custody, so land
 again once it has finished. When Build does not
 answer, the runner keeps the operation awaiting admission and refuses the submission
-as retryable (503): running `slipjay land` again resends the same admission, which
-Build replays, so a lost response never opens a second operation. A newer candidate
-of the same change names the queued one it supersedes to Build; if that one's admission
-never got an answer, the runner resends it first, and while Build stays silent it
-refuses the newer candidate as retryable and leaves the queued one as it was.
+as retryable (503). The receipt drain then keeps offering that same admission until Build
+answers, which Build replays, so a lost response never opens a second operation and
+needs no further landing; running `slipjay land` again only asks sooner. An owner may
+cancel an operation awaiting admission: the drain still settles its admission, and if
+Build had admitted it, reports it `failed` (`cancelled`), so Build never keeps custody of
+abandoned work. A newer candidate of the same change names the queued one it supersedes
+to Build; if that one's admission never got an answer, the runner resends it first, and
+while Build stays silent it refuses the newer candidate as retryable and leaves the queued
+one as it was. A Build-bound newer candidate replaces the queued one only once Build admits
+it: until Build answers, the queued one waits (`waitingFor` reads `Build admission of a
+newer candidate`), and if Build refuses the newer one, the queued one keeps its place.
 
 **Build receipts.** For each admitted landing the runner owes Build a receipt for each
 fact it reports, named by the operation and that fact's ledger sequence: its admission
-delivers `submitted`; its first held integration is reported `held`; its outcome is
+delivers `submitted`, and an admission Build never answered is owed like any receipt; its first held integration is reported `held`; its outcome is
 `published`, or `failed` with how it recovers (`publication_unknown` when it failed at or
 after integration, `cancelled` for an owner cancel or kill, `superseded`,
 `policy_refusal`, `infrastructure_retry`, otherwise `code_repair`); and an integration

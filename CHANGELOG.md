@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Settle Build admission independently, and supersede only after Build admits (#73, #60):**
+  the receipt drain keeps offering an admission Build never answered, including for an
+  operation cancelled or abandoned meanwhile, and reports a late-admitted cancelled one as
+  `failed` (`cancelled`), so Build never keeps custody of abandoned work. A Build-bound
+  resubmission replaces the queued candidate of its change only once Build admits it; until
+  then that candidate waits, and a refused resubmission leaves it in place.
+
+- **Read held integrations without rebuilding Build delivery state (#74, #60):** publication
+  checks and `/health` read held integrations directly; only the queue snapshot computes
+  Build delivery state.
+
 ## v3.19.0
 
 - **Map every runner fact to Build receipts truthfully (#70, #60):** admitted landings now

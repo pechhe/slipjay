@@ -1,4 +1,5 @@
 import type { BuildBinding, SubmissionHandoff } from "./submission-handoff.ts";
+import type { OperationLog, StoredEvent } from "./runner-contract.ts";
 
 /** The runner's dedicated credential for Build's runner route, from its `bws run` environment. */
 export const BUILD_TOKEN_ENV = "YARDSMITH_SLIPJAY_BUILD_TOKEN";
@@ -48,6 +49,42 @@ export function admissionRequest(input: { repo: string; operationId: string; seq
     helperRevisions: record.helperRevisions, repairsOperationId: record.repairsOperationId,
     bindGeneration: binding.bindGeneration, sessionId: binding.sessionId, supersedesOperationId: record.supersedes,
   };
+}
+
+/** Whether a Build-bound landing's admission has an answer: admitted, refused as its outcome, or refused once closed. */
+export function admissionSettled(history: readonly StoredEvent[]): boolean {
+  const submitted = history.find((row) => row.event.type === "submitted");
+  return history.some((row) => row.event.type === "build_admitted" || row.event.type === "declined" && row.event.build !== undefined
+    || row.event.type === "build_receipt" && row.event.sequence === submitted?.seq);
+}
+
+/**
+ * Offers a Build-bound landing's admission at its `submitted` sequence and records Build's answer, whether the
+ * submission handler or the receipt drain sends it: Build replays a resent admission, and the first answer
+ * recorded stands. Once admitted it replaces the queued candidates of its change, which waited for this answer.
+ * A refusal ends it as declined; if it closed while unanswered, the refusal settles its admission instead.
+ */
+export async function settleAdmission(log: OperationLog, admit: BuildAdmitter, operationId: string): Promise<{ resolved: true } | { resolved: false; reason: string }> {
+  const submitted = log.events({ operationId }).find((row) => row.event.type === "submitted");
+  if (submitted?.event.type !== "submitted" || submitted.event.kind === "release" || submitted.event.kind === "deploy" || submitted.event.kind === "reset" || !submitted.event.admission)
+    throw new Error(`Operation ${operationId} has no Build admission to resolve`);
+  const { repo, changeId, commitId, admission } = submitted.event;
+  if (admissionSettled(log.events({ operationId }))) return { resolved: true };
+  const answer = await admit(admissionRequest({ repo, operationId, sequence: submitted.seq, occurredAt: submitted.at, commitId, record: admission }));
+  if (answer.outcome === "unavailable") return { resolved: false, reason: answer.reason };
+  if (admissionSettled(log.events({ operationId }))) return { resolved: true };
+  if (answer.outcome === "admitted") {
+    log.append(operationId, { type: "build_admitted", sequence: answer.sequence, sessionId: answer.sessionId, recordedAt: answer.recordedAt });
+    // Only candidates submitted before it: one admitted late after being cancelled never displaces a newer one.
+    for (const earlier of log.operationsForChange(repo, changeId))
+      if (earlier.status === "queued" && log.events({ operationId: earlier.id }).find((row) => row.event.type === "submitted")!.seq < submitted.seq)
+        log.append(earlier.id, { type: "superseded", by: operationId });
+  } else if (!log.operation(operationId)?.result) {
+    const retryable = RETRYABLE_BUILD_REFUSALS.includes(answer.code);
+    log.append(operationId, { type: "declined", paths: [], build: { code: answer.code, retryable },
+      reason: `Build refused admission: ${answer.code}${retryable ? "; another delivery of this Spec is still in Build's custody: land again once it has finished" : ""}` });
+  } else log.append(operationId, { type: "build_receipt", sequence: submitted.seq, state: "parked", code: answer.code });
+  return { resolved: true };
 }
 
 /** Build's refusals the author can retry later unchanged: another delivery of the Spec is still in its custody. */

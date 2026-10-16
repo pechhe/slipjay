@@ -4,7 +4,7 @@ import { classifyFailure } from "./failure-classification.ts";
 import { deliveryState } from "./build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { admissionLane, recoveryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { admissionLane, awaitingReplacement, recoveryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState } from "./runner-contract.ts";
 
 export function newOperationId(): string {
@@ -73,7 +73,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const held = paused() !== null;
     // Until Build admits it, a Build-bound landing holds no place in any lane.
     for (const operation of open) if (operation.kind === "landing" && operation.admission === "pending" && operation.status === "queued") operation.waitingFor = "Build admission";
-    const serial = open.filter((operation) => operation.kind !== "deploy" && !(operation.kind === "landing" && operation.admission === "pending"));
+    // Nor does a candidate Build may yet replace with a newer one.
+    const replaced = open.filter((operation) => awaitingReplacement(operation, open));
+    for (const operation of replaced) operation.waitingFor = "Build admission of a newer candidate";
+    const serial = open.filter((operation) => operation.kind !== "deploy" && !(operation.kind === "landing" && operation.admission === "pending") && !replaced.includes(operation));
     const busy = serial.filter((operation) => operation.status === "running");
     const admittedTo = (operation: Operation) => admissionLane(lane(operation.repo), operation.repo, operation.kind);
     const holding = (first: Operation | undefined) => first && first.kind !== "deploy" ? busy.find((operation) => lane(operation.repo) === lane(first.repo) && (
@@ -231,8 +234,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
     },
     paused,
-    buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'build_admitted'
-      OR (type = 'submitted' AND json_extract(data, '$.chore') IS NOT NULL) GROUP BY operation_id ORDER BY MIN(seq)`).all() as { operation_id: string }[])
+    held,
+    buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+      AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL) ORDER BY seq`).all() as { operation_id: string }[])
       .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history);
         return operation?.kind === "landing" ? [{ operation, history }] : []; }),
     publicationRecoveries: () => {

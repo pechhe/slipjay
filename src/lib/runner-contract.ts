@@ -278,7 +278,9 @@ export interface OperationLog {
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
   paused(): { by: string; at: string } | null;
-  /** Every landing Build admitted or its author declared a chore, with its own events: what receipt delivery reads. */
+  /** Integrations kept locally but not yet published, by repository. */
+  held(): HeldIntegrationState[];
+  /** Every Build-bound landing (offered for admission, or declared a chore), with its own events: what receipt delivery reads. */
   buildBound(): { operation: LandingOperation; history: StoredEvent[] }[];
   /** Every event confirming an integrated commit published, in ledger order, keyed by `recoveryKey(repo, commitId)`. */
   publicationRecoveries(): Map<string, StoredEvent[]>;
@@ -459,6 +461,15 @@ export const repositoryLane = (config: Pick<RunnerConfig, "repos">, repo: string
  */
 export const admissionLane = (lane: string, repo: string, kind: Operation["kind"]): string =>
   kind === "release" && lane === repositoryKey(repo) ? `${lane}\0release` : lane;
+
+/**
+ * Whether a queued landing must wait because a newer candidate of its change awaits Build admission: Build may admit
+ * that one in its place, so it neither starts nor is superseded until Build answers.
+ */
+export const awaitingReplacement = (operation: Operation, open: readonly Operation[]): boolean =>
+  operation.kind === "landing" && operation.status === "queued" && operation.admission !== "pending" && open.some((other) =>
+    other.kind === "landing" && other.id !== operation.id && other.status === "queued" && other.admission === "pending"
+    && repositoryKey(other.repo) === repositoryKey(operation.repo) && other.changeId === operation.changeId);
 
 /** A repository's `owner/name` as the runner keys it: GitHub names are case-insensitive. */
 export const repositoryKey = (name: string): string => name.toLowerCase();
