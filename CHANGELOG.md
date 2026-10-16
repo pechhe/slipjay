@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.22.1
+
 - **An empty pool fills itself:** a `start` that finds no ready spare and adds a fresh
   workspace now starts a background refill, as a claim already did. Before, a repository
   whose pool was empty never refilled, so every start stayed cold.
