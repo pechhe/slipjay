@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.21.0
+
 - **Limit spares per machine and refresh stale spares once (#75):** `spares` in
   `~/.slipjay/config.json`, keyed by integration checkout path, lowers a repository's
   declared spare count on that machine (`0` disables the pool there; spares beyond it are
