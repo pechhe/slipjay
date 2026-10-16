@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.20.0
+
 - **Settle Build admission independently, and supersede only after Build admits (#73, #60):**
   the receipt drain keeps offering an admission Build never answered, including for an
   operation cancelled or abandoned meanwhile, and reports a late-admitted cancelled one as
