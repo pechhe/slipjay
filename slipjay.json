@@ -10,5 +10,6 @@
   ],
   "unattendedMergeToIntegration": true,
   "parallelExecution": true,
+  "spares": 8,
   "generatedPaths": [".build"]
 }
