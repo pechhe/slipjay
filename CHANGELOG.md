@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.23.0
+
 - **HQ Build as a repository's tracker:** `"tracker": "build"` in `slipjay.json` makes a
   repository's work-item numbers HQ Build numbers; GitHub Issues stay the default. A landing
   names its item in a `Build: #N` trailer and, with no description, takes its title from Build;
