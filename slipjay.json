@@ -10,5 +10,5 @@
   ],
   "unattendedMergeToIntegration": true,
   "parallelExecution": true,
-  "generatedPaths": [".build/menu-bar"]
+  "generatedPaths": [".build"]
 }
