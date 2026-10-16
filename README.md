@@ -355,6 +355,8 @@ and held state through the existing recovery path.
     and `jj`: settings set as repository config in every warm checkout. It must name `user.name` and
     `user.email`, the identity the runner commits as (use an email GitHub links to the owner);
     the runner also sets `snapshot.max-new-file-size` to 64MiB unless `jj` overrides it, so none of these depend on the host's jj config.
+    An optional `build.origin` names the HQ that Build admission and receipts go to; it takes effect
+    only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs. A reset's step output goes to the owner-only
     `logs/<operation>.reset-output` beside it, never into the log.
