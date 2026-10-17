@@ -9,16 +9,21 @@ import { poolRefillLogPath } from "../src/lib/workspace-paths.ts";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
 import { withWorkspaceTransaction } from "../src/lib/workspace-transaction.ts";
 
-// The suite disables the allocation-time trigger; these tests exercise it.
-delete process.env.SLIPJAY_AUTO_HOUSEKEEPING;
 
 const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
 const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
 const held = (promise: Promise<unknown>) => promise.then(() => true, () => true);
-/** Allocate without the trigger, so no detached sweep races the assertions. */
-async function quietly<T>(allocate: () => Promise<T>): Promise<T> {
-  process.env.SLIPJAY_AUTO_HOUSEKEEPING = "0";
-  try { return await allocate(); } finally { delete process.env.SLIPJAY_AUTO_HOUSEKEEPING; }
+/**
+ * The suite keeps the allocation-time trigger off, so no detached sweep races the lock
+ * and stamp a test asserts on; it is on only inside `triggered`.
+ */
+async function triggered<T>(body: () => Promise<T>): Promise<T> {
+  const prior = process.env.SLIPJAY_AUTO_HOUSEKEEPING;
+  delete process.env.SLIPJAY_AUTO_HOUSEKEEPING;
+  try { return await body(); } finally {
+    if (prior === undefined) delete process.env.SLIPJAY_AUTO_HOUSEKEEPING;
+    else process.env.SLIPJAY_AUTO_HOUSEKEEPING = prior;
+  }
 }
 
 test("housekeeping retires an unused empty workspace without any landing", async () => {
@@ -69,7 +74,7 @@ test("a repository whose sweep is running does not block another repository's ho
 test("the detached housekeeping child runs the sweep and logs its outcome", async () => {
   const f = await project();
   try {
-    const result = await startHousekeeping(f.repo);
+    const result = await triggered(() => startHousekeeping(f.repo));
     assert.equal(result.started, true);
     const deadline = Date.now() + 30_000;
     let log = "";
@@ -86,7 +91,7 @@ test("allocating a workspace through the library schedules the repository sweep,
   const f = await project();
   try {
     await rm(poolRefillLogPath(), { force: true });
-    await createWorkspace("first", f.repo);
+    await triggered(() => createWorkspace("first", f.repo));
     const deadline = Date.now() + 30_000;
     let log = "";
     while (!/housekeeping: \{"ran":true/.test(log)) {
@@ -94,29 +99,29 @@ test("allocating a workspace through the library schedules the repository sweep,
       await new Promise((resolve) => setTimeout(resolve, 100));
       log = await readFile(poolRefillLogPath(), "utf8").catch(() => "");
     }
-    assert.deepEqual(await startHousekeeping(f.repo), { started: false, reason: "recent" });
+    assert.deepEqual(await triggered(() => startHousekeeping(f.repo)), { started: false, reason: "recent" });
   } finally { await f.dispose(); }
 }, 120_000);
 
 test("a sweep that throws is still stamped, so the next trigger waits out the interval", async () => {
   const f = await project();
   try {
-    await quietly(() => createWorkspace("Issue #46", f.repo, { issueNumber: 46 }));
+    await createWorkspace("Issue #46", f.repo, { issueNumber: 46 });
     const failing = { now: later(), issueClosed: () => { throw new Error("tracker down"); } };
     await assert.rejects(runHousekeeping(f.repo, failing), /tracker down/);
     assert.deepEqual(await runHousekeeping(f.repo, failing), { ran: false, reason: "recent" });
-    assert.deepEqual(await startHousekeeping(f.repo), { started: false, reason: "recent" });
+    assert.deepEqual(await triggered(() => startHousekeeping(f.repo)), { started: false, reason: "recent" });
   } finally { await f.dispose(); }
 }, 120_000);
 
 test("a trigger from a subdirectory or a workspace finds the integration root's stamp", async () => {
   const f = await project();
   try {
-    const workspace = await quietly(() => createWorkspace("inside", f.repo));
+    const workspace = await createWorkspace("inside", f.repo);
     assert.equal((await runHousekeeping(f.repo, { issueClosed: () => null })).ran, true);
     await mkdir(join(f.repo, "nested", "deeper"), { recursive: true });
     for (const cwd of [join(f.repo, "nested", "deeper"), workspace.workspacePath]) {
-      assert.deepEqual(await startHousekeeping(cwd), { started: false, reason: "recent" }, cwd);
+      assert.deepEqual(await triggered(() => startHousekeeping(cwd)), { started: false, reason: "recent" }, cwd);
     }
   } finally { await f.dispose(); }
 }, 120_000);

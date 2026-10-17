@@ -114,7 +114,7 @@ landing.
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 | `SLIPJAY_RESET_TARGET`, `_SOURCE`, `_REASON_FILE` | The runner's `reset` command and target probe (see [Reset](#reset)). A policy's `environmentKeys` may not start with `SLIPJAY_RESET_`. |
 
-Every workspace allocation schedules a detached sweep of the repository's unused empty and delivered workspaces, at most once every 15 minutes; `SLIPJAY_AUTO_HOUSEKEEPING=0` turns that off (`slipjay prune --empty` still sweeps on demand).
+Every workspace allocation, Issue workspace recovery included, schedules a detached sweep of the repository's unused empty and delivered workspaces, at most once every 15 minutes, counted from each attempt so a failing sweep is retried no faster; `SLIPJAY_AUTO_HOUSEKEEPING=0` turns that off (`slipjay prune --empty` still sweeps on demand). An empty workspace of a closed Issue is kept for an hour after it was last assigned, so a just-resumed or repair checkout survives the sweep its own allocation starts. Each sweep's outcome is one line in `pool-refill.log` in the state home, the log the spare refill and start metrics also append to.
 
 slipjay reads `SLIPJAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
 and gh. The pre-v1.1.0 Peach environment names are neither set nor read.

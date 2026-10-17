@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A just-allocated checkout survives its own sweep:** an empty workspace of a closed Issue is
+  now kept for an hour after it was last assigned (a resume without a task refreshes that time),
+  so `slipjay repair` and a resumed closed-Issue start no longer risk losing the checkout to the
+  sweep their allocation starts; `prune --empty` still removes it at once. A sweep that fails is
+  retried at the same 15-minute bound, the recency check matches from a subdirectory or another
+  workspace, and Issue workspace recovery also starts the sweep. The sweep's outcome is logged to
+  `pool-refill.log`, shared with the spare refill. Library: `runHousekeeping` runs one throttled,
+  serialised sweep and `startHousekeeping` starts it detached (#85, #86).
+
 ## v3.24.4
 
 - **`slipjay repair <failed-operation>`:** sets up a failed landing's repair in one step. It
