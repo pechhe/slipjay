@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.24.2
+
 - **Faster starts:** claiming a spare spawned about 120 `jj` and `git` processes, so a start
   took 40 seconds on a loaded machine. Listing workspaces no longer resolves the integration
   policy it never used, the policy read resolves its bookmark once, and a claim reuses one
