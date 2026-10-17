@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A landing record naming another delivery is explained, not promised away:** a landed
+  workspace whose landing record names an artifact already archived as another workspace's
+  landing is kept by cleanup and the sweep with a reason naming that workspace, and `prune --plan`
+  now reports the same instead of planning its removal. Such a record proves nothing about the
+  checkout, so `slipjay remove` judges it as one that never landed. Removing a workspace that
+  has not landed now also keeps one holding a file no history holds, as retirement elsewhere
+  does, instead of deleting it (#77).
+
 ## v3.27.0
 
 - **`policy set` reports its operation while it waits:** with `--json-lines`, `slipjay policy set`

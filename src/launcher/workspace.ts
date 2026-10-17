@@ -168,9 +168,11 @@ async function removeWorkspaceAt(path: string): Promise<number> {
     console.log(`Removed landed workspace jj:${name}`);
     return 0;
   }
-  if (result.reason === "not-landed") {
+  // A landing record another delivery's archive disowns proves nothing: judge the checkout as never landed.
+  if (result.reason === "not-landed" || result.reason === "archived-elsewhere") {
     try {
-      await removeWorkspace(context.integration.root, name);
+      // Removing never deletes a file no history holds, one already there or one teardown writes.
+      await removeWorkspace(context.integration.root, name, { retainMaterial: true });
       console.log(`Removed untouched workspace jj:${name}`);
       return 0;
     } catch (error) {

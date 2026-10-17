@@ -13,7 +13,7 @@ import type { LandingState } from "./workspace-state.ts";
 import { generatedPathMatchers, readIntegrationPolicy } from "./execution-policy.ts";
 import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-delivery-lifecycle.ts";
 import { callerPids, describeHolders, processAlive, workspaceHolders } from "./workspace-holders.ts";
-import { archiveIntegratedWorkspaceEvidence } from "./workspace-finalization.ts";
+import { archiveIntegratedWorkspaceEvidence, conflictingArchive } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
 import { withWorkspaceTransaction } from "./workspace-transaction.ts";
 
@@ -33,7 +33,8 @@ type CleanupResult = {
   cleaned: boolean;
   reason?: string;
   paths?: string[];
-  /** A failed post-integration record a later published landing superseded. */
+  /** `archived-elsewhere`: the workspace whose landing already archived the artifact this checkout's record names. */
+  archivedAs?: string;
 };
 
 async function jj(cwd: string, args: string[]): Promise<string> {
@@ -63,7 +64,11 @@ export async function unsnapshottedEdits(root: string, integrationRoot: string, 
 }
 
 /** One human explanation of why cleanup kept a landed workspace. */
-export function describeRetention(result: { reason?: string; paths?: string[] } | null | undefined): string {
+export function describeRetention(result: { reason?: string; paths?: string[]; archivedAs?: string } | null | undefined): string {
+  if (result?.reason === "archived-elsewhere") {
+    return `its landing record names an artifact already archived as workspace ${result.archivedAs}'s landing, so it proves nothing about this checkout: `
+      + "if the checkout holds nothing you need, remove it with `slipjay remove <its path>`";
+  }
   if (result?.reason !== "unique-files") return String(result?.reason ?? "cleanup did not complete");
   return `holds files cleanup will not delete: ${(result.paths ?? []).join(", ")}`
     + " (remove them, declare generated output in slipjay.json generatedPaths, or evidence to preserve in evidencePaths)";
@@ -278,7 +283,7 @@ async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { 
 
 type LandedChecks =
   | { ready: false; result: CleanupResult }
-  | { ready: true; context: WorkspaceContext; state: LandingState; commit: string };
+  | { ready: true; context: WorkspaceContext; state: LandingState; commit: string; gitDirectory: string };
 
 /**
  * Every check cleanup makes before it retires a landed checkout, in its order.
@@ -310,6 +315,10 @@ export async function landedCleanupChecks(cwd: string, { readOnly = false }: { r
   if (retention) return keep(retention);
   if (!await revisionExists(context.integration.root, `${state.artifactCommitId} & ::${state.integrationBranch}`))
     throw new Error("Cannot prove the landed artifact is integrated; workspace retained");
+  const gitDirectory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
+  // A record naming another delivery's artifact cannot be archived, so nothing proves this checkout's own landing.
+  const archived = await conflictingArchive(gitDirectory, state);
+  if (archived) return { ready: false, result: { cleaned: false, reason: "archived-elsewhere", archivedAs: archived.workspaceName } };
   if (state.cleanupPending) {
     if (readOnly) return keep("housekeeping-pending");
     if ((await finishLandedWorkspace(context, state)).cleanupPending) return keep("housekeeping-pending");
@@ -321,14 +330,13 @@ export async function landedCleanupChecks(cwd: string, { readOnly = false }: { r
   if (!await artifactPublished(cwd, context, state, { fetch: !readOnly })) return keep("not-published");
   // Cleanup deletes only checkouts beneath slipjay workspace storage.
   if (!await withinWorkspaceStorage(context.current.root)) return keep("outside-workspace-storage");
-  return { ready: true, context, state, commit: judged.commit };
+  return { ready: true, context, state, commit: judged.commit, gitDirectory };
 }
 
 async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHooks): Promise<CleanupResult> {
   const checks = await landedCleanupChecks(cwd);
   if (!checks.ready) return checks.result;
-  const { context, state, commit } = checks;
-  const gitDirectory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
+  const { context, state, commit, gitDirectory } = checks;
   await archiveIntegratedWorkspaceEvidence(gitDirectory, state);
   await hooks.afterChecks?.();
   try {
@@ -340,7 +348,7 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
   return { cleaned: true };
 }
 
-/** Remove an isolated workspace after checking its work and Issue attachment; `retainMaterial` (the sweep) keeps one holding files retirement would delete. */
+/** Remove an isolated workspace after checking its work and Issue attachment; `retainMaterial` keeps one holding files retirement would delete, before or during retirement. */
 export async function removeWorkspace(cwd: string, workspaceName: string, options: { allowWork?: boolean; allowIssue?: boolean; retainMaterial?: boolean } = {}): Promise<{ workspaceName: string; hasWork: boolean; issueNumber: number | null }> {
   const context = await workspaceContext(cwd);
   if (!context) throw new Error("Not inside a Jujutsu repository");
@@ -367,6 +375,10 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
       throw new Error(
         `jj:${workspaceName} is attached to Issue #${metadata.issueNumber}; explicit deletion confirmation is required`,
       );
+    if (options.retainMaterial) {
+      const unique = await retainedWorkspaceMaterial(target.root, context.integration.root);
+      if (unique.length) throw new Error(describeRetention({ reason: "unique-files", paths: unique }));
+    }
     await retireWorkspace(context.integration.root, { name: workspaceName, root: target.root }, {},
       { ...judged === null ? {} : { expectedCommitId: judged }, retainMaterial: options.retainMaterial });
     return { workspaceName, hasWork, issueNumber: metadata?.issueNumber ?? null };
