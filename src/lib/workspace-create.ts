@@ -18,6 +18,7 @@ import {
 import { readIntegrationPolicy, UNDECLARED_POLICY } from "./execution-policy.ts";
 import { fetchIntegration, publicationRemote } from "./landing-steps.ts";
 import { forgetWorkspace } from "./workspace-lifecycle.ts";
+import { startHousekeeping } from "./workspace-housekeeping.ts";
 import { claimSpare, refreshDependencies } from "./workspace-pool.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -328,9 +329,14 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
   if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
   // Before the allocation lock, so concurrent starts never queue behind each other's fetch.
   if (await mayStartFromIntegrationHead(cwd, context, options)) await refreshIntegration(context);
-  const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, () => createWorkspaceUnlocked(task, cwd, options));
-  // Concurrent starts that resolve to one checkout (the same Issue, or a bind) prepare it in turn.
-  return withWorkspaceTransaction(`prepare:${allocation.context.current.root}`, () => ready(allocation)) as Promise<CreatedWorkspace<Readiness>>;
+  try {
+    const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, () => createWorkspaceUnlocked(task, cwd, options));
+    // Concurrent starts that resolve to one checkout (the same Issue, or a bind) prepare it in turn.
+    return await withWorkspaceTransaction(`prepare:${allocation.context.current.root}`, () => ready(allocation)) as CreatedWorkspace<Readiness>;
+  } finally {
+    // Every allocation, including a failed one, schedules the repository's bounded background sweep.
+    await startHousekeeping(context.integration.root).catch(() => undefined);
+  }
 }
 
 /**

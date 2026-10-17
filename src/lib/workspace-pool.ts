@@ -1,15 +1,14 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { repositoryProjectCode, run, workspaceContext } from "./workspace-jj.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "./workspace-jj.ts";
-import { machineConfigPath, metadataHome, poolRefillLogPath, stateHome, workspaceHome } from "./workspace-paths.ts";
+import { machineConfigPath, metadataHome, workspaceHome } from "./workspace-paths.ts";
 import { listWorkspaces, metadataPath, readJsonOptional, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
 import { processAlive } from "./workspace-holders.ts";
+import { startBackgroundEntry } from "./workspace-background.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { DEFAULT_SPARES, spareCount } from "./execution-policy.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
@@ -344,8 +343,6 @@ async function claimReadySpare(context: WorkspaceContext, name: string, base?: s
   return { root: spare.root, name: assigned, dependencies, installInputs };
 }
 
-const REFILL_LOG_LIMIT = 1024 * 1024;
-
 /**
  * Refill the repository's spare pool without blocking the caller: a detached,
  * `nice`d child runs the closure's own refill entry (`spare-refill.ts`, beside
@@ -358,29 +355,6 @@ const REFILL_LOG_LIMIT = 1024 * 1024;
  * integration root is always its last argument.
  */
 export async function startSpareRefill(cwd: string = process.cwd(), options: { command?: string[] } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
-  const context = await workspaceContext(cwd);
-  if (!context) return { started: false, reason: "not-jj" };
-  await mkdir(stateHome(), { recursive: true, mode: 0o700 });
-  const logPath = poolRefillLogPath();
-  let oversized = false;
-  try { oversized = statSync(logPath).size > REFILL_LOG_LIMIT; } catch { /* no log yet */ }
-  const log = openSync(logPath, oversized ? "w" : "a", 0o600);
-  try {
-    const [executable, ...args] = options.command ?? ["nice", "-n", "10", process.execPath, fileURLToPath(new URL("./spare-refill.ts", import.meta.url))];
-    const child = spawn(executable!, [...args, context.integration.root], {
-      cwd: context.integration.root,
-      detached: true,
-      stdio: ["ignore", log, log],
-    });
-    const spawned = await new Promise<Error | null>((resolveSpawn) => {
-      child.once("spawn", () => resolveSpawn(null));
-      child.once("error", (error) => resolveSpawn(error));
-    });
-    if (spawned) return { started: false, reason: spawned.message, logPath };
-    child.unref();
-    return { started: true, pid: child.pid, logPath };
-  } finally {
-    closeSync(log);
-  }
+  return await startBackgroundEntry(cwd, "./spare-refill.ts", options);
 }
 

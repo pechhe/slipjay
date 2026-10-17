@@ -26,6 +26,9 @@ for (const key of Object.keys(process.env)) {
   if (/^(CMUX_|SLIPJAY_COMMAND_)/.test(key) || key === "PI_CODING_AGENT_DIR") delete process.env[key];
 }
 
+// A fixture allocating a workspace must not race its own sweeps with a background one.
+process.env.SLIPJAY_AUTO_HOUSEKEEPING = "0";
+
 afterAll(() => {
   rmSync(home, { recursive: true, force: true, maxRetries: 3 });
 });

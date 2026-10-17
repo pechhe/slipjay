@@ -114,6 +114,8 @@ landing.
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 | `SLIPJAY_RESET_TARGET`, `_SOURCE`, `_REASON_FILE` | The runner's `reset` command and target probe (see [Reset](#reset)). A policy's `environmentKeys` may not start with `SLIPJAY_RESET_`. |
 
+Every workspace allocation schedules a detached sweep of the repository's unused empty and delivered workspaces, at most once every 15 minutes; `SLIPJAY_AUTO_HOUSEKEEPING=0` turns that off (`slipjay prune --empty` still sweeps on demand).
+
 slipjay reads `SLIPJAY_COMMAND_TIMEOUT_MS`, the per-command timeout for jj, git
 and gh. The pre-v1.1.0 Peach environment names are neither set nor read.
 
