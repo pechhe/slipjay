@@ -147,7 +147,9 @@ export type OperationEvent =
       /** Declared by its author as belonging to no Spec: once published, reported to Build as a chore landing. */
       chore?: { title: string; helperRevisions: string[] } }
   /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
-  | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null }
+  | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null;
+      /** The admitted Spec's and Tickets' numbers; absent on admissions recorded before they were read. */
+      items?: import("./build-admission.ts").BuildAdmittedItems }
   /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`. */
   | { type: "build_receipt"; sequence: number; state: "delivered" | "parked"; code?: string }
   /** Runner-wide, under RUNNER_CONTROL_ID: Build stopped (or resumed) answering receipt delivery. */

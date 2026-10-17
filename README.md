@@ -211,6 +211,8 @@ landing.
 | --- | --- |
 | `SLIPJAY_WORKSPACE_NAME`, `SLIPJAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
 | `SLIPJAY_MIGRATION_CONTEXT` | Late-bound migration generation and verification commands. The same trusted JSON provenance record is bound before generation; see below. |
+| `SLIPJAY_BUILD_CONTEXT` | A Build-bound landing's `requiredLandingVerification` and migration `generate`/`verify` commands: its admitted Build binding (see [Build access for checks](#build-check-access)). |
+| `SLIPJAY_BUILD_READ_URL`, `_TOKEN` | The same commands, for every landing of a Build-tracked repository on a runner with a Build connection: read-only Build access for this operation only (see [Build access for checks](#build-check-access)). |
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 | `SLIPJAY_RESET_TARGET`, `_SOURCE`, `_REASON_FILE` | The runner's `reset` command and target probe (see [Reset](#reset)). A policy's `environmentKeys` may not start with `SLIPJAY_RESET_`. |
 
@@ -855,6 +857,27 @@ newer candidate`), and if Build refuses the newer one, the queued one keeps its 
 asked. The answer is `{ "value" }`, Build's refusal is 409 with its `code`, and no answer is 503. So a
 client of a Build-tracked repository needs only the runner token: the Build credential never leaves
 the runner. A runner without a Build connection refuses the read (400).
+
+<a id="build-check-access"></a>**Build access for checks.** In a Build-tracked repository (`tracker: "build"`), a
+landing's `requiredLandingVerification` commands and its `migrationFinalization` `generate` and `verify` commands
+can see Build:
+
+- A Build-bound landing (`slipjay land --session … [--ticket …]`) gives them `SLIPJAY_BUILD_CONTEXT`,
+  `{ "version": 1, "specId": "<uuid>", "specNumber": <n>, "ticketNumbers": [<n>…], "sessionId": "<uuid>" }`, from
+  the binding Build admitted, never from commit text. The runner reads the Spec's and Tickets' numbers by id when
+  Build admits the landing (an admission whose items it cannot read stays unresolved and is offered again), so the
+  checks get them without Build having to answer while they run.
+  A chore (no Build item) gets no `SLIPJAY_BUILD_CONTEXT`.
+- Every landing, bound or not, gives them `SLIPJAY_BUILD_READ_URL` and `SLIPJAY_BUILD_READ_TOKEN`. A check POSTs
+  `{ "action", "input" }` to the URL with `Authorization: Bearer <token>` and gets the answers of
+  [Build reads](#build-reads): `200 { "value" }`, `409 { "code" }` for Build's refusal (`build_item_unavailable`
+  for an unknown item), anything else meaning Build gave no answer. Only `read`, `list`, `waits` and `binds` are
+  allowed. The token is random, reaches no other runner route, is good only while this operation runs and
+  never outlives a runner restart; it is neither the runner token nor the Build token, and it is redacted
+  from the runner's logs and stored evidence.
+
+On a runner with no Build connection, and in a GitHub-tracked repository, neither read variable is set: a check
+that needs Build should refuse by name rather than pass. Dependency installs, finalization, deploys and resets get none of these.
 
 **Build receipts.** For each admitted landing the runner owes Build a receipt for each
 fact it reports, named by the operation and that fact's ledger sequence: its admission

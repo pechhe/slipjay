@@ -6,6 +6,14 @@
   from the policy committed on the integration branch, like the spare allowance, instead of the
   primary checkout's working files, which move only when that host lands. Releasing an allocation
   attempt now also keeps a checkout that gains files during the release, as the sweep does (#77).
+
+- **Landing checks can see Build:** in a Build-tracked repository, `requiredLandingVerification` and
+  migration `generate`/`verify` commands get `SLIPJAY_BUILD_CONTEXT` (the admitted Spec id and number,
+  Ticket numbers and session) for a Build-bound landing, and, for every landing on a runner with a Build
+  connection, `SLIPJAY_BUILD_READ_URL` and `SLIPJAY_BUILD_READ_TOKEN`: read-only access to Build through the
+  runner's `/v1/build/read`, with a token scoped to the operation, revoked when it ends and redacted from
+  logs and evidence (#92).
+
 - **Evidence outlives its workspace:** a repository can declare `evidencePaths` in
   `slipjay.json`. Just before a workspace is retired, its untracked files there are copied to
   `~/.slipjay/state/evidence/<workspace>-<time>/` with a `provenance.json` (workspace,

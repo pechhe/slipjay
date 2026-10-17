@@ -18,6 +18,8 @@ import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHave
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import type { BuildReader } from "./tracker.ts";
+import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "./build-check-access.ts";
+import type { BuildCheckAccess } from "./build-check-access.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { readPolicyTextAtCommit } from "./execution-policy.ts";
 import { settingsLanding } from "./policy-settings.ts";
@@ -283,6 +285,8 @@ export function createRunnerQueue(input: {
   environment?: () => NodeJS.ProcessEnv;
   /** Reads Build for a Build-tracked release's half-built Spec check; absent, that check reports it could not run. */
   readBuild?: BuildReader;
+  /** Read-only Build access for a Build-tracked repository's landing checks; absent, the runner has no Build. */
+  buildChecks?: BuildCheckAccess;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
@@ -296,7 +300,7 @@ export function createRunnerQueue(input: {
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment, readBuild } = input;
+  const { log, executor, home, config, environment, readBuild, buildChecks } = input;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   const workers = runnerWorkers(config, executor);
@@ -581,6 +585,30 @@ export function createRunnerQueue(input: {
     let remote: string | undefined;
     let integrationBranch: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
+    // Set once the integration policy is read: landing checks in a Build-tracked repository may read Build.
+    let tracker: "github" | "build" | undefined;
+    let checkEnvironment: Promise<Record<string, string>> | undefined;
+    /**
+     * What a landing's verification and migration commands get from Build: the admitted binding, never commit text,
+     * and read access scoped to this attempt, revoked when it ends.
+     */
+    function buildCheckEnvironment(): Promise<Record<string, string>> {
+      return checkEnvironment ??= (async () => {
+        if (operation.kind !== "landing") return {};
+        const read = tracker === "build" ? buildChecks?.grant() : null;
+        const events = log.events({ operationId: operation.id }).map((row) => row.event);
+        const submitted = events.find((event) => event.type === "submitted");
+        const admitted = events.find((event) => event.type === "build_admitted");
+        const binding = admitted && submitted?.type === "submitted" && submitted.kind !== "release" && submitted.kind !== "deploy" && submitted.kind !== "reset"
+          ? submitted.admission?.binding : undefined;
+        // Without Build on the runner its checks get nothing from Build, and a check that needs it refuses by name.
+        if (!binding || !readBuild) return { ...read?.environment };
+        // Unanswered, nothing runs with the grant: end it now, as the operation's end will not see it.
+        const items = admitted?.type === "build_admitted" ? admitted.items : undefined;
+        const context = await buildCheckContext(binding, items, readBuild).catch((error: unknown) => { if (read) buildChecks!.revoke(read.token); throw error; });
+        return { ...read?.environment, [BUILD_CONTEXT_ENV]: context };
+      })();
+    }
     async function withAuthority<T>(pending: Promise<T>): Promise<T> {
       const signal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]);
       const fail = () => controller.signal.aborted ? new OwnerKill() : new Error("Exact predecessor invalidated this attempt");
@@ -595,15 +623,19 @@ export function createRunnerQueue(input: {
       const runId = randomUUID();
       const started = Date.now();
       const context = commandEvidence(request, checkout);
+      const runPurpose = purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate");
+      const build = ["gate", "migration_generate", "migration_verify"].includes(runPurpose) ? await buildCheckEnvironment() : {};
       append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs,
-        purpose: purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate"), ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
+        purpose: runPurpose, ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
       const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : [], ...request.abortSignal ? [request.abortSignal] : []]);
       const privateRun = stage === "resetting" || stage === "finalizing";
       const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
       if ((purpose === "migration_generate" || purpose === "migration_verify") && request.env?.SLIPJAY_MIGRATION_CONTEXT)
         runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
-      const result = await executor.run({ ...request, env: runEnvironment,
-        redactOutput: privateRun ? request.redactOutput : (value) => redactVerificationOutput(value, checkout), abortSignal }).catch((error: unknown) => {
+      const redact = privateRun ? request.redactOutput ?? ((value: string) => value) : (value: string) => redactVerificationOutput(value, checkout);
+      const token = build[BUILD_READ_TOKEN_ENV];
+      const result = await executor.run({ ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment,
+        redactOutput: token ? (value) => redact(value.split(token).join("[REDACTED]")) : redact, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
         throw error;
       });
@@ -717,6 +749,7 @@ export function createRunnerQueue(input: {
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
+      tracker = context.configuration.tracker;
       const submittedPolicy = prefix && operation.kind === "landing"
         ? (await readExactExecutionPolicy(await jj(checkout, ["git", "root"]), operation.commitId)).configuration : null;
       const hasBarrier = (policy: { migrationFinalization?: unknown; postIntegration?: unknown; reset?: unknown } | null) =>
@@ -913,6 +946,8 @@ export function createRunnerQueue(input: {
         else prefix.completed.resolve(false);
       }
     } finally {
+      const token = checkEnvironment && (await checkEnvironment.catch(() => ({} as Record<string, string>)))[BUILD_READ_TOKEN_ENV];
+      if (token) buildChecks!.revoke(token);
       if (stage !== "queued") append(operation.id, stageDetail());
       running.delete(operation.id);
       // Delete the candidate bookmark before the verdict: an author's repository that fetches

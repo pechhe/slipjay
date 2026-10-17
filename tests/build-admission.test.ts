@@ -174,24 +174,35 @@ test("a runner without Build configuration refuses bound submissions and still a
 
 test("the Build route client maps answers, sends the runner credential and gives up after its bound", async () => {
   let reply: { status: number; body: unknown; delayMs?: number } = { status: 200, body: {} };
+  // How Build answers the reads of the admitted items that follow an admission.
+  let items: { status: number; body: unknown } | null = null;
   const seen: { authorization?: string; body: unknown }[] = [];
   const server = createServer((request, response) => {
     let text = "";
     request.on("data", (chunk) => { text += chunk; });
     request.on("end", () => {
-      seen.push({ authorization: request.headers.authorization, body: JSON.parse(text) });
-      setTimeout(() => { response.writeHead(reply.status, { "content-type": "application/json" }); response.end(JSON.stringify(reply.body)); }, reply.delayMs ?? 0);
+      const body = JSON.parse(text) as { action: string; input: { itemId?: string } };
+      seen.push({ authorization: request.headers.authorization, body });
+      const answer = body.action === "read" ? items ?? { status: 200, body: { status: "succeeded", value: { id: body.input.itemId, number: body.input.itemId === binding.specId ? 40 : 41, kind: "spec" } } } : reply;
+      setTimeout(() => { response.writeHead(answer.status, { "content-type": "application/json" }); response.end(JSON.stringify(answer.body)); }, body.action === "read" ? 0 : reply.delayMs ?? 0);
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const admit = buildAdmitter(buildRoute({ origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, token, timeoutMs: 300 }));
-    const request = { repository: "owner/repo", operationId: "op", sequence: 7, occurredAt: "2026-10-15T21:00:00.000Z", specId: binding.specId, ticketIds: [],
+    const ticketId = "cccccccc-dddd-4eee-8fff-000000000000";
+    const request = { repository: "owner/repo", operationId: "op", sequence: 7, occurredAt: "2026-10-15T21:00:00.000Z", specId: binding.specId, ticketIds: [ticketId],
       specBodyRevision: null, specBodyHash: null, candidateRevision: "a".repeat(40), baseRevision: null, helperRevisions: [], repairsOperationId: null,
       bindGeneration: 2, sessionId: binding.sessionId, supersedesOperationId: null } satisfies BuildAdmissionRequest;
     reply = { status: 200, body: { status: "succeeded", value: { admission: { sessionId: binding.sessionId, sequence: 7, recordedAt: "2026-10-15T21:00:01.000Z" } } } };
-    assert.deepEqual(await admit(request), { outcome: "admitted", sequence: 7, sessionId: binding.sessionId, recordedAt: "2026-10-15T21:00:01.000Z" });
+    assert.deepEqual(await admit(request), { outcome: "admitted", sequence: 7, sessionId: binding.sessionId, recordedAt: "2026-10-15T21:00:01.000Z",
+      items: { specNumber: 40, ticketNumbers: [41] } });
     assert.deepEqual(seen[0], { authorization: `Bearer ${token}`, body: { action: "admitAttempt", input: request } });
+    assert.deepEqual(seen.slice(1).map((row) => row.body), [{ action: "read", input: { itemId: binding.specId } }, { action: "read", input: { itemId: ticketId } }]);
+    // Admitted but its items unread, the admission is unresolved, and resending it replays.
+    items = { status: 503, body: { status: "unavailable", code: "database_unavailable" } };
+    assert.match(JSON.stringify(await admit(request)), /"outcome":"unavailable","reason":"the admitted items could not be read/);
+    items = null;
     reply = { status: 200, body: { status: "duplicate", code: "replayed" } };
     assert.equal((await admit(request)).outcome, "admitted");
     reply = { status: 409, body: { status: "blocked", code: "delivery_pending" } };

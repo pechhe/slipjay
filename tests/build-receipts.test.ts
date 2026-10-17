@@ -47,6 +47,8 @@ function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRout
     }
     if (action === "recordChoreLanding") { chores.push(input as BuildChoreInput); return Promise.resolve({ kind: "accepted", value: null }); }
     if (action === "admitAttempt") { admissions.push(input as BuildAdmissionRequest); return Promise.resolve(admit(input as BuildAdmissionRequest)); }
+    // The admitter reads the numbers of the items it admitted.
+    if (action === "read") return Promise.resolve({ kind: "accepted", value: { id: (input as { itemId: string }).itemId, number: 1, kind: "spec" } });
     assert.equal(action, "recordAttempt");
     const receipt = input as BuildReceiptInput;
     sent.push(receipt);

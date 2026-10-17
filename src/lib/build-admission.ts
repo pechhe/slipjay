@@ -1,6 +1,6 @@
 import type { BuildBinding, SubmissionHandoff } from "./submission-handoff.ts";
 import type { OperationLog, StoredEvent } from "./runner-contract.ts";
-import { BUILD_ITEM_UNAVAILABLE, BuildRefusal } from "./tracker.ts";
+import { BUILD_ITEM_UNAVAILABLE, BuildRefusal, readBuildItem } from "./tracker.ts";
 import type { BuildReadAction, BuildReader } from "./tracker.ts";
 
 /** The runner's dedicated credential for Build's runner route, from its `bws run` environment. */
@@ -16,12 +16,25 @@ export type BuildAdmissionRequest = {
   bindGeneration: number; sessionId: string; supersedesOperationId: string | null;
 };
 
+/** The numbers of the Spec and Tickets an admission names, read from Build by their ids. */
+export type BuildAdmittedItems = { specNumber: number; ticketNumbers: number[] };
+
+/** `items` for `specId` and `ticketIds`; throws unless Build answers for every one. */
+export async function readAdmittedItems(read: BuildReader, specId: string, ticketIds: readonly string[]): Promise<BuildAdmittedItems> {
+  const number = async (itemId: string) => {
+    const item = await readBuildItem(read, { itemId });
+    if (!item || !Number.isSafeInteger(item.number)) throw new Error(`Build has no item ${itemId}, which the admission names`);
+    return item.number;
+  };
+  return { specNumber: await number(specId), ticketNumbers: await Promise.all(ticketIds.map(number)) };
+}
+
 /**
- * `admitted` puts the operation in Build's custody; `refused` is Build's final answer with its code;
+ * `admitted` puts the operation in Build's custody, with the numbers of the items it names; `refused` is Build's final answer with its code;
  * `unavailable` means Build gave no answer, so it may or may not have admitted: resending replays.
  */
 export type BuildAdmission =
-  | { outcome: "admitted"; sequence: number; sessionId: string; recordedAt: string | null }
+  | { outcome: "admitted"; sequence: number; sessionId: string; recordedAt: string | null; items?: BuildAdmittedItems }
   | { outcome: "refused"; code: string }
   | { outcome: "unavailable"; reason: string };
 
@@ -76,7 +89,7 @@ export async function settleAdmission(log: OperationLog, admit: BuildAdmitter, o
   if (answer.outcome === "unavailable") return { resolved: false, reason: answer.reason };
   if (admissionSettled(log.events({ operationId }))) return { resolved: true };
   if (answer.outcome === "admitted") {
-    log.append(operationId, { type: "build_admitted", sequence: answer.sequence, sessionId: answer.sessionId, recordedAt: answer.recordedAt });
+    log.append(operationId, { type: "build_admitted", sequence: answer.sequence, sessionId: answer.sessionId, recordedAt: answer.recordedAt, ...answer.items ? { items: answer.items } : {} });
     // Only candidates submitted before it: one admitted late after being cancelled never displaces a newer one.
     for (const earlier of log.operationsForChange(repo, changeId))
       if (earlier.status === "queued" && log.events({ operationId: earlier.id }).find((row) => row.event.type === "submitted")!.seq < submitted.seq)
@@ -140,12 +153,19 @@ export function buildReader(route: BuildRoute): BuildReader {
   };
 }
 
+/**
+ * Admits through Build's runner route, then reads the numbers of the items admitted, so a landing's checks get them
+ * without asking Build again. Unread, the admission is unresolved: Build replays it when it is sent again.
+ */
 export function buildAdmitter(route: BuildRoute): BuildAdmitter {
   return async (request) => {
     const answer = await route("admitAttempt", request);
     if (answer.kind === "unavailable") return { outcome: "unavailable", reason: answer.reason };
     if (answer.kind === "refused") return { outcome: "refused", code: answer.code };
     const recordedAt = (answer.value as { admission?: { recordedAt?: unknown } | null } | null)?.admission?.recordedAt;
-    return { outcome: "admitted", sequence: request.sequence, sessionId: request.sessionId, recordedAt: typeof recordedAt === "string" ? recordedAt : null };
+    let items: BuildAdmittedItems;
+    try { items = await readAdmittedItems(buildReader(route), request.specId, request.ticketIds); }
+    catch (error) { return { outcome: "unavailable", reason: `the admitted items could not be read: ${(error as Error).message}` }; }
+    return { outcome: "admitted", sequence: request.sequence, sessionId: request.sessionId, recordedAt: typeof recordedAt === "string" ? recordedAt : null, items };
   };
 }
