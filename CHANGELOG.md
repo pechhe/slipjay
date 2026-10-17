@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v3.27.0
+
+- **`policy set` reports its operation while it waits:** with `--json-lines`, `slipjay policy set`
+  writes `{"phase":"following","operationId":…}` as soon as the change is submitted, or a rerun
+  reattaches to it, and then the outcome as the last line, so a settings UI can follow the
+  operation through the queue instead of waiting blind for the outcome (pechhe/t3code#102).
+
 ## v3.26.0
 
 - **One policy for retirement on every host:** `generatedPaths` and `evidencePaths` are now read

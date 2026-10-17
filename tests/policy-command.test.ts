@@ -72,18 +72,22 @@ test("a rerun after an interrupted policy set reattaches to its operation and ne
     await withTestRunner(f, async ({ location, env }) => {
       const { revision } = await showPolicy(f.repo);
       assert.equal((await controlRunner(location, "pause", env)).ok, true);
-      const lines: string[] = [];
+      const followed: string[] = [];
       const following = new AbortController();
-      const first = setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location, env, signal: following.signal, onLine: (line) => { lines.push(line); } });
-      await vi.waitFor(() => assert.ok(lines.some((line) => /queued|paused/.test(line))), { timeout: 60_000, interval: 50 });
+      // The operation is reported while it still waits in the paused queue, not only with the outcome.
+      const first = setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location, env, signal: following.signal, onOperation: (id) => { followed.push(id); } });
+      await vi.waitFor(() => assert.equal(followed.length, 1), { timeout: 60_000, interval: 50 });
       following.abort(new Error("stopped following"));
       const interrupted = await first;
       assert.equal(interrupted.phase, "uncertain", JSON.stringify(interrupted));
       assert.equal((await controlRunner(location, "resume", env)).ok, true);
       const rerun: string[] = [];
-      const result = await setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location, env, onLine: (line) => { rerun.push(line); } });
+      const result = await setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location, env, onLine: (line) => { rerun.push(line); }, onOperation: (id) => { followed.push(id); } });
       assert.equal(result.phase, "landed", JSON.stringify(result));
       assert.ok(rerun.some((line) => line.startsWith("Reattaching")));
+      // The rerun follows the same operation it reported first, and lands it.
+      assert.deepEqual(followed, [followed[0], followed[0]]);
+      assert.equal(result.phase === "landed" && result.operationId, followed[0]);
     });
     const log = openOperationLog(join(f.root, "runner", "operations.sqlite"));
     try { assert.equal(log.events().filter((row) => row.event.type === "submitted").length, 1); }

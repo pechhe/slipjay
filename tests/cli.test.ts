@@ -281,6 +281,10 @@ test("config and policy show report each setting with its source, and config set
       assert.equal(refused.code, 2, refused.stderr);
       assert.equal(JSON.parse(refused.stdout).phase, "refused");
     }
+    // With --json-lines the outcome is one compact line, after any operation it followed.
+    const lines = await slipjay(f.repo, ["policy", "set", "--json-lines", "--spares", "2"]);
+    assert.equal(lines.code, 2, lines.stderr);
+    assert.deepEqual(lines.stdout.trim().split("\n").map((line) => JSON.parse(line).phase), ["refused"]);
   } finally {
     if (previous === null) await rm(configPath, { force: true });
     else await writeFile(configPath, previous);

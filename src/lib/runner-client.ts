@@ -637,7 +637,7 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
  */
 type LandOptions = { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
   location: string; env?: NodeJS.ProcessEnv; resubmitAfterOutcome?: boolean;
-  onLine?(line: string): void; onStage?(stage: string): void; signal?: AbortSignal };
+  onLine?(line: string): void; onStage?(stage: string): void; onOperation?(operationId: string): void; signal?: AbortSignal };
 type LandResult = { ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult };
 
 /** A landing that failed before it submitted anything or followed an operation: the runner holds nothing of it. */
@@ -785,6 +785,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     if (!older && requestId) await landingRequestIdentity(context, location, repo, target.commitId, requestId);
     await rememberOperationRunner(operation.id, location);
     await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });
+    options.onOperation?.(operation.id);
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.
     if (operation.result) options.onStage?.("housekeeping");

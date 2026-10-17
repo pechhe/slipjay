@@ -85,7 +85,7 @@ async function attemptHolds(workspacePath: string, patched: string, message: str
  * Refused as stale when the integration branch's policy differs from `base`'s, so two saves
  * from one read never overwrite each other; the runner checks the same again at its base.
  */
-export async function setPolicy(cwd: string, options: { base: string; patch: unknown; location: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; onLine?: (line: string) => void }): Promise<PolicySetResult> {
+export async function setPolicy(cwd: string, options: { base: string; patch: unknown; location: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal; onLine?: (line: string) => void; onOperation?: (operationId: string) => void }): Promise<PolicySetResult> {
   const onLine = options.onLine ?? (() => {});
   let patch: PolicyPatch;
   try { patch = parsePolicyPatch(options.patch); }
@@ -132,7 +132,7 @@ export async function setPolicy(cwd: string, options: { base: string; patch: unk
       await jj(workspacePath, ["describe", "-m", message]);
     }
     landing = true;
-    const landed = await landThroughRunner(workspacePath, { location: options.location, onLine, resubmitAfterOutcome: false, ...options.env ? { env: options.env } : {}, ...options.signal ? { signal: options.signal } : {} });
+    const landed = await landThroughRunner(workspacePath, { location: options.location, onLine, resubmitAfterOutcome: false, ...options.onOperation ? { onOperation: options.onOperation } : {}, ...options.env ? { env: options.env } : {}, ...options.signal ? { signal: options.signal } : {} });
     const { operation, logUrl: log } = landed;
     const result = operation.result;
     if (result?.type === "landed") return { ok: true, phase: "landed", operationId: operation.id, revision: result.commitId, log };

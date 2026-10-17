@@ -71,7 +71,7 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   `digest`, the file as `declared`, the `settings` in force with defaults filled in, and any
   `retired` fields. It reads the local integration bookmark, so fetch first to see another
   machine's change.
-- **`slipjay policy set --base <revision> [--spares <n|default>] [--process <level|default>] [--landing-verification <json|default>] [--patch <json>]`.**
+- **`slipjay policy set --base <revision> [--spares <n|default>] [--process <level|default>] [--landing-verification <json|default>] [--patch <json>] [--json-lines]`.**
   Applies a patch of those three fields (`default`, or `null` in `--patch`, removes one) to the
   policy at `--base`, the `revision` from `policy show`. Any other field is refused. If the
   integration branch's policy has changed since that revision, the patch is refused as stale, so
@@ -88,6 +88,10 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   and never submits twice). A rerun never submits an attempt again: it follows the attempt's
   operation, reports its last outcome, and reports `already-applied` once the policy is on the
   integration branch. Success exits 0, `refused` exits 2, and every other outcome exits 1.
+  With `--json-lines`, stdout is one compact JSON object per line instead: a
+  `{"phase":"following","operationId":"…"}` line as soon as the change is submitted or a rerun
+  reattaches to its operation, so a caller can show the operation's queue position and stage
+  while it waits, and the outcome object above as the last line.
 - **Runner version.** The fast path below and the runner's stale refusal need a runner on
   SlipJay 3.25.0 or later. An older runner ignores the `Policy-Base:` trailer and gates a
   settings landing with the full checks; only the client's own stale check then applies.
@@ -246,7 +250,7 @@ consumer requires a SlipJay version that implements this environment contract.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.26.0
+bun add -g github:pechhe/slipjay#v3.27.0
 slipjay status
 ```
 
