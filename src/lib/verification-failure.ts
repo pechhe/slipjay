@@ -68,7 +68,7 @@ export function failingTests(lines: string[]): string[] {
 }
 
 /** The first error block: its message line and the few lines that explain it. */
-function firstError(lines: string[]): string[] {
+export function firstError(lines: string[]): string[] {
   const start = lines.findIndex((line) => (ERROR_START.test(line.trim()) && !SCRIPT_EXIT.test(line.trim())) || /^\s+error: \|-?$/.test(line));
   if (start < 0) return [];
   const block = [lines[start]!.trim()];

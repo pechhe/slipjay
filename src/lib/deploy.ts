@@ -6,6 +6,7 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-proc
 import type { DeploymentEnvironment } from "./deployment-policy.ts";
 import type { FinalizationCommand } from "./post-integration-policy.ts";
 import type { DeployMigrations, DeployProjectOutcome, DeployRecord } from "./runner-contract.ts";
+import { firstError, outputLines } from "./verification-failure.ts";
 
 /** How many commits a deploy record lists; a longer range says how many it left out. */
 const CHANGES_LIMIT = 200;
@@ -49,10 +50,12 @@ async function changesSince(gitDirectory: string, previous: string | null, commi
 }
 
 /** Why a finished command did not succeed, with the tail of its output; null when it did. */
-function failure(result: BoundedProcessResult, timeoutMs: number): string | null {
+/** Why a step failed: the first error block in either stream when it printed one (an uncaught error's last lines are its stack), else its last lines. */
+export function failure(result: BoundedProcessResult, timeoutMs: number): string | null {
   if (result.exitCode === 0 && !result.timedOut && !result.signal && !result.error) return null;
-  const tail = (result.stderr || result.stdout).trim().split("\n").slice(-3).join("\n").slice(-600);
-  return `${result.timedOut ? `timed out after ${timeoutMs} ms` : result.signal ? `stopped by ${result.signal}` : `exited ${result.exitCode ?? result.error}`}${tail ? `: ${tail}` : ""}`;
+  const error = firstError(outputLines(result));
+  const detail = error.length ? error.join("\n").slice(0, 600) : (result.stderr || result.stdout).trim().split("\n").slice(-3).join("\n").slice(-600);
+  return `${result.timedOut ? `timed out after ${timeoutMs} ms` : result.signal ? `stopped by ${result.signal}` : `exited ${result.exitCode ?? result.error}`}${detail ? `: ${detail}` : ""}`;
 }
 
 /**
