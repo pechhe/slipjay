@@ -7,7 +7,7 @@ import { jj, jjWorkspaceRoot, parseWorkspaceList, revisionExists, revisionFacts,
 import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./workspace-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
-type LandingState = Record<string, unknown> & {
+export type LandingState = Record<string, unknown> & {
   version: number;
   phase?: "prepared" | "landed" | "recovering";
   workspaceName: string;
@@ -57,6 +57,16 @@ export async function readJsonOptional<T = Record<string, unknown>>(path: string
   }
 }
 
+/** False when the workspace's metadata exists but cannot be read or parsed: its Issue, spare and delivery facts are unknown. */
+export async function metadataReadable(workspaceName: string): Promise<boolean> {
+  try {
+    JSON.parse(await readFile(metadataPath(workspaceName), "utf8"));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+}
+
 export function metadataPath(workspaceName: string): string {
   return join(metadataHome(), `${workspaceName}.json`);
 }
@@ -101,17 +111,21 @@ export async function listWorkspaces(cwd: string = process.cwd(), options: { rea
 /** A workspace with its unlanded-work and landing-record facts. */
 export type InspectedWorkspace = WorkspaceEntry & { hasWork: boolean; landed: boolean };
 
-export async function inspectWorkspaces(cwd: string = process.cwd()): Promise<InspectedWorkspace[]> {
+/**
+ * Every workspace with its facts. `readOnly` corrects no metadata and snapshots no
+ * working copy, so `hasWork` is as of each checkout's last snapshot.
+ */
+export async function inspectWorkspaces(cwd: string = process.cwd(), { readOnly = false }: { readOnly?: boolean } = {}): Promise<InspectedWorkspace[]> {
   const context = await workspaceContext(cwd);
   if (!context) return [];
-  const workspaces = await listWorkspaces(cwd);
+  const workspaces = await listWorkspaces(cwd, { readOnly });
   return await Promise.all(
     workspaces.map(async (workspace) => ({
       ...workspace,
       hasWork:
         workspace.name === "default"
           ? false
-          : await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch).catch(() => true),
+          : await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch, { ignoreWorkingCopy: readOnly }).catch(() => true),
       landed: Boolean(await readLandingState(workspace.name, { readOnly: true })),
     })),
   );

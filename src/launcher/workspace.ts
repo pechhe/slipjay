@@ -3,6 +3,7 @@ import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRu
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
+import type { SweepOptions } from "../lib/workspace-sweep.ts";
 import { open } from "node:fs/promises";
 import { hostname } from "node:os";
 import { confirmableCandidate } from "../lib/release.ts";
@@ -16,6 +17,7 @@ import {
   inspectWorkspaces,
   landingPreview,
   releaseIntegration,
+  planDisposableWorkspaces,
   pruneEmptyWorkspaces,
   readWorkspaceMode,
   workspaceContext,
@@ -51,6 +53,27 @@ const LAND_USAGE = "Usage: slipjay land [--direct] [--handoff <json-file> | [--s
 function diskUsage(root: string): string {
   try { return execFileSync("du", ["-sh", root], { encoding: "utf8", timeout: 60_000 }).split("\t")[0] ?? "?"; }
   catch { return "?"; }
+}
+
+/** What `prune --empty` (with `emptyIdleMs: 0`) or the automatic sweep would do now, changing nothing. */
+async function printRetentionPlan(options: SweepOptions, json: boolean): Promise<void> {
+  const planned = await planDisposableWorkspaces(process.cwd(), options);
+  if (json) return console.log(JSON.stringify(planned, null, 2));
+  if (planned[0]) console.log(`repository ${planned[0].repository}`);
+  const unknown = "unknown";
+  for (const workspace of planned) {
+    const issue = workspace.issueNumber ? ` · issue #${workspace.issueNumber}` : "";
+    const size = workspace.sizeBytes === null ? `size ${unknown}` : `${Math.round(workspace.sizeBytes / 1024 / 1024)} MB`;
+    const landing = workspace.landing
+      ? `${workspace.landing.phase}, ${workspace.landing.published === null ? `publication ${unknown}` : workspace.landing.published ? "published" : "not published"}`
+      : "none";
+    console.log(`\n${workspace.action.toUpperCase()} ${workspace.name} (${workspace.state}${issue} · ${size}): ${workspace.reason}`);
+    console.log(`  path: ${workspace.root || unknown}`);
+    if (workspace.state === "integration") continue;
+    console.log(`  task: ${workspace.task ?? "none"} · assigned: ${workspace.assignedAt ?? unknown} · landing: ${landing}`);
+    console.log(`  processes: ${workspace.holders === null ? unknown : workspace.holders.join(", ") || "none"}`);
+    console.log(`  unique files: ${workspace.uniqueFiles === null ? unknown : workspace.uniqueFiles.join(", ") || "none"}`);
+  }
 }
 
 /** The repository's integration checkout, even when `cwd` is inside one of its workspaces. */
@@ -428,12 +451,18 @@ try {
       console.log(`${workspace.name}\t${workspace.root}\t${state}${issue}${kept}`);
     }
   } else if (command === "prune") {
-    if (rest[0] !== "--empty") throw new Error("Usage: slipjay prune --empty");
-    const result = await pruneEmptyWorkspaces(process.cwd(), runnerLocation() ? { readBuild: (action, input) => readBuildThroughRunner(action, input) } : {});
-    for (const name of result.removed) console.log(`Removed empty workspace: ${name}`);
-    for (const path of result.pruned) console.log(`Pruned state: ${path}`);
-    for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);
-    if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0) console.log("No empty workspaces to prune.");
+    const flags = new Set(rest);
+    const plan = flags.delete("--plan"), json = flags.delete("--json"), empty = flags.delete("--empty");
+    if (flags.size || (!plan && (!empty || json))) throw new Error("Usage: slipjay prune --empty | prune [--empty] --plan [--json]");
+    const reader: Pick<SweepOptions, "readBuild"> = runnerLocation() ? { readBuild: (action, input) => readBuildThroughRunner(action, input) } : {};
+    if (plan) await printRetentionPlan({ ...reader, ...empty ? { emptyIdleMs: 0 } : {} }, json);
+    else {
+      const result = await pruneEmptyWorkspaces(process.cwd(), reader);
+      for (const name of result.removed) console.log(`Removed empty workspace: ${name}`);
+      for (const path of result.pruned) console.log(`Pruned state: ${path}`);
+      for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);
+      if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0) console.log("No empty workspaces to prune.");
+    }
   } else if (command === "pool") {
     if (rest[0] === "refill") await refillPool(process.cwd(), (outcome) => console.log(JSON.stringify(outcome)));
     else if (rest.length === 0) {
@@ -661,7 +690,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|attach-issue|start|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

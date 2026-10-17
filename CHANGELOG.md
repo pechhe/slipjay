@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **`slipjay prune --plan`:** a read-only retention plan. It lists every workspace with its
+  path, state, Issue, task, assignment time, landing and publication, live processes, unique
+  files and size, and whether the
+  automatic sweep (or `prune --empty`, with `--empty`) would remove it now, or the concrete reason
+  it keeps it; `--json` prints it as data. Plan and sweep share one decision per workspace, so
+  they cannot disagree, but the plan snapshots no working copy, fetches nothing and finishes no
+  landing: an edit since the last snapshot, pending landing housekeeping and an unreadable fact
+  keep the workspace instead. An Issue tracker read that throws now reads as an unknown Issue
+  state (the workspace is kept) instead of failing the sweep, and the sweep keeps a workspace
+  whose metadata cannot be parsed instead of treating it as unbound. Library: `planDisposableWorkspaces`
+  (#79).
 - **A just-allocated checkout survives its own sweep:** an empty workspace of a closed Issue is
   now kept for an hour after it was last assigned (a resume without a task refreshes that time),
   so `slipjay repair` and a resumed closed-Issue start no longer risk losing the checkout to the

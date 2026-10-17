@@ -107,8 +107,9 @@ test("a sweep that throws is still stamped, so the next trigger waits out the in
   const f = await project();
   try {
     await createWorkspace("Issue #46", f.repo, { issueNumber: 46 });
-    const failing = { now: later(), issueClosed: () => { throw new Error("tracker down"); } };
-    await assert.rejects(runHousekeeping(f.repo, failing), /tracker down/);
+    // Reading the protected checkouts is part of every sweep, so failing it fails the whole sweep.
+    const failing = { now: later(), protectedRoots: { [Symbol.iterator]: () => { throw new Error("sweep failed"); } } as unknown as string[] };
+    await assert.rejects(runHousekeeping(f.repo, failing), /sweep failed/);
     assert.deepEqual(await runHousekeeping(f.repo, failing), { ran: false, reason: "recent" });
     assert.deepEqual(await triggered(() => startHousekeeping(f.repo)), { started: false, reason: "recent" });
   } finally { await f.dispose(); }

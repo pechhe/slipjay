@@ -1,10 +1,12 @@
-import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
+import type { WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
 import { readFile, stat } from "node:fs/promises";
-import { workspaceContext } from "./workspace-jj.ts";
+import { run, workspaceContext } from "./workspace-jj.ts";
 import { trackerOf, workItemClosed } from "./tracker.ts";
 import type { BuildReader } from "./tracker.ts";
-import { inspectWorkspaces, lockPath } from "./workspace-state.ts";
-import { cleanupLandedWorkspace, describeRetention, removeWorkspace, retainedWorkspaceMaterial } from "./workspace-lifecycle.ts";
+import { inspectWorkspaces, lockPath, metadataReadable, readLandingState } from "./workspace-state.ts";
+import type { InspectedWorkspace } from "./workspace-state.ts";
+import { cleanupLandedWorkspace, describeRetention, landedCleanupChecks, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
+import { artifactPublished } from "./landing-steps.ts";
 import { describeHolders, processAlive, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
 import { pruneWorkspaceState } from "./workspace-state-prune.ts";
 
@@ -76,70 +78,171 @@ async function assignedAt(workspace: WorkspaceEntry) {
  * directories cannot be read, nothing is removed.
  */
 export async function sweepDisposableWorkspaces(cwd: string = process.cwd(), options: SweepOptions = {}): Promise<SweepResult> {
-  const { emptyIdleMs = EMPTY_IDLE_MS, protectedRoots = [], now = Date.now(), issueClosed, readBuild } = options;
   const removed: string[] = [];
   const skipped: SweepResult["skipped"] = [];
-  const context = await workspaceContext(cwd);
-  if (!context) return { removed, skipped, pruned: [] };
-  const readIssueClosed = issueClosed ?? ((root: string, issueNumber: number) => workItemClosed(root, trackerOf(context.configuration), issueNumber, readBuild));
-  const result = await sweepCandidates(context, { emptyIdleMs, protectedRoots, now, readIssueClosed, removed, skipped });
-  return { ...result, pruned: options.pruneState === false ? [] : await pruneWorkspaceState() };
-}
-
-async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protectedRoots, now, readIssueClosed, removed, skipped }: {
-  emptyIdleMs: number; protectedRoots: string[]; now: number;
-  readIssueClosed: NonNullable<SweepOptions["issueClosed"]>;
-  removed: string[]; skipped: SweepResult["skipped"];
-}): Promise<Pick<SweepResult, "removed" | "skipped">> {
-  const result = { removed, skipped };
-  const candidates = (await inspectWorkspaces(context.integration.root)).filter((workspace) =>
-    workspace.name !== "default" && workspace.root && !workspace.hasWork && !workspace.metadata?.spare);
-  if (!candidates.length) return result;
-  const processes = await processWorkingDirectories();
-  if (!processes) {
-    skipped.push(...candidates.filter((workspace) => workspace.landed || !workspace.metadata?.issueNumber)
-      .map(({ name, landed }) => ({ name, landed, reason: "process working directories unavailable" })));
-    return result;
-  }
-  const guarded = [...protectedRoots, process.cwd()];
-  const issueStates = new Map<number, boolean | null>();
-  const closed = async (issueNumber: number) => {
-    if (!issueStates.has(issueNumber)) issueStates.set(issueNumber, await Promise.resolve(readIssueClosed(context.integration.root, issueNumber)).catch(() => null));
-    return issueStates.get(issueNumber) === true;
-  };
-  for (const workspace of candidates) {
+  const judge = await sweepJudge(cwd, options, { readOnly: false });
+  if (!judge) return { removed, skipped, pruned: [] };
+  for (const workspace of judge.workspaces) {
     const skip = (reason: string) => skipped.push({ name: workspace.name, landed: workspace.landed, reason });
-    // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the short
-    // assignment grace instead of the idle wait; a live process or owner still protects it below.
-    const issueBound = !workspace.landed && Boolean(workspace.metadata?.issueNumber);
-    if (guarded.some((root) => within(root, workspace.root))) continue;
-    if (issueBound && !await closed(workspace.metadata!.issueNumber!)) continue;
-    const holders = await workspaceHolders(workspace.root, { processes });
-    if (holders!.length || await lockOwnerAlive(workspace.name)) {
-      skip(holders!.length ? `in use by a live process: ${describeHolders(holders!)}` : "in use by a live process");
-      continue;
-    }
     try {
+      const decision = await judge.decide(workspace);
+      if (!decision.remove) {
+        if (decision.report) skip(decision.reason);
+        continue;
+      }
       if (workspace.landed) {
+        // Cleanup runs the landed checks again, with the snapshot, housekeeping and fetch a plan skips.
         const cleaned = await cleanupLandedWorkspace(workspace.root);
         if (cleaned.cleaned) removed.push(workspace.name);
         else skip(describeRetention(cleaned));
         continue;
       }
-      const idleMs = issueBound ? Math.min(emptyIdleMs, ASSIGNMENT_GRACE_MS) : emptyIdleMs;
-      if (idleMs > 0 && now - await assignedAt(workspace) < idleMs) continue;
-      const unique = await retainedWorkspaceMaterial(workspace.root, context.integration.root);
-      if (unique.length) {
-        skip(`holds unique files: ${unique.join(", ")}`);
-        continue;
-      }
-      await removeWorkspace(context.integration.root, workspace.name, issueBound ? { allowIssue: true } : {});
+      await removeWorkspace(judge.context.integration.root, workspace.name, decision.issueBound ? { allowIssue: true } : {});
       removed.push(workspace.name);
     } catch (error) {
       skip(error instanceof Error ? error.message : String(error));
     }
   }
-  return result;
+  return { removed, skipped, pruned: options.pruneState === false ? [] : await pruneWorkspaceState() };
+}
+
+/** Why the sweep keeps a workspace (`report`: a sweep names it as skipped), or that it removes it. */
+type SweepDecision =
+  | { remove: false; reason: string; report: boolean }
+  | { remove: true; issueBound: boolean };
+
+/**
+ * The sweep's decision for each workspace of the repository containing `cwd`,
+ * shared by the sweep and the read-only plan so they cannot disagree. `readOnly`
+ * snapshots no working copy, fetches nothing and finishes no landing: facts it
+ * cannot read without doing so keep the workspace, with the reason.
+ */
+async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { readOnly: boolean }) {
+  const { emptyIdleMs = EMPTY_IDLE_MS, protectedRoots = [], now = Date.now(), issueClosed, readBuild } = options;
+  const context = await workspaceContext(cwd);
+  if (!context) return null;
+  const readIssueClosed = issueClosed ?? ((root: string, issueNumber: number) => workItemClosed(root, trackerOf(context.configuration), issueNumber, readBuild));
+  const workspaces = await inspectWorkspaces(context.integration.root, { readOnly });
+  // Read once, and only when a workspace needs it.
+  let processList: Promise<Awaited<ReturnType<typeof processWorkingDirectories>>> | undefined;
+  const processes = () => processList ??= processWorkingDirectories();
+  const guarded = [...protectedRoots, process.cwd()];
+  const issueStates = new Map<number, boolean | null>();
+  const issueState = async (issueNumber: number) => {
+    if (!issueStates.has(issueNumber)) issueStates.set(issueNumber, await Promise.resolve().then(() => readIssueClosed(context.integration.root, issueNumber)).catch(() => null));
+    return issueStates.get(issueNumber)!;
+  };
+  const keep = (reason: string, report = true): SweepDecision => ({ remove: false, reason, report });
+  const decide = async (workspace: InspectedWorkspace): Promise<SweepDecision> => {
+    if (workspace.name === "default") return keep("integration checkout", false);
+    if (!workspace.root) return keep("checkout missing", false);
+    // Without its metadata, whether it is a spare, an Issue's or owes the runner facts is unknown.
+    if (!await metadataReadable(workspace.name)) return keep("metadata unreadable");
+    if (workspace.metadata?.spare) return keep("prepared spare", false);
+    if (workspace.hasWork) return keep("unlanded work", false);
+    // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the short
+    // assignment grace instead of the idle wait; a live process or owner still protects it below.
+    const issueBound = !workspace.landed && Boolean(workspace.metadata?.issueNumber);
+    const running = await processes();
+    if (!running) return keep("process working directories unavailable", !issueBound);
+    if (guarded.some((root) => within(root, workspace.root))) return keep("protected", false);
+    if (issueBound) {
+      const closed = await issueState(workspace.metadata!.issueNumber!);
+      if (closed !== true) return keep(closed === false ? `issue #${workspace.metadata!.issueNumber} open` : `issue #${workspace.metadata!.issueNumber} state unknown`, false);
+    }
+    const holders = await workspaceHolders(workspace.root, { processes: running });
+    if (holders!.length) return keep(`in use by a live process: ${describeHolders(holders!)}`);
+    if (await lockOwnerAlive(workspace.name)) return keep("in use by a live process");
+    if (workspace.landed) {
+      if (!readOnly) return { remove: true, issueBound: false };
+      const checks = await landedCleanupChecks(workspace.root, { readOnly: true });
+      return checks.ready ? { remove: true, issueBound: false } : keep(describeRetention(checks.result));
+    }
+    const idleMs = issueBound ? Math.min(emptyIdleMs, ASSIGNMENT_GRACE_MS) : emptyIdleMs;
+    if (idleMs > 0 && now - await assignedAt(workspace) < idleMs) return keep(issueBound ? "assigned within the grace period" : "assigned within the idle period", false);
+    if (readOnly) {
+      const edited = await unsnapshottedEdits(workspace.root, context.integration.root);
+      if (edited.length) return keep(`edited since its last snapshot: ${edited.join(", ")}`);
+    }
+    const unique = await retainedWorkspaceMaterial(workspace.root, context.integration.root);
+    if (unique.length) return keep(`holds unique files: ${unique.join(", ")}`);
+    const refusal = await removalRefusal(workspace, workspace.metadata);
+    if (refusal) return keep(refusal);
+    return { remove: true, issueBound };
+  };
+  return { context, workspaces, decide, processes };
+}
+
+/** One workspace in a retention plan: its facts and what the sweep would do with it. */
+export interface PlannedWorkspace {
+  name: string;
+  root: string;
+  /** The repository's integration checkout. */
+  repository: string;
+  state: "integration" | "spare" | "unlanded" | "landed" | "empty";
+  issueNumber: number | null;
+  task: string | null;
+  /** The workspace's landing, if it has one: its phase and whether its artifact is on the remote as of the last fetch (null when unknown). */
+  landing: { phase: string; published: boolean | null } | null;
+  /** Latest creation or assignment, null when unknown. */
+  assignedAt: string | null;
+  /** Live processes working in the checkout, null when process working directories are unreadable. */
+  holders: string[] | null;
+  /** Untracked material cleanup would keep, null when unreadable or not judged. */
+  uniqueFiles: string[] | null;
+  sizeBytes: number | null;
+  action: "remove" | "keep";
+  reason: string;
+}
+
+/**
+ * What the sweep would do now with every workspace of the repository containing
+ * `cwd`, and why, without changing anything: no filesystem, working-copy or
+ * state mutation. Facts it cannot read are unknown and keep the workspace.
+ */
+export async function planDisposableWorkspaces(cwd: string = process.cwd(), options: SweepOptions = {}): Promise<PlannedWorkspace[]> {
+  const judge = await sweepJudge(cwd, options, { readOnly: true });
+  if (!judge) return [];
+  const processes = await judge.processes();
+  return await Promise.all(judge.workspaces.map(async (workspace): Promise<PlannedWorkspace> => {
+    const decision = await judge.decide(workspace).catch((error: unknown): SweepDecision =>
+      ({ remove: false, reason: `unknown: ${error instanceof Error ? error.message : String(error)}`, report: true }));
+    const isolated = workspace.name !== "default" && Boolean(workspace.root);
+    const holders = isolated && processes ? (await workspaceHolders(workspace.root, { processes }))!.map(({ pid, command }) => `pid ${pid}${command ? ` (${command})` : ""}`) : null;
+    const assigned = isolated ? await assignedAt(workspace) : 0;
+    return {
+      name: workspace.name,
+      root: workspace.root,
+      repository: judge.context.integration.root,
+      state: workspace.name === "default" ? "integration" : workspace.metadata?.spare ? "spare"
+        : workspace.hasWork ? "unlanded" : workspace.landed ? "landed" : "empty",
+      issueNumber: workspace.metadata?.issueNumber ?? null,
+      task: typeof workspace.metadata?.task === "string" ? workspace.metadata.task : null,
+      landing: isolated ? await landingFacts(workspace.name) : null,
+      assignedAt: assigned ? new Date(assigned).toISOString() : null,
+      holders,
+      uniqueFiles: isolated ? await retainedWorkspaceMaterial(workspace.root, judge.context.integration.root).catch(() => null) : null,
+      sizeBytes: workspace.root ? await diskBytes(workspace.root) : null,
+      action: decision.remove ? "remove" : "keep",
+      reason: decision.remove ? (workspace.landed ? "landed and published" : "unused and empty") : decision.reason,
+    };
+  }));
+}
+
+/** A landing's phase and publication as of the last fetch, read without promoting or fetching. */
+async function landingFacts(workspaceName: string): Promise<PlannedWorkspace["landing"]> {
+  const state = await readLandingState(workspaceName, { readOnly: true }).catch(() => null);
+  if (!state) return null;
+  const context = typeof state.integrationRoot === "string" ? await workspaceContext(state.integrationRoot).catch(() => null) : null;
+  const published = context ? await artifactPublished(context.integration.root, context, state, { fetch: false }).catch(() => null) : null;
+  return { phase: state.phase ?? "landed", published };
+}
+
+/** The checkout's size on disk, null when `du` cannot read it. */
+async function diskBytes(root: string): Promise<number | null> {
+  const result = await run("du", ["-sk", root], { cwd: root });
+  const kilobytes = Number.parseInt(result.stdout, 10);
+  return result.code === 0 && Number.isFinite(kilobytes) ? kilobytes * 1024 : null;
 }
 
 /** Explicit `prune --empty`: every unused empty or delivered workspace now, with the same safety checks. */

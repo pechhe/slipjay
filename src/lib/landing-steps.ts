@@ -232,10 +232,11 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
 }
 
 /** True when the landed artifact is on the declared remote, or when no publication applies. */
-export async function artifactPublished(cwd: string, context: { integrationBranch: string; configuration: { remote?: string | null } }, state: { artifactCommitId: string }): Promise<boolean> {
+export async function artifactPublished(cwd: string, context: { integrationBranch: string; configuration: { remote?: string | null } }, state: { artifactCommitId: string }, { fetch = true }: { fetch?: boolean } = {}): Promise<boolean> {
   const remote = publicationRemote(context);
   if (!remote) return true;
-  await fetchIntegration(cwd, remote, context.integrationBranch);
+  // Without the fetch, the answer is as of the last fetch: published then is published now.
+  if (fetch) await fetchIntegration(cwd, remote, context.integrationBranch);
   return revisionExists(cwd, `${state.artifactCommitId} & ::${context.integrationBranch}@${remote}`);
 }
 

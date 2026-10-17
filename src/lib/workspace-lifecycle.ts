@@ -1,11 +1,13 @@
 import { existsSync } from "node:fs";
-import { readdir, readlink, realpath, rm } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { lstat, readdir, readlink, realpath, rm, stat } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 import { artifactPublished, finishLandedWorkspace } from "./landing-steps.ts";
-import type { WorkspaceContext } from "./workspace-jj.ts";
+import type { WorkspaceContext, WorkspaceMetadata } from "./workspace-jj.ts";
 import { revisionExists, run, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.ts";
 import { workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
+import type { LandingState } from "./workspace-state.ts";
 import { generatedPathMatchers, readExecutionPolicy } from "./execution-policy.ts";
 import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-delivery-lifecycle.ts";
 import { callerPids, describeHolders, workspaceHolders } from "./workspace-holders.ts";
@@ -51,6 +53,11 @@ export async function retainedWorkspaceMaterial(root: string, integrationRoot: s
   return uniqueUntrackedMaterial(root, limit, await declaredGeneratedPaths(integrationRoot), integrationRoot);
 }
 
+/** Paths edited since the checkout's last snapshot, for a reader that must not snapshot (see `editedSinceSnapshot`). */
+export async function unsnapshottedEdits(root: string, integrationRoot: string, limit: number = 5): Promise<string[]> {
+  return editedSinceSnapshot(root, await declaredGeneratedPaths(integrationRoot), integrationRoot, limit);
+}
+
 /** One human explanation of why cleanup kept a landed workspace. */
 export function describeRetention(result: { reason?: string; paths?: string[] } | null | undefined): string {
   if (result?.reason !== "unique-files") return String(result?.reason ?? "cleanup did not complete");
@@ -64,6 +71,25 @@ async function declaredGeneratedPaths(integrationRoot: string): Promise<RegExp[]
 }
 
 /**
+ * Visit every entry of a checkout that is not reproducible (a built-in tool cache or
+ * a path the repository declares as generated), depth first, until `visit` returns
+ * true (stop). Directories are visited before their contents.
+ */
+async function walkMaterial(root: string, generated: RegExp[], visit: (entry: Dirent, directory: string, path: string) => Promise<boolean | void>): Promise<void> {
+  async function walk(directory: string, relative: string): Promise<boolean> {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (REPRODUCIBLE.has(entry.name) || entry.name.endsWith(".tsbuildinfo")) continue;
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (generated.some((matcher) => matcher.test(`${path}/`))) continue;
+      if (await visit(entry, directory, path)) return true;
+      if (entry.isDirectory() && await walk(join(directory, entry.name), path)) return true;
+    }
+    return false;
+  }
+  await walk(root, "");
+}
+
+/**
  * Files in a checkout that are neither tracked nor reproducible (a built-in tool
  * cache or a path the repository declares as generated): ignored or unexplained
  * material that cleanup must not destroy. "Tracked" is the last snapshot of the
@@ -72,27 +98,53 @@ async function declaredGeneratedPaths(integrationRoot: string): Promise<RegExp[]
  * outlives the checkout. Returns at most `limit` repository-relative paths.
  */
 export async function uniqueUntrackedMaterial(root: string, limit: number = 5, generated: RegExp[] = [], primaryRoot: string | null = null): Promise<string[]> {
+  const linksIntoPrimary = primaryLinks(primaryRoot);
+  const tracked = await snapshotFiles(root);
+  const found: string[] = [];
+  await walkMaterial(root, generated, async (entry, directory, path) => {
+    if (entry.isDirectory() || tracked.has(path) || await linksIntoPrimary(entry, directory)) return false;
+    found.push(path);
+    return found.length >= limit;
+  });
+  return found;
+}
+
+/** Files in the checkout's last snapshot. Never snapshots: a snapshot here would turn an on-disk edit into a commit no caller has judged. */
+async function snapshotFiles(root: string): Promise<Set<string>> {
+  return new Set((await jj(root, ["--ignore-working-copy", "file", "list"])).split("\n").filter(Boolean));
+}
+
+/** Whether an entry is a symlink into the primary checkout, whose target outlives the checkout. */
+function primaryLinks(primaryRoot: string | null): (entry: Dirent, directory: string) => Promise<boolean> {
   const primary = primaryRoot && resolve(primaryRoot);
-  const linksIntoPrimary = async (directory: string, name: string): Promise<boolean> => {
-    const target = resolve(directory, await readlink(join(directory, name)));
+  return async (entry, directory) => {
+    if (!primary || !entry.isSymbolicLink()) return false;
+    const target = resolve(directory, await readlink(join(directory, entry.name)));
     return target === primary || target.startsWith(primary + sep);
   };
-  // Never snapshots: a snapshot here would turn an on-disk edit into a commit no caller has judged.
-  const tracked = new Set((await jj(root, ["--ignore-working-copy", "file", "list"])).split("\n").filter(Boolean));
+}
+
+/**
+ * Paths changed on disk since JJ last snapshotted the checkout, which a reader that
+ * must not snapshot cannot judge, since they may be unlanded work: a tracked file
+ * edited or deleted since, or a new file other than a link into the primary checkout.
+ * Returns at most `limit` repository-relative paths.
+ */
+async function editedSinceSnapshot(root: string, generated: RegExp[] = [], primaryRoot: string | null = null, limit: number = 5): Promise<string[]> {
+  const snapshot = (await stat(join(root, ".jj", "working_copy", "tree_state"))).mtimeMs;
+  const linksIntoPrimary = primaryLinks(primaryRoot);
+  const tracked = await snapshotFiles(root);
   const found: string[] = [];
-  async function walk(directory: string, relative: string): Promise<void> {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (found.length >= limit) return;
-      if (REPRODUCIBLE.has(entry.name) || entry.name.endsWith(".tsbuildinfo")) continue;
-      const path = relative ? `${relative}/${entry.name}` : entry.name;
-      if (generated.some((matcher) => matcher.test(`${path}/`))) continue;
-      if (entry.isDirectory()) await walk(join(directory, entry.name), path);
-      else if (tracked.has(path)) continue;
-      else if (primary && entry.isSymbolicLink() && await linksIntoPrimary(directory, entry.name)) continue;
-      else found.push(path);
-    }
+  for (const path of tracked) {
+    if (found.length >= limit) return found;
+    const changed = await lstat(join(root, path)).then((info) => info.mtimeMs > snapshot, () => true);
+    if (changed) found.push(path);
   }
-  await walk(root, "");
+  await walkMaterial(root, generated, async (entry, directory, path) => {
+    if (entry.isDirectory() || tracked.has(path) || await linksIntoPrimary(entry, directory)) return false;
+    if ((await lstat(join(directory, entry.name))).mtimeMs > snapshot) found.push(path);
+    return found.length >= limit;
+  });
   return found;
 }
 
@@ -134,49 +186,83 @@ export class WorkingCopyChangedError extends Error {
 /**
  * Judge a checkout once: snapshot its working copy, then read everything else
  * from that snapshot (`--ignore-working-copy`). Returns the judged working-copy
- * commit and why the checkout must be kept, if it must.
+ * commit and why the checkout must be kept, if it must. `readOnly` never
+ * snapshots: an edit since the last snapshot keeps the checkout instead.
  */
-async function judgeCheckout(context: WorkspaceContext): Promise<{ commit: string; retained: CleanupResult | null }> {
-  const commit = await workingCopyCommit(context.current.root);
+async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { readOnly?: boolean } = {}): Promise<{ commit: string; retained: CleanupResult | null }> {
+  const generated = await declaredGeneratedPaths(context.integration.root);
+  const commit = readOnly
+    ? await jj(context.current.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"])
+    : await workingCopyCommit(context.current.root);
+  if (readOnly) {
+    const edited = await editedSinceSnapshot(context.current.root, generated, context.integration.root);
+    if (edited.length) return { commit, retained: { cleaned: false, reason: "unsnapshotted-edits", paths: edited } };
+  }
   // Follow-up work on top of the landed artifact is never deleted.
   if (await workspaceHasUnintegratedWork(context.current.root, context.integrationBranch, { ignoreWorkingCopy: true })) {
     return { commit, retained: { cleaned: false, reason: "new-unlanded-work" } };
   }
-  const unique = await uniqueUntrackedMaterial(context.current.root, 5, await declaredGeneratedPaths(context.integration.root), context.integration.root);
+  const unique = await uniqueUntrackedMaterial(context.current.root, 5, generated, context.integration.root);
   return { commit, retained: unique.length ? { cleaned: false, reason: "unique-files", paths: unique } : null };
 }
 
-async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHooks): Promise<CleanupResult> {
+type LandedChecks =
+  | { ready: false; result: CleanupResult }
+  | { ready: true; context: WorkspaceContext; state: LandingState; commit: string };
+
+/**
+ * Every check cleanup makes before it retires a landed checkout, in its order.
+ * Cleanup snapshots the working copy, finishes a landing's pending housekeeping
+ * and fetches to prove publication. `readOnly` (the retention plan) changes
+ * nothing: it reads the last snapshot, reports pending housekeeping as a reason
+ * to keep, and judges publication as of the last fetch.
+ */
+export async function landedCleanupChecks(cwd: string, { readOnly = false }: { readOnly?: boolean } = {}): Promise<LandedChecks> {
+  const keep = (reason: string, paths?: string[]): LandedChecks => ({ ready: false, result: { cleaned: false, reason, ...paths ? { paths } : {} } });
   const context = await workspaceContext(cwd);
-  if (!context || context.current.name === "default") return { cleaned: false, reason: "not-isolated" };
-  const state = await readLandingState(context.current.name);
-  if (!state) return { cleaned: false, reason: "not-landed" };
+  if (!context || context.current.name === "default") return keep("not-isolated");
+  let state = await readLandingState(context.current.name, { readOnly });
+  // A read-only read never promotes a queued landing, so judge it as cleanup's promotion would.
+  if (readOnly && state?.phase === "prepared") {
+    const integrated = typeof state.integrationRoot === "string"
+      && await revisionExists(state.integrationRoot, `${state.artifactCommitId} & ::${state.integrationBranch}`);
+    if (!integrated) return keep("landing-queued");
+    state = { ...state, phase: "landed" };
+  }
+  if (!state) return keep("not-landed");
   if (resolve(state.workspacePath) !== resolve(context.current.root) || state.workspaceName !== context.current.name) {
     throw new Error("Landing state does not match the current workspace");
   }
-  let judged = await judgeCheckout(context);
-  if (judged.retained) return judged.retained;
+  let judged = await judgeCheckout(context, { readOnly });
+  if (judged.retained) return { ready: false, result: judged.retained };
   // Pending housekeeping is retried below; every other retention reason holds.
   const retention = cleanupRetentionReason({ ...state, cleanupPending: false }, context, await workspaceMetadata(context.current.name));
-  if (retention) return { cleaned: false, reason: retention };
+  if (retention) return keep(retention);
   if (!await revisionExists(context.integration.root, `${state.artifactCommitId} & ::${state.integrationBranch}`))
     throw new Error("Cannot prove the landed artifact is integrated; workspace retained");
   if (state.cleanupPending) {
-    if ((await finishLandedWorkspace(context, state)).cleanupPending) return { cleaned: false, reason: "housekeeping-pending" };
+    if (readOnly) return keep("housekeeping-pending");
+    if ((await finishLandedWorkspace(context, state)).cleanupPending) return keep("housekeeping-pending");
     // Housekeeping moves the working copy off the artifact: judge the new state.
     judged = await judgeCheckout(context);
-    if (judged.retained) return judged.retained;
+    if (judged.retained) return { ready: false, result: judged.retained };
   }
-  const gitDirectory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
   // The runner finalizes before it publishes, so a published artifact has no pending step.
-  const published = await artifactPublished(cwd, context, state);
-  if (!published) return { cleaned: false, reason: "not-published" };
+  if (!await artifactPublished(cwd, context, state, { fetch: !readOnly })) return keep("not-published");
   // Cleanup deletes only checkouts beneath slipjay workspace storage.
-  if (!await withinWorkspaceStorage(context.current.root)) return { cleaned: false, reason: "outside-workspace-storage" };
+  if (!await withinWorkspaceStorage(context.current.root)) return keep("outside-workspace-storage");
+  return { ready: true, context, state, commit: judged.commit };
+}
+
+async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHooks): Promise<CleanupResult> {
+  const checks = await landedCleanupChecks(cwd);
+  if (!checks.ready) return checks.result;
+  const { context, state, commit } = checks;
+  const gitDirectory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
   await archiveIntegratedWorkspaceEvidence(gitDirectory, state);
   await hooks.afterChecks?.();
   try {
-    await retireWorkspace(context.integration.root, context.current, hooks, { expectedCommitId: judged.commit });
+    await retireWorkspace(context.integration.root, context.current, hooks, { expectedCommitId: commit });
   } catch (error) {
     if (error instanceof WorkingCopyChangedError) return { cleaned: false, reason: "working-copy-changed" };
     throw error;
@@ -195,9 +281,9 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
   return withWorkspaceTransaction(`writer:${workspaceName}`, async () => {
     const target = (await listWorkspaces(cwd)).find((workspace) => workspace.name === workspaceName);
     if (!target?.root) throw new Error(`Unknown or unavailable JJ workspace: ${workspaceName}`);
-    if (!await withinWorkspaceStorage(target.root))
-      throw new Error("Refusing to remove a workspace outside ~/.slipjay/workspaces, ~/.slipway/workspaces and ~/.pi/workspaces");
     const metadata = await workspaceMetadata(workspaceName);
+    const refusal = await removalRefusal({ name: workspaceName, root: target.root }, metadata);
+    if (refusal) throw new Error(refusal);
     // Snapshot once; retirement then refuses a working copy that moved since.
     const judged = await workingCopyCommit(target.root).catch(() => null);
     const hasWork = judged === null || await workspaceHasUnintegratedWork(target.root, context.integrationBranch, { ignoreWorkingCopy: true }).catch(
@@ -246,6 +332,18 @@ export async function forgetWorkspace(integrationRoot: string, workspaceName: st
  * With `options.expectedCommitId`, a working copy that no longer matches it is
  * kept and `WorkingCopyChangedError` thrown.
  */
+/**
+ * Why removing an unused checkout must be refused whatever its work: outside workspace
+ * storage, or holding runner facts not yet delivered. Reads only, so the retention plan
+ * judges removal by the same rules.
+ */
+export async function removalRefusal(workspace: { name: string; root: string }, metadata: WorkspaceMetadata | null | undefined): Promise<string | null> {
+  if (!await withinWorkspaceStorage(workspace.root))
+    return "Refusing to remove a workspace outside ~/.slipjay/workspaces, ~/.slipway/workspaces and ~/.pi/workspaces";
+  if (hasPendingRunnerFacts(metadata ?? null)) return `jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`;
+  return null;
+}
+
 export async function retireWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks = {}, options: { expectedCommitId?: string } = {}): Promise<void> {
   const metadata = await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) throw new Error(`jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`);

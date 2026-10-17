@@ -18,7 +18,8 @@ export {
 } from "./workspace-lifecycle.ts";
 export { provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance, startSpareRefill } from "./workspace-pool.ts";
 export { runHousekeeping, startHousekeeping } from "./workspace-housekeeping.ts";
-export { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace-sweep.ts";
+export { planDisposableWorkspaces, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace-sweep.ts";
+export type { PlannedWorkspace } from "./workspace-sweep.ts";
 export { withWorkspaceTransaction } from "./workspace-transaction.ts";
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
 
