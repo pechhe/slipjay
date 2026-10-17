@@ -138,6 +138,40 @@ workspace whose checkout is already gone has no working directory, so it is
 forgotten without a teardown. Claiming a spare renames an unused checkout in
 place and does not run one.
 
+### Generated output and evidence
+
+Retiring a workspace never deletes a file that no history holds: an untracked or
+ignored file keeps the checkout (`unique-files`), except where the repository
+says what it is. Two `slipjay.json` declarations, read from the primary
+checkout, take repository-relative paths or globs (`*` within one segment, `**`
+across segments); a match covers everything below it:
+
+```json
+{ "generatedPaths": [".t3/userdata", "apps/*/dist-electron"], "evidencePaths": [".t3/review"] }
+```
+
+- **`generatedPaths`**: disposable build, preview and runtime output, deleted
+  with the checkout when it retires. The sweeps and the landing's own cleanup
+  retire a checkout only once no live process works in it; an explicit
+  `cleanup` or `remove` does not wait.
+- **`evidencePaths`**: review, acceptance or recovery evidence. Just before a
+  checkout is forgotten, `retireWorkspace` copies its untracked files there
+  into `~/.slipjay/state/evidence/<workspace>-<time>/files/` with a
+  `provenance.json` naming the workspace, repository, Issue, task,
+  working-copy commit and landing artifact, and each file's size and SHA-256
+  (symbolic links are recorded with their target, not followed; sockets and
+  FIFOs are listed as skipped). The copy is written as `<name>.partial` and
+  renamed once complete; the workspace's next retirement removes an
+  interrupted one. Evidence over 64 MiB, or that cannot be copied, keeps the
+  workspace with the reason, and so does evidence that changes during the
+  copy (its copy is then removed). The preserved directories are kept until
+  deleted by hand.
+
+Nothing is disposable by default: not `.t3`, patches, or other ignored files.
+A file that appears while a checkout is being retired keeps it
+(`working-copy-changed`). The runner's own retained landing evidence (source,
+handoff, artifacts) expires on its separate schedule; see [Runner](#runner).
+
 ### Workspace options
 
 Optional `slipjay.json` fields for the workspace pool and shared output:
@@ -246,8 +280,8 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
 | `list` | Workspaces with their state, Issue and retained material. |
 | `pool [refill]` | Show ready spare workspaces, or provision one (up to `spares`). |
-| `prune --empty` | Remove empty workspaces, empty workspaces of a closed Issue, and state left by workspaces that no longer exist. |
-| `prune [--empty] --plan [--json]` | Change nothing; list every workspace of the repository with its path, state, Issue, task, assignment time, landing (and whether it is published, as of the last fetch), live processes, unique files and size, and whether the automatic sweep (or, with `--empty`, `prune --empty`) would remove it now and why not. It shares the sweep's decisions but snapshots no working copy, fetches nothing and finishes no landing, so an edit since a checkout's last snapshot, a landing's pending housekeeping and an unreadable fact (an Issue state the tracker cannot report, metadata that cannot be parsed) each keep the workspace, with that reason. |
+| `prune --empty` | Remove empty workspaces, empty workspaces of a closed Issue, and state left by workspaces that no longer exist. A registered workspace whose checkout is gone from disk is forgotten when its revision holds no unlanded work; one whose working copy JJ cannot read is kept, with how to recover it. Directories in workspace storage that no repository lists (a forgotten checkout, one whose repository is gone, one with no JJ identity) are removed only when they hold nothing but reproducible output, are over an hour old and no live process uses them; any other is kept and named. |
+| `prune [--empty] --plan [--json]` | Change nothing; list every workspace of the repository with its path, state, Issue, task, assignment time, landing (and whether it is published, as of the last fetch), live processes, unique files and size, and whether the automatic sweep (or, with `--empty`, `prune --empty`) would remove it now and why not. It shares the sweep's decisions but snapshots no working copy, fetches nothing and finishes no landing, so an edit since a checkout's last snapshot, a landing's pending housekeeping and an unreadable fact (an Issue state the tracker cannot report, metadata that cannot be parsed) each keep the workspace, with that reason. States are `integration`, `spare`, `unlanded`, `landed`, `empty`, `missing` (registered, checkout gone from disk), `broken` (JJ cannot read its working copy) and `orphan` (a directory in workspace storage no repository lists; its `repository` is the one it names, or null). |
 | `attach-issue <n>` | Bind the current workspace to Issue `n` (a Build number in a Build-tracked repository; see `tracker`). |
 | `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). The fetch runs before the start takes the repository's allocation lock, and starts within 30 seconds of a fetch, or arriving while one runs, share it, so concurrent starts never queue behind each other's fetch. |
 | `start [--integration] [--issue <n> \| --base <revision>] [--attempt <id>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`); `--base` (implies `--integration`, no `--issue`) starts a new workspace, a claimed spare or a fresh one, on that revision of the current checkout instead of the integration head, so a helper sees a lead's unlanded work; it must name one commit other than the caller's working copy (`jj new`, then pass `@-`), and dependencies are reused unless that revision changed the install inputs; `--attempt <id>` records the start as that allocation attempt (see `attempt`); `--refill` then starts a background spare refill (a new workspace always does); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`, and `attemptId` when given) and sends all install output to stderr. With a runner configured, the start's metrics (`workspace_start`, `pool_claim`) are posted to its ledger by a detached process, so a slow or unreachable runner never delays the start; a failure is one line in `pool-refill.log`. |

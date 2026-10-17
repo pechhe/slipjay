@@ -71,7 +71,8 @@ async function printRetentionPlan(options: SweepOptions, json: boolean): Promise
     console.log(`\n${workspace.action.toUpperCase()} ${workspace.name} (${workspace.state}${issue} · ${size}): ${workspace.reason}`);
     console.log(`  path: ${workspace.root || unknown}`);
     if (workspace.state === "integration") continue;
-    console.log(`  task: ${workspace.task ?? "none"} · assigned: ${workspace.assignedAt ?? unknown} · landing: ${landing}`);
+    if (workspace.state === "orphan") console.log(`  repository: ${workspace.repository ?? "none (not a JJ checkout)"}`);
+    else console.log(`  task: ${workspace.task ?? "none"} · assigned: ${workspace.assignedAt ?? unknown} · landing: ${landing}`);
     console.log(`  processes: ${workspace.holders === null ? unknown : workspace.holders.join(", ") || "none"}`);
     console.log(`  unique files: ${workspace.uniqueFiles === null ? unknown : workspace.uniqueFiles.join(", ") || "none"}`);
   }
@@ -481,8 +482,9 @@ try {
       const result = await pruneEmptyWorkspaces(process.cwd(), reader);
       for (const name of result.removed) console.log(`Removed empty workspace: ${name}`);
       for (const path of result.pruned) console.log(`Pruned state: ${path}`);
+      for (const path of result.orphans) console.log(`Removed orphaned directory: ${path}`);
       for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);
-      if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0) console.log("No empty workspaces to prune.");
+      if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0 && result.orphans.length === 0) console.log("No empty workspaces to prune.");
     }
   } else if (command === "pool") {
     if (rest[0] === "refill") await refillPool(process.cwd(), (outcome) => console.log(JSON.stringify(outcome)));

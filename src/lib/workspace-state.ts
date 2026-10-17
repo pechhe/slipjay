@@ -108,13 +108,19 @@ export async function listWorkspaces(cwd: string = process.cwd(), options: { rea
   );
 }
 
-/** A workspace with its unlanded-work and landing-record facts. */
-export type InspectedWorkspace = WorkspaceEntry & { hasWork: boolean; landed: boolean };
+/**
+ * A workspace with its unlanded-work and landing-record facts. `unreadable` is JJ's error when
+ * its working copy could not be read (a broken identity, a missing checkout), when `hasWork` is
+ * assumed rather than known.
+ */
+export type InspectedWorkspace = WorkspaceEntry & { hasWork: boolean; landed: boolean; unreadable?: string };
 
 /**
  * Every workspace with its facts. `readOnly` corrects no metadata and snapshots no
  * working copy, so `hasWork` is as of each checkout's last snapshot.
  */
+const firstLine = (error: unknown) => (error instanceof Error ? error.message : String(error)).split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 200) ?? "unreadable";
+
 export async function inspectWorkspaces(cwd: string = process.cwd(), { readOnly = false }: { readOnly?: boolean } = {}): Promise<InspectedWorkspace[]> {
   const context = await workspaceContext(cwd);
   if (!context) return [];
@@ -122,10 +128,11 @@ export async function inspectWorkspaces(cwd: string = process.cwd(), { readOnly 
   return await Promise.all(
     workspaces.map(async (workspace) => ({
       ...workspace,
-      hasWork:
-        workspace.name === "default"
-          ? false
-          : await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch, { ignoreWorkingCopy: readOnly }).catch(() => true),
+      ...workspace.name === "default"
+        ? { hasWork: false }
+        : await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch, { ignoreWorkingCopy: readOnly }).then(
+          (hasWork) => ({ hasWork }),
+          (error: unknown) => ({ hasWork: true, unreadable: firstLine(error) })),
       landed: Boolean(await readLandingState(workspace.name, { readOnly: true })),
     })),
   );

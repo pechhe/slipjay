@@ -169,11 +169,13 @@ test("state of vanished workspaces and all retired local-landing state is pruned
     await write(join(metadataHome(), "ghost.json"), record("ghost", { issueNumber: 9 }));
     await write(join(lockHome(), "ghost.json"), { version: 1, workspaceName: "ghost", pid: dead });
     await write(join(stateHome(), "ghost.json"), landing("ghost", { phase: "landed" }));
+    // A repository that no longer exists registers nothing.
+    await write(join(metadataHome(), "vanished-repo.json"), record("vanished-repo", { integrationRoot: join(f.root, "no-such-repo") }));
     // Kept: in flight, undeterminable or evidence.
     await write(join(metadataHome(), "ghost-spare.json"), record("ghost-spare", { spare: true, prepared: false, preparingPid: process.pid }));
     await write(join(stateHome(), "ghost-prepared.json"), landing("ghost-prepared", { phase: "prepared" }));
     await write(join(stateHome(), "ghost-unproven.json"), landing("ghost-unproven", { phase: "landed", artifactCommitId: "f".repeat(40) }));
-    await write(join(metadataHome(), "elsewhere.json"), record("elsewhere", { integrationRoot: join(f.root, "no-such-repo") }));
+    await write(join(metadataHome(), "elsewhere.json"), record("elsewhere", { integrationRoot: f.root }));
     await write(join(lockHome(), "ghost-live.json"), { version: 1, workspaceName: "ghost-live", pid: process.pid });
     await write(join(landedHome(), "artifact-abc.json"), landing("ghost", { phase: "landed" }));
     // What local landings left behind goes whatever it holds: slot locks, waiters and post-land runs.
@@ -183,7 +185,7 @@ test("state of vanished workspaces and all retired local-landing state is pruned
     await write(join(stateHome(), "post-land", "abc.json"), { version: 1, commit: "abc", status: "running" });
     const removed = await pruneWorkspaceState();
     assert.ok(removed.includes("workspaces/ghost.json") || removed.some((path) => path.endsWith("ghost.json")), JSON.stringify(removed));
-    for (const gone of [join(metadataHome(), "ghost.json"), join(lockHome(), "ghost.json"), join(stateHome(), "ghost.json"), ...retired]) {
+    for (const gone of [join(metadataHome(), "ghost.json"), join(metadataHome(), "vanished-repo.json"), join(lockHome(), "ghost.json"), join(stateHome(), "ghost.json"), ...retired]) {
       assert.equal(existsSync(gone), false, gone);
     }
     for (const kept of [join(metadataHome(), "ghost-spare.json"), join(stateHome(), "ghost-prepared.json"), join(stateHome(), "ghost-unproven.json"),

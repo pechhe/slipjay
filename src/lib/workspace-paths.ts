@@ -80,6 +80,9 @@ export const attemptHome = (): string => join(stateHome(), "attempts");
 /** Legacy landing sidecars and integrated-artifact evidence. */
 export const landedHome = (): string => join(stateHome(), "landed");
 
+/** Evidence preserved from retired workspaces, one directory per retirement with its `provenance.json`. */
+export const evidenceHome = (): string => join(stateHome(), "evidence");
+
 /** Cross-process transaction locks. */
 export const transactionHome = (): string => join(stateHome(), "transactions");
 

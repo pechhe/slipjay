@@ -2,22 +2,20 @@ import type { WorkspaceContext, WorkspaceEntry } from "./workspace-jj.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve, sep } from "node:path";
-import { legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionExists, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext } from "./workspace-jj.ts";
-import { metadataHome, startFetchHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
+import { basename, dirname, join, resolve } from "node:path";
+import { legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext } from "./workspace-jj.ts";
+import { metadataHome, startFetchHome, workspaceHome } from "./workspace-paths.ts";
 import {
   assertIssueAvailable,
   assertWorkspaceMutationAllowed,
   attachWorkspaceIssue,
-  landingStatePaths,
   listWorkspaces,
   metadataPath,
-  readLandingState,
   workspaceMetadata,
 } from "./workspace-state.ts";
 import { readIntegrationPolicy, UNDECLARED_POLICY } from "./execution-policy.ts";
 import { fetchIntegration, publicationRemote } from "./landing-steps.ts";
-import { forgetWorkspace } from "./workspace-lifecycle.ts";
+import { forgetMissingCheckout, missingCheckoutRefusal } from "./workspace-lifecycle.ts";
 import { startHousekeeping } from "./workspace-housekeeping.ts";
 import { beginAttempt, updateAttempt } from "./workspace-attempts.ts";
 import { claimSpare, refreshDependencies } from "./workspace-pool.ts";
@@ -156,35 +154,6 @@ async function applyWorkspaceAuthorIdentity(sourceRoot: string, workspacePath: s
   await jj(workspacePath, ["config", "set", "--repo", "user.email", email]).catch(() => undefined);
 }
 
-/** Forget an Issue workspace whose checkout is gone, only when nothing in it could be lost. */
-async function forgetSafeMissingIssueWorkspace(cwd: string, workspace: WorkspaceEntry, issueNumber: number, hooks: Pick<WorkspaceCreationHooks, "forget">) {
-  if (workspace.root && exists(workspace.root)) return;
-  const context = await workspaceContext(cwd);
-  if (!context) throw new Error("Missing Issue workspace recovery requires a Jujutsu repository");
-  const label = `Issue #${issueNumber} workspace jj:${workspace.name}`;
-  const facts = await revisionFacts(cwd, workspace.commitId).catch(() => null);
-  if (!facts) throw new Error(`${label} points at an unreadable JJ revision; preserve it for explicit recovery`);
-  if (facts.conflict) throw new Error(`${label} has conflicted JJ state; preserve it for explicit recovery`);
-  const unintegrated = await jj(cwd, ["log", "-r", `(${context.integrationBranch}..${workspace.commitId}) & ~empty()`, "--no-graph", "-T", 'commit_id.short() ++ "\\n"']);
-  if (unintegrated) throw new Error(`${label} is missing on disk but still contains unintegrated work; preserve it for explicit recovery`);
-  const landed = await readLandingState(workspace.name);
-  if (landed && !await revisionExists(cwd, `${landed.artifactCommitId} & ::${landed.integrationBranch}`)) {
-    throw new Error(`${label} has landing evidence that is not integrated; preserve it for explicit recovery`);
-  }
-  const recordedPath = typeof workspace.metadata?.workspacePath === "string"
-    ? workspace.metadata.workspacePath
-    : workspace.root || join(workspaceHome(), workspace.name);
-  // The checkout is gone, so storage containment is checked lexically, not through realpath.
-  const normalizedPath = resolve(recordedPath);
-  if (!workspaceStorageHomes().some((home) => normalizedPath.startsWith(`${resolve(home)}${sep}`))) {
-    throw new Error(`${label} has an unsafe stale path; preserve it for explicit recovery`);
-  }
-  await forgetWorkspace(context.integration.root, workspace.name, normalizedPath, hooks);
-  if (exists(normalizedPath)) throw new Error(`${label} stale checkout could not be removed safely`);
-  await rm(metadataPath(workspace.name), { force: true });
-  for (const candidate of landingStatePaths(workspace.name)) await rm(candidate, { force: true });
-}
-
 /**
  * The Issue's one healthy workspace, or null. A registered workspace missing on
  * disk is forgotten when that loses nothing and fails closed otherwise.
@@ -194,7 +163,11 @@ export async function findIssueWorkspace(cwd: string, issueNumber: number, hooks
   const healthy: WorkspaceEntry[] = [];
   for (const workspace of matches) {
     if (workspace.root && exists(workspace.root)) healthy.push(workspace);
-    else await forgetSafeMissingIssueWorkspace(cwd, workspace, issueNumber, hooks);
+    else {
+      const refusal = await missingCheckoutRefusal(cwd, workspace);
+      if (refusal) throw new Error(`Issue #${issueNumber} workspace jj:${workspace.name} ${refusal}`);
+      await forgetMissingCheckout(cwd, workspace, hooks);
+    }
   }
   if (healthy.length > 1) throw new Error(`Issue #${issueNumber} is associated with multiple JJ workspaces; reconcile them explicitly`);
   return healthy[0] ?? null;

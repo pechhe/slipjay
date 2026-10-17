@@ -1,16 +1,18 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { Dirent } from "node:fs";
-import { lstat, readdir, readlink, realpath, rm, stat } from "node:fs/promises";
-import { join, resolve, sep } from "node:path";
+import { copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join, resolve, sep } from "node:path";
 import { artifactPublished, finishLandedWorkspace } from "./landing-steps.ts";
-import type { WorkspaceContext, WorkspaceMetadata } from "./workspace-jj.ts";
-import { revisionExists, run, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.ts";
-import { workspaceStorageHomes } from "./workspace-paths.ts";
+import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
+import { revisionExists, revisionFacts, run, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.ts";
+import { evidenceHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import type { LandingState } from "./workspace-state.ts";
 import { generatedPathMatchers, readExecutionPolicy } from "./execution-policy.ts";
 import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-delivery-lifecycle.ts";
-import { callerPids, describeHolders, workspaceHolders } from "./workspace-holders.ts";
+import { callerPids, describeHolders, processAlive, workspaceHolders } from "./workspace-holders.ts";
 import { archiveIntegratedWorkspaceEvidence } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
 import { withWorkspaceTransaction } from "./workspace-transaction.ts";
@@ -23,6 +25,8 @@ export interface RetirementHooks {
   teardownTimeoutMs?: number;
   /** Called after cleanup's delivery checks and just before it retires the checkout (tests, hosts). */
   afterChecks?: () => void | Promise<void>;
+  /** Called after retirement copies a checkout's evidence and before its last look (tests). */
+  afterEvidence?: () => void | Promise<void>;
 }
 
 type CleanupResult = {
@@ -50,38 +54,48 @@ const REPRODUCIBLE = new Set([
  * Every cleanup surface (Pi launcher, CLI, Peach host) must pass this first.
  */
 export async function retainedWorkspaceMaterial(root: string, integrationRoot: string, limit: number = 5): Promise<string[]> {
-  return uniqueUntrackedMaterial(root, limit, await declaredGeneratedPaths(integrationRoot), integrationRoot);
+  return uniqueUntrackedMaterial(root, limit, await disposablePaths(integrationRoot), integrationRoot);
 }
 
 /** Paths edited since the checkout's last snapshot, for a reader that must not snapshot (see `editedSinceSnapshot`). */
 export async function unsnapshottedEdits(root: string, integrationRoot: string, limit: number = 5): Promise<string[]> {
-  return editedSinceSnapshot(root, await declaredGeneratedPaths(integrationRoot), integrationRoot, limit);
+  return editedSinceSnapshot(root, await disposablePaths(integrationRoot), integrationRoot, limit);
 }
 
 /** One human explanation of why cleanup kept a landed workspace. */
 export function describeRetention(result: { reason?: string; paths?: string[] } | null | undefined): string {
   if (result?.reason !== "unique-files") return String(result?.reason ?? "cleanup did not complete");
   return `holds files cleanup will not delete: ${(result.paths ?? []).join(", ")}`
-    + " (remove them, or declare generated output in slipjay.json generatedPaths)";
+    + " (remove them, declare generated output in slipjay.json generatedPaths, or evidence to preserve in evidencePaths)";
 }
 
 /** Cleanup judges files on disk, so it reads the primary checkout's working policy (strictly). */
-async function declaredGeneratedPaths(integrationRoot: string): Promise<RegExp[]> {
-  return generatedPathMatchers((await readExecutionPolicy(integrationRoot))?.generatedPaths);
+async function declaredPaths(integrationRoot: string): Promise<{ generated: RegExp[]; evidence: RegExp[] }> {
+  const policy = await readExecutionPolicy(integrationRoot);
+  return { generated: generatedPathMatchers(policy?.generatedPaths), evidence: generatedPathMatchers(policy?.evidencePaths, "evidencePaths") };
+}
+
+/** Paths that cannot keep a checkout: generated output it discards and evidence retirement preserves first. */
+async function disposablePaths(integrationRoot: string): Promise<RegExp[]> {
+  const { generated, evidence } = await declaredPaths(integrationRoot);
+  return [...generated, ...evidence];
 }
 
 /**
  * Visit every entry of a checkout that is not reproducible (a built-in tool cache or
  * a path the repository declares as generated), depth first, until `visit` returns
- * true (stop). Directories are visited before their contents.
+ * true (stop). Directories are visited before their contents; one matching `skip` is
+ * visited but not entered.
  */
-async function walkMaterial(root: string, generated: RegExp[], visit: (entry: Dirent, directory: string, path: string) => Promise<boolean | void>): Promise<void> {
+async function walkMaterial(root: string, generated: RegExp[], visit: (entry: Dirent, directory: string, path: string) => Promise<boolean | void>,
+  { skip = [] }: { skip?: RegExp[] } = {}): Promise<void> {
   async function walk(directory: string, relative: string): Promise<boolean> {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       if (REPRODUCIBLE.has(entry.name) || entry.name.endsWith(".tsbuildinfo")) continue;
       const path = relative ? `${relative}/${entry.name}` : entry.name;
       if (generated.some((matcher) => matcher.test(`${path}/`))) continue;
       if (await visit(entry, directory, path)) return true;
+      if (skip.some((matcher) => matcher.test(`${path}/`))) continue;
       if (entry.isDirectory() && await walk(join(directory, entry.name), path)) return true;
     }
     return false;
@@ -109,6 +123,39 @@ export async function uniqueUntrackedMaterial(root: string, limit: number = 5, g
   return found;
 }
 
+/**
+ * Files in a directory that are not reproducible (a built-in tool cache or JJ/Git state), for a
+ * directory with no JJ identity to compare against, such as an orphan in workspace storage.
+ * Returns at most `limit` relative paths.
+ */
+export async function nonReproducibleFiles(root: string, limit: number = 5): Promise<string[]> {
+  const found: string[] = [];
+  // A Git repository or a JJ store holds history of its own: only a `.jj/repo` pointer file is a checkout's.
+  if (existsSync(join(root, ".git"))) found.push(".git");
+  if (await stat(join(root, ".jj", "repo")).then((info) => info.isDirectory(), () => false)) found.push(".jj/repo");
+  await walkMaterial(root, [], async (entry, directory, path) => {
+    if (entry.isDirectory()) {
+      // A nested repository's history (`vendor/.git`) is skipped by the walk itself.
+      if (existsSync(join(directory, entry.name, ".git"))) found.push(`${path}/.git`);
+      return found.length >= limit;
+    }
+    found.push(path);
+    return found.length >= limit;
+  });
+  return found;
+}
+
+/** Whether a tracked file on disk holds exactly its bytes in the checkout's last snapshot. */
+function matchesSnapshot(root: string, path: string, size: number): Promise<boolean> {
+  return new Promise((done) => {
+    execFile("jj", ["--color=never", "--ignore-working-copy", "file", "show", "-r", "@", "--", `root-file:${JSON.stringify(path)}`],
+      { cwd: root, encoding: "buffer", maxBuffer: size + 1 }, async (error, stdout) => {
+        if (error || stdout.length !== size) return done(false);
+        done(await readFile(join(root, path)).then((disk) => disk.equals(stdout), () => false));
+      });
+  });
+}
+
 /** Files in the checkout's last snapshot. Never snapshots: a snapshot here would turn an on-disk edit into a commit no caller has judged. */
 async function snapshotFiles(root: string): Promise<Set<string>> {
   return new Set((await jj(root, ["--ignore-working-copy", "file", "list"])).split("\n").filter(Boolean));
@@ -124,21 +171,30 @@ function primaryLinks(primaryRoot: string | null): (entry: Dirent, directory: st
   };
 }
 
+/** How many tracked files newer than the snapshot a read-only judgement compares with it before assuming the rest changed. */
+const SNAPSHOT_COMPARISONS = 32;
+/** The largest tracked file it compares; a larger one newer than the snapshot is assumed changed. */
+const SNAPSHOT_COMPARISON_BYTES = 16 * 1024 * 1024;
+
 /**
  * Paths changed on disk since JJ last snapshotted the checkout, which a reader that
  * must not snapshot cannot judge, since they may be unlanded work: a tracked file
  * edited or deleted since, or a new file other than a link into the primary checkout.
- * Returns at most `limit` repository-relative paths.
+ * A tracked file written after the snapshot with the snapshot's exact bytes (as setting
+ * up a checkout does) is not an edit. Returns at most `limit` repository-relative paths.
  */
 async function editedSinceSnapshot(root: string, generated: RegExp[] = [], primaryRoot: string | null = null, limit: number = 5): Promise<string[]> {
   const snapshot = (await stat(join(root, ".jj", "working_copy", "tree_state"))).mtimeMs;
   const linksIntoPrimary = primaryLinks(primaryRoot);
   const tracked = await snapshotFiles(root);
   const found: string[] = [];
+  let comparisons = 0;
   for (const path of tracked) {
     if (found.length >= limit) return found;
-    const changed = await lstat(join(root, path)).then((info) => info.mtimeMs > snapshot, () => true);
-    if (changed) found.push(path);
+    const info = await lstat(join(root, path)).catch(() => null);
+    if (info && info.mtimeMs <= snapshot) continue;
+    if (info?.isFile() && info.size <= SNAPSHOT_COMPARISON_BYTES && comparisons++ < SNAPSHOT_COMPARISONS && await matchesSnapshot(root, path, info.size)) continue;
+    found.push(path);
   }
   await walkMaterial(root, generated, async (entry, directory, path) => {
     if (entry.isDirectory() || tracked.has(path) || await linksIntoPrimary(entry, directory)) return false;
@@ -160,7 +216,6 @@ export async function cleanupLandedWorkspace(cwd: string = process.cwd(), hooks:
   return withWorkspaceTransaction(`writer:${context.current.name}`, () => cleanupLandedWorkspaceUnlocked(cwd, hooks));
 }
 
-/** Thrown when a checkout's working copy changed between cleanup's judgement and its retirement. */
 /**
  * Remove the workspace a landing delivered, as `slipjay cleanup` would. Anything
  * else working inside it keeps it, and is named so its owner can stop it.
@@ -173,6 +228,7 @@ export async function releaseLandedWorkspace(context: WorkspaceContext) {
   return result.cleaned ? { cleaned: true } : { cleaned: false, reason: describeRetention(result) };
 }
 
+/** Thrown when a checkout's working copy changed between cleanup's judgement and its retirement. */
 export class WorkingCopyChangedError extends Error {
   /** Stable code for hosts handling a changed working copy. */
   declare code: "WORKING_COPY_CHANGED";
@@ -190,7 +246,7 @@ export class WorkingCopyChangedError extends Error {
  * snapshots: an edit since the last snapshot keeps the checkout instead.
  */
 async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { readOnly?: boolean } = {}): Promise<{ commit: string; retained: CleanupResult | null }> {
-  const generated = await declaredGeneratedPaths(context.integration.root);
+  const generated = await disposablePaths(context.integration.root);
   const commit = readOnly
     ? await jj(context.current.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"])
     : await workingCopyCommit(context.current.root);
@@ -262,7 +318,7 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
   await archiveIntegratedWorkspaceEvidence(gitDirectory, state);
   await hooks.afterChecks?.();
   try {
-    await retireWorkspace(context.integration.root, context.current, hooks, { expectedCommitId: commit });
+    await retireWorkspace(context.integration.root, context.current, hooks, { expectedCommitId: commit, retainMaterial: true });
   } catch (error) {
     if (error instanceof WorkingCopyChangedError) return { cleaned: false, reason: "working-copy-changed" };
     throw error;
@@ -270,8 +326,8 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
   return { cleaned: true };
 }
 
-/** Remove an isolated workspace after checking its work and Issue attachment. */
-export async function removeWorkspace(cwd: string, workspaceName: string, options: { allowWork?: boolean; allowIssue?: boolean } = {}): Promise<{ workspaceName: string; hasWork: boolean; issueNumber: number | null }> {
+/** Remove an isolated workspace after checking its work and Issue attachment; `retainMaterial` (the sweep) keeps one holding files retirement would delete. */
+export async function removeWorkspace(cwd: string, workspaceName: string, options: { allowWork?: boolean; allowIssue?: boolean; retainMaterial?: boolean } = {}): Promise<{ workspaceName: string; hasWork: boolean; issueNumber: number | null }> {
   const context = await workspaceContext(cwd);
   if (!context) throw new Error("Not inside a Jujutsu repository");
   if (workspaceName === "default")
@@ -298,7 +354,7 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
         `jj:${workspaceName} is attached to Issue #${metadata.issueNumber}; explicit deletion confirmation is required`,
       );
     await retireWorkspace(context.integration.root, { name: workspaceName, root: target.root }, {},
-      judged === null ? {} : { expectedCommitId: judged });
+      { ...judged === null ? {} : { expectedCommitId: judged }, retainMaterial: options.retainMaterial });
     return { workspaceName, hasWork, issueNumber: metadata?.issueNumber ?? null };
   });
 }
@@ -313,6 +369,169 @@ export async function withinWorkspaceStorage(root: string): Promise<boolean> {
   return storage.some((home) => target!.startsWith(home + "/"));
 }
 
+/**
+ * Why a workspace whose checkout is gone from disk must stay registered, or null when forgetting
+ * it loses nothing: it owes the runner no facts, no live process prepares or owns it, its JJ
+ * revision is readable and unconflicted, holds no work outside the integration branch, any
+ * landing it recorded is integrated, and its recorded path lies in workspace storage. Reads
+ * only, so the retention plan reports the same reason.
+ */
+export async function missingCheckoutRefusal(cwd: string, workspace: WorkspaceEntry): Promise<string | null> {
+  const context = await workspaceContext(cwd);
+  if (!context) return "cannot be checked outside a Jujutsu repository";
+  // The obligations retirement keeps for a present checkout hold for a missing one too.
+  const metadata = workspace.metadata ?? await workspaceMetadata(workspace.name);
+  if (hasPendingRunnerFacts(metadata)) return "has pending runner facts; reconnect from that workspace to deliver them before removal";
+  if (processAlive(metadata?.preparingPid)) return "is being prepared by a live process";
+  const owner = await readFile(lockPath(workspace.name), "utf8").then((text) => (JSON.parse(text) as { pid?: unknown } | null)?.pid, () => undefined);
+  if (processAlive(owner)) return "is owned by a live process";
+  const facts = await revisionFacts(cwd, workspace.commitId, { ignoreWorkingCopy: true }).catch(() => null);
+  if (!facts) return "points at an unreadable JJ revision; preserve it for explicit recovery";
+  if (facts.conflict) return "has conflicted JJ state; preserve it for explicit recovery";
+  const unintegrated = await run("jj", ["--color=never", "--ignore-working-copy", "log", "-r", `(${context.integrationBranch}..${workspace.commitId}) & ~empty()`, "--no-graph", "-T", 'commit_id.short() ++ "\\n"'], { cwd });
+  if (unintegrated.code !== 0) return "points at an unreadable JJ revision; preserve it for explicit recovery";
+  if (unintegrated.stdout.trim()) return "is missing on disk but still contains unintegrated work; preserve it for explicit recovery";
+  const landed = await readLandingState(workspace.name, { readOnly: true });
+  if (landed && !await revisionExists(cwd, `${landed.artifactCommitId} & ::${landed.integrationBranch}`)) {
+    return "has landing evidence that is not integrated; preserve it for explicit recovery";
+  }
+  if (!missingCheckoutPath(workspace)) return "has an unsafe stale path; preserve it for explicit recovery";
+  return null;
+}
+
+/** The recorded path of a missing checkout, when it lies in workspace storage (checked lexically: the checkout is gone). */
+function missingCheckoutPath(workspace: WorkspaceEntry): string | null {
+  const recorded = typeof workspace.metadata?.workspacePath === "string"
+    ? workspace.metadata.workspacePath
+    : workspace.root || join(workspaceHome(), workspace.name);
+  const path = resolve(recorded);
+  return workspaceStorageHomes().some((home) => path.startsWith(`${resolve(home)}${sep}`)) ? path : null;
+}
+
+/**
+ * Forget a workspace whose checkout is gone, once `missingCheckoutRefusal` finds nothing to keep,
+ * with its state. Serialized on the workspace's `writer:` key, which is not reentrant: never call
+ * this while holding that key.
+ */
+export async function forgetMissingCheckout(cwd: string, workspace: WorkspaceEntry, hooks: Pick<RetirementHooks, "forget"> = {}): Promise<void> {
+  // Serialized with removal and host writes, judged again under the writer key.
+  await withWorkspaceTransaction(`writer:${workspace.name}`, async () => {
+    const context = await workspaceContext(cwd);
+    const path = missingCheckoutPath(workspace);
+    if (!context || !path) throw new Error(`jj:${workspace.name} cannot be forgotten safely`);
+    if (existsSync(path)) throw new Error(`jj:${workspace.name} checkout reappeared; kept`);
+    // Its metadata read again under the key: a host may have recorded facts since the caller listed it.
+    const refusal = await missingCheckoutRefusal(cwd, { ...workspace, metadata: await workspaceMetadata(workspace.name) });
+    if (refusal) throw new Error(`jj:${workspace.name} ${refusal}`);
+    await forgetWorkspace(context.integration.root, workspace.name, path, hooks);
+    if (existsSync(path)) throw new Error(`jj:${workspace.name} stale checkout could not be removed safely`);
+    await rm(metadataPath(workspace.name), { force: true });
+    for (const candidate of landingStatePaths(workspace.name)) await rm(candidate, { force: true });
+    await rm(lockPath(workspace.name), { force: true });
+  });
+}
+
+/** The most evidence one retirement preserves; more keeps the workspace, since evidence must not be silently dropped. */
+export const MAX_EVIDENCE_BYTES: number = 64 * 1024 * 1024;
+
+/** The time suffix of a preserved evidence directory: an ISO timestamp with `:` and `.` replaced by `-`. */
+const EVIDENCE_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z$/;
+
+/** What lies under a checkout's declared `evidencePaths`, untracked. */
+interface EvidenceInventory {
+  files: Array<{ path: string; bytes: number; mtimeMs: number }>;
+  /** Symbolic links, recorded with their target and never followed. */
+  links: Array<{ path: string; target: string }>;
+  /** Sockets, FIFOs and devices: runtime endpoints, not evidence. */
+  skipped: string[];
+}
+
+async function evidenceInventory(root: string, generated: RegExp[], evidence: RegExp[]): Promise<EvidenceInventory> {
+  const tracked = await snapshotFiles(root).catch(() => new Set<string>());
+  const inventory: EvidenceInventory = { files: [], links: [], skipped: [] };
+  // Everything at or below a declared evidence path; the walk does not descend into one itself.
+  const collect = async (entry: Dirent, absolute: string, path: string): Promise<void> => {
+    if (entry.isDirectory()) {
+      for (const child of await readdir(absolute, { withFileTypes: true })) await collect(child, join(absolute, child.name), `${path}/${child.name}`);
+    } else if (entry.isSymbolicLink()) inventory.links.push({ path, target: await readlink(absolute) });
+    else if (!entry.isFile()) inventory.skipped.push(path);
+    else if (!tracked.has(path)) {
+      const { size, mtimeMs } = await lstat(absolute);
+      inventory.files.push({ path, bytes: size, mtimeMs });
+    }
+  };
+  await walkMaterial(root, generated, async (entry, directory, path) => {
+    if (evidence.some((matcher) => matcher.test(`${path}/`))) await collect(entry, join(directory, entry.name), path);
+    return false;
+  }, { skip: evidence });
+  return inventory;
+}
+
+/**
+ * Copy the untracked files under the repository's declared `evidencePaths` out of a checkout
+ * about to be retired, into its own directory of the evidence home with a `provenance.json`
+ * naming the workspace, repository, Issue, task, working-copy commit, landing (if any) and each
+ * file's size and SHA-256; symbolic links are recorded with their target and sockets or FIFOs
+ * as skipped. Written as `<name>.partial` and renamed once complete; a retirement removes its
+ * workspace's interrupted copies first. Returns the directory and the inventory it copied (for
+ * `retireWorkspace` to compare just before forgetting), or null when there was nothing. Throws,
+ * keeping the checkout, when the evidence exceeds `MAX_EVIDENCE_BYTES` or cannot be copied.
+ */
+export async function preserveWorkspaceEvidence(integrationRoot: string, workspace: { name: string; root: string }): Promise<{ directory: string; inventory: string } | null> {
+  const { generated, evidence } = await declaredPaths(integrationRoot);
+  if (!evidence.length) return null;
+  const inventory = await evidenceInventory(workspace.root, generated, evidence);
+  if (!inventory.files.length && !inventory.links.length) return null;
+  const total = inventory.files.reduce((sum, file) => sum + file.bytes, 0);
+  if (total > MAX_EVIDENCE_BYTES) {
+    throw new Error(`jj:${workspace.name} holds ${Math.ceil(total / 1024 / 1024)} MiB of evidence under evidencePaths, more than the ${MAX_EVIDENCE_BYTES / 1024 / 1024} MiB retirement preserves; move what is needed elsewhere, then retire it`);
+  }
+  // Only this workspace's own copies: `fix-x-2-<stamp>.partial` belongs to another workspace than `fix-x`.
+  for (const entry of await readdir(evidenceHome()).catch(() => [])) {
+    if (entry.startsWith(`${workspace.name}-`) && EVIDENCE_STAMP.test(entry.slice(workspace.name.length + 1).replace(/\.partial$/, "")) && entry.endsWith(".partial")) {
+      await rm(join(evidenceHome(), entry), { recursive: true, force: true });
+    }
+  }
+  const directory = join(evidenceHome(), `${workspace.name}-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+  const partial = `${directory}.partial`;
+  const recorded: Array<{ path: string; bytes: number; sha256: string }> = [];
+  for (const file of inventory.files) {
+    const destination = join(partial, "files", file.path);
+    await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+    await copyFile(join(workspace.root, file.path), destination);
+    recorded.push({ path: file.path, bytes: file.bytes, sha256: createHash("sha256").update(await readFile(destination)).digest("hex") });
+  }
+  const metadata = await workspaceMetadata(workspace.name);
+  const landing = await readLandingState(workspace.name, { readOnly: true });
+  const commit = await jj(workspace.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"]).catch(() => null);
+  await mkdir(partial, { recursive: true, mode: 0o700 });
+  await writeFile(join(partial, "provenance.json"), `${JSON.stringify({
+    version: 1,
+    workspaceName: workspace.name,
+    workspacePath: workspace.root,
+    repository: integrationRoot,
+    issueNumber: metadata?.issueNumber ?? null,
+    task: typeof metadata?.task === "string" ? metadata.task : null,
+    workingCopyCommitId: commit,
+    landing: landing ? { artifactCommitId: landing.artifactCommitId, artifactChangeId: landing.artifactChangeId, integrationBranch: landing.integrationBranch } : null,
+    preservedAt: new Date().toISOString(),
+    files: recorded,
+    links: inventory.links,
+    skipped: inventory.skipped,
+  }, null, 2)}\n`, { mode: 0o600 });
+  for (const file of recorded) {
+    if (!existsSync(join(partial, "files", file.path))) throw new Error(`jj:${workspace.name} evidence copy is incomplete (${file.path}); kept`);
+  }
+  await rename(partial, directory);
+  return { directory, inventory: JSON.stringify(inventory) };
+}
+
+/** Whether a checkout's evidence still matches what `preserveWorkspaceEvidence` copied. */
+async function evidenceUnchanged(integrationRoot: string, root: string, inventory: string): Promise<boolean> {
+  const { generated, evidence } = await declaredPaths(integrationRoot);
+  return JSON.stringify(await evidenceInventory(root, generated, evidence)) === inventory;
+}
+
 /** Unregister a workspace from JJ and delete its checkout, through the host's guarded forget when given. */
 export async function forgetWorkspace(integrationRoot: string, workspaceName: string, workspacePath: string, hooks: Pick<RetirementHooks, "forget"> = {}): Promise<void> {
   if (hooks.forget) return hooks.forget(integrationRoot, workspaceName, workspacePath);
@@ -325,14 +544,6 @@ export async function forgetWorkspace(integrationRoot: string, workspaceName: st
 }
 
 /**
- * The one retirement step for an isolated checkout: forget it, delete it and its
- * sidecars, then report the release. The repository's `workspaceTeardown` runs
- * first, best effort, so it also covers cleanup, remove and every sweep. A host supplies its guarded forget and its
- * lifecycle event; the default forgets through JJ and removes the directory.
- * With `options.expectedCommitId`, a working copy that no longer matches it is
- * kept and `WorkingCopyChangedError` thrown.
- */
-/**
  * Why removing an unused checkout must be refused whatever its work: outside workspace
  * storage, or holding runner facts not yet delivered. Reads only, so the retention plan
  * judges removal by the same rules.
@@ -344,15 +555,38 @@ export async function removalRefusal(workspace: { name: string; root: string }, 
   return null;
 }
 
-export async function retireWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks = {}, options: { expectedCommitId?: string } = {}): Promise<void> {
+/**
+ * The one retirement step for an isolated checkout, behind cleanup, remove and every sweep: run
+ * the repository's `workspaceTeardown` (best effort), preserve its evidence, then forget it,
+ * delete it and its sidecars, and report the release. A host supplies its guarded forget and its
+ * lifecycle event; the default forgets through JJ and removes the directory. `expectedCommitId` refuses a working copy that moved since it was
+ * judged; `retainMaterial` also refuses one that gained files retirement would delete; a change
+ * to its evidence during the copy is refused too (each throws `WorkingCopyChangedError`).
+ */
+export async function retireWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks = {}, options: { expectedCommitId?: string; retainMaterial?: boolean } = {}): Promise<void> {
   const metadata = await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) throw new Error(`jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`);
   await runWorkspaceTeardown(integrationRoot, workspace, { timeoutMs: hooks.teardownTimeoutMs });
-  // The last look before the point of no return, after the teardown: a working copy that moved
-  // since it was judged (an edit snapshots into a new commit) is never forgotten, or its commit would be orphaned.
-  if (options.expectedCommitId && workspace.root && existsSync(workspace.root)) {
-    const current = await workingCopyCommit(workspace.root).catch(() => null);
-    if (current !== options.expectedCommitId) throw new WorkingCopyChangedError(workspace.name);
+  const present = Boolean(workspace.root) && existsSync(workspace.root);
+  const preserved = present ? await preserveWorkspaceEvidence(integrationRoot, workspace) : null;
+  try {
+    await hooks.afterEvidence?.();
+    // The last look before the point of no return, after the teardown and the evidence copy: a working
+    // copy that moved since it was judged (an edit snapshots into a new commit) is never forgotten, or its
+    // commit would be orphaned, and neither is one that gained a file no history holds or whose evidence
+    // changed since it was copied.
+    if (options.expectedCommitId && present) {
+      const current = await workingCopyCommit(workspace.root).catch(() => null);
+      if (current !== options.expectedCommitId) throw new WorkingCopyChangedError(workspace.name);
+    }
+    if (options.retainMaterial && present && (await retainedWorkspaceMaterial(workspace.root, integrationRoot, 1)).length) {
+      throw new WorkingCopyChangedError(workspace.name);
+    }
+    if (preserved && !await evidenceUnchanged(integrationRoot, workspace.root, preserved.inventory)) throw new WorkingCopyChangedError(workspace.name);
+  } catch (error) {
+    // The checkout is kept, evidence and all: a later retirement copies it afresh.
+    if (preserved) await rm(preserved.directory, { recursive: true, force: true });
+    throw error;
   }
   await forgetWorkspace(integrationRoot, workspace.name, workspace.root, hooks);
   await rm(metadataPath(workspace.name), { force: true });

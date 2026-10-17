@@ -26,6 +26,8 @@ export type ExecutionPolicy = {
   /** Run in a workspace (cwd = its path) before it is removed; undefined when undeclared. */
   workspaceTeardown?: { executable: string; args: string[] };
   generatedPaths?: unknown;
+  /** Paths of review, acceptance or recovery evidence that retiring a workspace preserves in the state home (see `preserveWorkspaceEvidence`). */
+  evidencePaths?: unknown;
   /** Repository-relative directories each workspace links to the same path in the primary checkout. */
   sharedPaths?: string[];
   /** How many prepared spare workspaces the pool keeps; 1 when undeclared. */
@@ -159,17 +161,18 @@ function workspaceTeardown(value: unknown): { executable: string; args: string[]
  * Compile a repository's `generatedPaths` declaration: repository-relative paths or
  * globs (`*` within one segment, `**` across segments) of generated output that
  * cleanup may discard. A match also covers everything below it. Anything that could
- * escape or be ambiguous fails closed.
+ * escape or be ambiguous fails closed. `evidencePaths` (evidence retirement preserves)
+ * uses the same form.
  */
-export function generatedPathMatchers(declared: unknown): RegExp[] {
+export function generatedPathMatchers(declared: unknown, key: "generatedPaths" | "evidencePaths" = "generatedPaths"): RegExp[] {
   if (declared === undefined) return [];
-  if (!Array.isArray(declared)) fail("generatedPaths must be an array of repository-relative paths");
+  if (!Array.isArray(declared)) fail(`${key} must be an array of repository-relative paths`);
   return declared.map((entry) => {
     const segments = typeof entry === "string" ? entry.split("/") : [];
     if (!segments.length || entry.startsWith("/") || entry.includes("\\") || entry.includes("\0")
       || segments.some((segment) => !segment || segment === "." || segment === ".." || (segment.includes("**") && segment !== "**"))
       || segments.every((segment) => /^\**$/.test(segment))) {
-      fail(`generatedPaths entry ${JSON.stringify(entry)} must be a specific repository-relative path without '.', '..', or empty segments`);
+      fail(`${key} entry ${JSON.stringify(entry)} must be a specific repository-relative path without '.', '..', or empty segments`);
     }
     const pattern = segments.map((segment) => segment === "**" ? "(?:[^/]+/)*"
       : `${segment.split("*").map((part) => part.replace(/[.+?^${}()|[\]]/g, "\\$&")).join("[^/]*")}/`).join("");
@@ -280,6 +283,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   const deployments = deploymentPolicy(parsed.deployments);
   if (parsed.tracker !== undefined && parsed.tracker !== "github" && parsed.tracker !== "build") fail('declares a tracker other than "github" or "build"');
   generatedPathMatchers(parsed.generatedPaths);
+  generatedPathMatchers(parsed.evidencePaths, "evidencePaths");
   const sharedPaths = sharedPathList(parsed.sharedPaths);
   const spares = spareCount(parsed.spares);
   const level = processLevel(parsed.process);

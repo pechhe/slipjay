@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **Evidence outlives its workspace:** a repository can declare `evidencePaths` in
+  `slipjay.json`. Just before a workspace is retired, its untracked files there are copied to
+  `~/.slipjay/state/evidence/<workspace>-<time>/` with a `provenance.json` (workspace,
+  repository, Issue, task, working-copy commit, landing artifact, and each file's size and
+  SHA-256), so review and acceptance material no longer keeps a landed checkout. Evidence over
+  64 MiB keeps the workspace. A file that appears while a workspace is being retired by cleanup or
+  the sweep now keeps it (`working-copy-changed`), and `prune --plan` no longer reports a tracked
+  file rewritten with its snapshot's exact bytes (as setting up a checkout does) as an edit (#82).
+
+- **Broken and orphaned workspaces get a disposition:** the sweep and `slipjay prune --plan` now
+  forget a registered workspace whose checkout is gone from disk once its revision holds no
+  unlanded work (`missing`), keep one whose working copy JJ cannot read and say how to recover it
+  (`broken`), and report directories in workspace storage that no repository lists (`orphan`).
+  An orphan is removed only when it holds nothing but reproducible output, is over an hour old and
+  no live process uses it; anything else is kept with what to do. State recorded for a repository
+  that no longer exists, and integrated-artifact evidence left by test fixtures in the temporary
+  directory, now converge. `SweepResult` gains `orphans` (#81).
+
+
 ## v3.25.0
 
 - **Workspace start timings in `slipjay metrics`:** a "Workspace starts" line reports, per repository

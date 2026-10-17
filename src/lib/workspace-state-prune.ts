@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { readdir, rm, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { readdir, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import lockfile from "proper-lockfile";
 import { revisionExists, run } from "./workspace-jj.ts";
 import { processAlive } from "./workspace-holders.ts";
@@ -14,8 +15,9 @@ import { readJsonOptional } from "./workspace-state.ts";
  * workspace no longer exists in its repository, and what local landings left behind.
  * Conservative by construction: a file is removed only when its repository can be
  * listed and does not contain the workspace, the checkout is gone, and nothing in
- * flight could still use it. Integrated-artifact evidence (`landed/artifact-*.json`),
- * transaction locks and the post-integration records are never touched.
+ * flight could still use it. Integrated-artifact evidence (`landed/artifact-*.json`) is kept,
+ * except a vanished test fixture's; transaction locks and the post-integration records are
+ * never touched.
  */
 
 /** Fields read from machine-local housekeeping records. */
@@ -40,17 +42,26 @@ async function writerHeld(workspaceName: string) {
   return lockfile.check(target, { realpath: false, stale: 120000 }).catch(() => true);
 }
 
-/** Registered workspace names of the repository at `root`, or null when it cannot be listed. */
+/**
+ * Registered workspace names of the repository at `root`, or null when it cannot be listed. A
+ * repository deleted from a directory that still exists registers none, so its records converge
+ * once their checkouts are gone too.
+ */
 async function registeredNames(root: string | undefined, cache: Map<string, Set<string> | null>) {
   if (typeof root !== "string" || !root) return null;
   if (!cache.has(root)) {
-    const listed = await stat(root).then(() => run("jj", ["--color=never", "--ignore-working-copy", "workspace", "list", "-T", 'name ++ "\\n"'], { cwd: root, timeoutMs: 30_000 }), () => null);
-    cache.set(root, listed && listed.code === 0 ? new Set(listed.stdout.split("\n").map((line) => line.replace(/^"|"$/g, "")).filter(Boolean)) : null);
+    if (await repositoryGone(root)) cache.set(root, new Set());
+    else {
+      const listed = await run("jj", ["--color=never", "--ignore-working-copy", "workspace", "list", "-T", 'name ++ "\\n"'], { cwd: root, timeoutMs: 30_000 }).catch(() => null);
+      cache.set(root, listed && listed.code === 0 ? new Set(listed.stdout.split("\n").map((line) => line.replace(/^"|"$/g, "")).filter(Boolean)) : null);
+    }
   }
   return cache.get(root);
 }
 
 const gone = (path: string) => stat(path).then(() => false, (error: unknown) => (error as NodeJS.ErrnoException)?.code === "ENOENT");
+/** A repository deleted from a directory that still exists: one on an unmounted volume is unknown, not gone. */
+const repositoryGone = async (root: string) => await gone(root) && !await gone(dirname(root));
 
 /** Remove state for vanished workspaces; returns the removed file names. Never throws. */
 export async function pruneWorkspaceState(): Promise<string[]> {
@@ -104,7 +115,30 @@ export async function pruneWorkspaceState(): Promise<string[]> {
       } catch { /* undeterminable: keep */ }
     }
     removed.push(...await pruneRetiredLandingState());
+    removed.push(...await pruneFixtureEvidence());
   } catch { /* housekeeping never fails its caller */ }
+  return removed;
+}
+
+/**
+ * Integrated-artifact evidence recorded for a test fixture's repository, written before tests had
+ * their own home: one in a `peach-*` directory of the system temporary directory that no longer
+ * exists. Nothing can refer to it again. Evidence for any other repository is kept, including a
+ * real one that once lived in the temporary directory.
+ */
+async function pruneFixtureEvidence() {
+  const removed: string[] = [];
+  const temporary = await realpath(tmpdir()).catch(() => tmpdir());
+  for (const file of await names(landedHome())) {
+    if (!file.startsWith("artifact-") || !file.endsWith(".json")) continue;
+    try {
+      const path = join(landedHome(), file);
+      const root = (await readJsonOptional(path))?.integrationRoot;
+      if (typeof root !== "string" || ![temporary, tmpdir()].some((home) => root.startsWith(`${home}/peach-`)) || !await gone(root)) continue;
+      await rm(path, { force: true });
+      removed.push(path.slice(stateHome().length + 1));
+    } catch { /* keep */ }
+  }
   return removed;
 }
 

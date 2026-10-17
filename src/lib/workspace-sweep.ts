@@ -1,14 +1,16 @@
 import type { WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
-import { readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { run, workspaceContext } from "./workspace-jj.ts";
 import { trackerOf, workItemClosed } from "./tracker.ts";
 import type { BuildReader } from "./tracker.ts";
 import { inspectWorkspaces, lockPath, metadataReadable, readLandingState } from "./workspace-state.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
-import { cleanupLandedWorkspace, describeRetention, landedCleanupChecks, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
+import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
 import { artifactPublished } from "./landing-steps.ts";
 import { describeHolders, processAlive, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
 import { pruneWorkspaceState } from "./workspace-state-prune.ts";
+import { findOrphanedCheckouts, retireOrphanedCheckouts } from "./workspace-orphans.ts";
 
 /**
  * Disposable-workspace housekeeping shared by every surface that lands or
@@ -37,6 +39,8 @@ export interface SweepResult {
   skipped: Array<{ name: string; landed: boolean; reason: string }>;
   /** State files removed for workspaces that no longer exist (relative to the state home). */
   pruned: string[];
+  /** Orphaned directories removed from workspace storage (see `retireOrphanedCheckouts`). */
+  orphans: string[];
 }
 
 /** Controls assignment age, protected checkouts, state pruning, and Issue lookup. */
@@ -81,13 +85,18 @@ export async function sweepDisposableWorkspaces(cwd: string = process.cwd(), opt
   const removed: string[] = [];
   const skipped: SweepResult["skipped"] = [];
   const judge = await sweepJudge(cwd, options, { readOnly: false });
-  if (!judge) return { removed, skipped, pruned: [] };
+  if (!judge) return { removed, skipped, pruned: [], orphans: [] };
   for (const workspace of judge.workspaces) {
     const skip = (reason: string) => skipped.push({ name: workspace.name, landed: workspace.landed, reason });
     try {
       const decision = await judge.decide(workspace);
       if (!decision.remove) {
         if (decision.report) skip(decision.reason);
+        continue;
+      }
+      if (decision.missing) {
+        await forgetMissingCheckout(judge.context.integration.root, workspace);
+        removed.push(workspace.name);
         continue;
       }
       if (workspace.landed) {
@@ -97,19 +106,21 @@ export async function sweepDisposableWorkspaces(cwd: string = process.cwd(), opt
         else skip(describeRetention(cleaned));
         continue;
       }
-      await removeWorkspace(judge.context.integration.root, workspace.name, decision.issueBound ? { allowIssue: true } : {});
+      await removeWorkspace(judge.context.integration.root, workspace.name, { retainMaterial: true, ...decision.issueBound ? { allowIssue: true } : {} });
       removed.push(workspace.name);
     } catch (error) {
       skip(error instanceof Error ? error.message : String(error));
     }
   }
-  return { removed, skipped, pruned: options.pruneState === false ? [] : await pruneWorkspaceState() };
+  // Machine-wide state and storage housekeeping, which `pruneState: false` leaves alone.
+  if (options.pruneState === false) return { removed, skipped, pruned: [], orphans: [] };
+  return { removed, skipped, pruned: await pruneWorkspaceState(), orphans: await retireOrphanedCheckouts({ now: options.now }).catch(() => []) };
 }
 
 /** Why the sweep keeps a workspace (`report`: a sweep names it as skipped), or that it removes it. */
 type SweepDecision =
   | { remove: false; reason: string; report: boolean }
-  | { remove: true; issueBound: boolean };
+  | { remove: true; issueBound: boolean; missing?: boolean };
 
 /**
  * The sweep's decision for each workspace of the repository containing `cwd`,
@@ -135,9 +146,17 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
   const keep = (reason: string, report = true): SweepDecision => ({ remove: false, reason, report });
   const decide = async (workspace: InspectedWorkspace): Promise<SweepDecision> => {
     if (workspace.name === "default") return keep("integration checkout", false);
-    if (!workspace.root) return keep("checkout missing", false);
     // Without its metadata, whether it is a spare, an Issue's or owes the runner facts is unknown.
     if (!await metadataReadable(workspace.name)) return keep("metadata unreadable");
+    if (!workspace.root || !existsSync(workspace.root)) {
+      // Forgetting a checkout already gone loses nothing once it owes nothing and its revision holds no unlanded work.
+      const refusal = await missingCheckoutRefusal(context.integration.root, workspace);
+      return refusal ? keep(`checkout missing on disk; it ${refusal}`) : { remove: true, issueBound: false, missing: true };
+    }
+    if (workspace.unreadable) {
+      return keep(`working copy unreadable (${workspace.unreadable}): run \`jj workspace update-stale\` in it; if JJ cannot recover it, copy out anything needed, `
+        + `run \`jj workspace forget ${workspace.name}\` in the integration checkout and delete the directory`);
+    }
     if (workspace.metadata?.spare) return keep("prepared spare", false);
     if (workspace.hasWork) return keep("unlanded work", false);
     // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the short
@@ -177,9 +196,10 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
 export interface PlannedWorkspace {
   name: string;
   root: string;
-  /** The repository's integration checkout. */
-  repository: string;
-  state: "integration" | "spare" | "unlanded" | "landed" | "empty";
+  /** The repository's integration checkout; for an orphan, the one it names (null without a JJ identity). */
+  repository: string | null;
+  /** `missing`: registered, but the checkout is gone from disk; `broken`: JJ cannot read its working copy. */
+  state: "integration" | "missing" | "broken" | "spare" | "unlanded" | "landed" | "empty" | "orphan";
   issueNumber: number | null;
   task: string | null;
   /** The workspace's landing, if it has one: its phase and whether its artifact is on the remote as of the last fetch (null when unknown). */
@@ -204,17 +224,18 @@ export async function planDisposableWorkspaces(cwd: string = process.cwd(), opti
   const judge = await sweepJudge(cwd, options, { readOnly: true });
   if (!judge) return [];
   const processes = await judge.processes();
-  return await Promise.all(judge.workspaces.map(async (workspace): Promise<PlannedWorkspace> => {
+  const planned = await Promise.all(judge.workspaces.map(async (workspace): Promise<PlannedWorkspace> => {
     const decision = await judge.decide(workspace).catch((error: unknown): SweepDecision =>
       ({ remove: false, reason: `unknown: ${error instanceof Error ? error.message : String(error)}`, report: true }));
-    const isolated = workspace.name !== "default" && Boolean(workspace.root);
+    const isolated = workspace.name !== "default" && Boolean(workspace.root) && existsSync(workspace.root);
     const holders = isolated && processes ? (await workspaceHolders(workspace.root, { processes }))!.map(({ pid, command }) => `pid ${pid}${command ? ` (${command})` : ""}`) : null;
     const assigned = isolated ? await assignedAt(workspace) : 0;
     return {
       name: workspace.name,
       root: workspace.root,
       repository: judge.context.integration.root,
-      state: workspace.name === "default" ? "integration" : workspace.metadata?.spare ? "spare"
+      state: workspace.name === "default" ? "integration" : !workspace.root || !existsSync(workspace.root) ? "missing"
+        : workspace.unreadable ? "broken" : workspace.metadata?.spare ? "spare"
         : workspace.hasWork ? "unlanded" : workspace.landed ? "landed" : "empty",
       issueNumber: workspace.metadata?.issueNumber ?? null,
       task: typeof workspace.metadata?.task === "string" ? workspace.metadata.task : null,
@@ -224,9 +245,16 @@ export async function planDisposableWorkspaces(cwd: string = process.cwd(), opti
       uniqueFiles: isolated ? await retainedWorkspaceMaterial(workspace.root, judge.context.integration.root).catch(() => null) : null,
       sizeBytes: workspace.root ? await diskBytes(workspace.root) : null,
       action: decision.remove ? "remove" : "keep",
-      reason: decision.remove ? (workspace.landed ? "landed and published" : "unused and empty") : decision.reason,
+      reason: decision.remove ? (decision.missing ? "checkout missing on disk; nothing to keep" : workspace.landed ? "landed and published" : "unused and empty") : decision.reason,
     };
   }));
+  // Orphans in workspace storage that name this repository, or none that still exists.
+  const repository = await realpath(judge.context.integration.root).catch(() => judge.context.integration.root);
+  const orphans = (await findOrphanedCheckouts({ now: options.now })).filter((orphan) => orphan.kind !== "unregistered" || orphan.repository === repository);
+  return [...planned, ...await Promise.all(orphans.map(async (orphan): Promise<PlannedWorkspace> => ({
+    name: orphan.name, root: orphan.root, repository: orphan.repository, state: "orphan", issueNumber: null, task: null, landing: null,
+    assignedAt: null, holders: orphan.holders, uniqueFiles: orphan.files, sizeBytes: await diskBytes(orphan.root), action: orphan.action, reason: orphan.reason,
+  })))];
 }
 
 /** A landing's phase and publication as of the last fetch, read without promoting or fetching. */
