@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.24.3
+
 - **Spares with stale install records are refreshed:** a refill only refreshed a spare behind
   the integration head, so after the fingerprint's format changed (or a package-manager upgrade)
   every spare already on the head kept its old record and every claim reseeded `node_modules`.
