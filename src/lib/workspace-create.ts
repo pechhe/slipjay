@@ -48,6 +48,7 @@ type AssignmentOptions = {
   attach?: boolean;
   workspacePath?: string;
   prepared?: unknown;
+  installInputs?: string | null;
   created: boolean;
   reused: boolean;
   pooled?: boolean;
@@ -57,6 +58,7 @@ type AssignedWorkspace = {
   context: WorkspaceContext;
   issueNumber: number | undefined;
   prepared: unknown;
+  installInputs: string | null | undefined;
   workspace: Omit<CreatedWorkspace, "readiness">;
 };
 
@@ -87,9 +89,9 @@ async function addWorkspace(hooks: WorkspaceCreationHooks, integrationRoot: stri
 
 // Default preparation records the install inputs it made ready, so this checkout can seed others (see
 // refreshDependencies); a claimed spare's stale dependencies are replaced by a clone when another checkout has current ones.
-const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, pooled = false) => hooks.prepare
+const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, pooled = false, installInputs?: string | null) => hooks.prepare
   ? hooks.prepare(integrationRoot, workspacePath)
-  : refreshDependencies(integrationRoot, workspacePath, { replace: pooled });
+  : refreshDependencies(integrationRoot, workspacePath, { replace: pooled, installInputs });
 
 function acquired(hooks: WorkspaceCreationHooks, context: WorkspaceContext, issueNumber: number | undefined) {
   hooks.onAcquired?.({ workspaceName: context.current.name, projectRoot: context.integration.root, issueNumber: issueNumber ?? null });
@@ -334,15 +336,15 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
 /**
  * Record the task (and Issue) on the allocated workspace, under the allocation lock.
  * `prepared` is a claimed spare's still-exact provisioned readiness, used instead
- * of reinstalling. Resumed and bound workspaces always reinstall: commands run in
+ * of reinstalling; otherwise `installInputs` is its fingerprint, which the install reuses. Resumed and bound workspaces always reinstall: commands run in
  * them may have changed `node_modules` without changing the install inputs.
  */
-async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext, task: string, { issueNumber, attach = true, workspacePath = context.current.root, prepared, ...result }: AssignmentOptions): Promise<AssignedWorkspace> {
+async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext, task: string, { issueNumber, attach = true, workspacePath = context.current.root, prepared, installInputs, ...result }: AssignmentOptions): Promise<AssignedWorkspace> {
   await writeWorkspaceTaskMetadata(context, task);
   if (issueNumber && attach) await attachWorkspaceIssue(context.current.root, issueNumber);
   await describeAssignedWorkspace(context, task, issueNumber);
   if (context.current.name !== "default") await linkSharedPaths(context.integration.root, context.current.root);
-  return { hooks, context, issueNumber, prepared, workspace: { ...context, context, pooled: false, ...result, workspacePath } };
+  return { hooks, context, issueNumber, prepared, installInputs, workspace: { ...context, context, pooled: false, ...result, workspacePath } };
 }
 
 /**
@@ -367,9 +369,9 @@ async function describeAssignedWorkspace(context: WorkspaceContext, task: string
 }
 
 /** Make an allocated workspace's checkout ready and report its acquisition. */
-async function ready({ hooks, context, issueNumber, prepared, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
+async function ready({ hooks, context, issueNumber, prepared, installInputs: claimedInputs, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
   if (prepared) console.error(`[deps] ${basename(context.current.root)}: install inputs unchanged since the spare was prepared; reusing its dependencies`);
-  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root, workspace.pooled);
+  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root, workspace.pooled, claimedInputs);
   const { state, packageManager, installInputs } = (hooks.prepare ? {} : readiness) as { state?: string; packageManager?: string | null; installInputs?: string | null };
   if (installInputs) {
     await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs } });
@@ -487,5 +489,5 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   if (!created || created.current.name !== name) throw new Error("Created workspace could not be verified");
   // A host with its own readiness authority (Peach's `prepare` hook) always decides itself.
   const prepared = hooks.prepare ? undefined : spare?.dependencies ?? undefined;
-  return assigned(hooks, created, task, { issueNumber, created: true, reused: false, pooled: Boolean(spare), workspacePath, prepared });
+  return assigned(hooks, created, task, { issueNumber, created: true, reused: false, pooled: Boolean(spare), workspacePath, prepared, installInputs: spare?.installInputs });
 }

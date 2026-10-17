@@ -655,6 +655,29 @@ test("after an install-input change, a refill refreshes stale spares with one in
   }
 }, 300_000);
 
+test("a spare on the integration head whose recorded install inputs are stale is refreshed, then claimed without installing", async () => {
+  const f = await bunProject();
+  try {
+    await provisionSpare(f.repo);
+    const name = await spareName(f.repo);
+    // As after a fingerprint format change or a package-manager upgrade: the spare is current, its record is not.
+    const metadata = (await workspaceMetadata(name))!;
+    await writeFile(metadataPath(name), JSON.stringify({ ...metadata, preparedDependencies: { ...metadata.preparedDependencies as object, installInputs: "sha256:stale" } }));
+
+    assert.deepEqual((await refreshSpares(f.repo)).map((spare) => spare.name), [name], "the stale record is refreshed although the spare is on the head");
+    const [spare] = await readySpares(f.repo);
+    assert.equal((spare!.metadata?.preparedDependencies as { installInputs?: string }).installInputs, await installInputFingerprint(spare!.root));
+    assert.deepEqual(await refreshSpares(f.repo), [], "a current record is left alone");
+
+    const before = await f.count();
+    const created = await createWorkspace("task", f.repo);
+    assert.equal((created.readiness as { reused?: boolean }).reused, true, "the claim reuses the refreshed dependencies");
+    assert.equal(await f.count(), before, "no install ran on claim");
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
+
 test("refills of two repositories install one after the other, and a claim never waits for them", async () => {
   const a = await bunProject({ spares: 2 });
   const b = await bunProject({ spares: 1 });

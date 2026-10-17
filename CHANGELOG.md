@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Spares with stale install records are refreshed:** a refill only refreshed a spare behind
+  the integration head, so after the fingerprint's format changed (or a package-manager upgrade)
+  every spare already on the head kept its old record and every claim reseeded `node_modules`.
+  A refill now also refreshes a spare whose recorded install inputs are no longer its own.
+- **Fewer fingerprints per install:** a claim's fingerprint is reused by the install that
+  follows, and seed candidates are proved lazily, so a matching spare is cloned without
+  fingerprinting other checkouts first. A reseeding claim computed the fingerprint six times.
+
 ## v3.24.2
 
 - **Faster starts:** claiming a spare spawned about 120 `jj` and `git` processes, so a start
