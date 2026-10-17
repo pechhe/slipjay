@@ -192,3 +192,25 @@ test("keeps held observations with the same commit separate by repository", () =
     { repo: "other/app", operationId: "held-b", commitId: "shared-commit", retries: 4, durationMs: 4_000, published: true, seq: 2 },
   ]);
 });
+
+test("reports workspace claim timings and pool hit rate by repository and machine", () => {
+  const claim = (seq: number, id: string, ms: number, hit: boolean, spareCount: number, durationMs: number): StoredEvent =>
+    row(seq, id, ms, { type: "client", id: `fact-${seq}`, fact: { kind: "pool_claim", workspace: `ws-${seq}`, hit, spareCount, durationMs } });
+  const events: StoredEvent[] = [
+    row(1, "mac-1", 1_000, { type: "client_operation", repo: "acme/app", workspace: "a", machine: "mac" }),
+    claim(2, "mac-1", 1_001, true, 8, 2_000),
+    row(3, "mac-2", 2_000, { type: "client_operation", repo: "acme/app", workspace: "b", machine: "mac" }),
+    claim(4, "mac-2", 2_001, false, 0, 9_000),
+    row(5, "vps-1", 3_000, { type: "client_operation", repo: "acme/app", workspace: "c", machine: "vps" }),
+    claim(6, "vps-1", 3_001, true, 6, 1_000),
+    row(7, "old", 10, { type: "client_operation", repo: "acme/app", workspace: "d", machine: "mac" }),
+    claim(8, "old", 11, true, 8, 50_000),
+  ];
+  const starts = pipelineMetrics(events, at(500)).workspaceStarts;
+  assert.deepEqual(starts.map(({ machine, starts, poolHits, medianSpares }) => ({ machine, starts, poolHits, medianSpares })), [
+    { machine: "mac", starts: 2, poolHits: 1, medianSpares: 4 },
+    { machine: "vps", starts: 1, poolHits: 1, medianSpares: 6 },
+  ]);
+  assert.deepEqual(starts[0]!.claim, { samples: 2, medianMs: 5_500, p90Ms: 9_000 });
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, at(500))), /acme\/app on mac 2 starts, 1 from the pool, claim median 5500ms, p90 9000ms, median 4 spares at start/);
+});

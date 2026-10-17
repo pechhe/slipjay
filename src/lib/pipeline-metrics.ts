@@ -10,6 +10,7 @@ export type FlakeCandidate = {
   failureEvidence: { operationId: string; seq: number; fileSet?: string }[];
   passingEvidence?: { operationId: string; seq: number };
 };
+export type WorkspaceStartMetric = { repo: string; machine: string; starts: number; poolHits: number; claim: MetricTiming; medianSpares: number };
 export type ChangeAttempts = { repo: string; changeId: string; operationIds: string[]; attempts: number; landed: boolean };
 export type HeldMetric = { repo: string; operationId: string; commitId: string; retries: number; durationMs: number; published: boolean; seq: number };
 
@@ -24,6 +25,7 @@ export type PipelineMetrics = {
   flakes: FlakeCandidate[];
   attempts: ChangeAttempts[];
   held: HeldMetric[];
+  workspaceStarts: WorkspaceStartMetric[];
 };
 
 type OperationHistory = {
@@ -136,6 +138,26 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
   return result.sort((a, b) => a.test.localeCompare(b.test) || a.command.localeCompare(b.command));
 }
 
+/** Claim timings for workspace starts, grouped by repository and machine, from the clients' pool_claim facts. */
+function workspaceStarts(events: readonly StoredEvent[], since: number): WorkspaceStartMetric[] {
+  const origins = new Map<string, { repo: string; machine: string }>();
+  for (const row of events) if (row.event.type === "client_operation") origins.set(row.operationId, { repo: row.event.repo, machine: row.event.machine });
+  const groups = new Map<string, { repo: string; machine: string; durations: number[]; spares: number[]; hits: number }>();
+  for (const row of events) {
+    if (row.event.type !== "client" || row.event.fact.kind !== "pool_claim" || !(eventTime(row) >= since) || !validDuration(row.event.fact.durationMs)) continue;
+    const origin = origins.get(row.operationId);
+    if (!origin) continue;
+    const key = JSON.stringify([origin.repo, origin.machine]);
+    const group = groups.get(key) ?? { ...origin, durations: [], spares: [], hits: 0 };
+    group.durations.push(row.event.fact.durationMs);
+    group.spares.push(row.event.fact.spareCount);
+    if (row.event.fact.hit) group.hits++;
+    groups.set(key, group);
+  }
+  return [...groups.values()].map((group) => ({ repo: group.repo, machine: group.machine, starts: group.durations.length, poolHits: group.hits, claim: timing(group.durations)!, medianSpares: timing(group.spares)!.medianMs }))
+    .sort((a, b) => a.repo.localeCompare(b.repo) || a.machine.localeCompare(b.machine));
+}
+
 /** Project terminal pipeline metrics from runner evidence. */
 export function pipelineMetrics(events: readonly StoredEvent[], since: string): PipelineMetrics {
   const histories = operationHistory(events);
@@ -234,6 +256,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string): 
     flakes: flakeCandidates(histories, threshold),
     attempts,
     held,
+    workspaceStarts: workspaceStarts(events, threshold),
   };
 }
 
@@ -252,5 +275,6 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
   lines.push(`Flake candidates: ${metrics.flakes.length ? metrics.flakes.map((candidate) => `${candidate.test} (${candidate.confirmed ? "confirmed" : "candidate"}; ${candidate.changes.length} changes; ${candidate.command}${candidate.fileSet ? `; fileSet ${candidate.fileSet}` : ""})`).join("; ") : "none"}`);
   lines.push(`Attempts: ${metrics.attempts.length ? metrics.attempts.map((attempt) => `${attempt.repo}/${attempt.changeId} ${attempt.attempts}${attempt.landed ? " until landed" : " open"}`).join("; ") : "none"}`);
   lines.push(`Held integrations: ${metrics.held.length ? metrics.held.map((entry) => `${entry.repo}/${entry.commitId} retries ${entry.retries}, ${entry.durationMs}ms, ${entry.published ? "published" : "unpublished"}`).join("; ") : "none"}`);
+  lines.push(`Workspace starts: ${metrics.workspaceStarts.length ? metrics.workspaceStarts.map((entry) => `${entry.repo} on ${entry.machine} ${entry.starts} starts, ${entry.poolHits} from the pool, claim median ${Math.round(entry.claim.medianMs)}ms, p90 ${Math.round(entry.claim.p90Ms)}ms, median ${entry.medianSpares} spares at start`).join("; ") : "none"}`);
   return lines.join("\n");
 }

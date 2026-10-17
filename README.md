@@ -679,7 +679,9 @@ its timing line on stderr, one duration per runner stage, then `housekeeping`: t
 machine's own work after the verdict (recording the landing, sweeping other workspaces); `landings.jsonl` and `releases.jsonl` are no longer written.
 `slipjay metrics [--since <ISO date>]` reads that ledger and prints outcomes, cause
 classes, median and p90 stage and command durations, active and paused queue waits,
-held integrations, attempts per change, and flake candidates. The default range
+held integrations, attempts per change, flake candidates, and workspace starts (per
+repository and machine: starts, how many came from the spare pool, median and p90 claim time, and
+median spares available). The claim time is the allocation itself, not `slipjay`'s own startup. The default range
 starts at midnight UTC today. Older operations retain their original evidence;
 missing instrumentation is not synthesized as a measured fact.
 

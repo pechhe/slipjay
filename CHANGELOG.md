@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Workspace start timings in `slipjay metrics`:** a "Workspace starts" line reports, per repository
+  and machine, the starts, how many claimed a spare, the median and p90 claim time and the median
+  spares available, from the `pool_claim` facts starts already send the runner.
 - **Durable allocation attempts:** `slipjay start --attempt <id>` records the start before it
   allocates anything, so a caller that never got the result (a failed install, a lost or malformed
   receipt, a timeout, a restart) finds its checkout with `slipjay attempt show <id>` and gives it
