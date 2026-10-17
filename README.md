@@ -52,6 +52,61 @@ lowercase letters or digits) when declared, else two letters derived from the
 checkout folder (`peach-pi` → `pp`, `slipjay` → `sl`). Declare it when the folder
 name may change, so existing `ys-412`-style names stay stable.
 
+### Settings
+
+Three `slipjay.json` fields are settings: `spares` (see [Workspace options](#workspace-options)),
+`process` and `requiredLandingVerification` (the gate). Change them with `slipjay policy set`
+rather than by hand, and this machine's own settings with `slipjay config`.
+
+- **`process`.** `"standard"` (the default when absent) or `"light"`: how much process agents
+  apply to the repository's work. SlipJay validates and reports it but changes no behaviour;
+  agents read it through `slipjay policy show`. Any other value is refused, and an unreadable
+  policy is an error, never `light`.
+- **Retired fields.** `parallelExecution` and `unattendedMergeToIntegration` drive nothing. A
+  policy that still declares them loads; `land` and `policy show` print a one-line warning to
+  stderr (other commands stay quiet), `policy show --json` lists them as `retired`, and
+  `policy set` drops them.
+- **`slipjay policy show [--json]`.** The policy committed on the integration branch, read the
+  way landing reads it: the integration branch, the `revision` it was read from, the policy's
+  `digest`, the file as `declared`, the `settings` in force with defaults filled in, and any
+  `retired` fields. It reads the local integration bookmark, so fetch first to see another
+  machine's change.
+- **`slipjay policy set --base <revision> [--spares <n|default>] [--process <level|default>] [--landing-verification <json|default>] [--patch <json>]`.**
+  Applies a patch of those three fields (`default`, or `null` in `--patch`, removes one) to the
+  policy at `--base`, the `revision` from `policy show`. Any other field is refused. If the
+  integration branch's policy has changed since that revision, the patch is refused as stale, so
+  two saves from one read never overwrite each other; its commit carries a `Policy-Base:` trailer
+  with the base's digest, and the runner refuses it as stale too if the policy moved before it
+  reached the queue. The change is made in a workspace of its own on the integration tip (never
+  the primary checkout) and lands through the normal queue. It prints one JSON object whose
+  `phase` is `refused` (nothing submitted, exit 2), `already-applied`, `landed`, `rejected` (the
+  runner refused or failed it before integration; nothing changed), `failed-after-integration`
+  (integrated, but finalization or publication has not finished; the runner retries it) or
+  `uncertain` (rerun the same command: it reattaches to the attempt it made and never submits
+  twice).
+- **The settings fast path.** The runner gates a landing with the integration branch's current
+  checks, not the candidate's, so a changed check would otherwise first run on the next
+  landing. When a rebased candidate's only difference from its integration base is
+  `slipjay.json`, and the two policies match outside the settings fields (and retired fields),
+  the runner skips `requiredLandingVerification`: it checks the new policy loads, and that every
+  check's executable (and capability probe's) resolves on the runner host, then records a
+  `verification_skipped` event with the changed fields and the reason. Preparation, barriers,
+  finalization and publication are unchanged. It decides again for every prepared candidate, so
+  after any rebase. Anything else, including an edit that also touches a migration,
+  post-integration, deployment, reset or release field, takes the normal route. **What it does not
+  prove:** that a new or edited check passes. That is first shown when a later landing runs it;
+  a broken check blocks the repository's landings until it is fixed, which the same fast path
+  can do.
+- **`slipjay config [--json]`, `config set runner <location>`, `config set spares <0-8> [--repo <path>]`, `config unset <runner|spares> [--repo <path>]`.**
+  Reads and writes `~/.slipjay/config.json`, keeping its other keys. `--json` reports `runner`
+  (`value`, `source`: `environment`, `file` or `unset`, the `file` value, and whether
+  `SLIPJAY_RUNNER` overrides it) and, for the current repository and each one with a limit,
+  `declared`, `machineLimit` and `effective` spares. A spare limit only lowers the declared count
+  and the next refill applies it; `--repo` defaults to the current repository's integration
+  checkout. Changing the runner location does not move or cancel operations already submitted:
+  `land` keeps following each on the runner that accepted it, and `runner log`, `outcome`,
+  `handoff`, `source` and `artifact` read an operation this machine submitted from that runner.
+
 ### Workspace teardown
 
 A repository can declare a command that runs in a workspace just before slipjay
@@ -175,6 +230,8 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | Command | Effect |
 | --- | --- |
 | `status` | Mode, current workspace and its Issue, integration checkout, landing state and this machine's spare count (JSON). |
+| `config [--json]`, `config set\|unset <runner\|spares> …` | This machine's runner location and spare limits, each with its source (see [Settings](#settings)). |
+| `policy show [--json]`, `policy set --base <revision> …` | Read the integration branch's policy, or land a change to its settings fields without running the landing checks (see [Settings](#settings)). |
 | `landed <path>` | The landing recorded for the workspace at exactly that path, even after it was removed, as one JSON line (`workspaceName`, `workspacePath`, `artifactCommitId`, and `operationId`, `issueNumber`, `landedAt` when recorded), or `null`. Read-only. |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
 | `list` | Workspaces with their state, Issue and retained material. |

@@ -133,6 +133,8 @@ export type OperationEvent =
   /** `candidate` is the exact revision verified on `base`; rows from before it was recorded lack it. */
   | { type: "verification_base"; base: string; candidate?: string }
   | { type: "verification_passed"; base: string; candidate: string }
+  /** A settings landing: only `fields` of the policy changed, so its landing checks did not run (see `policy-settings.ts`). */
+  | { type: "verification_skipped"; base: string; candidate: string; fields: string[]; reason: string }
   | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
   /** Retained source, manifest and command artifacts were deleted under the runner's retention policy. */
   | { type: "evidence_expired"; policy: "published" | "unadopted" }

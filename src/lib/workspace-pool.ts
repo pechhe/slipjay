@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { repositoryProjectCode, run, workspaceContext } from "./workspace-jj.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "./workspace-jj.ts";
-import { machineConfigPath, metadataHome, workspaceHome } from "./workspace-paths.ts";
+import { metadataHome, workspaceHome } from "./workspace-paths.ts";
 import { listWorkspaces, metadataPath, readJsonOptional, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
 import { processAlive } from "./workspace-holders.ts";
 import { startBackgroundEntry } from "./workspace-background.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
-import { DEFAULT_SPARES, spareCount } from "./execution-policy.ts";
+import { DEFAULT_SPARES } from "./execution-policy.ts";
+import { machineSpareLimit } from "./machine-config.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { removeWorkspace, withinWorkspaceStorage } from "./workspace-lifecycle.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -74,13 +75,7 @@ export interface SpareAllowance {
  */
 export async function spareAllowance(context: WorkspaceContext): Promise<SpareAllowance> {
   const declared = context.configuration.spares ?? DEFAULT_SPARES;
-  const text = await readFile(machineConfigPath(), "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
-  const limits: unknown = text === null ? undefined : JSON.parse(text).spares;
-  if (limits !== undefined && (!limits || typeof limits !== "object" || Array.isArray(limits))) {
-    throw new Error(`spares in ${machineConfigPath()} must map integration checkout paths to spare counts`);
-  }
-  const limit = Object.entries((limits ?? {}) as Record<string, unknown>).find(([path]) => resolve(path) === resolve(context.integration.root));
-  const machineLimit = limit === undefined ? null : spareCount(limit[1]);
+  const machineLimit = machineSpareLimit(context.integration.root);
   return { spares: machineLimit === null ? declared : Math.min(declared, machineLimit), declared, machineLimit };
 }
 

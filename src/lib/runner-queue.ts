@@ -19,6 +19,9 @@ import { readExactExecutionPolicy } from "./post-integration-source.ts";
 import { confirmRelease, returnRelease } from "./release.ts";
 import type { BuildReader } from "./tracker.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
+import { readPolicyTextAtCommit } from "./execution-policy.ts";
+import { settingsLanding } from "./policy-settings.ts";
+import { verificationEvidence } from "./verification-policy.ts";
 import { admissionLane, awaitingReplacement, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
@@ -758,6 +761,18 @@ export function createRunnerQueue(input: {
           verify: async ({ base, candidate }) => {
             append(operation.id, { type: "verification_base", base, candidate });
             await recordShape(checkout, candidateContext.integrationBranch, candidate, candidateContext.configuration.migrationFinalization);
+            // Decided for each prepared candidate, so again after any rebase or rebuilt attempt.
+            const settings = await settingsLanding({
+              changedPaths: async (from, to) => (await jj(checkout, ["diff", "--from", from, "--to", to, "--name-only"])).split("\n").filter(Boolean),
+              policyText: async (commitId) => readPolicyTextAtCommit(checkout, commitId),
+              description: async (commitId) => jj(checkout, ["log", "-r", commitId, "--no-graph", "-T", "description"]),
+            }, base, candidate, (environment ?? (() => process.env))().PATH);
+            if (settings) {
+              progress(`[verify] skipped: ${settings.reason}`);
+              append(operation.id, { type: "verification_skipped", base, candidate, fields: settings.fields, reason: settings.reason });
+              append(operation.id, { type: "verification_passed", base, candidate });
+              return verificationEvidence([], [], settings.checks);
+            }
             const verification = await runRequiredVerification({
               root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
               environment, onProgress: progress, run,

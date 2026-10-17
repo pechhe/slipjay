@@ -250,3 +250,34 @@ test("watch and cancel reject unsupported arguments before connecting", async ()
     assert.match(result.stderr, /Usage: slipjay (watch --json|cancel <id>)/);
   }
 });
+
+test("config and policy show report each setting with its source, and config set changes the effective spare count", async () => {
+  const f = await project({ policy: { spares: 4 } });
+  const configPath = join(homedir(), ".slipjay", "config.json");
+  const previous = await readFile(configPath, "utf8").catch(() => null);
+  try {
+    await mkdir(join(homedir(), ".slipjay"), { recursive: true });
+    assert.equal((await slipjay(f.repo, ["config", "set", "runner", "ssh://peach-box"])).code, 0);
+    const set = await slipjay(f.repo, ["config", "set", "spares", "2"]);
+    assert.equal(set.code, 0, set.stderr);
+    assert.deepEqual(JSON.parse(set.stdout), { repository: await realpath(f.repo), declared: 4, machineLimit: 2, effective: 2 });
+    const shown = await slipjay(f.repo, ["config", "--json"]);
+    assert.equal(shown.code, 0, shown.stderr);
+    const config = JSON.parse(shown.stdout);
+    assert.deepEqual(config.runner, { value: "ssh://peach-box", source: "file", file: "ssh://peach-box", overriddenByEnvironment: false });
+    assert.deepEqual(config.spares, [{ repository: await realpath(f.repo), declared: 4, machineLimit: 2, effective: 2 }]);
+    assert.equal((await slipjay(f.repo, ["config", "unset", "spares"])).code, 0);
+    assert.equal(JSON.parse((await slipjay(f.repo, ["config", "--json"])).stdout).spares[0].effective, 4);
+    const policy = await slipjay(f.repo, ["policy", "show", "--json"]);
+    assert.equal(policy.code, 0, policy.stderr);
+    const view = JSON.parse(policy.stdout);
+    assert.equal(view.integrationBranch, "main");
+    assert.equal(view.revision, jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]));
+    assert.deepEqual([view.settings.spares, view.settings.process], [4, "standard"]);
+    assert.equal((await slipjay(f.repo, ["policy", "set", "--spares", "2"])).code, 1);
+  } finally {
+    if (previous === null) await rm(configPath, { force: true });
+    else await writeFile(configPath, previous);
+    await f.dispose();
+  }
+});

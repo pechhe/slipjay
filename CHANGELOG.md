@@ -10,6 +10,20 @@
   workspace, and Issue workspace recovery also starts the sweep. The sweep's outcome is logged to
   `pool-refill.log`, shared with the spare refill. Library: `runHousekeeping` runs one throttled,
   serialised sweep and `startHousekeeping` starts it detached (#85, #86).
+- **Settings through commands:** `slipjay policy show` reads the integration branch's committed
+  policy with its revision and digest, and `slipjay policy set --base <revision>` lands a patch of
+  `spares`, `process` or `requiredLandingVerification` from a workspace of its own, refused as
+  stale when the policy moved since that read. `slipjay config` reads and sets this machine's
+  runner location and spare limits, each with its source (#84).
+- **Settings landings skip the gate:** a landing whose only difference is those fields of
+  `slipjay.json` lands without running the landing checks, once the new policy loads and every
+  check's executable resolves on the runner; the skip and its reason are recorded as
+  `verification_skipped`. A new check is proven only when a later landing runs it (#84).
+- **`process`:** `"standard"` (default) or `"light"`, validated and reported for agents (#84).
+- **Retired `parallelExecution` and `unattendedMergeToIntegration`:** they drove nothing; a policy
+  that declares them loads, `land` and `policy show` warn of them, and `policy set` drops them (#84).
+- **A landing follows the runner that accepted it:** after this machine's runner location changes,
+  `land` keeps following an operation it submitted earlier on that runner (#84).
 
 ## v3.24.4
 

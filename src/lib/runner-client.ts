@@ -6,10 +6,9 @@ import { BUILD_SESSION_ENV, buildLandingHandoff } from "./build-handoff.ts";
 import type { BuildReadAction } from "./tracker.ts";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { open, link, rm, lstat } from "node:fs/promises";
+import { open, link, readFile, rm, lstat } from "node:fs/promises";
 import { SOURCE_BUNDLE_MAX_BYTES } from "./submission-source-export.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createConnection, createServer } from "node:net";
 import { hostname } from "node:os";
@@ -26,7 +25,8 @@ import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { metadataPath, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
-import { machineConfigPath, poolRefillLogPath, stateHome } from "./workspace-paths.ts";
+import { poolRefillLogPath, stateHome } from "./workspace-paths.ts";
+import { runnerSetting } from "./machine-config.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 import type { SweepResult } from "./workspace-sweep.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
@@ -47,6 +47,26 @@ async function updatePendingFacts(context: WorkspaceContext, update: (pending: P
     if (!metadata || context.current.name === "default") return false;
     await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, pendingRunnerFacts: update(pendingFacts(metadata)) });
     return true;
+  }, { waitMs: 1000 });
+}
+
+/**
+ * The runner a workspace submitted each commit to, kept from before submission until its outcome is known, so
+ * a landing reattaches where it was submitted even after this machine's runner location changes.
+ * `location` records it, null forgets it; without either it is only read.
+ */
+async function landingRunner(context: WorkspaceContext, commitId: string, location?: string | null): Promise<string | undefined> {
+  if (context.current.name === "default") return undefined;
+  const runners = (metadata: WorkspaceMetadata | null) => ({ ...(metadata?.landingRunners as Record<string, string> | undefined) });
+  if (location === undefined) return runners(await workspaceMetadata(context.current.name))[commitId];
+  return withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
+    const metadata = await workspaceMetadata(context.current.name);
+    if (!metadata) return undefined;
+    const next = runners(metadata);
+    if (location === null) delete next[commitId];
+    else next[commitId] = location;
+    await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, landingRunners: next });
+    return location ?? undefined;
   }, { waitMs: 1000 });
 }
 
@@ -165,18 +185,7 @@ async function flushForwardFailures(cwd: string, location: string, baseUrl: stri
 }
 
 export function runnerLocation(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.SLIPJAY_RUNNER) return env.SLIPJAY_RUNNER;
-  return readRunnerConfiguration();
-}
-
-function readRunnerConfiguration(): string | null {
-  try {
-    const config = JSON.parse(readFileSync(machineConfigPath(), "utf8"));
-    return typeof config.runner === "string" && config.runner ? config.runner : null;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
+  return runnerSetting(env).value;
 }
 
 /** The token read from Bitwarden, once per process: one command can reach the runner many times. */
@@ -360,6 +369,38 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
 
 /** How to read retained operation events from any machine with the runner location. */
 export const runLogCommand = (operationId: string): string => `slipjay runner log ${operationId}`;
+
+/** This machine's record of which runner accepted each operation it submitted, newest last. */
+const operationRunnersPath = (): string => join(stateHome(), "operation-runners.json");
+const OPERATION_RUNNERS_KEPT = 500;
+
+async function readOperationRunners(): Promise<Record<string, string>> {
+  const text = await readFile(operationRunnersPath(), "utf8").catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return null; throw error; });
+  if (text === null) return {};
+  const value: unknown = JSON.parse(text);
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, string> : {};
+}
+
+/** Remember that `location` accepted `operationId`, so reading it later still asks that runner. Never fails its caller. */
+async function rememberOperationRunner(operationId: string, location: string): Promise<void> {
+  await withWorkspaceTransaction(`operation-runners:${operationRunnersPath()}`, async () => {
+    const runners = await readOperationRunners();
+    if (runners[operationId] === location) return;
+    delete runners[operationId];
+    runners[operationId] = location;
+    const kept = Object.entries(runners).slice(-OPERATION_RUNNERS_KEPT);
+    mkdirSync(dirname(operationRunnersPath()), { recursive: true });
+    await writeWorkspaceJson(operationRunnersPath(), Object.fromEntries(kept));
+  }, { waitMs: 1000 }).catch(() => undefined);
+}
+
+/**
+ * Where to read an operation: the runner that accepted it when this machine submitted it,
+ * even after the runner location changed, else the configured runner.
+ */
+export async function operationRunnerLocation(operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  return (await readOperationRunners().catch(() => ({} as Record<string, string>)))[operationId] ?? runnerLocation(env);
+}
 
 /** Chunked retrieval verifies bytes against the ledger-backed digest before exposing JSON. */
 export async function readRunArtifact(location: string, operationId: string, runId: string, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
@@ -620,8 +661,11 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     return prepareSubmissionHandoff(supplied, { ...process.env, ...env });
   };
   let handoff = options.handoff ? prepared(options.handoff) : undefined;
+  // Follow a submission where it was made, even if this machine's runner location has changed since.
+  const location = await landingRunner(context, target.commitId) ?? options.location;
+  if (location !== options.location) onLine(`[runner] following ${target.commitId.slice(0, 12)} on ${location}, where it was submitted`);
   const token = await runnerToken(env);
-  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
   const { baseUrl, name } = connection;
   const operationsFor = async (changeId: string) => (await (await request(baseUrl, token, `/v1/changes/${changeId}?repo=${encodeURIComponent(repo)}`,
     { signal: options.signal })).json() as { operations: Operation[] }).operations;
@@ -651,7 +695,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       if (running) operation = running;
     }
     if (!operation) {
-      const repair = await workspaceRepairProof(context, options.location, repo, target.changeId);
+      const repair = await workspaceRepairProof(context, location, repo, target.changeId);
       if (repair || priorAttempt?.kind === "landing" && priorAttempt.outcome) {
         const ownership = await request(baseUrl, token, `/v1/operations/${encodeURIComponent(repair?.operationId ?? priorAttempt!.id)}/repair`);
         if (!ownership.ok) throw new Error("Repair ownership could not be established; source was not submitted");
@@ -663,11 +707,12 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       // an operation already submitted never depends on the session or on Build answering.
       if (!handoff && buildTracked) {
         const issueNumber = (await workspaceMetadata(context.current.name))?.issueNumber;
-        handoff = await writtenLandingHandoff(context, landingRequestKey(options.location, repo, target.commitId), awaitingAdmission, async () => prepared(await buildLandingHandoff({
+        handoff = await writtenLandingHandoff(context, landingRequestKey(location, repo, target.commitId), awaitingAdmission, async () => prepared(await buildLandingHandoff({
           source: target.commitId, description: target.description, issueNumber: typeof issueNumber === "number" ? issueNumber : null,
           tickets: options.tickets ?? [], sessionId: options.session ?? env[BUILD_SESSION_ENV], read: (action, input) => readBuildThroughRunner(action, input, env) })));
       }
-      requestId = await landingRequestIdentity(context, options.location, repo, target.commitId);
+      requestId = await landingRequestIdentity(context, location, repo, target.commitId);
+      await landingRunner(context, target.commitId, location);
       const bookmark = candidateBookmark(target.changeId);
       try { await jj(cwd, ["git", "fetch", "--remote", remote, "--branch", bookmark]); }
       catch (error) { if (!/nothing|no matching|does not exist|not found/i.test(String(error))) throw error; }
@@ -713,11 +758,13 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       reattached = submitted.reattached === true || response.status === 409;
       older = olderRunning;
     }
-    if (!older && requestId) await landingRequestIdentity(context, options.location, repo, target.commitId, requestId);
+    if (!older && requestId) await landingRequestIdentity(context, location, repo, target.commitId, requestId);
+    await rememberOperationRunner(operation.id, location);
     await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.
     if (operation.result) options.onStage?.("housekeeping");
+    if (operation.result) await landingRunner(context, target.commitId, null).catch(() => undefined);
     // A fetch of every bookmark while the candidate was on the remote imports it untracked,
     // which makes the submitted commit immutable: the author could neither fix a failure
     // nor abandon a landed commit, and the landed rewrite would show as divergent.
@@ -740,7 +787,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       let state: Record<string, unknown> = { artifactCommitId: result.commitId };
       if (context.current.name !== "default") {
         await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
-        state = { ...await readLandingState(context.current.name), runner: { location: options.location, operationId: operation.id } };
+        state = { ...await readLandingState(context.current.name), runner: { location: location, operationId: operation.id } };
         await writeWorkspaceJson(statePath(context.current.name), state);
       }
       // A concurrent jj command elsewhere in the repository can leave this working copy stale.
@@ -898,6 +945,7 @@ export async function releaseThroughRunner(cwd: string, options: { candidate: st
       headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, candidate: options.candidate,
         migrationsReady: options.migrationsReady, submittedBy: `${hostname()}:${cwd}` }) });
     const { operation: submitted, reattached } = (await response.json()) as { operation: ReleaseOperation; reattached: boolean };
+    await rememberOperationRunner(submitted.id, options.location);
     if (reattached) onLine(`[runner ${connection.name}] following the open release of ${options.candidate.slice(0, 12)}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
     // A promotion ends with its production deploy, which runs in the deploy lane.
@@ -961,6 +1009,7 @@ export async function deployThroughRunner(cwd: string, options: { environment: s
       headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, environment: options.environment, commitId,
         submittedBy: `${hostname()}:${cwd}` }) });
     const { operation: submitted, reattached } = (await response.json()) as { operation: DeployOperation; reattached: boolean };
+    await rememberOperationRunner(submitted.id, options.location);
     onLine(`[runner ${connection.name}] ${reattached ? "following the open deploy" : "deploying"} of ${branch} ${commitId.slice(0, 12)} to ${options.environment}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
     return { operation, logUrl: runLogCommand(operation.id) };
@@ -996,6 +1045,7 @@ export async function resetThroughRunner(cwd: string, options: { location: strin
     const response = await request(connection.baseUrl, token, "/v1/resets", { method: "POST", signal: options.signal,
       headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, submittedBy: `${hostname()}:${cwd}` }) });
     const { operation: submitted, reattached } = (await response.json()) as ResetResponse;
+    await rememberOperationRunner(submitted.id, options.location);
     onLine(`[runner ${connection.name}] ${reattached ? "following the open reset" : "resetting"} of ${repo}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
     return { operation, logUrl: runLogCommand(operation.id) };

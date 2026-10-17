@@ -36,6 +36,9 @@ export { redactVerificationOutput } from "./verification-failure.ts";
 
 // Repository policy and post-integration finalization (desktop, peach-pi scripts).
 export { parseExecutionPolicy, readExecutionPolicy, readIntegrationPolicy, resolveIntegrationBranch } from "./execution-policy.ts";
+export { setPolicy, showPolicy } from "./policy-command.ts";
+export type { PolicySetResult, PolicyView } from "./policy-command.ts";
+export { readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "./machine-config.ts";
 export { declaredPublicationRemote } from "./source-publication-policy.ts";
 export { postIntegrationPolicy } from "./post-integration-policy.ts";
 export { SourcePreparationFailure, finalizationGit, withFinalizationSource } from "./post-integration-source.ts";

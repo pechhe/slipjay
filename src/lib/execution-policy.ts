@@ -17,7 +17,6 @@ export type ExecutionPolicy = {
   version: 1;
   integrationBranch?: string;
   remote: string | null;
-  parallelExecution: boolean;
   requiredLandingVerification: VerificationDeclaration[];
   /** The branch `slipjay promote` promotes the integration branch to. */
   releaseBranch?: string;
@@ -31,6 +30,8 @@ export type ExecutionPolicy = {
   sharedPaths?: string[];
   /** How many prepared spare workspaces the pool keeps; 1 when undeclared. */
   spares?: number;
+  /** How much process agents apply to the repository's work; `standard` when undeclared. SlipJay only reports it. */
+  process?: ProcessLevel;
   postIntegration?: unknown;
   /** The target the runner resets on a schedule and on demand; undefined when undeclared. */
   reset?: ResetPolicy;
@@ -39,6 +40,8 @@ export type ExecutionPolicy = {
   /** Where the repository's work is tracked (see `tracker.ts`); GitHub Issues when undeclared. */
   tracker?: "github" | "build";
 };
+
+export type ProcessLevel = "standard" | "light";
 
 export type IntegrationBranchProbes = {
   originHead?: () => Promise<string | null>;
@@ -210,6 +213,24 @@ export function spareCount(declared: unknown): number {
   return declared as number;
 }
 
+/** `process`: `standard` (the default) or `light`. */
+export function processLevel(declared: unknown): ProcessLevel {
+  if (declared === undefined) return "standard";
+  if (declared !== "standard" && declared !== "light") fail('process must be "standard" or "light"');
+  return declared;
+}
+
+/** Declarations that drive nothing: a policy still declaring them loads, and `land` and `policy show` warn of them. */
+export const RETIRED_POLICY_FIELDS: readonly ["parallelExecution", "unattendedMergeToIntegration"] = Object.freeze(["parallelExecution", "unattendedMergeToIntegration"]);
+
+/** The one-line warning for a policy that declares retired fields, or null when it declares none. */
+export function retiredFieldsWarning(policy: Record<string, unknown> | null | undefined): string | null {
+  const retired = RETIRED_POLICY_FIELDS.filter((field) => policy?.[field] !== undefined);
+  if (!retired.length) return null;
+  const them = retired.length === 1 ? "it" : "them";
+  return `${EXECUTION_POLICY_PATH} declares ${retired.join(" and ")}, which ${retired.length === 1 ? "drives" : "drive"} nothing; remove ${them} (slipjay policy set drops ${them})`;
+}
+
 /**
  * `slipjay promote`'s declaration: the branch the integration branch is promoted to
  * and the checks the exact candidate commit must pass first. A release branch with
@@ -261,25 +282,26 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   generatedPathMatchers(parsed.generatedPaths);
   const sharedPaths = sharedPathList(parsed.sharedPaths);
   const spares = spareCount(parsed.spares);
+  const level = processLevel(parsed.process);
   return {
     ...parsed,
     version: 1,
     integrationBranch: (parsed.integrationBranch as string | null | undefined) ?? undefined,
     remote: declaredPublicationRemote(parsed),
-    parallelExecution: parsed.parallelExecution === true,
     requiredLandingVerification: landingGate(parsed),
     ...releasePolicy(parsed),
     migrationFinalization: migrationFinalization(parsed.migrationFinalization),
     workspaceTeardown: workspaceTeardown(parsed.workspaceTeardown),
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
     ...(parsed.spares === undefined ? {} : { spares }),
+    ...(parsed.process === undefined ? {} : { process: level }),
     ...(deployments ? { deployments } : {}),
     ...(reset ? { reset } : {}),
   };
 }
 
 /** The landing configuration of a repository that declares no policy. */
-export const UNDECLARED_POLICY: Readonly<Pick<ExecutionPolicy, "requiredLandingVerification" | "remote" | "parallelExecution" | "migrationFinalization">> = Object.freeze({ requiredLandingVerification: [], remote: null, parallelExecution: false, migrationFinalization: null });
+export const UNDECLARED_POLICY: Readonly<Pick<ExecutionPolicy, "requiredLandingVerification" | "remote" | "migrationFinalization">> = Object.freeze({ requiredLandingVerification: [], remote: null, migrationFinalization: null });
 
 /** The policy in a checkout's working files, or null when it declares none. */
 export async function readExecutionPolicy(root: string): Promise<ExecutionPolicy | null> {
@@ -311,6 +333,12 @@ export async function readExecutionPolicyAtCommit(repo: string, revision: string
 
 /** `readExecutionPolicyAtCommit` for a revision already resolved to its commit id. */
 async function policyAtCommitId(repo: string, commitId: string): Promise<{ commitId: string; policy: ExecutionPolicy | null }> {
+  const text = await readPolicyTextAtCommit(repo, commitId);
+  return { commitId, policy: text === null ? null : parseExecutionPolicy(text, EXECUTION_POLICY_PATH) };
+}
+
+/** The policy file's text committed at a resolved commit id, or null when that commit declares none. */
+export async function readPolicyTextAtCommit(repo: string, commitId: string): Promise<string | null> {
   const shown = new Map<string, string>();
   const exists = async (candidate: string) => {
     const result = await jjRead(repo, ["file", "show", "-r", commitId, `root-file:${symbol(candidate)}`]);
@@ -319,8 +347,7 @@ async function policyAtCommitId(repo: string, commitId: string): Promise<{ commi
     throw new Error(`Could not read ${candidate} at ${commitId}: ${result.stderr.trim()}`);
   };
   const found = await selectExecutionPolicyPath(exists);
-  if (found) return { commitId, policy: parseExecutionPolicy(shown.get(found)!, found) };
-  return { commitId, policy: null };
+  return found ? shown.get(found)! : null;
 }
 
 /**

@@ -4,7 +4,8 @@ import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
-import { controlRunner, landThroughRunner, releaseThroughRunner } from "../src/lib/runner-client.ts";
+import { controlRunner, landThroughRunner, operationRunnerLocation, releaseThroughRunner } from "../src/lib/runner-client.ts";
+import { setPolicy, showPolicy } from "../src/lib/policy-command.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
@@ -618,3 +619,58 @@ test("a Build admission that did not complete is reported as retryable, and land
     await retry;
   } finally { await f.dispose(); }
 }, 60_000);
+
+test("a landing submitted before the runner location changed is still followed on the runner that accepted it", async () => {
+  const f = await fixture();
+  let reached = 0;
+  const other = await serveRunner(async () => { reached += 1; return Response.json({ error: "not this runner" }, { status: 500 }); }, { host: "127.0.0.1", port: 0 });
+  try {
+    const abort = new AbortController();
+    const first = landThroughRunner(f.cwd, { ...f.options, signal: abort.signal });
+    const stopped = assert.rejects(first);
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const operation = f.log.openOperations()[0]!;
+    abort.abort();
+    await stopped;
+    f.lines.length = 0;
+    const second = landThroughRunner(f.cwd, { ...f.options, location: other.url });
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    assert.ok(f.lines.some((line) => line.includes(`on ${f.server.url}, where it was submitted`)));
+    f.append(operation.id, { type: "cancelled", reason: "fixture done" });
+    const result = await second;
+    assert.equal(result.operation.id, operation.id);
+    assert.equal(reached, 0);
+    assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+    // Its log, outcome and evidence are read from that runner too.
+    assert.equal(await operationRunnerLocation(operation.id, { SLIPJAY_RUNNER: other.url }), f.server.url);
+    assert.equal(await operationRunnerLocation("op_unknown", { SLIPJAY_RUNNER: other.url }), other.url);
+  } finally { await other.close(); await f.dispose(); }
+});
+
+test("policy set after a lost submission response reconciles the same request instead of submitting twice", async () => {
+  const f = await fixture(false, false, true);
+  try {
+    const { revision } = await showPolicy(f.repo);
+    const options = { base: revision, patch: { spares: 2 }, location: f.options.location, env: f.options.env };
+    const lost = await setPolicy(f.repo, options);
+    assert.equal(lost.phase, "uncertain", JSON.stringify(lost));
+    const rerun = await setPolicy(f.repo, options);
+    assert.equal(rerun.phase, "rejected", JSON.stringify(rerun));
+    assert.equal(new Set(f.requestIds).size, 1);
+    assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+  } finally { await f.dispose(); }
+});
+
+test("policy set reports a failure after integration apart from a refusal before it", async () => {
+  const f = await fixture();
+  try {
+    const { revision } = await showPolicy(f.repo);
+    const running = setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location: f.options.location, env: f.options.env, onLine: (line) => { f.lines.push(line); } });
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const operation = f.log.openOperations()[0]!;
+    f.append(operation.id, { type: "integrated", base: "fixture-base", commitId: "f".repeat(40) });
+    f.append(operation.id, { type: "failed", stage: "publishing", reason: "remote unavailable" });
+    const result = await running;
+    assert.equal(result.phase, "failed-after-integration", JSON.stringify(result));
+  } finally { await f.dispose(); }
+});

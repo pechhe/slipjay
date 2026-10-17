@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents } from "../lib/runner-client.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
@@ -32,7 +32,10 @@ import {
   cutover,
   cutoverPending,
 } from "../lib/slipjay.ts";
-import { legacyStateHome } from "../lib/workspace-paths.ts";
+import { legacyStateHome, machineConfigPath } from "../lib/workspace-paths.ts";
+import { machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "../lib/machine-config.ts";
+import { setPolicy, showPolicy } from "../lib/policy-command.ts";
+import { retiredFieldsWarning } from "../lib/execution-policy.ts";
 import { workspaceMetadata } from "../lib/workspace-state.ts";
 import { landingGuardDecision } from "../lib/landing-guard.ts";
 import { landingTimingLine } from "../lib/landing-timing.ts";
@@ -280,6 +283,103 @@ async function runCutover(args: string[]): Promise<number> {
   return result.status === "refused" ? 1 : 0;
 }
 
+const CONFIG_USAGE = "Usage: slipjay config [--json] | config set runner <location> | config set spares <0-8> [--repo <integration checkout>] | config unset <runner|spares> [--repo <integration checkout>]";
+
+/** `config`: this machine's runner location and spare limits, each with where it comes from. */
+async function runConfig(args: string[]): Promise<number> {
+  const [action, key, ...more] = args;
+  if (!action || action === "--json") {
+    if (args.length > 1) throw new Error(CONFIG_USAGE);
+    const config = readMachineConfig();
+    const runner = runnerSetting(process.env, config);
+    const context = await workspaceContext().catch(() => null);
+    const roots = [...new Set([...context ? [resolve(context.integration.root)] : [], ...Object.keys(machineSpareLimits(config)).map((path) => resolve(path))])];
+    const spares = await Promise.all(roots.map(async (repository) => {
+      const repositoryContext = await workspaceContext(repository).catch(() => null);
+      const allowance = repositoryContext ? await spareAllowance(repositoryContext) : null;
+      return { repository, declared: allowance?.declared ?? null, machineLimit: machineSpareLimit(repository, config), effective: allowance?.spares ?? null };
+    }));
+    if (action === "--json") console.log(JSON.stringify({ path: machineConfigPath(), runner, spares }, null, 2));
+    else {
+      console.log(`runner: ${runner.value ?? "(none)"} (${runner.source === "environment" ? `from SLIPJAY_RUNNER${runner.overriddenByEnvironment ? `, overriding ${runner.file}` : ""}` : runner.source === "file" ? machineConfigPath() : "unset"})`);
+      for (const entry of spares) console.log(`spares: ${entry.repository}: ${entry.effective ?? "?"} (declared ${entry.declared ?? "?"}, machine limit ${entry.machineLimit ?? "none"})`);
+    }
+    return 0;
+  }
+  if (action !== "set" && action !== "unset") throw new Error(CONFIG_USAGE);
+  const repoIndex = more.indexOf("--repo");
+  const repoPath = repoIndex >= 0 ? more[repoIndex + 1] : undefined;
+  if (repoIndex >= 0 && (!repoPath || repoPath.startsWith("-"))) throw new Error(CONFIG_USAGE);
+  const values = repoIndex >= 0 ? more.filter((_, index) => index !== repoIndex && index !== repoIndex + 1) : more;
+  if (key === "runner" && repoIndex < 0 && values.length === (action === "set" ? 1 : 0)) {
+    await setConfiguredRunner(action === "set" ? values[0]! : null);
+    const runner = runnerSetting();
+    console.log(JSON.stringify({ runner }));
+    if (runner.overriddenByEnvironment) console.error(`SLIPJAY_RUNNER overrides this setting in the current environment (${runner.value})`);
+    return 0;
+  }
+  if (key === "spares" && values.length === (action === "set" ? 1 : 0)) {
+    const count = action === "set" ? Number(values[0]) : null;
+    if (count !== null && !Number.isInteger(count)) throw new Error(CONFIG_USAGE);
+    const root = await integrationRoot(repoPath ? resolve(repoPath) : process.cwd());
+    await setMachineSpareLimit(root, count);
+    const context = await workspaceContext(root);
+    const allowance = context ? await spareAllowance(context) : null;
+    console.log(JSON.stringify({ repository: root, declared: allowance?.declared ?? null, machineLimit: allowance?.machineLimit ?? null, effective: allowance?.spares ?? null }));
+    return 0;
+  }
+  throw new Error(CONFIG_USAGE);
+}
+
+const POLICY_USAGE = "Usage: slipjay policy show [--json] | policy set --base <revision> [--patch <json>] [--spares <0-8|default>] [--process <standard|light|default>] [--landing-verification <json list|default>]";
+
+/** `policy`: read the integration branch's policy, or land a change to its settings fields. */
+async function runPolicy(args: string[]): Promise<number> {
+  const [action, ...flags] = args;
+  if (action === "show" && (flags.length === 0 || (flags.length === 1 && flags[0] === "--json"))) {
+    const view = await showPolicy(process.cwd());
+    if (flags[0] === "--json") console.log(JSON.stringify(view, null, 2));
+    else {
+      console.log(`${view.integrationBranch} @ ${view.revision.slice(0, 12)}${view.declared ? "" : " (no slipjay.json)"}`);
+      console.log(`spares: ${view.settings.spares}\nprocess: ${view.settings.process}`);
+      console.log(`requiredLandingVerification:${view.settings.requiredLandingVerification.length ? "" : " (none)"}`);
+      for (const check of view.settings.requiredLandingVerification as { executable: string; args: string[] }[]) console.log(`  ${[check.executable, ...check.args].join(" ")}`);
+      const retired = retiredFieldsWarning(view.declared);
+      if (retired) console.error(retired);
+    }
+    return 0;
+  }
+  if (action !== "set") throw new Error(POLICY_USAGE);
+  let base: string | undefined;
+  let patch: Record<string, unknown> = {};
+  const json = (flag: string, value: string) => { try { return JSON.parse(value) as unknown; } catch { throw new Error(`${flag} must be JSON`); } };
+  for (let index = 0; index < flags.length; index += 2) {
+    const flag = flags[index]!, value = flags[index + 1];
+    if (value === undefined || value.startsWith("--")) throw new Error(POLICY_USAGE);
+    if (flag === "--base") base = value;
+    else if (flag === "--patch") {
+      const supplied = json(flag, value);
+      if (!supplied || typeof supplied !== "object" || Array.isArray(supplied)) throw new Error("--patch must be a JSON object");
+      patch = { ...patch, ...supplied };
+    }
+    else if (flag === "--spares") patch.spares = value === "default" ? null : Number(value);
+    else if (flag === "--process") patch.process = value === "default" ? null : value;
+    else if (flag === "--landing-verification") patch.requiredLandingVerification = value === "default" ? null : json(flag, value);
+    else throw new Error(POLICY_USAGE);
+  }
+  if (!base) throw new Error(POLICY_USAGE);
+  const location = runnerLocation();
+  if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  const following = new AbortController();
+  const stopFollowing = () => following.abort(new Error("Stopped following; rerun the same slipjay policy set to reattach"));
+  process.once("SIGINT", stopFollowing);
+  let result: Awaited<ReturnType<typeof setPolicy>>;
+  try { result = await setPolicy(process.cwd(), { base, patch, location, signal: following.signal, onLine: (line) => console.error(line) }); }
+  finally { process.removeListener("SIGINT", stopFollowing); }
+  console.log(JSON.stringify(result, null, 2));
+  return result.ok ? 0 : result.phase === "refused" ? 2 : 1;
+}
+
 const [command, ...rest] = process.argv.slice(2);
 
 try {
@@ -432,6 +532,8 @@ try {
     // --direct lands the primary checkout itself, for a session explicitly working Direct.
     const location = runnerLocation();
     if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+    const retired = retiredFieldsWarning((await workspaceContext().catch(() => null))?.configuration);
+    if (retired) console.error(retired);
     const timing: { startedAt: number; stages: [string, number][] } = { startedAt: Date.now(), stages: [] };
     // The landing may remove this very directory, after which process.cwd() throws.
     const following = new AbortController();
@@ -497,6 +599,10 @@ try {
     const outcome = await cancelThroughRunner(location, rest[0]!);
     console.log(JSON.stringify(outcome.result));
     if (!outcome.ok) process.exitCode = 1;
+  } else if (command === "config") {
+    process.exitCode = await runConfig(rest);
+  } else if (command === "policy") {
+    process.exitCode = await runPolicy(rest);
   } else if (command === "deploy") {
     process.exitCode = await runDeploy(rest);
   } else if (command === "reset") {
@@ -505,7 +611,7 @@ try {
     process.exitCode = await runDeploys(rest);
   } else if (command === "runner") {
     if (rest[0] === "artifact" && rest.length === 3) {
-      const location = runnerLocation();
+      const location = await operationRunnerLocation(rest[1]!);
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
       console.log(JSON.stringify(await readRunArtifact(location, rest[1]!, rest[2]!), null, 2));
     } else if (["repair-claim", "repair-release", "repair-revoke"].includes(rest[0] ?? "") && rest.length === 2) {
@@ -513,19 +619,19 @@ try {
       if (!location) throw new Error("No runner location configured");
       console.log(JSON.stringify(await manageRepairClaim(process.cwd(), location, rest[1]!, rest[0]!.slice(7) as "claim" | "release" | "revoke"), null, 2));
     } else if (rest[0] === "source" && rest.length === 3) {
-      const location = runnerLocation();
+      const location = await operationRunnerLocation(rest[1]!);
       if (!location) throw new Error("No runner location configured");
       console.log(JSON.stringify(await downloadSubmissionSource(location, rest[1]!, resolve(rest[2]!)), null, 2));
     } else if (rest[0] === "handoff" && rest.length === 2) {
-      const location = runnerLocation();
+      const location = await operationRunnerLocation(rest[1]!);
       if (!location) throw new Error("No runner location configured");
       console.log(JSON.stringify(await readLandingHandoff(location, rest[1]!), null, 2));
     } else if (rest[0] === "outcome" && rest.length === 2) {
-      const location = runnerLocation();
+      const location = await operationRunnerLocation(rest[1]!);
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
       console.log(JSON.stringify(await readLandingOutcome(location, rest[1]!), null, 2));
     } else if (rest[0] === "log" && rest.length === 2) {
-      const location = runnerLocation();
+      const location = await operationRunnerLocation(rest[1]!);
       if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
       process.stdout.write(await readRunLog(location, rest[1]!));
     } else if ((rest.length === 1 && (rest[0] === "kill" || rest[0] === "pause" || rest[0] === "resume")) || (rest.length === 2 && rest[0] === "kill" && !rest[1]!.startsWith("-"))) {
@@ -555,7 +661,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|attach-issue|start|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
