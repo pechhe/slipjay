@@ -142,8 +142,9 @@ place and does not run one.
 
 Retiring a workspace never deletes a file that no history holds: an untracked or
 ignored file keeps the checkout (`unique-files`), except where the repository
-says what it is. Two `slipjay.json` declarations, read from the primary
-checkout, take repository-relative paths or globs (`*` within one segment, `**`
+says what it is. Two `slipjay.json` declarations, read from the policy
+committed on the integration branch (as the spare allowance is, so a stale or
+unlanded local edit on one host changes nothing there), take repository-relative paths or globs (`*` within one segment, `**`
 across segments); a match covers everything below it:
 
 ```json

@@ -1,14 +1,14 @@
 import type { WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
 import { existsSync } from "node:fs";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { run, workspaceContext } from "./workspace-jj.ts";
 import { trackerOf, workItemClosed } from "./tracker.ts";
 import type { BuildReader } from "./tracker.ts";
-import { inspectWorkspaces, lockPath, metadataReadable, readLandingState } from "./workspace-state.ts";
+import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState } from "./workspace-state.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
 import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
 import { artifactPublished } from "./landing-steps.ts";
-import { describeHolders, processAlive, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
+import { describeHolders, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
 import { pruneWorkspaceState } from "./workspace-state-prune.ts";
 import { findOrphanedCheckouts, retireOrphanedCheckouts } from "./workspace-orphans.ts";
 
@@ -53,14 +53,6 @@ export interface SweepOptions {
   issueClosed?: (repositoryRoot: string, issueNumber: number) => Promise<boolean | null> | boolean | null;
   /** Reads Build for the default `issueClosed` in a Build-tracked repository; without it a Build item's state is unknown. */
   readBuild?: BuildReader;
-}
-
-async function lockOwnerAlive(workspaceName: string) {
-  try {
-    return processAlive((JSON.parse(await readFile(lockPath(workspaceName), "utf8")) as { pid?: unknown } | null)?.pid);
-  } catch {
-    return false;
-  }
 }
 
 /**

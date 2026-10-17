@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **One policy for retirement on every host:** `generatedPaths` and `evidencePaths` are now read
+  from the policy committed on the integration branch, like the spare allowance, instead of the
+  primary checkout's working files, which move only when that host lands. Releasing an allocation
+  attempt now also keeps a checkout that gains files during the release, as the sweep does (#77).
 - **Evidence outlives its workspace:** a repository can declare `evidencePaths` in
   `slipjay.json`. Just before a workspace is retired, its untracked files there are copied to
   `~/.slipjay/state/evidence/<workspace>-<time>/` with a `provenance.json` (workspace,

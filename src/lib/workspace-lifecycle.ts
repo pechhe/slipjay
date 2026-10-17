@@ -8,9 +8,9 @@ import { artifactPublished, finishLandedWorkspace } from "./landing-steps.ts";
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
 import { revisionExists, revisionFacts, run, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "./workspace-jj.ts";
 import { evidenceHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
-import { landingStatePaths, listWorkspaces, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
+import { landingStatePaths, listWorkspaces, lockOwnerAlive, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import type { LandingState } from "./workspace-state.ts";
-import { generatedPathMatchers, readExecutionPolicy } from "./execution-policy.ts";
+import { generatedPathMatchers, readIntegrationPolicy } from "./execution-policy.ts";
 import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-delivery-lifecycle.ts";
 import { callerPids, describeHolders, processAlive, workspaceHolders } from "./workspace-holders.ts";
 import { archiveIntegratedWorkspaceEvidence } from "./workspace-finalization.ts";
@@ -69,10 +69,24 @@ export function describeRetention(result: { reason?: string; paths?: string[] } 
     + " (remove them, declare generated output in slipjay.json generatedPaths, or evidence to preserve in evidencePaths)";
 }
 
-/** Cleanup judges files on disk, so it reads the primary checkout's working policy (strictly). */
-async function declaredPaths(integrationRoot: string): Promise<{ generated: RegExp[]; evidence: RegExp[] }> {
-  const policy = await readExecutionPolicy(integrationRoot);
-  return { generated: generatedPathMatchers(policy?.generatedPaths), evidence: generatedPathMatchers(policy?.evidencePaths, "evidencePaths") };
+/** How long one reading of a repository's declared paths serves the checks of a single judgement. */
+const DECLARED_PATHS_TTL_MS = 5_000;
+const declaredPathsRead = new Map<string, { at: number; paths: Promise<{ generated: RegExp[]; evidence: RegExp[] }> }>();
+
+/**
+ * The repository's `generatedPaths` and `evidencePaths`, from the policy committed on its
+ * integration bookmark (strictly), as the spare allowance reads it: never the primary checkout's
+ * working files, which move only when that host lands, so every host judges by the same policy.
+ */
+function declaredPaths(integrationRoot: string): Promise<{ generated: RegExp[]; evidence: RegExp[] }> {
+  const cached = declaredPathsRead.get(integrationRoot);
+  if (cached && Date.now() - cached.at < DECLARED_PATHS_TTL_MS) return cached.paths;
+  const paths = readIntegrationPolicy(integrationRoot, { hintRoot: integrationRoot }).then(({ policy }) => ({
+    generated: generatedPathMatchers(policy?.generatedPaths), evidence: generatedPathMatchers(policy?.evidencePaths, "evidencePaths"),
+  }));
+  declaredPathsRead.set(integrationRoot, { at: Date.now(), paths });
+  paths.catch(() => declaredPathsRead.delete(integrationRoot));
+  return paths;
 }
 
 /** Paths that cannot keep a checkout: generated output it discards and evidence retirement preserves first. */
@@ -383,8 +397,7 @@ export async function missingCheckoutRefusal(cwd: string, workspace: WorkspaceEn
   const metadata = workspace.metadata ?? await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) return "has pending runner facts; reconnect from that workspace to deliver them before removal";
   if (processAlive(metadata?.preparingPid)) return "is being prepared by a live process";
-  const owner = await readFile(lockPath(workspace.name), "utf8").then((text) => (JSON.parse(text) as { pid?: unknown } | null)?.pid, () => undefined);
-  if (processAlive(owner)) return "is owned by a live process";
+  if (await lockOwnerAlive(workspace.name)) return "is owned by a live process";
   const facts = await revisionFacts(cwd, workspace.commitId, { ignoreWorkingCopy: true }).catch(() => null);
   if (!facts) return "points at an unreadable JJ revision; preserve it for explicit recovery";
   if (facts.conflict) return "has conflicted JJ state; preserve it for explicit recovery";

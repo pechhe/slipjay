@@ -1,5 +1,6 @@
 import { jj, landThroughTestRunner, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, truncate, utimes, writeFile } from "node:fs/promises";
@@ -9,6 +10,7 @@ import { cleanupLandedWorkspace, createWorkspace, planDisposableWorkspaces, swee
 import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
 import { MAX_EVIDENCE_BYTES } from "../src/lib/workspace-lifecycle.ts";
 import { evidenceHome } from "../src/lib/workspace-paths.ts";
+import { statePath } from "../src/lib/workspace-state.ts";
 import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
 
 type Fixture = Awaited<ReturnType<typeof project>>;
@@ -179,6 +181,66 @@ test("evidence that changes while it is copied keeps the workspace, removes the 
     await rm(sibling, { recursive: true, force: true });
     assert.equal(await readFile(join(evidenceHome(), added!, "files", ".t3", "review", "issue-7-review.md"), "utf8"), "Approved, with a follow-up.\n");
   } finally {
+    await f.dispose();
+  }
+}, 120_000);
+
+test("declared paths come from the policy committed on the integration branch, never the primary checkout's working files", async () => {
+  const f = await project({ ignore: ".t3/\n" });
+  try {
+    const workspace = await landedWorkspace(f, "uncommitted policy");
+    await previewOutput(workspace.workspacePath);
+    // A stale or unlanded local edit on one host must not change what retirement may delete there.
+    const policyPath = join(f.repo, "slipjay.json");
+    await writeFile(policyPath, JSON.stringify({ ...JSON.parse(await readFile(policyPath, "utf8")), generatedPaths: [".t3"] }));
+    const result = await cleanupLandedWorkspace(workspace.workspacePath);
+    assert.equal(result.reason, "unique-files", JSON.stringify(result));
+    assert.ok(existsSync(join(workspace.workspacePath, ".t3", "review", "issue-7-review.md")));
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
+
+test("a preview running inside a landed checkout keeps it until it stops, and a queued landing keeps its checkout", async () => {
+  const f = await project(declared);
+  const preview = { stop: () => {} };
+  try {
+    const previewed = await landedWorkspace(f, "previewed");
+    await mkdir(join(previewed.workspacePath, "apps", "web"), { recursive: true });
+    const server = spawn("sleep", ["60"], { cwd: join(previewed.workspacePath, "apps", "web"), stdio: "ignore" });
+    const exited = new Promise((resolveExit) => server.once("exit", resolveExit));
+    preview.stop = () => server.kill();
+
+    // A checkout with no work of its own whose recorded landing is queued: its artifact (made in
+    // another checkout) is not on main yet, so only the queued-landing guard can keep it.
+    const queued = await createWorkspace("queued", f.repo);
+    const source = await createWorkspace("queued source", f.repo);
+    await writeFile(join(source.workspacePath, "queued.txt"), "queued\n");
+    jj(source.workspacePath, ["describe", "-m", "Queued"]);
+    const artifact = jj(source.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    await writeFile(statePath(queued.current.name), JSON.stringify({
+      version: 1, workspaceName: queued.current.name, workspacePath: queued.workspacePath, integrationRoot: f.repo,
+      integrationBranch: "main", artifactCommitId: artifact, artifactChangeId: "queued", phase: "prepared",
+    }));
+
+    const options = { now: later() };
+    const plan = Object.fromEntries((await planDisposableWorkspaces(f.repo, options)).map((entry) => [entry.name, entry]));
+    assert.equal(plan[previewed.current.name]?.action, "keep");
+    assert.match(plan[previewed.current.name]?.reason ?? "", /live process: pid \d+/);
+    assert.equal(plan[queued.current.name]?.state, "landed");
+    assert.equal(plan[queued.current.name]?.action, "keep");
+    assert.equal(plan[queued.current.name]?.reason, "landing-queued");
+    let swept = await sweepDisposableWorkspaces(f.repo, options);
+    assert.ok(!swept.removed.includes(previewed.current.name) && !swept.removed.includes(queued.current.name));
+    assert.ok(existsSync(previewed.workspacePath) && existsSync(queued.workspacePath));
+
+    preview.stop();
+    await exited;
+    swept = await sweepDisposableWorkspaces(f.repo, options);
+    assert.ok(swept.removed.includes(previewed.current.name), "once the preview stops, the landed checkout retires");
+    assert.ok(existsSync(queued.workspacePath), "the queued landing's checkout is still kept");
+  } finally {
+    preview.stop();
     await f.dispose();
   }
 }, 120_000);

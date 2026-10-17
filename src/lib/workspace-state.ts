@@ -5,6 +5,7 @@ import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./work
 import { LANDED_WORKSPACE_REFUSAL, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
 import { jj, jjWorkspaceRoot, parseWorkspaceList, revisionExists, revisionFacts, workspaceContext, workspaceHasUnintegratedWork, workspaceSlug } from "./workspace-jj.ts";
 import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./workspace-paths.ts";
+import { processAlive } from "./workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
 export type LandingState = Record<string, unknown> & {
@@ -65,6 +66,11 @@ export async function metadataReadable(workspaceName: string): Promise<boolean> 
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT";
   }
+}
+
+/** Whether the workspace's owner record (`lockPath`) names a live process. */
+export async function lockOwnerAlive(workspaceName: string): Promise<boolean> {
+  return processAlive(await readFile(lockPath(workspaceName), "utf8").then((text) => (JSON.parse(text) as { pid?: unknown } | null)?.pid, () => undefined));
 }
 
 export function metadataPath(workspaceName: string): string {

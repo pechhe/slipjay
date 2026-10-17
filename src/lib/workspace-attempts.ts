@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { processAlive, describeHolders, workspaceHolders } from "./workspace-holders.ts";
 import { removeWorkspace, retainedWorkspaceMaterial } from "./workspace-lifecycle.ts";
 import { attemptHome } from "./workspace-paths.ts";
-import { listWorkspaces, lockPath, readJsonOptional, workspaceMetadata } from "./workspace-state.ts";
+import { listWorkspaces, lockOwnerAlive, readJsonOptional, workspaceMetadata } from "./workspace-state.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
 /**
@@ -119,13 +119,13 @@ async function releaseOwnedCheckout(attempt: AllocationAttempt & { interrupted: 
   const holders = await workspaceHolders(workspace.root);
   if (!holders) return { released: false, reason: "process working directories unavailable" };
   if (holders.length) return { released: false, reason: `in use by a live process: ${describeHolders(holders)}` };
-  const owner = await readJsonOptional<{ pid?: unknown }>(lockPath(name));
-  if (owner && processAlive(owner.pid)) return { released: false, reason: "in use by a live process" };
+  if (await lockOwnerAlive(name)) return { released: false, reason: "in use by a live process" };
   const unique = await retainedWorkspaceMaterial(workspace.root, attempt.integrationRoot);
   if (unique.length) return { released: false, reason: `holds unique files: ${unique.join(", ")}` };
   try {
     // Refuses unlanded work, undelivered runner facts and checkouts outside workspace storage.
-    await removeWorkspace(attempt.integrationRoot, name, { allowIssue: true });
+    // `retainMaterial`: a file written since the check above keeps it, as it does for the sweep.
+    await removeWorkspace(attempt.integrationRoot, name, { allowIssue: true, retainMaterial: true });
   } catch (error) {
     return { released: false, reason: error instanceof Error ? error.message : String(error) };
   }
