@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.25.0
+
 - **Workspace start timings in `slipjay metrics`:** a "Workspace starts" line reports, per repository
   and machine, the starts, how many claimed a spare, the median and p90 claim time and the median
   spares available, from the `pool_claim` facts starts already send the runner.
