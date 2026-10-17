@@ -4,13 +4,13 @@ import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { revisionExists, run } from "./workspace-jj.ts";
 import { processAlive } from "./workspace-holders.ts";
-import { landedHome, lockHome, metadataHome, stateHome, transactionHome } from "./workspace-paths.ts";
+import { attemptHome, landedHome, lockHome, metadataHome, stateHome, transactionHome } from "./workspace-paths.ts";
 import { archiveIntegratedWorkspaceEvidence } from "./workspace-finalization.ts";
 import { readJsonOptional } from "./workspace-state.ts";
 
 /**
  * Housekeeping for machine-local state that outlives its workspace: per-workspace
- * metadata, landing sidecars and owner records under the state home whose
+ * metadata, landing sidecars, owner records and allocation attempts under the state home whose
  * workspace no longer exists in its repository, and what local landings left behind.
  * Conservative by construction: a file is removed only when its repository can be
  * listed and does not contain the workspace, the checkout is gone, and nothing in
@@ -72,6 +72,8 @@ export async function pruneWorkspaceState(): Promise<string[]> {
     await collect(stateHome(), "landing", landing);
     await collect(landedHome(), "landing", landing);
     await collect(lockHome(), "lock");
+    // An allocation attempt is kept while its start runs or its checkout exists.
+    await collect(attemptHome(), "attempt");
     // A lock records no repository; borrow the one a metadata or landing record of the same name names.
     const rootOf = (record: PruneRecord) => record.data?.integrationRoot
       ?? records.find((other) => other.name === record.name && other.kind !== "lock" && other.data?.integrationRoot)?.data!.integrationRoot;
@@ -80,6 +82,7 @@ export async function pruneWorkspaceState(): Promise<string[]> {
         const { data, name, path } = record;
         if (!data || typeof data !== "object") continue;
         if (record.kind === "lock" && processAlive(data.pid)) continue;
+        if (record.kind === "attempt" && (data.status === "allocating" || data.status === "preparing") && processAlive(data.pid)) continue;
         if (record.kind === "metadata" && data.spare === true && processAlive(data.preparingPid)) continue;
         if (record.kind === "landing" && data.phase !== undefined && data.phase !== "landed") continue;
         const root = rootOf(record);

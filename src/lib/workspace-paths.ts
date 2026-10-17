@@ -74,6 +74,9 @@ export const lockHome = (): string => join(stateHome(), "locks");
 /** Per-workspace metadata (Issue, task, spare readiness). */
 export const metadataHome = (): string => join(stateHome(), "workspaces");
 
+/** Allocation attempts (`start --attempt`), one record per attempt id. */
+export const attemptHome = (): string => join(stateHome(), "attempts");
+
 /** Legacy landing sidecars and integrated-artifact evidence. */
 export const landedHome = (): string => join(stateHome(), "landed");
 

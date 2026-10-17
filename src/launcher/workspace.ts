@@ -3,6 +3,7 @@ import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRu
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
+import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace-attempts.ts";
 import type { SweepOptions } from "../lib/workspace-sweep.ts";
 import { open } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -83,7 +84,7 @@ async function integrationRoot(cwd: string): Promise<string> {
   return context.integration.root;
 }
 
-type StartOptions = { integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; base: string | undefined; resultFd: number | undefined; task: string };
+type StartOptions = { integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; base: string | undefined; attemptId: string | undefined; resultFd: number | undefined; task: string };
 
 /**
  * `start` flags, which precede the task: `--integration` allocates from the
@@ -91,16 +92,24 @@ type StartOptions = { integration: boolean; json: boolean; refill: boolean; issu
  * that Issue's workspace; `--base <revision>` starts a new workspace (from the
  * integration checkout) on that revision of the current checkout instead of the
  * integration head, and takes no Issue; `--refill` then starts a background spare
- * refill; `--json` prints one JSON result object. Null when the arguments are invalid.
+ * refill; `--attempt <id>` records the start as that allocation attempt, so a caller that
+ * never receives the result can still find and release its checkout (`slipjay attempt`);
+ * `--json` prints one JSON result object. Null when the arguments are invalid.
  */
 function startOptions(args: string[]): StartOptions | null {
-  const options: StartOptions = { integration: false, json: false, refill: false, issueNumber: undefined, base: undefined, resultFd: undefined, task: "" };
+  const options: StartOptions = { integration: false, json: false, refill: false, issueNumber: undefined, base: undefined, attemptId: undefined, resultFd: undefined, task: "" };
   let index = 0;
   for (; index < args.length; index += 1) {
     const flag = args[index];
     if (flag === "--integration") options.integration = true;
     else if (flag === "--json") options.json = true;
     else if (flag === "--refill") options.refill = true;
+    else if (flag === "--attempt") {
+      const value = args[index + 1];
+      if (!value || !ATTEMPT_ID.test(value)) return null;
+      options.attemptId = value;
+      index += 1;
+    }
     else if (flag === "--base") {
       const value = args[index + 1];
       if (!value || value.startsWith("-")) return null;
@@ -357,6 +366,8 @@ async function runConfig(args: string[]): Promise<number> {
   throw new Error(CONFIG_USAGE);
 }
 
+const ATTEMPT_USAGE = "Usage: slipjay attempt show <id> | attempt release <id>";
+
 const POLICY_USAGE = "Usage: slipjay policy show [--json] | policy set --base <revision> [--patch <json>] [--spares <0-8|default>] [--process <standard|light|default>] [--landing-verification <json list|default>]";
 
 /** `policy`: read the integration branch's policy, or land a change to its settings fields. */
@@ -494,7 +505,7 @@ try {
   } else if (command === "start") {
     const options = startOptions(rest);
     if (!options) {
-      console.error('Usage: slipjay start [--integration] [--issue <n> | --base <revision>] [--refill] [--json] ["task"]');
+      console.error('Usage: slipjay start [--integration] [--issue <n> | --base <revision>] [--attempt <id>] [--refill] [--json] ["task"]');
       process.exitCode = 2;
     } else if (options.json && options.resultFd === undefined) {
       process.exitCode = await startForJson(rest);
@@ -506,7 +517,10 @@ try {
       const started = Date.now();
       const spareCount = (await readySpares(root)).length;
       const task = options.task || `Issue #${options.issueNumber}`;
-      const result = await createWorkspace(task, root, options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {});
+      const result = await createWorkspace(task, root, {
+        ...options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {},
+        ...options.attemptId ? { attemptId: options.attemptId } : {},
+      });
       // The runner is told in the background: a slow or unreachable one never delays the workspace.
       await recordClientFactsInBackground(result.workspacePath, [
         { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
@@ -521,9 +535,22 @@ try {
         writeSync(options.resultFd, `${JSON.stringify({
           workspacePath: result.workspacePath, workspaceName: result.current.name, integrationRoot: result.integration.root,
           issueNumber: options.issueNumber ?? null, created: result.created ?? false, reused: result.reused ?? false, pooled: Boolean(result.pooled),
+          ...(options.attemptId ? { attemptId: options.attemptId } : {}),
           ...(refill ? { refill } : {}),
         })}\n`);
       }
+    }
+  } else if (command === "attempt") {
+    const [action, attemptId, ...extra] = rest;
+    if ((action !== "show" && action !== "release") || !attemptId || extra.length) throw new Error(ATTEMPT_USAGE);
+    if (action === "show") {
+      const attempt = await readAttempt(attemptId);
+      if (!attempt) throw new Error(`No allocation attempt '${attemptId}'`);
+      console.log(JSON.stringify(attempt, null, 2));
+    } else {
+      const released = await releaseAttempt(attemptId);
+      console.log(JSON.stringify(released));
+      if (!released.released) process.exitCode = 1;
     }
   } else if (command === "preview") {
     const preview = await landingPreview();
@@ -700,7 +727,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Durable allocation attempts:** `slipjay start --attempt <id>` records the start before it
+  allocates anything, so a caller that never got the result (a failed install, a lost or malformed
+  receipt, a timeout, a restart) finds its checkout with `slipjay attempt show <id>` and gives it
+  back with `slipjay attempt release <id>`. Release removes only a checkout that attempt created or
+  claimed and nothing has used since: never a bound or resumed one (a resumed Issue's), one a later
+  start took, or one with a live process, work, unique files or undelivered runner facts. The JSON
+  receipt echoes `attemptId`. Library: `createWorkspace`'s `attemptId`, `readAttempt` and
+  `releaseAttempt` (#80).
 - **The spare allowance names its source:** `slipjay status` and `slipjay config` report, with the
   declared, machine and effective counts, the integration branch and commit whose committed
   `slipjay.json` declared them, so Mac and VPS can be compared and a stale or unlanded local edit is
