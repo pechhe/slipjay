@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { startBackgroundEntry } from "./workspace-background.ts";
+import { workspaceContext } from "./workspace-jj.ts";
 import { stateHome } from "./workspace-paths.ts";
 import { readJsonOptional } from "./workspace-state.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
@@ -26,7 +27,9 @@ async function recentlySwept(root: string, now: number, intervalMs: number) {
  * a workspace, so unused checkouts retire without any landing or manual prune.
  * Triggers serialise per repository (another repository's sweep never waits on
  * this one): a trigger finding a sweep running or finished within `intervalMs`
- * does nothing, so concurrent triggers converge on exactly one sweep.
+ * does nothing, so concurrent triggers converge on exactly one sweep. The stamp
+ * records the attempt before sweeping, so a sweep that keeps failing is retried
+ * at the same bounded rate.
  */
 export async function runHousekeeping(root: string, options: SweepOptions & { intervalMs?: number } = {}): Promise<HousekeepingOutcome> {
   const { intervalMs = HOUSEKEEPING_INTERVAL_MS, ...sweep } = options;
@@ -35,9 +38,8 @@ export async function runHousekeeping(root: string, options: SweepOptions & { in
       const now = sweep.now ?? Date.now();
       if (await recentlySwept(root, now, intervalMs)) return { ran: false as const, reason: "recent" as const };
       await mkdir(join(stateHome(), "housekeeping"), { recursive: true, mode: 0o700 });
-      const result = await sweepDisposableWorkspaces(root, sweep);
       await writeWorkspaceJson(stampPath(root), { at: now });
-      return { ran: true as const, result };
+      return { ran: true as const, result: await sweepDisposableWorkspaces(root, sweep) };
     }, { wait: false });
   } catch (error) {
     if ((error as { code?: string } | null | undefined)?.code === "ELOCKED") return { ran: false, reason: "running" };
@@ -48,7 +50,10 @@ export async function runHousekeeping(root: string, options: SweepOptions & { in
 /** Sweep the repository in a detached child without delaying the caller; see `startBackgroundEntry`. */
 export async function startHousekeeping(cwd: string = process.cwd(), options: { command?: string[] } = {}): ReturnType<typeof startBackgroundEntry> {
   if (process.env.SLIPJAY_AUTO_HOUSEKEEPING === "0") return { started: false, reason: "disabled" };
+  const context = await workspaceContext(cwd);
+  if (!context) return { started: false, reason: "not-jj" };
   // A sweep that ran recently needs no child, so frequent allocations cost one small read.
-  if (await recentlySwept(cwd, Date.now(), HOUSEKEEPING_INTERVAL_MS)) return { started: false, reason: "recent" };
-  return await startBackgroundEntry(cwd, "./housekeeping-run.ts", options);
+  // The stamp is keyed by the integration root, which is what the child sweeps.
+  if (await recentlySwept(context.integration.root, Date.now(), HOUSEKEEPING_INTERVAL_MS)) return { started: false, reason: "recent" };
+  return await startBackgroundEntry(context.integration.root, "./housekeeping-run.ts", options);
 }

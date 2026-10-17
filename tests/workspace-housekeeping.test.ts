@@ -2,14 +2,15 @@ import { jj, landThroughTestRunner, project, withTestRunner } from "./support/wo
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readlinkSync } from "node:fs";
-import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { cleanupLandedWorkspace, createWorkspace } from "../src/lib/slipjay.ts";
 import { pruneWorkspaceState } from "../src/lib/workspace-state-prune.ts";
 import { landedHome, lockHome, metadataHome, stateHome, workspaceHome } from "../src/lib/workspace-paths.ts";
-import { EMPTY_IDLE_MS, sweepDisposableWorkspaces } from "../src/lib/workspace-sweep.ts";
+import { metadataPath } from "../src/lib/workspace-state.ts";
+import { ASSIGNMENT_GRACE_MS, EMPTY_IDLE_MS, sweepDisposableWorkspaces } from "../src/lib/workspace-sweep.ts";
 
 const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
 const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
@@ -119,9 +120,11 @@ test("an empty workspace attached to a closed Issue is swept; open, unknown and 
 
     const held = await createWorkspace("Issue #45", f.repo, { issueNumber: 45 });
     const holder = occupy(held.workspacePath);
-    const swept = await sweepDisposableWorkspaces(f.repo);
+    const fresh = await sweepDisposableWorkspaces(f.repo);
+    assert.deepEqual(fresh.removed, [], "a just-allocated closed Issue's workspace survives the sweep its allocation triggers");
+    const swept = await sweepDisposableWorkspaces(f.repo, { now: Date.now() + ASSIGNMENT_GRACE_MS + 60_000 });
     holder.dispose();
-    assert.deepEqual(swept.removed, [closed.current.name], "a closed Issue's empty workspace goes at once, without the idle wait");
+    assert.deepEqual(swept.removed, [closed.current.name], "after the short assignment grace, a closed Issue's empty workspace goes without the idle wait");
     assert.equal(existsSync(closed.workspacePath), false);
     assert.match(swept.skipped.find(({ name }) => name === held.current.name)?.reason ?? "", /live process/, "a closed Issue's workspace in use is kept");
     for (const kept of [open, unknown, worked, held]) assert.ok(existsSync(kept.workspacePath), kept.current.name);
@@ -133,6 +136,22 @@ test("an empty workspace attached to a closed Issue is swept; open, unknown and 
     process.env.PATH = path;
     await f.dispose();
   }
+}, 120_000);
+
+test("resuming an Issue's workspace without a task still restarts its assignment grace", async () => {
+  const f = await project();
+  try {
+    const first = await createWorkspace("Issue #47", f.repo, { issueNumber: 47 });
+    const path = metadataPath(first.current.name);
+    const old = new Date(Date.now() - 2 * ASSIGNMENT_GRACE_MS).toISOString();
+    const aged = { ...JSON.parse(await readFile(path, "utf8")), updatedAt: old, attachedAt: old };
+    await writeFile(path, JSON.stringify(aged));
+    const resumed = await createWorkspace("", f.repo, { issueNumber: 47 });
+    assert.equal(resumed.workspacePath, first.workspacePath);
+    const metadata = JSON.parse(await readFile(path, "utf8"));
+    assert.ok(Date.parse(metadata.updatedAt) > Date.parse(old), "the resume records a fresh assignment time");
+    assert.equal(metadata.task, "Issue #47", "an empty task keeps the recorded one");
+  } finally { await f.dispose(); }
 }, 120_000);
 
 test("state of vanished workspaces and all retired local-landing state is pruned; undeterminable or in-flight workspace records are kept", async () => {

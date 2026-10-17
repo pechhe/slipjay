@@ -16,11 +16,17 @@ import { pruneWorkspaceState } from "./workspace-state-prune.ts";
  * unique untracked material always keeps a workspace. Unfinished work is never
  * swept: only `hasWork === false` checkouts qualify. An Issue's checkout is
  * swept once it has landed, or while empty once `gh` reports its Issue CLOSED
- * (never while the Issue is open or its state is unknown). The sweep also prunes
+ * (never while the Issue is open or its state is unknown) and `ASSIGNMENT_GRACE_MS`
+ * has passed since it was assigned, so a checkout just allocated for a closed
+ * Issue (`slipjay repair`, a resumed start) survives the sweep its allocation
+ * triggers until its agent enters it. The sweep also prunes
  * machine-local state left by workspaces that no longer exist.
  */
 /** Minimum assignment age before an unused empty workspace is swept. */
 export const EMPTY_IDLE_MS: number = 24 * 60 * 60 * 1000;
+
+/** Minimum assignment age before a closed Issue's empty workspace is swept (never longer than `emptyIdleMs`). */
+export const ASSIGNMENT_GRACE_MS: number = 60 * 60 * 1000;
 
 /** Workspaces removed, retained, and machine-local state pruned by housekeeping. */
 export interface SweepResult {
@@ -57,9 +63,9 @@ async function lockOwnerAlive(workspaceName: string) {
  * is no measure of idleness; a source-empty checkout's age since assignment is.
  */
 async function assignedAt(workspace: WorkspaceEntry) {
-  const metadata: WorkspaceMetadata & { updatedAt?: string; claimedAt?: string; createdAt?: string } = workspace.metadata ?? {};
+  const metadata: WorkspaceMetadata & { updatedAt?: string; claimedAt?: string; createdAt?: string; attachedAt?: string } = workspace.metadata ?? {};
   const created = await stat(workspace.root).then((info) => info.birthtimeMs || info.mtimeMs, () => 0);
-  return Math.max(created, ...[metadata.updatedAt, metadata.claimedAt, metadata.createdAt].map((value) => Date.parse(value ?? "") || 0));
+  return Math.max(created, ...[metadata.updatedAt, metadata.claimedAt, metadata.createdAt, metadata.attachedAt].map((value) => Date.parse(value ?? "") || 0));
 }
 
 /**
@@ -103,8 +109,8 @@ async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protect
   };
   for (const workspace of candidates) {
     const skip = (reason: string) => skipped.push({ name: workspace.name, landed: workspace.landed, reason });
-    // An Issue's checkout that has not landed qualifies only when its Issue is closed (it is empty, and
-    // a closed Issue needs no idle wait); a live process or owner still protects it below.
+    // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the short
+    // assignment grace instead of the idle wait; a live process or owner still protects it below.
     const issueBound = !workspace.landed && Boolean(workspace.metadata?.issueNumber);
     if (guarded.some((root) => within(root, workspace.root))) continue;
     if (issueBound && !await closed(workspace.metadata!.issueNumber!)) continue;
@@ -120,7 +126,8 @@ async function sweepCandidates(context: WorkspaceContext, { emptyIdleMs, protect
         else skip(describeRetention(cleaned));
         continue;
       }
-      if (!issueBound && emptyIdleMs > 0 && now - await assignedAt(workspace) < emptyIdleMs) continue;
+      const idleMs = issueBound ? Math.min(emptyIdleMs, ASSIGNMENT_GRACE_MS) : emptyIdleMs;
+      if (idleMs > 0 && now - await assignedAt(workspace) < idleMs) continue;
       const unique = await retainedWorkspaceMaterial(workspace.root, context.integration.root);
       if (unique.length) {
         skip(`holds unique files: ${unique.join(", ")}`);

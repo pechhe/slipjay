@@ -1,7 +1,8 @@
 import { jj, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { createWorkspace, runHousekeeping, startHousekeeping } from "../src/lib/slipjay.ts";
 import { poolRefillLogPath } from "../src/lib/workspace-paths.ts";
@@ -14,6 +15,11 @@ delete process.env.SLIPJAY_AUTO_HOUSEKEEPING;
 const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
 const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
 const held = (promise: Promise<unknown>) => promise.then(() => true, () => true);
+/** Allocate without the trigger, so no detached sweep races the assertions. */
+async function quietly<T>(allocate: () => Promise<T>): Promise<T> {
+  process.env.SLIPJAY_AUTO_HOUSEKEEPING = "0";
+  try { return await allocate(); } finally { delete process.env.SLIPJAY_AUTO_HOUSEKEEPING; }
+}
 
 test("housekeeping retires an unused empty workspace without any landing", async () => {
   const f = await project();
@@ -89,5 +95,28 @@ test("allocating a workspace through the library schedules the repository sweep,
       log = await readFile(poolRefillLogPath(), "utf8").catch(() => "");
     }
     assert.deepEqual(await startHousekeeping(f.repo), { started: false, reason: "recent" });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a sweep that throws is still stamped, so the next trigger waits out the interval", async () => {
+  const f = await project();
+  try {
+    await quietly(() => createWorkspace("Issue #46", f.repo, { issueNumber: 46 }));
+    const failing = { now: later(), issueClosed: () => { throw new Error("tracker down"); } };
+    await assert.rejects(runHousekeeping(f.repo, failing), /tracker down/);
+    assert.deepEqual(await runHousekeeping(f.repo, failing), { ran: false, reason: "recent" });
+    assert.deepEqual(await startHousekeeping(f.repo), { started: false, reason: "recent" });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a trigger from a subdirectory or a workspace finds the integration root's stamp", async () => {
+  const f = await project();
+  try {
+    const workspace = await quietly(() => createWorkspace("inside", f.repo));
+    assert.equal((await runHousekeeping(f.repo, { issueClosed: () => null })).ran, true);
+    await mkdir(join(f.repo, "nested", "deeper"), { recursive: true });
+    for (const cwd of [join(f.repo, "nested", "deeper"), workspace.workspacePath]) {
+      assert.deepEqual(await startHousekeeping(cwd), { started: false, reason: "recent" }, cwd);
+    }
   } finally { await f.dispose(); }
 }, 120_000);

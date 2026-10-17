@@ -100,9 +100,14 @@ function acquired(hooks: WorkspaceCreationHooks, context: WorkspaceContext, issu
 
 async function writeWorkspaceTaskMetadata(context: WorkspaceContext, task: string) {
   const normalized = task.trim().slice(0, 500);
-  if (!normalized || context.current.name === "default") return;
-  await mkdir(dirname(metadataPath(context.current.name)), { recursive: true, mode: 0o700 });
+  if (context.current.name === "default") return;
   const existing = await workspaceMetadata(context.current.name);
+  if (!normalized) {
+    // Without a task, a resumed workspace still records its assignment time, which the sweep's grace measures.
+    if (existing) await writeFile(metadataPath(context.current.name), JSON.stringify({ ...existing, updatedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+    return;
+  }
+  await mkdir(dirname(metadataPath(context.current.name)), { recursive: true, mode: 0o700 });
   const creationOperationId = typeof existing?.workspaceCreationOperationId === "string"
     ? existing.workspaceCreationOperationId
     : await jj(context.current.root, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
@@ -294,12 +299,17 @@ export async function recoverIssueWorkspace(cwd: string, options: { issueNumber:
   }
   await assertIssueAvailable(cwd, issueNumber, workspaceName);
   const workspacePath = join(workspaceHome(), workspaceName);
-  const recovered = await recoverExistingIssueWorkspace(cwd, workspacePath, workspaceName, issueNumber, {
-    ...(options.changeId ? { changeId: options.changeId } : {}), ...(options.commitId ? { commitId: options.commitId } : {}),
-  });
-  await attachWorkspaceIssue(workspacePath, issueNumber);
-  await prepare(hooks, recovered.integration.root, recovered.current.root);
-  return recovered;
+  try {
+    const recovered = await recoverExistingIssueWorkspace(cwd, workspacePath, workspaceName, issueNumber, {
+      ...(options.changeId ? { changeId: options.changeId } : {}), ...(options.commitId ? { commitId: options.commitId } : {}),
+    });
+    await attachWorkspaceIssue(workspacePath, issueNumber);
+    await prepare(hooks, recovered.integration.root, recovered.current.root);
+    return recovered;
+  } finally {
+    // Like `createWorkspace`, recovery schedules the repository's bounded background sweep.
+    await startHousekeeping(root).catch(() => undefined);
+  }
 }
 
 /**
