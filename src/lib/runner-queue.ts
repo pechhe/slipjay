@@ -39,8 +39,14 @@ import { jj, run as workspaceRun, revisionExists, revisionFacts, workspaceContex
  * later turn retries it first; nothing else lands until it is published.
  */
 class HeldIntegration extends Error {
-  constructor(readonly commitId: string, readonly stage: "finalizing" | "publishing", reason: string, readonly output?: string) {
+  readonly commitId: string;
+  readonly stage: "finalizing" | "publishing";
+  readonly output?: string;
+  constructor(commitId: string, stage: "finalizing" | "publishing", reason: string, output?: string) {
     super(`${reason}\nThe runner holds ${commitId.slice(0, 12)}, integrated but not published, and retries it before the next landing.`);
+    this.commitId = commitId;
+    this.stage = stage;
+    this.output = output;
   }
 }
 

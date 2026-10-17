@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **One Bitwarden lookup per command:** a command that reaches the runner several times now reads
+  `SLIPJAY_RUNNER_TOKEN` from Bitwarden once, instead of running `bws secret list` for each
+  request, which failed intermittently on the Mac. A failed lookup is retried on the next call.
+- **`erasableSyntaxOnly`:** the compiler now rejects TypeScript syntax that Node's type stripping
+  cannot load, such as constructor parameter properties.
+
 ## v3.24.0
 
 - **A Build-tracked landing always reaches Build:** without `--handoff`, `slipjay land` now writes

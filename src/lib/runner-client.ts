@@ -179,8 +179,17 @@ function readRunnerConfiguration(): string | null {
   }
 }
 
+/** The token read from Bitwarden, once per process: one command can reach the runner many times. */
+let savedToken: Promise<string> | undefined;
+
 export async function runnerToken(env: NodeJS.ProcessEnv = process.env): Promise<string> {
   if (env.SLIPJAY_RUNNER_TOKEN) return env.SLIPJAY_RUNNER_TOKEN;
+  // A failed lookup is not kept, so a later call (a watcher's retry) asks Bitwarden again.
+  savedToken ??= bitwardenRunnerToken(env).catch((error: unknown) => { savedToken = undefined; throw error; });
+  return savedToken;
+}
+
+async function bitwardenRunnerToken(env: NodeJS.ProcessEnv): Promise<string> {
   const result = await runBoundedProcess({ executable: "bws", args: ["secret", "list"], cwd: process.cwd(), env,
     timeoutMs: 15_000, maxOutputBytes: 4 * 1024 * 1024 });
   if (result.exitCode === 0) {
@@ -194,7 +203,8 @@ export async function runnerToken(env: NodeJS.ProcessEnv = process.env): Promise
 }
 
 class RunnerRequestRefused extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  readonly status: number;
+  constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
 async function request(baseUrl: string, token: string, path: string, init: RequestInit = {}): Promise<Response> {

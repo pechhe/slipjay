@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
-import { afterEach, test, vi } from "vite-plus/test";
+import { afterEach, beforeEach, test, vi } from "vite-plus/test";
 import type { WatchEnvelope } from "../src/lib/runner-watch.ts";
 
 const mocks = vi.hoisted(() => ({ credential: vi.fn(), delay: vi.fn() }));
 vi.mock("../src/lib/bounded-process.ts", () => ({ runBoundedProcess: mocks.credential }));
 vi.mock("node:timers/promises", () => ({ setTimeout: mocks.delay }));
-import { watchThroughRunner } from "../src/lib/runner-client.ts";
 
+// A fresh module per test: the runner token read from Bitwarden is kept for the module's life.
+let watchThroughRunner: typeof import("../src/lib/runner-client.ts").watchThroughRunner;
+beforeEach(async () => {
+  vi.resetModules();
+  ({ watchThroughRunner } = await import("../src/lib/runner-client.ts"));
+});
 afterEach(() => { vi.unstubAllGlobals(); vi.resetAllMocks(); });
 
 test("missing token stays in watch loop, waits thirty seconds and cancellation stops retries", async () => {
