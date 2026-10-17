@@ -238,8 +238,11 @@ test("a retried Build landing replays the handoff it first wrote, and following 
       fake.state.admits = true;
       await controlRunner(location, "pause", env);
       const following = new AbortController();
-      const retried = landThroughRunner(workspace.workspacePath, { location, env, signal: following.signal, onLine: () => {} }).catch(() => undefined);
-      await until(() => fake.requests.slice(retrying).some((request) => request.action === "admitAttempt"), "the retried admission");
+      const followed: string[] = [];
+      const retried = landThroughRunner(workspace.workspacePath, { location, env, signal: following.signal, onLine: (line) => { followed.push(line); } }).catch(() => undefined);
+      // The client's own retry was accepted and is being followed, whichever of it or the drain sent the admission.
+      await until(() => followed.some((line) => line.startsWith("[runner ")) && fake.requests.slice(retrying).some((request) => request.action === "admitAttempt"),
+        "the retried submission and its admission");
       following.abort();
       await retried;
       // The client reads nothing from Build again: the admission carries the evidence first written. Only the
