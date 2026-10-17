@@ -3,7 +3,7 @@ import { dirname, join, resolve } from "node:path";
 import type { WorkspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "./workspace-jj.ts";
 import { LANDED_WORKSPACE_REFUSAL, workspaceContinuationDisposition } from "./workspace-delivery-lifecycle.ts";
-import { jj, parseWorkspaceList, revisionExists, revisionFacts, workspaceContext, workspaceHasUnintegratedWork, workspaceSlug } from "./workspace-jj.ts";
+import { jj, jjWorkspaceRoot, parseWorkspaceList, revisionExists, revisionFacts, workspaceContext, workspaceHasUnintegratedWork, workspaceSlug } from "./workspace-jj.ts";
 import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./workspace-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "./workspace-transaction.ts";
 
@@ -71,15 +71,15 @@ export async function workspaceMetadata(workspaceName: string): Promise<Workspac
  * `readOnly`; a workspace JJ recorded without a root falls back to its metadata path.
  */
 export async function listWorkspaces(cwd: string = process.cwd(), options: { readOnly?: boolean } = {}): Promise<WorkspaceEntry[]> {
-  const context = await workspaceContext(cwd);
-  if (!context) return [];
+  if (!await jjWorkspaceRoot(cwd)) return [];
   const output = await jj(cwd, [
     "--ignore-working-copy",
     "workspace",
     "list",
     "-T",
     'name ++ "\\t" ++ root ++ "\\t" ++ target.change_id() ++ "\\t" ++ target.commit_id() ++ "\\n"',
-  ]);
+  ]).catch(() => null);
+  if (output === null) return [];
   return await Promise.all(
     parseWorkspaceList(output).map(async (workspace) => {
       let metadata = await workspaceMetadata(workspace.name);
@@ -154,17 +154,22 @@ export async function renameWorkspace(cwd: string, desired: string): Promise<{ o
   const context = await workspaceContext(cwd);
   if (!context || context.current.name === "default")
     throw new Error("Only isolated JJ workspaces can be renamed");
+  return renameListedWorkspace(context.current, await listWorkspaces(cwd), desired);
+}
+
+/** `renameWorkspace` for an isolated workspace `current` of the repository listing `workspaces`, as a spare claim holds both. */
+export async function renameListedWorkspace(current: Pick<WorkspaceEntry, "name" | "root">, workspaces: WorkspaceEntry[], desired: string): Promise<{ oldName: string; name: string }> {
   const base = workspaceSlug(desired, 60);
   if (!base) throw new Error("New workspace name is empty after normalization");
-  const taken = new Set((await listWorkspaces(cwd)).map((workspace) => workspace.name));
-  taken.delete(context.current.name);
+  const taken = new Set(workspaces.map((workspace) => workspace.name));
+  taken.delete(current.name);
   let name = base;
   for (let index = 2; taken.has(name); index += 1) name = `${base}-${index}`;
 
-  await jj(context.current.root, ["workspace", "rename", name]);
-  const oldName = context.current.name;
-  const operationId = await jj(context.current.root, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
-  const target = await revisionFacts(context.current.root, "@");
+  await jj(current.root, ["workspace", "rename", name]);
+  const oldName = current.name;
+  const operationId = await jj(current.root, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
+  const target = await revisionFacts(current.root, "@");
   const renamed = (data: Record<string, unknown>) => ({
     ...data,
     workspaceName: name,
@@ -178,7 +183,7 @@ export async function renameWorkspace(cwd: string, desired: string): Promise<{ o
     ...renamed(data),
     workspaceRenameEpochs: [
       ...(Array.isArray(data.workspaceRenameEpochs) ? data.workspaceRenameEpochs.filter((value: unknown) => value && typeof value === "object") : []),
-      { version: 1, operationId, fromName: oldName, toName: name, workspacePath: context.current.root, changeId: target.changeId, commitId: target.commitId },
+      { version: 1, operationId, fromName: oldName, toName: name, workspacePath: current.root, changeId: target.changeId, commitId: target.commitId },
     ].slice(-16),
   }));
   for (const directory of [stateHome(), landedHome()]) await moveSidecarFile(directory, oldName, name, renamed);

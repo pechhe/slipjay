@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import { createWorkspace, provisionSpare, resolveStartBase } from "../src/lib/slipjay.ts";
 import { startFetchHome } from "../src/lib/workspace-paths.ts";
+import { withWorkspaceTransaction } from "../src/lib/workspace-transaction.ts";
 
 /** Land a commit on `origin/main` from another clone, as another machine would. */
 function landElsewhere(f: { root: string; remote: string }, file: string) {
@@ -70,6 +71,20 @@ test("starts within the reuse window share one fetch, and a later start fetches 
     for (const name of await readdir(startFetchHome())) await utimes(join(startFetchHome(), name), old, old);
     const third = await createWorkspace("third", f.repo);
     assert.equal(parentOf(third.workspacePath), landed);
+  } finally { await f.dispose(); }
+});
+
+test("a start fetches while another start holds the allocation lock, then starts from what it fetched", async () => {
+  const f = await project();
+  try {
+    const landed = landElsewhere(f, "elsewhere.txt");
+    const remoteHead = () => jj(f.repo, ["--ignore-working-copy", "log", "-r", "main@origin", "--no-graph", "-T", "commit_id"]);
+    let start: ReturnType<typeof createWorkspace> | undefined;
+    await withWorkspaceTransaction(`allocate:${f.repo}`, async () => {
+      start = createWorkspace("task", f.repo);
+      await vi.waitFor(() => assert.equal(remoteHead(), landed), { timeout: 30_000, interval: 50 });
+    });
+    assert.equal(parentOf((await start!).workspacePath), landed);
   } finally { await f.dispose(); }
 });
 

@@ -10,7 +10,8 @@ import { runWorkspaceCommand as run } from "./workspace-command.ts";
  * mean a prepared `node_modules` is still that install's exact output, so a
  * claimed spare need not reinstall.
  *
- * From the JJ tree at `@`: every lockfile, `package.json` and package-manager
+ * From the JJ tree at `@`: every lockfile, `package.json` (less the fields an
+ * install never reads, see `installManifest`) and package-manager
  * configuration file; the root `patches/` tree and every `patchedDependencies`
  * path; every `file:` dependency target (copied, not linked); and the tracked
  * files install-time lifecycle scripts name, following nested `run` scripts and
@@ -36,6 +37,12 @@ const RELATIVE_LITERAL = /["'`](\.{1,2}\/[^"'`\s]+)["'`]/g;
 const UNFOLLOWED_FLAG = /^(?:--(?:filter|cwd|prefix|workspaces?|recursive)\b|-[FC]$)/;
 const INSTALL_ENVIRONMENT = /^(?:NODE_ENV|npm_config_(?:production|omit|include|only|optional|ignore_scripts|legacy_peer_deps|registry)|BUN_CONFIG_\w+)$/i;
 const MAX_REFERENCED_FILES = 256;
+// Package metadata and publishing fields: an install neither resolves nor links by them, and a
+// release bump or a new export changes them on almost every landing.
+const UNINSTALLED_FIELDS = new Set([
+  "version", "description", "keywords", "homepage", "bugs", "license", "author", "contributors", "maintainers", "funding",
+  "repository", "private", "exports", "types", "typings", "files",
+]);
 
 /** One path of a tree as `git ls-tree` reports it. */
 interface TreeEntry {
@@ -77,6 +84,37 @@ interface PackageManifest {
   dependenciesMeta?: Record<string, { injected?: boolean }>;
   pnpm?: { patchedDependencies?: Record<string, string> };
   [field: string]: unknown;
+}
+
+/** The words of a script, split at shell separators and quotes. */
+const scriptWords = (script: string): string[] => script.split(/[\s;&|()'"`<>]+/);
+
+/**
+ * The scripts an install runs: the lifecycle scripts and the package's own scripts they run, such
+ * as `bun run prepare:generated`, each with the `pre`/`post` hooks a package manager runs around it.
+ */
+function installScripts(scripts: Record<string, string>): Set<string> {
+  const reached = new Set<string>();
+  const pending: string[] = [];
+  const reach = (name: string) => {
+    for (const hooked of [name, `pre${name}`, `post${name}`]) {
+      if (typeof scripts[hooked] === "string" && !reached.has(hooked)) { reached.add(hooked); pending.push(hooked); }
+    }
+  };
+  for (const name of LIFECYCLE_SCRIPTS) reach(name);
+  while (pending.length) for (const word of scriptWords(String(scripts[pending.pop()!]))) reach(word);
+  return reached;
+}
+
+/**
+ * A manifest as an install reads it: without `UNINSTALLED_FIELDS` and without scripts the install
+ * never runs, so a release bump or a new test script leaves the fingerprint alone. A manifest the
+ * install's lifecycle code reads is hashed whole instead (see `installInputFingerprint`).
+ */
+function installManifest(source: string): string {
+  const { scripts = {}, ...fields }: PackageManifest = JSON.parse(source);
+  const kept = Object.fromEntries(Object.entries(fields).filter(([field]) => !UNINSTALLED_FIELDS.has(field)));
+  return JSON.stringify({ ...kept, scripts: Object.fromEntries([...installScripts(scripts)].sort().map((name) => [name, scripts[name]])) });
 }
 
 /** A workspace list this module cannot read exactly: the caller then judges every manifest. */
@@ -190,16 +228,12 @@ async function referencedInputs(workspacePath: string, entries: Map<string, Tree
     if (Object.values(dependenciesMeta).some((meta) => meta?.injected)) throw new Error("injected workspace dependencies");
     for (const target of stringsWithPrefix(declarations, "file:")) await requireInput(directory, target);
     for (const target of Object.values({ ...patchedDependencies, ...parsed.pnpm?.patchedDependencies })) await requireInput(directory, String(target));
-    const pending = LIFECYCLE_SCRIPTS.filter((name) => typeof scripts[name] === "string");
-    const seen = new Set(pending);
-    while (pending.length) {
-      for (const word of String(scripts[pending.pop()!]).split(/[\s;&|()'"`<>]+/)) {
+    for (const name of installScripts(scripts)) {
+      for (const word of scriptWords(String(scripts[name]))) {
         if (UNFOLLOWED_FLAG.test(word)) throw new Error(`unfollowed lifecycle script flag ${word}`);
         // `--import=./register.ts`: the value is the reference.
         const token = word.startsWith("-") ? word.slice(word.indexOf("=") + 1 || word.length) : word;
         if (!token || isAbsolute(token)) continue;
-        // `bun run prepare:generated` and similar: follow the package's own nested scripts.
-        if (typeof scripts[token] === "string" && !seen.has(token)) { seen.add(token); pending.push(token); }
         const candidate = posix.normalize(posix.join(directory, token));
         if (candidate === directory || candidate === "." || candidate.startsWith("../") || !tracked(candidate)) continue;
         await visit(candidate, directory);
@@ -248,12 +282,16 @@ export async function installInputFingerprint(workspacePath: string, { snapshot 
       if (path === "patches") selected.add(path);
     }
     const manifests = await installedManifests(workspacePath, [...selected].filter((path) => posix.basename(path) === "package.json"));
-    for (const path of await referencedInputs(workspacePath, entries, manifests)) selected.add(path);
-    const hash = createHash("sha256").update("peach-install-inputs/v1\n");
+    const referenced = await referencedInputs(workspacePath, entries, manifests);
+    for (const path of referenced) selected.add(path);
+    const hash = createHash("sha256").update("peach-install-inputs/v2\n");
     for (const line of await installEnvironment(workspacePath)) hash.update(`${line}\n`);
     for (const path of [...selected].sort()) {
       const { mode, type, oid } = entries.get(path)!;
-      hash.update(`${mode} ${type} ${oid}\t${path}\n`);
+      // An installed manifest counts by what an install reads of it; any other file, and a manifest
+      // install lifecycle code reads itself, by its exact content.
+      const content = manifests.includes(path) && !referenced.has(path) ? createHash("sha256").update(installManifest(await readFile(join(workspacePath, path), "utf8"))).digest("hex") : oid;
+      hash.update(`${mode} ${type} ${content}\t${path}\n`);
     }
     return `sha256:${hash.digest("hex")}`;
   } catch {

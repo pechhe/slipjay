@@ -74,7 +74,11 @@ test("a claimed spare reuses its dependencies when the refresh leaves install in
   try {
     await provisionSpare(f.repo);
     assert.equal(await f.count(), 1);
-    await write(f.repo, { "README.md": "changed\n", "scripts/unrelated.mjs": "export const unrelated = 2;\n" });
+    await write(f.repo, {
+      "README.md": "changed\n", "scripts/unrelated.mjs": "export const unrelated = 2;\n",
+      // A release: version bumps, a new export and a new test script, none of which an install reads.
+      "packages/x/package.json": JSON.stringify({ name: "x", version: "1.1.0", exports: { ".": "./index.ts" }, scripts: { test: "bun test" } }),
+    });
     advance(f.repo, "Change non-install files");
 
     const created = await createWorkspace("task", f.repo);
@@ -92,7 +96,7 @@ test("a claimed spare reuses its dependencies when the refresh leaves install in
 }, 120_000);
 
 const inputChanges: Array<[string, (repo: string) => Promise<void>]> = [
-  ["a nested package.json", (repo) => write(repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "d" }) })],
+  ["a nested package.json's install fields", (repo) => write(repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", engines: { node: ">=18" } }) })],
   ["the lockfile", async (repo) => {
     await write(repo, { "packages/y/package.json": JSON.stringify({ name: "y", version: "1.0.0", dependencies: { x: "workspace:*" } }) });
     execFileSync("bun", ["install"], { cwd: repo, stdio: "pipe" });
@@ -173,7 +177,7 @@ test("the install-input fingerprint covers lockfiles, manifests, package-manager
     assert.match(base ?? "", /^sha256:[0-9a-f]{64}$/);
     await write(f.repo, { "README.md": "other\n", "src/app.ts": "export {};\n" });
     assert.equal(await installInputFingerprint(f.repo), base, "unrelated files do not change it");
-    const inputs = ["bun.lock", "bunfig.toml", ".npmrc", "patches/x.patch", "packages/x/package.json", "scripts/count-install.mjs"];
+    const inputs = ["bun.lock", "bunfig.toml", ".npmrc", "patches/x.patch", "scripts/count-install.mjs"];
     let previous = base;
     for (const path of inputs) {
       const current = await readFile(join(f.repo, path), "utf8").catch(() => "");
@@ -183,6 +187,53 @@ test("the install-input fingerprint covers lockfiles, manifests, package-manager
       previous = next;
     }
     assert.equal(await installInputFingerprint(join(f.root, "not-a-repo")), null);
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
+
+test("a manifest counts by what an install reads of it, not by its metadata or the scripts an install never runs", async () => {
+  const f = await bunProject();
+  try {
+    const fingerprint = () => installInputFingerprint(f.repo);
+    const root = (fields: Record<string, unknown>) => write(f.repo, {
+      "package.json": JSON.stringify({ name: "fixture", private: true, packageManager: `bun@${BUN_VERSION}`, workspaces: ["packages/*"], ...fields }, null, 2),
+    });
+    const member = (fields: Record<string, unknown>) => write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", ...fields }) });
+    await root({ scripts: { postinstall: "bun run prepare:generated", "prepare:generated": "node scripts/count-install.mjs" } });
+    let previous = await fingerprint();
+    assert.ok(previous);
+
+    await root({
+      version: "2.0.0", description: "release", exports: { ".": "./src/index.ts" },
+      scripts: { postinstall: "bun run prepare:generated", "prepare:generated": "node scripts/count-install.mjs", test: "bun test" },
+    });
+    await member({ version: "1.1.0", types: "./index.d.ts", files: ["dist"], scripts: { build: "tsc" } });
+    assert.equal(await fingerprint(), previous, "metadata, exports and scripts outside the install lifecycle are no input");
+
+    const installChanges: Array<[string, () => Promise<void>]> = [
+      ["a script the lifecycle runs", () => root({ scripts: { postinstall: "bun run prepare:generated", "prepare:generated": "node scripts/count-install.mjs --quiet" } })],
+      ["a member's dependencies", () => member({ dependencies: { left: "1.0.0" } })],
+      ["a member's lifecycle script", () => member({ dependencies: { left: "1.0.0" }, scripts: { postinstall: "node scripts/count-install.mjs" } })],
+      ["a member's bin", () => member({ dependencies: { left: "1.0.0" }, scripts: { postinstall: "node scripts/count-install.mjs" }, bin: { x: "x.js" } })],
+      ["the pre hook of a script the lifecycle runs", () => root({ scripts: {
+        postinstall: "bun run prepare:generated", "prepare:generated": "node scripts/count-install.mjs --quiet", "preprepare:generated": "node scripts/unrelated.mjs",
+      } })],
+    ];
+    for (const [label, change] of installChanges) {
+      await change();
+      const next = await fingerprint();
+      assert.ok(next && next !== previous, `${label} is an install input`);
+      previous = next;
+    }
+
+    // A lifecycle script that reads its package's manifest makes the whole manifest an input.
+    await write(f.repo, { "packages/x/stamp.mjs": 'import { readFileSync } from "node:fs";\nreadFileSync(new URL("./package.json", import.meta.url));\n' });
+    await member({ scripts: { postinstall: "node stamp.mjs" } });
+    previous = await fingerprint();
+    assert.ok(previous);
+    await member({ version: "1.2.0", scripts: { postinstall: "node stamp.mjs" } });
+    assert.notEqual(await fingerprint(), previous, "a version the lifecycle reads is an install input");
   } finally {
     await f.dispose();
   }
@@ -575,7 +626,7 @@ test("after an install-input change, a refill refreshes stale spares with one in
     assert.equal(await f.count(), unchanged, "nothing installed when install inputs are unchanged");
     assert.deepEqual(await refreshSpares(f.repo), [], "spares already on the integration head are left alone");
 
-    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "d" }) });
+    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", engines: { node: ">=18" } }) });
     advance(f.repo, "Change an install input");
     // No checkout has the new inputs installed, so the first refresh must install.
     await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
@@ -588,11 +639,11 @@ test("after an install-input change, a refill refreshes stale spares with one in
     for (const spare of spares) {
       const inputs = (spare.metadata?.preparedDependencies as { installInputs?: string } | undefined)?.installInputs;
       assert.equal(inputs, await installInputFingerprint(spare.root), `${spare.name} recorded its current install inputs`);
-      assert.match(await readFile(join(spare.root, "packages/x/package.json"), "utf8"), /"description"/, `${spare.name} is on the integration head`);
+      assert.match(await readFile(join(spare.root, "packages/x/package.json"), "utf8"), /"engines"/, `${spare.name} is on the integration head`);
     }
 
     // A claim of a stale spare installs in place, and the refill then clones that claim's install.
-    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "e" }) });
+    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", engines: { node: ">=20" } }) });
     advance(f.repo, "Change an install input again");
     await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
     const created = await createWorkspace("task", f.repo);
@@ -636,7 +687,7 @@ test("concurrent claims of stale spares install one at a time, and the later one
   const spans = join(f.root, "spans.jsonl");
   try {
     await refill(f.repo);
-    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", description: "d" }) });
+    await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", engines: { node: ">=18" } }) });
     advance(f.repo, "Change an install input");
     await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
     process.env.FIXTURE_INSTALL_SPANS = spans;

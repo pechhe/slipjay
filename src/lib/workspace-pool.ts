@@ -8,7 +8,7 @@ import { prepareWorkspaceDependencies, removeNodeModules } from "./workspace-dep
 import { repositoryProjectCode, run, workspaceContext } from "./workspace-jj.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "./workspace-jj.ts";
 import { machineConfigPath, metadataHome, poolRefillLogPath, stateHome, workspaceHome } from "./workspace-paths.ts";
-import { listWorkspaces, metadataPath, readJsonOptional, renameWorkspace, workspaceMetadata } from "./workspace-state.ts";
+import { listWorkspaces, metadataPath, readJsonOptional, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
 import { processAlive } from "./workspace-holders.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { DEFAULT_SPARES, spareCount } from "./execution-policy.ts";
@@ -85,10 +85,13 @@ export async function spareAllowance(context: WorkspaceContext): Promise<SpareAl
   return { spares: machineLimit === null ? declared : Math.min(declared, machineLimit), declared, machineLimit };
 }
 
+/** Whether a listed workspace is a spare ready to claim. */
+const isReadySpare = (workspace: WorkspaceEntry): boolean =>
+  workspace.metadata?.spare === true && workspace.metadata?.prepared === true && Boolean(workspace.root) && existsSync(workspace.root);
+
 /** Prepared spares for this repository. A spare still being prepared is never one. */
 export async function readySpares(cwd: string): Promise<WorkspaceEntry[]> {
-  return (await listWorkspaces(cwd)).filter((workspace: WorkspaceEntry) =>
-    workspace.metadata?.spare === true && workspace.metadata?.prepared === true && workspace.root && existsSync(workspace.root));
+  return (await listWorkspaces(cwd)).filter(isReadySpare);
 }
 
 /** Every spare registered for the repository, ready, in progress or abandoned, from its metadata records. */
@@ -114,8 +117,9 @@ function dependencySeeds(integrationRoot: string, workspacePath: string): (insta
   return async (installInputs: string): Promise<string[]> => {
     const recorded = (workspace: WorkspaceEntry) => resolve(workspace.root) !== resolve(workspacePath) && existsSync(join(workspace.root, "node_modules"))
       && (workspace.metadata?.preparedDependencies as PreparedDependencies | undefined)?.installInputs === installInputs;
-    const seeds = (await readySpares(integrationRoot)).filter(recorded).map((spare) => spare.root);
-    for (const workspace of await listWorkspaces(integrationRoot)) {
+    const workspaces = await listWorkspaces(integrationRoot);
+    const seeds = workspaces.filter((workspace) => isReadySpare(workspace) && recorded(workspace)).map((spare) => spare.root);
+    for (const workspace of workspaces) {
       if (workspace.metadata?.spare !== true && workspace.root && recorded(workspace)
         && await installInputFingerprint(workspace.root, { snapshot: false }) === installInputs) seeds.push(workspace.root);
     }
@@ -316,18 +320,17 @@ async function reusableDependencies(root: string, prepared: PreparedDependencies
  * waited for); the caller then provisions synchronously. Never falls back to the
  * primary checkout.
  */
-export async function claimSpare(cwd: string, name: string, base?: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
-  const context = await workspaceContext(cwd);
-  if (!context) return null;
+export async function claimSpare(context: WorkspaceContext, name: string, base?: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
   // The pool is held only briefly (a claim, or a refill registering a name), so a short wait suffices.
-  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(cwd, context, name, base), { waitMs: 3000 })
+  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base), { waitMs: 3000 })
     .catch((error: unknown) => { if ((error as { code?: string } | null | undefined)?.code === "ELOCKED") return null; throw error; });
 }
 
-async function claimReadySpare(cwd: string, context: WorkspaceContext, name: string, base?: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
-  const [spare] = await readySpares(cwd);
+async function claimReadySpare(context: WorkspaceContext, name: string, base?: string): Promise<{ root: string; name: string; dependencies: ReusedDependencies | null } | null> {
+  const workspaces = await listWorkspaces(context.integration.root);
+  const spare = workspaces.find(isReadySpare);
   if (!spare) return null;
-  const { name: assigned } = await renameWorkspace(spare.root, name);
+  const { name: assigned } = await renameListedWorkspace(spare, workspaces, name);
   await jj(spare.root, ["new", base ?? context.integrationBranch]);
   const dependencies = await reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | null | undefined);
   const { spare: _released, prepared: _prepared, preparedDependencies: _dependencies, createdAt: _created, ...metadata } =

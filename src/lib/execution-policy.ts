@@ -306,6 +306,11 @@ async function commitOf(repo: string, revision: string): Promise<string | null> 
 export async function readExecutionPolicyAtCommit(repo: string, revision: string): Promise<{ commitId: string; policy: ExecutionPolicy | null }> {
   const commitId = await commitOf(repo, revision);
   if (!commitId) throw new Error(`Revision '${revision}' does not exist`);
+  return policyAtCommitId(repo, commitId);
+}
+
+/** `readExecutionPolicyAtCommit` for a revision already resolved to its commit id. */
+async function policyAtCommitId(repo: string, commitId: string): Promise<{ commitId: string; policy: ExecutionPolicy | null }> {
   const shown = new Map<string, string>();
   const exists = async (candidate: string) => {
     const result = await jjRead(repo, ["file", "show", "-r", commitId, `root-file:${symbol(candidate)}`]);
@@ -360,7 +365,9 @@ export async function readIntegrationPolicy(repo: string, { hintRoot, fetchMissi
   let fallback: { branch: string | null } | undefined;
   const undeclared = async () => (fallback ??= { branch: await resolveIntegrationBranch(probes) }).branch;
   const hint = hintRoot ? (await readExecutionPolicy(hintRoot).catch(() => null))?.integrationBranch : undefined;
-  let start = hint && await probes.exists(hint) ? hint : null;
+  // The hinted bookmark's commit, resolved once for both its existence and its policy.
+  const hintCommit = hint ? await commitOf(repo, hint) : null;
+  let start = hintCommit ? hint! : null;
   let revision = start;
   if (!start) {
     const head = await probes.originHead();
@@ -380,7 +387,7 @@ export async function readIntegrationPolicy(repo: string, { hintRoot, fetchMissi
     if (!start) start = revision = await undeclared();
   }
   if (!start || !revision) throw new Error("Could not resolve an integration bookmark (tried the declared branch, origin/HEAD, main and master)");
-  const first = await readExecutionPolicyAtCommit(repo, revision);
+  const first = hintCommit ? await policyAtCommitId(repo, hintCommit) : await readExecutionPolicyAtCommit(repo, revision);
   const target = first.policy?.integrationBranch ?? await undeclared();
   if (target === start && revision === start) return { integrationBranch: start, ...first };
   if (target && !await probes.exists(target) && fetchMissingBookmarks) {

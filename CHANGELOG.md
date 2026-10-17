@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Faster starts:** claiming a spare spawned about 120 `jj` and `git` processes, so a start
+  took 40 seconds on a loaded machine. Listing workspaces no longer resolves the integration
+  policy it never used, the policy read resolves its bookmark once, and a claim reuses one
+  listing for finding and renaming its spare, which roughly halves the processes a start runs.
+- **A release bump no longer reinstalls a claimed spare:** the install-input fingerprint hashed
+  each `package.json` whole, so a version bump, a new export or a new test script discarded the
+  spare's `node_modules` and reinstalled. Installed manifests now count by what an install
+  reads of them. The fingerprint format is `v2`, so every spare is reseeded once by its next
+  refill.
+- **A start's fetch runs outside the allocation lock:** concurrent starts of one repository
+  queued behind each other's fetch of the integration branch. The fetch now runs before the
+  lock, and starts arriving while one fetches wait for it and reuse it.
+
 ## v3.24.1
 
 - **One Bitwarden lookup per command:** a command that reaches the runner several times now reads

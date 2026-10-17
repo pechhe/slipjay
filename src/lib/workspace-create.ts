@@ -324,6 +324,8 @@ export async function resolveStartBase(cwd: string, revision: string): Promise<s
 export async function createWorkspace<Readiness = unknown>(task: string, cwd: string = process.cwd(), options: WorkspaceCreationOptions<Readiness> = {}): Promise<CreatedWorkspace<Readiness>> {
   const context = await workspaceContext(cwd);
   if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
+  // Before the allocation lock, so concurrent starts never queue behind each other's fetch.
+  if (await mayStartFromIntegrationHead(cwd, context, options)) await refreshIntegration(context);
   const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, () => createWorkspaceUnlocked(task, cwd, options));
   // Concurrent starts that resolve to one checkout (the same Issue, or a bind) prepare it in turn.
   return withWorkspaceTransaction(`prepare:${allocation.context.current.root}`, () => ready(allocation)) as Promise<CreatedWorkspace<Readiness>>;
@@ -380,30 +382,47 @@ const START_FETCH_TIMEOUT_MS = 30_000;
 const START_FETCH_REUSE_MS = 30_000;
 
 /**
+ * Whether this start may base a new workspace on the integration head, so it should fetch
+ * first: not on a pinned base, not binding the current workspace and not resuming an Issue's.
+ * Read without the allocation lock, so a race only costs a needless fetch or skips a best-effort one.
+ */
+async function mayStartFromIntegrationHead(cwd: string, context: WorkspaceContext, { issueNumber, base }: WorkspaceCreationOptions) {
+  if (base || context.current.name !== "default") return false;
+  return !issueNumber || !(await listWorkspaces(cwd, { readOnly: true })).some((entry) => entry.metadata?.issueNumber === issueNumber);
+}
+
+/**
  * Bring the integration branch up to its declared remote before a new workspace
  * is based on it, so work started on one machine sees what another has landed.
  * A start within `START_FETCH_REUSE_MS` of the last successful one reuses that
- * fetch, so a burst of starts fetches once. Best effort: offline or failing, the
- * workspace starts from the local branch and landing still fetches and rebases.
- * Runs under the allocation lock, so the marker needs no locking of its own.
+ * fetch, and a start arriving while another fetches waits for it and reuses it, so
+ * a burst of starts fetches once. Best effort: offline or failing, the workspace
+ * starts from the local branch and landing still fetches and rebases.
  */
 async function refreshIntegration(context: WorkspaceContext) {
   const remote = publicationRemote(context);
   if (!remote) return;
   const key = `${resolve(context.integration.root)}\0${remote}\0${context.integrationBranch}`;
   const marker = join(startFetchHome(), `${createHash("sha256").update(key).digest("hex")}.stamp`);
-  const fetchedAt = await stat(marker).then((info) => info.mtimeMs, () => 0);
-  // A marker from the future (the clock moved back) proves nothing.
-  const age = Date.now() - fetchedAt;
-  if (age >= 0 && age < START_FETCH_REUSE_MS) return;
-  const fetched = await fetchIntegration(context.integration.root, remote, context.integrationBranch, { timeoutMs: START_FETCH_TIMEOUT_MS });
-  if (fetched.code === 0) {
-    await mkdir(startFetchHome(), { recursive: true, mode: 0o700 });
-    await writeFile(marker, "");
-    return;
-  }
-  const detail = (fetched.stderr || fetched.stdout).trim().split(/\r?\n/).at(-1);
-  console.error(`[fetch] could not refresh ${context.integrationBranch} from ${remote}${detail ? `: ${detail}` : ""}; starting from the local branch`);
+  const fresh = async () => {
+    const fetchedAt = await stat(marker).then((info) => info.mtimeMs, () => 0);
+    // A marker from the future (the clock moved back) proves nothing.
+    const age = Date.now() - fetchedAt;
+    return age >= 0 && age < START_FETCH_REUSE_MS;
+  };
+  if (await fresh()) return;
+  // Held for one bounded fetch, and only by starts of this repository and branch.
+  await withWorkspaceTransaction(`fetch:${key}`, async () => {
+    if (await fresh()) return;
+    const fetched = await fetchIntegration(context.integration.root, remote, context.integrationBranch, { timeoutMs: START_FETCH_TIMEOUT_MS });
+    if (fetched.code === 0) {
+      await mkdir(startFetchHome(), { recursive: true, mode: 0o700 });
+      await writeFile(marker, "");
+      return;
+    }
+    const detail = (fetched.stderr || fetched.stdout).trim().split(/\r?\n/).at(-1);
+    console.error(`[fetch] could not refresh ${context.integrationBranch} from ${remote}${detail ? `: ${detail}` : ""}; starting from the local branch`);
+  });
 }
 
 /**
@@ -448,9 +467,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   await assertIssueAvailable(cwd, issueNumber, name);
   // A surviving Issue checkout at its deterministic path is recovered, never replaced by a spare.
   const survivor = Boolean(issueNumber) && exists(join(workspaceHome(), name));
-  // A pinned base is already local, so a helper claiming a spare never waits on the remote.
-  if (!survivor && !base) await refreshIntegration(context);
-  const spare = survivor ? null : await claimSpare(cwd, name, base);
+  const spare = survivor ? null : await claimSpare(context, name, base);
   if (spare) name = spare.name;
   const workspacePath = spare?.root ?? join(workspaceHome(), name);
   await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });

@@ -92,6 +92,13 @@ new checkout). The normal frozen install still runs afterwards as the
 verification, and if it fails on a cloned tree, the clone is discarded and the
 install repeated from scratch.
 
+The install-input fingerprint covers what a frozen install reads: lockfiles,
+package-manager configuration, patches, the files install lifecycle scripts reach,
+and each installed `package.json` less its metadata and publishing fields
+(`version`, `description`, `exports`, `types`, `files` and the like) and the
+scripts an install never runs. A release bump, a new export or a new test script
+therefore leaves a spare's dependencies reusable.
+
 `land` runs that frozen install again after rebasing the candidate, before any
 migration generation or verification, so the gate sees the dependencies of the
 integration tip it verifies against rather than the one the workspace was
@@ -172,7 +179,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `pool [refill]` | Show ready spare workspaces, or provision one (up to `spares`). |
 | `prune --empty` | Remove empty workspaces, empty workspaces of a closed Issue, and state left by workspaces that no longer exist. |
 | `attach-issue <n>` | Bind the current workspace to Issue `n` (a Build number in a Build-tracked repository; see `tracker`). |
-| `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). |
+| `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). The fetch runs before the start takes the repository's allocation lock, and starts within 30 seconds of a fetch, or arriving while one runs, share it, so concurrent starts never queue behind each other's fetch. |
 | `start [--integration] [--issue <n> \| --base <revision>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`); `--base` (implies `--integration`, no `--issue`) starts a new workspace, a claimed spare or a fresh one, on that revision of the current checkout instead of the integration head, so a helper sees a lead's unlanded work; it must name one commit other than the caller's working copy (`jj new`, then pass `@-`), and dependencies are reused unless that revision changed the install inputs; `--refill` then starts a background spare refill (a new workspace always does); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`) and sends all install output to stderr. With a runner configured, the start's metrics (`workspace_start`, `pool_claim`) are posted to its ledger by a detached process, so a slow or unreachable runner never delays the start; a failure is one line in `pool-refill.log`. |
 | `preview` | Diffstat of what a landing would integrate. |
 | `record-preview <port>` | Record a host's started workspace preview in the runner ledger. |
