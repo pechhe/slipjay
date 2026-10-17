@@ -16,6 +16,7 @@ export type CandidateContext = {
 export type PrimaryCheckoutOutcome = {
   /** `moved` onto the new integration, already `current`, or `left` in place. */
   action: "moved" | "current" | "left";
+  /** Why: `carried-edits` when uncommitted edits moved along; otherwise why it was left. */
   reason?: string;
   /** Something the primary checkout's owner should resolve, such as a conflict. */
   warning?: string;
@@ -171,10 +172,11 @@ export async function integrateLandingCandidate(cwd: string, options: CandidateO
 }
 
 /**
- * What an Isolated landing does with the primary checkout. It moves only an empty
- * `@` whose parents are already integrated; edits, conflicts and unintegrated
- * ancestry stay exactly where they are (the next Direct landing rebases them). None
- * of these block integration or push.
+ * What an Isolated landing does with the primary checkout. It moves `@` onto the new
+ * integration when its parents are already integrated: an empty `@` becomes a new
+ * empty change there, and uncommitted edits are rebased along with it. Edits that
+ * would conflict there, a conflicted `@` and unintegrated ancestry stay exactly where
+ * they are (the next Direct landing rebases them). None of these block integration or push.
  */
 async function primaryCheckoutDisposition(context: CandidateContext, io: LandingIO): Promise<PrimaryCheckoutOutcome> {
   const { revisionFacts, jj } = io;
@@ -182,14 +184,24 @@ async function primaryCheckoutDisposition(context: CandidateContext, io: Landing
   const facts = await revisionFacts(root, "@");
   if (facts.conflict) return { action: "left", reason: "conflicted",
     warning: "The primary checkout has conflicts; it was left in place for its owner to resolve" };
-  if (!facts.empty) return { action: "left", reason: "unlanded-changes" };
   if (await jj(root, ["log", "-r", `parents(@) ~ ::${context.integrationBranch}`, "--no-graph", "-T", "commit_id"]))
     return { action: "left", reason: "unintegrated-ancestry" };
   const parent = await revisionFacts(root, "@-");
   const integration = await revisionFacts(root, context.integrationBranch);
   if (parent.commitId === integration.commitId) return { action: "current" };
-  await jj(root, ["new", context.integrationBranch]);
-  return { action: "moved" };
+  if (facts.empty) {
+    await jj(root, ["new", context.integrationBranch]);
+    return { action: "moved" };
+  }
+  const before = await jj(root, ["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
+  await jj(root, ["rebase", "-r", "@", "--onto", context.integrationBranch]);
+  if ((await revisionFacts(root, "@")).conflict) {
+    // Restoring the operation puts `@` and the files on disk back exactly as they were.
+    await jj(root, ["op", "restore", before]);
+    return { action: "left", reason: "edits-conflict",
+      warning: "The primary checkout's uncommitted edits conflict with the new integration; they were left in place for its owner to rebase" };
+  }
+  return { action: "moved", reason: "carried-edits" };
 }
 
 /** Move the primary checkout (when safe) and the landed workspace onto the new integration. */

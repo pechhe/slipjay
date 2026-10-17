@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Landings reach a primary checkout with local edits:** after a landing, the primary checkout
+  now moves onto the new integration even when it holds uncommitted edits, which are rebased along
+  unchanged (`primaryCheckout: { action: "moved", reason: "carried-edits" }`). Edits that would
+  conflict there are restored exactly as they were and reported as `left` with reason
+  `edits-conflict` and a warning. Previously any uncommitted edit kept the checkout on the old
+  integration until moved by hand.
 - **`slipjay prune --plan`:** a read-only retention plan. It lists every workspace with its
   path, state, Issue, task, assignment time, landing and publication, live processes, unique
   files and size, and whether the

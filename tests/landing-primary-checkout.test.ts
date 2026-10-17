@@ -8,8 +8,8 @@ import { test } from "vite-plus/test";
 import { createWorkspace, readLandingState } from "../src/lib/slipjay.ts";
 import type { PrimaryCheckoutOutcome } from "../src/lib/landing-candidate.ts";
 
-// An Isolated landing integrates and pushes whatever the primary checkout holds,
-// and moves that checkout only when it is an empty `@` on integrated ancestry.
+// An Isolated landing integrates and pushes whatever the primary checkout holds, and
+// moves that checkout onto integrated ancestry, carrying uncommitted edits that apply cleanly.
 
 type Fixture = Awaited<ReturnType<typeof project>>;
 const cli = fileURLToPath(new URL("../src/launcher/workspace.ts", import.meta.url));
@@ -46,22 +46,42 @@ test("an empty primary checkout moves onto the new integration", async () => {
   }
 }, 120_000);
 
-test("uncommitted primary edits on an older integration stay exactly where they are", async () => {
+test("uncommitted primary edits are carried onto the new integration unchanged", async () => {
   const f = await project();
   try {
     await writeFile(join(f.repo, "local.txt"), "unlanded\n");
     const before = primary(f);
     await land(f, "first.txt");
-    // Now on an older integration tip: a second landing must still leave it alone.
     const { result } = await land(f, "second.txt");
-    assert.deepEqual(result.primaryCheckout, { action: "left", reason: "unlanded-changes" });
-    assert.deepEqual(primary(f), before);
+    assert.deepEqual(result.primaryCheckout, { action: "moved", reason: "carried-edits" });
+    const after = primary(f);
+    assert.equal(after.change, before.change);
+    assert.equal(after.parent, jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]));
+    assert.equal(after.conflict, false);
     assert.equal(await readFile(join(f.repo, "local.txt"), "utf8"), "unlanded\n");
+    assert.equal(await readFile(join(f.repo, "second.txt"), "utf8"), "second.txt\n");
     assert.match(jj(f.repo, ["diff", "-r", "@", "--name-only"]), /^local\.txt$/m);
   } finally {
     await f.dispose();
   }
 }, 180_000);
+
+test("uncommitted primary edits that would conflict with the landing stay exactly where they are", async () => {
+  const f = await project();
+  try {
+    await writeFile(join(f.repo, "clash.txt"), "local\n");
+    const before = primary(f);
+    const { result } = await land(f, "clash.txt");
+    assert.equal(result.primaryCheckout?.action, "left");
+    assert.equal(result.primaryCheckout?.reason, "edits-conflict");
+    assert.match(result.primaryCheckout?.warning ?? "", /conflict/);
+    assert.equal(result.cleanupPending, false);
+    assert.deepEqual(primary(f), before);
+    assert.equal(await readFile(join(f.repo, "clash.txt"), "utf8"), "local\n");
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
 
 test("a conflicted primary checkout is reported as a warning and left for its owner", async () => {
   const f = await project();
