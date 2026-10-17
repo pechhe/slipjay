@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.24.4
+
 - **`slipjay repair <failed-operation>`:** sets up a failed landing's repair in one step. It
   claims the repair, restores the exact candidate into a fresh workspace on its own change,
   and writes a repair brief from the runner's evidence, naming every gap. The next `land` from
@@ -10,6 +12,9 @@
   rerun on the same machine resumes it. The repair keeps the Issue or Build item the candidate
   named; in a Build-tracked repository it lands under the repairer's own session, never as a
   chore. The runner's repair state read now also reports `eligibility` (#17).
+- **Empty workspaces retire on their own:** every workspace allocation, a failed one included,
+  starts a detached housekeeping sweep of its repository, at most one every 15 minutes, so empty
+  assigned checkouts retire without a landing or a manual `prune` (#77, #78).
 
 ## v3.24.3
 
