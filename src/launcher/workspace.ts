@@ -36,6 +36,7 @@ import { legacyStateHome } from "../lib/workspace-paths.ts";
 import { workspaceMetadata } from "../lib/workspace-state.ts";
 import { landingGuardDecision } from "../lib/landing-guard.ts";
 import { landingTimingLine } from "../lib/landing-timing.ts";
+import { repairFailedLanding } from "../lib/repair-workspace.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, writeSync } from "node:fs";
 import { resolve } from "node:path";
@@ -339,6 +340,14 @@ try {
       const spares = await readySpares(process.cwd());
       console.log(spares.length ? spares.map((spare) => `ready\t${spare.name}\t${spare.root}`).join("\n") : "No ready spare workspace.");
     } else throw new Error("Usage: slipjay pool [refill]");
+  } else if (command === "repair") {
+    const json = rest.includes("--json"), args = rest.filter((arg) => arg !== "--json");
+    if (args.length !== 1 || args[0]!.startsWith("-")) throw new Error("Usage: slipjay repair <failed-operation> [--json]");
+    const location = runnerLocation();
+    if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+    const setup = await repairFailedLanding(process.cwd(), args[0]!, { location });
+    console.log(json ? JSON.stringify(setup) : [`${setup.resumed ? "Resumed" : "Ready"}: repair of ${setup.operationId} in ${setup.workspacePath}`,
+      `Brief: ${setup.briefPath}`, "Fix it there, review it, then slipjay land from that workspace."].join("\n"));
   } else if (command === "attach-issue") {
     const issueNumber = Number(rest[0]);
     const result = await attachWorkspaceIssue(process.cwd(), issueNumber);
@@ -546,7 +555,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|mode|list|pool [refill]|prune --empty|attach-issue|start|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`slipjay repair <failed-operation>`:** sets up a failed landing's repair in one step. It
+  claims the repair, restores the exact candidate into a fresh workspace on its own change,
+  and writes a repair brief from the runner's evidence, naming every gap. The next `land` from
+  that workspace is the repair, linked to the failure. It refuses what the runner already shows
+  before allocating anything; a workspace whose claim the runner refuses is removed again; and a
+  rerun on the same machine resumes it. The repair keeps the Issue or Build item the candidate
+  named; in a Build-tracked repository it lands under the repairer's own session, never as a
+  chore. The runner's repair state read now also reports `eligibility` (#17).
+
 ## v3.24.3
 
 - **Spares with stale install records are refreshed:** a refill only refreshed a spare behind

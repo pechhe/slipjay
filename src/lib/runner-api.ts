@@ -136,7 +136,8 @@ export function createRunnerHandler(input: {
       if (operation.kind !== "landing") return json({ error: "Repair claims require a landing" }, 409);
       if (request.method === "GET") {
         const authority = repairAuthority(input.log, operation.repo, operation.changeId);
-        return json({ claimed: authority.claimed, claim: publicRepairClaim(authority.active) });
+        // Whether a fresh claim would be refused now, so a client can say so before allocating anything; the claim decides.
+        return json({ claimed: authority.claimed, claim: publicRepairClaim(authority.active), eligibility: repairEligibility(input.log, operation) });
       }
       const body = await boundedJson(request);
       if (!body || !["claim", "release", "revoke"].includes(String(body.action)) || !boundedString(body.by)) return json({ error: "Invalid repair request" }, 400);

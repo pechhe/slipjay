@@ -202,7 +202,8 @@ async function bitwardenRunnerToken(env: NodeJS.ProcessEnv): Promise<string> {
   throw new Error("Set SLIPJAY_RUNNER_TOKEN or save the Bitwarden key SLIPJAY_RUNNER_TOKEN");
 }
 
-class RunnerRequestRefused extends Error {
+/** The runner answered and refused: unlike a lost response, nothing it was asked to do happened. */
+export class RunnerRequestRefused extends Error {
   readonly status: number;
   constructor(status: number, message: string) { super(message); this.status = status; }
 }
@@ -445,7 +446,7 @@ export async function manageRepairClaim(cwd: string, location: string, operation
         : action === "release" ? { claimId: saved!.claimId, token: saved!.token } : {}) }),
     });
     const body = await control.json() as { claim?: { claimId: string; operationId: string; source: string } | null; error?: string };
-    if (!control.ok) throw new Error(body.error ?? "Repair claim was refused; keep its local capability until reconciled");
+    if (!control.ok) throw new RunnerRequestRefused(control.status, body.error ?? "Repair claim was refused; keep its local capability until reconciled");
     await withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
       const metadata = await workspaceMetadata(context.current.name);
       if (!metadata) throw new Error("Assigned workspace metadata disappeared; retain this workspace for recovery");
@@ -468,6 +469,18 @@ async function workspaceRepairProof(context: WorkspaceContext, location: string,
   const claim = Object.values(workspaceRepairs(metadata)).filter((entry) => entry.binding === runnerBinding(location)
     && entry.repo === repo.toLowerCase() && entry.changeId === changeId && entry.claimId).sort((a, b) => (b.confirmedAt ?? 0) - (a.confirmedAt ?? 0))[0];
   return claim?.claimId ? { operationId: claim.operationId, claimId: claim.claimId, token: claim.token } : undefined;
+}
+
+/** A logical change's public repair claim, and why a fresh claim would be refused now (absent from older runners). */
+export async function readRepairState(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<{ claimed: boolean; claim: { claimId: string; operationId: string; workspace: string; source: string } | null; eligibility?: string | null }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/repair`, { signal: AbortSignal.timeout(15000) });
+    const body = await response.json() as { claimed?: boolean; claim?: { claimId: string; operationId: string; workspace: string; source: string } | null; eligibility?: string | null; error?: string };
+    if (!response.ok || typeof body.claimed !== "boolean") throw new RunnerRequestRefused(response.status, body.error ?? "Runner did not report the repair state");
+    return { claimed: body.claimed, claim: body.claim ?? null, ...("eligibility" in body ? { eligibility: body.eligibility ?? null } : {}) };
+  } finally { connection.close(); }
 }
 
 /** Stream a derived recovery bundle to a new local file; no source or ownership is changed. */

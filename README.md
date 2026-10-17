@@ -181,6 +181,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `attach-issue <n>` | Bind the current workspace to Issue `n` (a Build number in a Build-tracked repository; see `tracker`). |
 | `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). The fetch runs before the start takes the repository's allocation lock, and starts within 30 seconds of a fetch, or arriving while one runs, share it, so concurrent starts never queue behind each other's fetch. |
 | `start [--integration] [--issue <n> \| --base <revision>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`); `--base` (implies `--integration`, no `--issue`) starts a new workspace, a claimed spare or a fresh one, on that revision of the current checkout instead of the integration head, so a helper sees a lead's unlanded work; it must name one commit other than the caller's working copy (`jj new`, then pass `@-`), and dependencies are reused unless that revision changed the install inputs; `--refill` then starts a background spare refill (a new workspace always does); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`) and sends all install output to stderr. With a runner configured, the start's metrics (`workspace_start`, `pool_claim`) are posted to its ledger by a detached process, so a slow or unreachable runner never delays the start; a failure is one line in `pool-refill.log`. |
+| `repair <failed-operation> [--json]` | Set up a repair of a failed landing from the runner's retained evidence: claim it, restore the exact candidate into a fresh workspace and write a repair brief (see [Repairing a failed landing](#repairing-a-failed-landing)). `--json` prints `operationId`, `workspacePath`, `workspaceName`, `claimId`, `source`, `changeId`, `issueNumber`, `briefPath` and `resumed`. |
 | `preview` | Diffstat of what a landing would integrate. |
 | `record-preview <port>` | Record a host's started workspace preview in the runner ledger. |
 | `metrics [--since <ISO date>]` | Pipeline outcomes, causes, stage and queue percentiles, held integrations, attempts and flake candidates from the runner ledger. |
@@ -816,16 +817,62 @@ validates the bundle's exact operation ref and imports immutable objects into an
 already assigned authoring checkout. It leaves the working revision unchanged. It
 does not grant repair ownership, execute source, retry verification or publish.
 
-A source correction uses a durable repair claim:
+<a id="repairing-a-failed-landing"></a>**Repairing a failed landing.** A source correction uses a durable repair claim, and
+`slipjay repair` sets one up in one step from any checkout of the same repository:
 
 ```sh
-# From the repair worker's assigned isolated checkout of the same repository:
-slipjay runner repair-claim <failed-operation>
-slipjay runner source <failed-operation> /path/to/new/recovery.bundle
-# Import the bundle with importSourceBundle; edit the retained source revision,
-# preserving its logical jj change ID. Fix and run focused checks, then:
+slipjay repair <failed-operation>   # prints the repair workspace and its brief
+# In that workspace: fix the cause, keeping its change, and run focused checks. Then:
 slipjay land
 ```
+
+Before allocating anything, `repair` reads the operation's outcome and repair state and
+refuses what they already show: a published or unconfirmed publication, a landing that
+did not fail (a kill, pause or cancellation included), expired or missing retained
+source, an active claim, and whatever the runner's `eligibility` names (a newer
+attempt, migration or finalisation history, a paused runner). Each refusal names the
+next step. The claim stays the authority: when the runner refuses it after allocation,
+for example to a concurrent claimant, `repair` removes the workspace it just allocated.
+Otherwise it downloads and imports the retained source (`runner source`,
+`importSourceBundle`, which needs no claim), allocates a workspace whose task is `Repair
+<operation>`, claims the repair there (`runner repair-claim`) and moves the workspace's
+untouched placeholder change onto the candidate, so the next `land` from it is the linked
+repair. The failed
+landing's evidence is never changed.
+
+`repair` writes a brief to `~/.slipjay/state/repairs/<operation>.md`, outside every
+checkout so it can never land. It holds only what the runner recorded, and names each
+absence as a gap:
+- the operation, change, candidate, the author's source base and the runner's prepared integration base
+- the submitted intent and Spec reference with its body digest
+- the classification and diagnostics (an interaction with an earlier landing is marked suspected)
+- the recorded commands, each passed, failed or invalidated
+- the author-reported checks and reviews
+- every integration commit published since the prepared base, up to the integration head observed
+
+Log output is quoted as untrusted data, and the brief is redacted with the caller's environment.
+
+The repair workspace belongs to the work item the failed candidate named: `land` writes
+it into the candidate's description (`Issue: owner/repo#<n>`, or `Build: #<n>` in a
+Build-tracked repository), so it is attached as `start --issue` would. A candidate that
+named none, such as a chore, stays unassociated. Further Tickets named in the landing's
+Build binding are listed in the brief as `--ticket` flags. A failure that belonged to a
+Spec therefore never lands as a chore.
+Custody stays the repairer's own: `land` needs their current lead session and the
+Spec's current bind, exactly as for any landing, and the old binding is never copied.
+When the author's workspace on the same machine still holds that item, `repair` refuses:
+fix the failure there, or remove that workspace first.
+
+Running `repair` again on the same machine resumes the workspace it set up, found by its
+task, which is recorded the moment it is allocated: after an interruption anywhere from
+allocation on, a lost claim response, or once the fix has begun. It never takes a second
+claim and never moves a workspace away from edits. Another machine cannot reuse it: the
+claim capability belongs to that workspace, and is released or revoked rather than shared.
+Starting a repair agent, accepting a repair automatically and repair budgets are not
+SlipJay's: the repair is reviewed and gated like any landing.
+
+The lower-level steps remain for operators: `slipjay runner repair-claim`, `runner
+source` and the public `importSourceBundle`.
 
 The claim capability is stored and flushed in private workspace metadata **before**
 the claim request; its confirmed identity is retained before CLI success. A new CLI
@@ -836,7 +883,8 @@ attempt, source and failure are immutable history. This command does not waive t
 normal independent review/gate requirements.
 
 `GET /v1/operations/:id/repair` reports whether the logical change has ever been
-fenced and its public current claim. `POST` accepts `claim` with `workspace`, `by`
+fenced, its public current claim, and `eligibility`: why a fresh claim would be refused
+now, or `null`. `POST` accepts `claim` with `workspace`, `by`
 and a 64-character lowercase hex `token`; `release` with `claimId`, `token`, `by`;
 or explicit owner `revoke` with `by`. All use the existing runner credential. This
 is the runner's existing trusted-owner API, not a separate person/agent role system.
