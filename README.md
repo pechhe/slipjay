@@ -88,8 +88,8 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   and never submits twice). A rerun never submits an attempt again: it follows the attempt's
   operation, reports its last outcome, and reports `already-applied` once the policy is on the
   integration branch. Success exits 0, `refused` exits 2, and every other outcome exits 1.
-- **Runner version.** The fast path below and the runner's stale refusal need a runner on the
-  release that adds `policy set`. An older runner ignores the `Policy-Base:` trailer and gates a
+- **Runner version.** The fast path below and the runner's stale refusal need a runner on
+  SlipJay 3.25.0 or later. An older runner ignores the `Policy-Base:` trailer and gates a
   settings landing with the full checks; only the client's own stale check then applies.
 - **The settings fast path.** The runner gates a landing with the integration branch's current
   checks, not the candidate's, so a changed check would otherwise first run on the next
