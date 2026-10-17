@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.24.1
+
 - **One Bitwarden lookup per command:** a command that reaches the runner several times now reads
   `SLIPJAY_RUNNER_TOKEN` from Bitwarden once, instead of running `bws secret list` for each
   request, which failed intermittently on the Mac. A failed lookup is retried on the next call.
