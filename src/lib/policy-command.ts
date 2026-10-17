@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { DEFAULT_SPARES, EXECUTION_POLICY_PATH, processLevel, readIntegrationPolicy, readPolicyTextAtCommit, RETIRED_POLICY_FIELDS } from "./execution-policy.ts";
 import { applyPolicyPatch, parsePolicyPatch, POLICY_BASE_TRAILER, policyDigest } from "./policy-settings.ts";
 import type { PolicyPatch } from "./policy-settings.ts";
-import { landThroughRunner } from "./runner-client.ts";
+import { LandingNotSubmitted, landThroughRunner } from "./runner-client.ts";
 import { publicationRemote } from "./landing-steps.ts";
 import { createWorkspace } from "./workspace-create.ts";
 import { run, workspaceContext } from "./workspace-jj.ts";
@@ -111,12 +111,17 @@ export async function setPolicy(cwd: string, options: { base: string; patch: unk
   const prepared = earlier ? await attemptHolds(earlier.root, patched, message) : false;
   const current = await readIntegrationPolicy(root, { hintRoot: root });
   const currentText = await readPolicyTextAtCommit(root, current.commitId);
+  if (currentText !== null && policyDigest(currentText) === policyDigest(patched)) {
+    // Published, perhaps by the runner retrying an integration it held: an earlier attempt is spent.
+    if (earlier?.root) await removeWorkspace(root, (await repository(earlier.root)).current.name, { allowWork: true }).catch(() => undefined);
+    return { ok: true, phase: "already-applied", revision: current.commitId };
+  }
   if (!prepared) {
-    if (currentText !== null && policyDigest(currentText) === policyDigest(patched)) return { ok: true, phase: "already-applied", revision: current.commitId };
     if (currentText === null || policyDigest(currentText) !== baseDigest)
       return { ok: false, phase: "refused", reason: `Stale base: ${EXECUTION_POLICY_PATH} on ${current.integrationBranch} has changed since ${options.base.slice(0, 12)}; read it again with slipjay policy show and reapply` };
   }
   let workspacePath = earlier?.root;
+  let landing = false;
   try {
     if (prepared) onLine(`Reattaching to the earlier attempt in ${workspacePath}`);
     workspacePath ??= (await createWorkspace(task, root)).workspacePath;
@@ -126,7 +131,8 @@ export async function setPolicy(cwd: string, options: { base: string; patch: unk
       await writeFile(join(workspacePath, EXECUTION_POLICY_PATH), patched);
       await jj(workspacePath, ["describe", "-m", message]);
     }
-    const landed = await landThroughRunner(workspacePath, { location: options.location, onLine, ...options.env ? { env: options.env } : {}, ...options.signal ? { signal: options.signal } : {} });
+    landing = true;
+    const landed = await landThroughRunner(workspacePath, { location: options.location, onLine, resubmitAfterOutcome: false, ...options.env ? { env: options.env } : {}, ...options.signal ? { signal: options.signal } : {} });
     const { operation, logUrl: log } = landed;
     const result = operation.result;
     if (result?.type === "landed") return { ok: true, phase: "landed", operationId: operation.id, revision: result.commitId, log };
@@ -140,6 +146,10 @@ export async function setPolicy(cwd: string, options: { base: string; patch: unk
     return { ok: false, phase: "uncertain", reason: `Operation ${operation.id} is ${operation.status}; rerun the same command to follow it`, workspacePath };
   } catch (error) {
     if (!workspacePath) throw error;
-    return { ok: false, phase: "uncertain", reason: (error as Error).message, workspacePath };
+    // An earlier attempt may have been submitted by the run that prepared it, so only a fresh one is refused.
+    if (prepared || landing && !(error instanceof LandingNotSubmitted)) return { ok: false, phase: "uncertain", reason: (error as Error).message, workspacePath };
+    // Nothing reached the runner: the attempt is released, so a rerun prepares afresh and checks staleness again.
+    await removeWorkspace(root, (await repository(workspacePath)).current.name, { allowWork: true }).catch(() => undefined);
+    return { ok: false, phase: "refused", reason: (error as Error).message };
   }
 }

@@ -274,7 +274,12 @@ test("config and policy show report each setting with its source, and config set
     assert.equal(view.integrationBranch, "main");
     assert.equal(view.revision, jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]));
     assert.deepEqual([view.settings.spares, view.settings.process], [4, "standard"]);
-    assert.equal((await slipjay(f.repo, ["policy", "set", "--spares", "2"])).code, 1);
+    // Every failure before submission is a refusal in JSON, apart from any landing outcome.
+    for (const args of [["--spares", "2"], ["--base", view.revision, "--patch", "{bad"], ["--base", view.revision, "--patch", "[]"]]) {
+      const refused = await slipjay(f.repo, ["policy", "set", ...args]);
+      assert.equal(refused.code, 2, refused.stderr);
+      assert.equal(JSON.parse(refused.stdout).phase, "refused");
+    }
   } finally {
     if (previous === null) await rm(configPath, { force: true });
     else await writeFile(configPath, previous);

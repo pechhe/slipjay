@@ -40,7 +40,17 @@
 - **Retired `parallelExecution` and `unattendedMergeToIntegration`:** they drove nothing; a policy
   that declares them loads, `land` and `policy show` warn of them, and `policy set` drops them (#84).
 - **A landing follows the runner that accepted it:** after this machine's runner location changes,
-  `land` keeps following an operation it submitted earlier on that runner (#84).
+  `land` keeps following an operation it submitted earlier on that runner. A submission the runner
+  refused is not pinned, so a retry after changing the location goes to the new runner (#84, #88).
+- **`policy set` never submits twice:** a rerun reports its attempt's last outcome instead of
+  submitting it again, and reports `already-applied` once the policy is on the integration branch.
+  Every failure before submission, a usage error included, prints `phase: "refused"` and exits 2
+  (#88, #89).
+- **Build receipts don't claim a skipped verification:** a settings landing's attempt receipts
+  carry no `verifiedRevision`, and one `incomplete` run names the skipped checks' reason (#90).
+- **An unresolved publication keeps its runner:** a landing that failed at or after integration
+  stays pinned to the runner that holds it, so a retry after changing the location never
+  submits it again elsewhere (#88).
 
 ## v3.24.4
 

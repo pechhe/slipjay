@@ -4,8 +4,9 @@ import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
+import { listWorkspaces } from "../src/lib/workspace-state.ts";
 import { controlRunner, landThroughRunner, operationRunnerLocation, releaseThroughRunner } from "../src/lib/runner-client.ts";
-import { setPolicy, showPolicy } from "../src/lib/policy-command.ts";
+import { patchTask, setPolicy, showPolicy } from "../src/lib/policy-command.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
 import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../src/lib/runner-contract.ts";
@@ -645,6 +646,60 @@ test("a landing submitted before the runner location changed is still followed o
     assert.equal(await operationRunnerLocation(operation.id, { SLIPJAY_RUNNER: other.url }), f.server.url);
     assert.equal(await operationRunnerLocation("op_unknown", { SLIPJAY_RUNNER: other.url }), other.url);
   } finally { await other.close(); await f.dispose(); }
+});
+
+test("a submission the runner refused is not pinned, so a retry goes to the current runner location", async () => {
+  const f = await fixture(false, false, 401);
+  let reached = 0;
+  const other = await serveRunner(async () => { reached += 1; return Response.json({ error: "fixture runner" }, { status: 400 }); }, { host: "127.0.0.1", port: 0 });
+  try {
+    await assert.rejects(landThroughRunner(f.cwd, f.options), /refused the credential/);
+    f.lines.length = 0;
+    await assert.rejects(landThroughRunner(f.cwd, { ...f.options, location: other.url }), /HTTP 400/);
+    assert.ok(reached > 0);
+    assert.ok(!f.lines.some((line) => line.includes("where it was submitted")));
+  } finally { await other.close(); await f.dispose(); }
+});
+
+test("policy set rerun after a failure after integration reports it again and submits nothing new", async () => {
+  const f = await fixture();
+  try {
+    const { revision } = await showPolicy(f.repo);
+    const options = { base: revision, patch: { spares: 2 }, location: f.options.location, env: f.options.env, onLine: (line: string) => { f.lines.push(line); } };
+    const running = setPolicy(f.repo, options);
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const operation = f.log.openOperations()[0]!;
+    f.append(operation.id, { type: "integrated", base: "fixture-base", commitId: "f".repeat(40) });
+    f.append(operation.id, { type: "failed", stage: "publishing", reason: "remote unavailable" });
+    assert.equal((await running).phase, "failed-after-integration");
+    const rerun = await setPolicy(f.repo, options);
+    assert.equal(rerun.phase, "failed-after-integration", JSON.stringify(rerun));
+    assert.equal(rerun.phase === "failed-after-integration" ? rerun.operationId : "", operation.id);
+    // Publication is unresolved on that runner, so a rerun after changing location still asks it, not the new one.
+    let reached = 0;
+    const other = await serveRunner(async () => { reached += 1; return Response.json({ error: "not this runner" }, { status: 500 }); }, { host: "127.0.0.1", port: 0 });
+    try {
+      const moved = await setPolicy(f.repo, { ...options, location: other.url });
+      assert.equal(moved.phase, "failed-after-integration", JSON.stringify(moved));
+      assert.equal(reached, 0);
+    } finally { await other.close(); }
+    assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+  } finally { await f.dispose(); }
+});
+
+test("policy set the runner refuses is reported refused and leaves no attempt behind", async () => {
+  const f = await fixture(false, false, 400);
+  try {
+    const { revision, digest } = await showPolicy(f.repo);
+    const attempt = async (patch: Record<string, unknown>) => (await listWorkspaces(f.repo)).some((entry) => entry.metadata?.task === patchTask(digest!, patch));
+    const refused = await setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location: f.options.location, env: f.options.env });
+    assert.equal(refused.phase, "refused", JSON.stringify(refused));
+    assert.equal(await attempt({ spares: 2 }), false);
+    // A runner that cannot be reached submits nothing either.
+    const unreachable = await setPolicy(f.repo, { base: revision, patch: { spares: 3 }, location: "http://127.0.0.1:9", env: f.options.env });
+    assert.equal(unreachable.phase, "refused", JSON.stringify(unreachable));
+    assert.equal(await attempt({ spares: 3 }), false);
+  } finally { await f.dispose(); }
 });
 
 test("policy set after a lost submission response reconciles the same request instead of submitting twice", async () => {

@@ -79,11 +79,18 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   with the base's digest, and the runner refuses it as stale too if the policy moved before it
   reached the queue. The change is made in a workspace of its own on the integration tip (never
   the primary checkout) and lands through the normal queue. It prints one JSON object whose
-  `phase` is `refused` (nothing submitted, exit 2), `already-applied`, `landed`, `rejected` (the
-  runner refused or failed it before integration; nothing changed), `failed-after-integration`
-  (integrated, but finalization or publication has not finished; the runner retries it) or
-  `uncertain` (rerun the same command: it reattaches to the attempt it made and never submits
-  twice).
+  `phase` is `refused` (nothing submitted, exit 2: this includes a usage error, a malformed
+  `--patch`, no runner location, a failed fetch, a stale base, a runner that cannot be reached
+  and one that refuses the submission; a fresh attempt's workspace is then removed), `already-applied`, `landed`,
+  `rejected` (the runner refused or failed it before integration; nothing changed),
+  `failed-after-integration` (integrated, but finalization or publication has not finished; the
+  runner retries it) or `uncertain` (rerun the same command: it reattaches to the attempt it made
+  and never submits twice). A rerun never submits an attempt again: it follows the attempt's
+  operation, reports its last outcome, and reports `already-applied` once the policy is on the
+  integration branch. Success exits 0, `refused` exits 2, and every other outcome exits 1.
+- **Runner version.** The fast path below and the runner's stale refusal need a runner on the
+  release that adds `policy set`. An older runner ignores the `Policy-Base:` trailer and gates a
+  settings landing with the full checks; only the client's own stale check then applies.
 - **The settings fast path.** The runner gates a landing with the integration branch's current
   checks, not the candidate's, so a changed check would otherwise first run on the next
   landing. When a rebased candidate's only difference from its integration base is
@@ -104,7 +111,10 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   `declared`, `machineLimit` and `effective` spares. A spare limit only lowers the declared count
   and the next refill applies it; `--repo` defaults to the current repository's integration
   checkout. Changing the runner location does not move or cancel operations already submitted:
-  `land` keeps following each on the runner that accepted it, and `runner log`, `outcome`,
+  from an assigned workspace, `land` keeps following each on the runner that may hold it,
+  including one that failed at or after integration while its publication is unresolved (a
+  submission the runner refused is not pinned, so a retry goes to the current location), and
+  from the primary checkout (`land --direct`) it uses the current location. `runner log`, `outcome`,
   `handoff`, `source` and `artifact` read an operation this machine submitted from that runner.
 
 ### Workspace teardown
@@ -818,7 +828,9 @@ whose publication was unknown is reported `published` once any later reconciliat
 confirms it. Each command it ran is reported through `recordAttemptRun` as a named run
 (`passed`, `failed`, `incomplete` or `cancelled`, with its failing test names), attached to
 the outcome fact and sent only after it; a pass with no recorded verified candidate is
-reported `incomplete` with that gap. Repair linkage comes only from a repair the author
+reported `incomplete` with that gap. A settings landing that skipped its checks reports no
+`verifiedRevision` on any attempt receipt, and one `incomplete` run (`verification-skipped`)
+whose known gap names the changed fields and the reason. Repair linkage comes only from a repair the author
 proposed, never from queue-prefix ancestry. A declared chore reports only its
 publication, through `recordChoreLanding`. Every receipt repeats the admitted source tuple:
 the author's commit as `candidateRevision`, the Spec, Tickets, body revision and hash,

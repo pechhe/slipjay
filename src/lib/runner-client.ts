@@ -635,9 +635,24 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
  * `session` and `tickets` shape the handoff a Build-tracked landing writes itself when none is supplied
  * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`) and further Tickets it completes.
  */
-export async function landThroughRunner(cwd: string, options: { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
-  location: string; env?: NodeJS.ProcessEnv;
-  onLine?(line: string): void; onStage?(stage: string): void; signal?: AbortSignal }): Promise<{ ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult }> {
+type LandOptions = { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
+  location: string; env?: NodeJS.ProcessEnv; resubmitAfterOutcome?: boolean;
+  onLine?(line: string): void; onStage?(stage: string): void; signal?: AbortSignal };
+type LandResult = { ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult };
+
+/** A landing that failed before it submitted anything or followed an operation: the runner holds nothing of it. */
+export class LandingNotSubmitted extends Error {
+  constructor(cause: unknown) { super(cause instanceof Error ? cause.message : String(cause), { cause }); }
+}
+
+export async function landThroughRunner(cwd: string, options: LandOptions): Promise<LandResult> {
+  const progress = { engaged: false };
+  try { return await submitAndFollow(cwd, options, progress); }
+  catch (error) { throw progress.engaged || error instanceof LandingNotSubmitted ? error : new LandingNotSubmitted(error); }
+}
+
+/** `engaged` turns true once the runner may hold this landing: it follows an operation, or sends the submission. */
+async function submitAndFollow(cwd: string, options: LandOptions, progress: { engaged: boolean }): Promise<LandResult> {
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
   const { context, target: preview } = await landingPreview(cwd, { allowDefaultWorkspace: options.direct });
@@ -693,7 +708,10 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       const running = operation ? undefined : existing.find((op) => op.status === "running");
       older = running !== undefined;
       if (running) operation = running;
+      // A caller that must never submit a commit twice reports this commit's last outcome instead.
+      if (!operation && options.resubmitAfterOutcome === false && priorAttempt?.result && priorAttempt.commitId === target.commitId) operation = priorAttempt;
     }
+    if (operation) progress.engaged = true;
     if (!operation) {
       const repair = await workspaceRepairProof(context, location, repo, target.changeId);
       if (repair || priorAttempt?.kind === "landing" && priorAttempt.outcome) {
@@ -712,7 +730,6 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
           tickets: options.tickets ?? [], sessionId: options.session ?? env[BUILD_SESSION_ENV], read: (action, input) => readBuildThroughRunner(action, input, env) })));
       }
       requestId = await landingRequestIdentity(context, location, repo, target.commitId);
-      await landingRunner(context, target.commitId, location);
       const bookmark = candidateBookmark(target.changeId);
       try { await jj(cwd, ["git", "fetch", "--remote", remote, "--branch", bookmark]); }
       catch (error) { if (!/nothing|no matching|does not exist|not found/i.test(String(error))) throw error; }
@@ -729,6 +746,10 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
       // Forgotten through the colocated integration checkout, which also drops the Git ref:
       // forgotten from a secondary workspace, the next command there would re-import it.
       await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", bookmark]);
+      // Pinned only once the runner may hold the submission, so a lost response is followed where it went;
+      // a known refusal submitted nothing and releases the pin, so a retry goes to the current location.
+      await landingRunner(context, target.commitId, location);
+      progress.engaged = true;
       let response: Response;
       try {
         response = await request(baseUrl, token, "/v1/operations", { method: "POST", signal: options.signal,
@@ -739,7 +760,10 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
             ...(env.CODEX_THREAD_ID ? { harness: "codex", sessionId: env.CODEX_THREAD_ID } : env.CLAUDE_SESSION_ID ? { harness: "claude", sessionId: env.CLAUDE_SESSION_ID } : {}),
           } }) });
       } catch (error) {
-        if (error instanceof RunnerRequestRefused) throw error;
+        if (error instanceof RunnerRequestRefused) {
+          await landingRunner(context, target.commitId, null).catch(() => undefined);
+          throw new LandingNotSubmitted(error);
+        }
         throw new Error(`Landing submission outcome is unknown${requestId ? ` (request ${requestId})` : ""}; run slipjay land again from this workspace to reconcile. Do not assume it failed.`);
       }
       let submitted: { operation: Operation; reattached?: boolean; requestId?: string; code?: string };
@@ -764,7 +788,9 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.
     if (operation.result) options.onStage?.("housekeeping");
-    if (operation.result) await landingRunner(context, target.commitId, null).catch(() => undefined);
+    // A failure at or after integration leaves publication unresolved: later attempts still follow that runner.
+    const unresolved = operation.result?.type === "failed" && (operation.result.stage === "finalizing" || operation.result.stage === "publishing");
+    if (operation.result && !unresolved) await landingRunner(context, target.commitId, null).catch(() => undefined);
     // A fetch of every bookmark while the candidate was on the remote imports it untracked,
     // which makes the submitted commit immutable: the author could neither fix a failure
     // nor abandon a landed commit, and the landed rewrite would show as divergent.

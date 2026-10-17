@@ -373,6 +373,16 @@ async function runPolicy(args: string[]): Promise<number> {
     return 0;
   }
   if (action !== "set") throw new Error(POLICY_USAGE);
+  // Every failure before submission is a refusal the caller can tell apart from a landing outcome.
+  let result: Awaited<ReturnType<typeof setPolicy>>;
+  try { result = await runPolicySet(flags); }
+  catch (error) { result = { ok: false, phase: "refused", reason: error instanceof Error ? error.message : String(error) }; }
+  console.log(JSON.stringify(result, null, 2));
+  return result.ok ? 0 : result.phase === "refused" ? 2 : 1;
+}
+
+/** `policy set`: parse the flags and land the patch; throws only before anything is submitted. */
+async function runPolicySet(flags: string[]): Promise<Awaited<ReturnType<typeof setPolicy>>> {
   let base: string | undefined;
   let patch: Record<string, unknown> = {};
   const json = (flag: string, value: string) => { try { return JSON.parse(value) as unknown; } catch { throw new Error(`${flag} must be JSON`); } };
@@ -396,11 +406,8 @@ async function runPolicy(args: string[]): Promise<number> {
   const following = new AbortController();
   const stopFollowing = () => following.abort(new Error("Stopped following; rerun the same slipjay policy set to reattach"));
   process.once("SIGINT", stopFollowing);
-  let result: Awaited<ReturnType<typeof setPolicy>>;
-  try { result = await setPolicy(process.cwd(), { base, patch, location, signal: following.signal, onLine: (line) => console.error(line) }); }
+  try { return await setPolicy(process.cwd(), { base, patch, location, signal: following.signal, onLine: (line) => console.error(line) }); }
   finally { process.removeListener("SIGINT", stopFollowing); }
-  console.log(JSON.stringify(result, null, 2));
-  return result.ok ? 0 : result.phase === "refused" ? 2 : 1;
 }
 
 const [command, ...rest] = process.argv.slice(2);

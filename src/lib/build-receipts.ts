@@ -117,7 +117,7 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
     receipts.push(attempt(terminal, { event: "published", baseRevision: terminal.event.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: terminal.event.commitId, failure: null }));
   else if (terminal) {
     receipts.push(attempt(terminal, { event: "failed", baseRevision: verification(events, terminal.seq)?.base ?? null,
-      verifiedRevision: verification(events, terminal.seq)?.candidate ?? null, publishedRevision: null, failure: failureOf(operation, events, terminal) }));
+      verifiedRevision: skippedVerification(events, terminal.seq) ? null : verification(events, terminal.seq)?.candidate ?? null, publishedRevision: null, failure: failureOf(operation, events, terminal) }));
     // An integration whose publication was unknown when this failed is reported published once it is confirmed.
     const late = confirmedLate(operation, events, terminal, recoveries);
     if (late) receipts.push(attempt(late.confirmed, { event: "published", baseRevision: late.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: late.commitId, failure: null }));
@@ -139,12 +139,27 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
       checks: (run.failingTests ?? []).slice(0, 200).map((name) => ({ name: name.slice(0, 1000), outcome: "failed" as const })),
       knownGaps: reported === "incomplete" && !gaps.length ? ["The command passed but its attempt's verified candidate is unknown"] : gaps, usageIds: [] } });
   }
+  // A settings landing ran no checks: Build learns why from one run that is not evidence.
+  const skipped = terminal ? skippedVerification(events, terminal.seq) : undefined;
+  if (terminal && skipped?.event.type === "verification_skipped")
+    receipts.push({ operationId: operation.id, key: skipped.seq, occurredAt: skipped.at, after: terminal.seq, action: "recordAttemptRun", input: {
+      repository: operation.repo, operationId: operation.id, sequence: terminal.seq, clientRef: "verification-skipped", startedAt: skipped.at,
+      endedAt: skipped.at, outcome: "incomplete", command: null, checks: [], usageIds: [],
+      knownGaps: [`Landing checks skipped for a settings landing (${skipped.event.fields.join(", ")}): ${skipped.event.reason}`.slice(0, 2000)] } });
   return receipts;
 }
 
+/** The skip of the last verification before `before`, when a settings landing skipped its checks. */
+function skippedVerification(events: readonly StoredEvent[], before: number): StoredEvent | undefined {
+  const started = events.findLast((entry) => entry.seq < before && entry.event.type === "verification_base");
+  return started && events.find((entry) => entry.seq > started.seq && entry.seq < before && entry.event.type === "verification_skipped");
+}
+
+/** The candidate the last verification before `before` passed on; none when a settings landing skipped its checks. */
 const verifiedBefore = (events: readonly StoredEvent[], before: number): string | null => {
-  const row = events.findLast((entry) => entry.seq < before && entry.event.type === "verification_passed")?.event;
-  return row?.type === "verification_passed" ? row.candidate : null;
+  const passed = events.findLast((entry) => entry.seq < before && entry.event.type === "verification_passed");
+  if (passed?.event.type !== "verification_passed") return null;
+  return skippedVerification(events, passed.seq + 1) ? null : passed.event.candidate;
 };
 /** The base and candidate the last verification before `before` ran on; a depth-two prepared attempt names both. */
 function verification(events: readonly StoredEvent[], before: number): { base: string; candidate?: string } | undefined {

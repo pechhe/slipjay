@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { patchTask, setPolicy, showPolicy } from "../src/lib/policy-command.ts";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
-import { controlRunner, readRunLog } from "../src/lib/runner-client.ts";
+import { controlRunner, landThroughRunner, readRunLog } from "../src/lib/runner-client.ts";
 import { openOperationLog } from "../src/lib/runner-log.ts";
 import { jj, project, withTestRunner } from "./support/workspace-project.ts";
 
@@ -102,6 +104,45 @@ test("a rerun after an attempt that failed before writing its patch prepares it 
       assert.equal(result.phase, "landed", JSON.stringify(result));
       assert.ok(!lines.some((line) => line.startsWith("Reattaching")));
       assert.equal(JSON.parse(f.remoteFile("slipjay.json")).spares, 2);
+    });
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("policy set lands an added check without running any check, and the next landing runs it", async () => {
+  const f = await project({ verify: slowGate });
+  try {
+    await withTestRunner(f, async ({ location, env }) => {
+      const { revision } = await showPolicy(f.repo);
+      const added = { executable: "node", args: ["-e", "console.log('added check ran')"] };
+      const started = Date.now();
+      const result = await setPolicy(f.repo, { base: revision, patch: { requiredLandingVerification: [added] }, location, env });
+      assert.equal(result.phase, "landed", JSON.stringify(result));
+      if (result.phase !== "landed") return;
+      assert.ok(Date.now() - started < 30_000, `took ${Date.now() - started} ms`);
+      assert.doesNotMatch(await readRunLog(location, result.operationId, env), /added check ran|setTimeout/);
+      // An ordinary landing after it is gated by the new check.
+      const next = (await createWorkspace("ordinary change", f.repo)).workspacePath;
+      await writeFile(join(next, "ordinary.txt"), "ordinary\n");
+      jj(next, ["describe", "-m", "Add an ordinary file"]);
+      const landed = await landThroughRunner(next, { location, env });
+      assert.equal(landed.operation.result?.type, "landed", JSON.stringify(landed.operation.result));
+      assert.match(await readRunLog(location, landed.operation.id, env), /added check ran|console\.log/);
+    });
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("a rerun once the patch is on the integration branch reports it applied and releases the earlier attempt", async () => {
+  const f = await project({ verify: slowGate });
+  try {
+    await withTestRunner(f, async ({ location, env }) => {
+      const view = await showPolicy(f.repo);
+      const patch = { spares: 2 };
+      assert.equal((await setPolicy(f.repo, { base: view.revision, patch, location, env })).phase, "landed");
+      // An attempt left behind, as by a run that stopped after its landing published.
+      const leftover = (await createWorkspace(patchTask(view.digest!, patch), f.repo)).workspacePath;
+      const rerun = await setPolicy(f.repo, { base: view.revision, patch, location, env });
+      assert.equal(rerun.phase, "already-applied", JSON.stringify(rerun));
+      await vi.waitFor(() => assert.equal(existsSync(leftover), false), { timeout: 30_000, interval: 50 });
     });
   } finally { await f.dispose(); }
 }, 180_000);

@@ -54,6 +54,37 @@ test("held, unknown publication and its later confirmation keep one source tuple
   log.close();
 });
 
+test("a settings landing that skipped its checks is published without a verified revision", () => {
+  const log = openOperationLog(":memory:");
+  const base = "b".repeat(40), candidate = "c".repeat(40);
+  const id = operation(log, { admission: record() }, [
+    { type: "verification_base", base, candidate },
+    { type: "verification_skipped", base, candidate, fields: ["spares"], reason: "settings landing" },
+    { type: "verification_passed", base, candidate },
+    { type: "landed", base, commitId: "d".repeat(40), branch: "main", remote: "origin" },
+  ]);
+  const receipts = owed(log, id);
+  assert.deepEqual(attempts(receipts).map((fact) => [fact.event, fact.verifiedRevision, fact.publishedRevision]), [["published", null, "d".repeat(40)]]);
+  // Build learns why from a run that is not evidence.
+  const [skip] = runs(receipts);
+  assert.equal(skip?.outcome, "incomplete");
+  assert.match(skip?.knownGaps[0] ?? "", /skipped for a settings landing \(spares\): settings landing/);
+
+  // Held, then failed at publication: no receipt claims the skipped candidate was verified.
+  const held = operation(log, { admission: record() }, [
+    { type: "verification_base", base, candidate },
+    { type: "verification_skipped", base, candidate, fields: ["spares"], reason: "settings landing" },
+    { type: "verification_passed", base, candidate },
+    { type: "integrated", base, commitId: "d".repeat(40) },
+    { type: "integration_held", repo: "owner/repo", commitId: "d".repeat(40), reason: "push refused" },
+    { type: "failed", stage: "publishing", reason: "Integration publication failed" },
+  ]);
+  const failed = owed(log, held);
+  assert.deepEqual(attempts(failed).map((fact) => [fact.event, fact.verifiedRevision]), [["held", null], ["failed", null]]);
+  assert.equal(runs(failed).length, 1);
+  log.close();
+});
+
 test("a confirmation counts only in the integration's own repository, and only once it follows the failure", () => {
   const log = openOperationLog(":memory:");
   const unknown: OperationEvent[] = [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
