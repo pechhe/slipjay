@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.26.0
+
 - **One policy for retirement on every host:** `generatedPaths` and `evidencePaths` are now read
   from the policy committed on the integration branch, like the spare allowance, instead of the
   primary checkout's working files, which move only when that host lands. Releasing an allocation

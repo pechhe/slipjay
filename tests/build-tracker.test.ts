@@ -233,9 +233,10 @@ test("a retried Build landing replays the handoff it first wrote, and following 
       // Build moves on before the retry: regenerated evidence would no longer match what was submitted.
       spec.bodyRevision = 5;
       binds[spec.id] = [{ generation: 3, endedAt: "2026-10-17T00:00:00Z" }, { generation: 4, endedAt: null }];
+      // Counted from before Build admits again: the runner's own drain may resend the admission before the client does.
+      const retrying = fake.requests.length;
       fake.state.admits = true;
       await controlRunner(location, "pause", env);
-      const retrying = fake.requests.length;
       const following = new AbortController();
       const retried = landThroughRunner(workspace.workspacePath, { location, env, signal: following.signal, onLine: () => {} }).catch(() => undefined);
       await until(() => fake.requests.slice(retrying).some((request) => request.action === "admitAttempt"), "the retried admission");
