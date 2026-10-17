@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { repositoryProjectCode, run, workspaceContext } from "./workspace-jj.ts";
@@ -66,6 +66,11 @@ export interface SpareAllowance {
   declared: number;
   /** This machine's limit for the repository, or null when it sets none. */
   machineLimit: number | null;
+  /**
+   * Where `declared` was read: the policy committed on the integration bookmark at this commit,
+   * never the primary checkout's working files, so an unlanded or stale local edit cannot change it.
+   */
+  source: { integrationBranch: string; commitId: string | null };
 }
 
 /**
@@ -76,7 +81,8 @@ export interface SpareAllowance {
 export async function spareAllowance(context: WorkspaceContext): Promise<SpareAllowance> {
   const declared = context.configuration.spares ?? DEFAULT_SPARES;
   const machineLimit = machineSpareLimit(context.integration.root);
-  return { spares: machineLimit === null ? declared : Math.min(declared, machineLimit), declared, machineLimit };
+  return { spares: machineLimit === null ? declared : Math.min(declared, machineLimit), declared, machineLimit,
+    source: { integrationBranch: context.integrationBranch, commitId: context.policyCommitId ?? null } };
 }
 
 /** Whether a listed workspace is a spare ready to claim. */
@@ -88,13 +94,28 @@ export async function readySpares(cwd: string): Promise<WorkspaceEntry[]> {
   return (await listWorkspaces(cwd)).filter(isReadySpare);
 }
 
-/** Every spare registered for the repository, ready, in progress or abandoned, from its metadata records. */
+/**
+ * Every spare registered for the repository, ready, in progress or abandoned, from its metadata
+ * records: those naming its integration checkout by real path (so a symlinked or differently
+ * spelled path still matches), and, when a record names a checkout path that no longer exists,
+ * any that is still one of its JJ workspaces, so spares recorded under an old checkout path still
+ * count against the allowance and can be retired.
+ */
 async function spareRecords(integrationRoot: string): Promise<SpareRecord[]> {
   const records: SpareRecord[] = [];
+  const root = await realpath(integrationRoot).catch(() => resolve(integrationRoot));
+  let members: Set<string> | undefined;
   for (const file of await readdir(metadataHome()).catch(() => [])) {
     if (!file.endsWith(".json")) continue;
     const metadata = await readJsonOptional(join(metadataHome(), file)) as SpareRecord | null;
-    if (metadata?.spare === true && typeof metadata.integrationRoot === "string" && resolve(metadata.integrationRoot) === resolve(integrationRoot)) records.push(metadata);
+    if (metadata?.spare !== true || typeof metadata.integrationRoot !== "string") continue;
+    const recorded = await realpath(metadata.integrationRoot).catch(() => null);
+    if (recorded === root) records.push(metadata);
+    else if (recorded === null) {
+      // Rare, so JJ is read only then.
+      members ??= new Set((await listWorkspaces(integrationRoot, { readOnly: true })).map((workspace) => workspace.name));
+      if (members.has(metadata.workspaceName)) records.push(metadata);
+    }
   }
   return records;
 }

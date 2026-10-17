@@ -2,12 +2,14 @@ import { jj, project } from "./support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readlinkSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance, startSpareRefill } from "../src/lib/slipjay.ts";
+import { createWorkspace, provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance, startSpareRefill, sweepDisposableWorkspaces } from "../src/lib/slipjay.ts";
+import { EMPTY_IDLE_MS } from "../src/lib/workspace-sweep.ts";
 import { workspaceContext } from "../src/lib/workspace-jj.ts";
 import { machineConfigPath } from "../src/lib/workspace-paths.ts";
+import { setMachineSpareLimit } from "../src/lib/machine-config.ts";
 import { listWorkspaces } from "../src/lib/workspace-state.ts";
 import { metadataPath, workspaceMetadata } from "../src/lib/workspace-state.ts";
 import { installInputFingerprint } from "../src/lib/install-inputs.ts";
@@ -566,6 +568,9 @@ async function withMachineSpares<T>(spares: Record<string, unknown>, body: () =>
   try { return await body(); } finally { await rm(machineConfigPath(), { force: true }); }
 }
 
+/** An allowance without its source, for tests about counts. */
+const counts = ({ source: _source, ...allowance }: Awaited<ReturnType<typeof spareAllowance>>) => allowance;
+
 const refill = async (repo: string) => {
   const outcomes: object[] = [];
   await refillPool(repo, (outcome) => outcomes.push(outcome));
@@ -581,7 +586,7 @@ test("this machine's limit lowers a repository's declared spares, never raises t
       assert.equal((await readySpares(f.repo)).length, 3, "the pool stops at the machine's limit");
     });
     await withMachineSpares({ [f.repo]: 2 }, async () => {
-      assert.deepEqual(await spareAllowance(context), { spares: 2, declared: 8, machineLimit: 2 });
+      assert.deepEqual(counts(await spareAllowance(context)), { spares: 2, declared: 8, machineLimit: 2 });
       const outcomes = await refill(f.repo);
       assert.equal(outcomes.filter((outcome) => "retired" in outcome).length, 1, "lowering the limit retires the excess spare");
       assert.equal((await readySpares(f.repo)).length, 2);
@@ -592,7 +597,7 @@ test("this machine's limit lowers a repository's declared spares, never raises t
       assert.deepEqual(await provisionSpare(f.repo), { provisioned: false, reason: "pool-disabled" });
     });
     await withMachineSpares({ "/elsewhere/other": 0 }, async () => {
-      assert.deepEqual(await spareAllowance(context), { spares: 8, declared: 8, machineLimit: null }, "another checkout's limit does not apply");
+      assert.deepEqual(counts(await spareAllowance(context)), { spares: 8, declared: 8, machineLimit: null }, "another checkout's limit does not apply");
     });
   } finally {
     await f.dispose();
@@ -601,7 +606,7 @@ test("this machine's limit lowers a repository's declared spares, never raises t
   try {
     const context = (await workspaceContext(g.repo))!;
     await withMachineSpares({ [g.repo]: 3 }, async () => {
-      assert.deepEqual(await spareAllowance(context), { spares: 1, declared: 1, machineLimit: 3 });
+      assert.deepEqual(counts(await spareAllowance(context)), { spares: 1, declared: 1, machineLimit: 3 });
     });
     await withMachineSpares({ [g.repo]: 9 }, async () => {
       await assert.rejects(spareAllowance(context), /spares must be an integer from 0 to 8/);
@@ -728,3 +733,62 @@ test("concurrent claims of stale spares install one at a time, and the later one
     await f.dispose();
   }
 }, 300_000);
+
+test("the allowance comes from the integration bookmark's committed policy, never the checkout's working files", async () => {
+  const f = await bunProject({ spares: 3 });
+  const main = () => jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]).trim();
+  const setSpares = async (spares: number) => {
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+    await writeFile(join(f.repo, "slipjay.json"), JSON.stringify({ ...policy, spares }));
+  };
+  try {
+    await setSpares(1);
+    const allowance = await spareAllowance((await workspaceContext(f.repo))!);
+    assert.deepEqual(allowance, { spares: 3, declared: 3, machineLimit: null, source: { integrationBranch: "main", commitId: main() } },
+      "an uncommitted edit in the primary checkout does not change the allowance");
+    await refill(f.repo);
+    assert.equal((await readySpares(f.repo)).length, 3);
+    await setSpares(2);
+    advance(f.repo, "Lower spares");
+    const lowered = await spareAllowance((await workspaceContext(f.repo))!);
+    assert.deepEqual(lowered.source, { integrationBranch: "main", commitId: main() }, "the source names the commit read");
+    assert.equal(lowered.declared, 2);
+    await refill(f.repo);
+    assert.equal((await readySpares(f.repo)).length, 2, "the pool never exceeds the allowance");
+  } finally {
+    await f.dispose();
+  }
+}, 240_000);
+
+test("retiring assigned workspaces leaves the pool at its allowance, and old checkout paths still count", async () => {
+  const f = await bunProject({ spares: 2 });
+  try {
+    await refill(f.repo);
+    const claimed = await createWorkspace("task", f.repo);
+    assert.equal(claimed.pooled, true);
+    await refill(f.repo);
+    assert.equal((await readySpares(f.repo)).length, 2);
+    const swept = await sweepDisposableWorkspaces(f.repo, { now: Date.now() + EMPTY_IDLE_MS + 60_000, issueClosed: () => null });
+    assert.deepEqual(swept.removed, [claimed.current.name], "the idle assigned workspace retires");
+    assert.equal((await readySpares(f.repo)).length, 2, "retiring it takes no spare");
+
+    // A limit keyed by another spelling of the checkout's path, such as a symlink, still applies.
+    const alias = join(f.root, "alias");
+    await symlink(f.repo, alias);
+    await withMachineSpares({ [alias]: 1 }, async () => {
+      assert.equal((await spareAllowance((await workspaceContext(f.repo))!)).machineLimit, 1);
+      // Setting or clearing the limit replaces every spelling of the checkout's path.
+      await setMachineSpareLimit(f.repo, 0);
+      assert.deepEqual(JSON.parse(await readFile(machineConfigPath(), "utf8")).spares, { [await realpath(f.repo)]: 0 });
+      assert.equal((await spareAllowance((await workspaceContext(f.repo))!)).spares, 0);
+      await setMachineSpareLimit(alias, null);
+      assert.equal((await spareAllowance((await workspaceContext(f.repo))!)).machineLimit, null);
+    });
+    // A spare recorded under the checkout's old path is still one of this repository's.
+    const [spare] = await readySpares(f.repo);
+    await writeFile(metadataPath(spare!.name), JSON.stringify({ ...await workspaceMetadata(spare!.name), integrationRoot: join(f.root, "old-checkout") }));
+    assert.deepEqual(await provisionSpare(f.repo), { provisioned: false, reason: "spare-exists" }, "the moved spare counts against the allowance");
+  } finally {
+    await f.dispose();
+  }
+}, 240_000);

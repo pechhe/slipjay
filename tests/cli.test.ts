@@ -260,12 +260,13 @@ test("config and policy show report each setting with its source, and config set
     assert.equal((await slipjay(f.repo, ["config", "set", "runner", "ssh://peach-box"])).code, 0);
     const set = await slipjay(f.repo, ["config", "set", "spares", "2"]);
     assert.equal(set.code, 0, set.stderr);
-    assert.deepEqual(JSON.parse(set.stdout), { repository: await realpath(f.repo), declared: 4, machineLimit: 2, effective: 2 });
+    const source = { integrationBranch: "main", commitId: jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]).trim() };
+    assert.deepEqual(JSON.parse(set.stdout), { repository: await realpath(f.repo), declared: 4, machineLimit: 2, effective: 2, source });
     const shown = await slipjay(f.repo, ["config", "--json"]);
     assert.equal(shown.code, 0, shown.stderr);
     const config = JSON.parse(shown.stdout);
     assert.deepEqual(config.runner, { value: "ssh://peach-box", source: "file", file: "ssh://peach-box", overriddenByEnvironment: false });
-    assert.deepEqual(config.spares, [{ repository: await realpath(f.repo), declared: 4, machineLimit: 2, effective: 2 }]);
+    assert.deepEqual(config.spares, [{ repository: await realpath(f.repo), declared: 4, machineLimit: 2, effective: 2, source }]);
     assert.equal((await slipjay(f.repo, ["config", "unset", "spares"])).code, 0);
     assert.equal(JSON.parse((await slipjay(f.repo, ["config", "--json"])).stdout).spares[0].effective, 4);
     const policy = await slipjay(f.repo, ["policy", "show", "--json"]);

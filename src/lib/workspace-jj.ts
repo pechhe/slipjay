@@ -31,6 +31,8 @@ export interface WorkspaceContext {
   integrationBranch: string;
   /** The policy committed on the integration bookmark (D3), or the undeclared defaults. */
   configuration: Partial<ExecutionPolicy> & typeof UNDECLARED_POLICY;
+  /** The integration bookmark commit `configuration` was read from; absent when the caller named the branch instead. */
+  policyCommitId?: string;
 }
 
 export type RevisionFacts = { changeId: string; commitId: string; empty: boolean; conflict: boolean; description: string };
@@ -201,8 +203,8 @@ export async function workspaceContext(cwd: string = process.cwd(), integratedBr
   if (!integration?.root) throw new Error("The canonical jj workspace named 'default' is missing or unavailable");
   if (integratedBranch) return { current, integration, integrationBranch: integratedBranch, configuration: { ...UNDECLARED_POLICY, integrationBranch: integratedBranch } };
   // D3: the policy committed on the integration bookmark, not the primary checkout's working files.
-  const { integrationBranch, policy } = await readIntegrationPolicy(cwd, { hintRoot: integration.root, ...options });
-  return { current, integration, integrationBranch, configuration: policy ?? UNDECLARED_POLICY };
+  const { integrationBranch, commitId, policy } = await readIntegrationPolicy(cwd, { hintRoot: integration.root, ...options });
+  return { current, integration, integrationBranch, configuration: policy ?? UNDECLARED_POLICY, policyCommitId: commitId };
 }
 
 export async function revisionExists(cwd: string, revision: string): Promise<boolean> {

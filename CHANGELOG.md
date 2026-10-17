@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The spare allowance names its source:** `slipjay status` and `slipjay config` report, with the
+  declared, machine and effective counts, the integration branch and commit whose committed
+  `slipjay.json` declared them, so Mac and VPS can be compared and a stale or unlanded local edit is
+  seen not to apply. A machine limit keyed by a symlinked or differently spelled checkout path now
+  applies, and a spare recorded under a checkout path that no longer exists still counts against the
+  allowance (and is retired beyond it) while it is one of the repository's workspaces (#83).
 - **Landings reach a primary checkout with local edits:** after a landing, the primary checkout
   now moves onto the new integration even when it holds uncommitted edits, which are rebased along
   unchanged (`primaryCheckout: { action: "moved", reason: "carried-edits" }`). Edits that would

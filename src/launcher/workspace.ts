@@ -35,7 +35,7 @@ import {
   cutoverPending,
 } from "../lib/slipjay.ts";
 import { legacyStateHome, machineConfigPath } from "../lib/workspace-paths.ts";
-import { machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "../lib/machine-config.ts";
+import { checkoutIdentity, machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "../lib/machine-config.ts";
 import { setPolicy, showPolicy } from "../lib/policy-command.ts";
 import { retiredFieldsWarning } from "../lib/execution-policy.ts";
 import { workspaceMetadata } from "../lib/workspace-state.ts";
@@ -316,16 +316,19 @@ async function runConfig(args: string[]): Promise<number> {
     const config = readMachineConfig();
     const runner = runnerSetting(process.env, config);
     const context = await workspaceContext().catch(() => null);
-    const roots = [...new Set([...context ? [resolve(context.integration.root)] : [], ...Object.keys(machineSpareLimits(config)).map((path) => resolve(path))])];
+    const roots = [...new Set([...context ? [checkoutIdentity(context.integration.root)] : [], ...Object.keys(machineSpareLimits(config)).map(checkoutIdentity)])];
     const spares = await Promise.all(roots.map(async (repository) => {
       const repositoryContext = await workspaceContext(repository).catch(() => null);
       const allowance = repositoryContext ? await spareAllowance(repositoryContext) : null;
-      return { repository, declared: allowance?.declared ?? null, machineLimit: machineSpareLimit(repository, config), effective: allowance?.spares ?? null };
+      return { repository, declared: allowance?.declared ?? null, machineLimit: machineSpareLimit(repository, config), effective: allowance?.spares ?? null, source: allowance?.source ?? null };
     }));
     if (action === "--json") console.log(JSON.stringify({ path: machineConfigPath(), runner, spares }, null, 2));
     else {
       console.log(`runner: ${runner.value ?? "(none)"} (${runner.source === "environment" ? `from SLIPJAY_RUNNER${runner.overriddenByEnvironment ? `, overriding ${runner.file}` : ""}` : runner.source === "file" ? machineConfigPath() : "unset"})`);
-      for (const entry of spares) console.log(`spares: ${entry.repository}: ${entry.effective ?? "?"} (declared ${entry.declared ?? "?"}, machine limit ${entry.machineLimit ?? "none"})`);
+      for (const entry of spares) {
+        const declaredAt = entry.source ? ` on ${entry.source.integrationBranch}${entry.source.commitId ? ` at ${entry.source.commitId.slice(0, 12)}` : ""}` : "";
+        console.log(`spares: ${entry.repository}: ${entry.effective ?? "?"} (declared ${entry.declared ?? "?"}${declaredAt}, machine limit ${entry.machineLimit ?? "none"})`);
+      }
     }
     return 0;
   }
@@ -348,7 +351,7 @@ async function runConfig(args: string[]): Promise<number> {
     await setMachineSpareLimit(root, count);
     const context = await workspaceContext(root);
     const allowance = context ? await spareAllowance(context) : null;
-    console.log(JSON.stringify({ repository: root, declared: allowance?.declared ?? null, machineLimit: allowance?.machineLimit ?? null, effective: allowance?.spares ?? null }));
+    console.log(JSON.stringify({ repository: root, declared: allowance?.declared ?? null, machineLimit: allowance?.machineLimit ?? null, effective: allowance?.spares ?? null, source: allowance?.source ?? null }));
     return 0;
   }
   throw new Error(CONFIG_USAGE);

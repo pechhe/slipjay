@@ -4,7 +4,7 @@
  * reader and writer of that file; every other key in it is kept as written.
  */
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spareCount } from "./execution-policy.ts";
 import { RUNNER_LOCATION_ENV } from "./runner-contract.ts";
@@ -42,9 +42,18 @@ export function machineSpareLimits(config: Record<string, unknown> = readMachine
   return Object.fromEntries(Object.entries(limits).map(([path, count]) => [path, machineCount(count)]));
 }
 
+/**
+ * The identity a spare limit's checkout path is matched by: its real path, so a limit keyed by a
+ * symlinked or differently spelled path applies, and is replaced or cleared, as the checkout's own.
+ */
+export function checkoutIdentity(path: string): string {
+  try { return realpathSync(path); } catch { return resolve(path); }
+}
+
 /** This machine's limit for the repository whose integration checkout is `integrationRoot`, or null when it sets none. */
 export function machineSpareLimit(integrationRoot: string, config?: Record<string, unknown>): number | null {
-  const found = Object.entries(machineSpareLimits(config)).find(([path]) => resolve(path) === resolve(integrationRoot));
+  const root = checkoutIdentity(integrationRoot);
+  const found = Object.entries(machineSpareLimits(config)).find(([path]) => checkoutIdentity(path) === root);
   return found ? found[1] : null;
 }
 
@@ -90,9 +99,10 @@ export async function setConfiguredRunner(location: string | null): Promise<void
 /** Record (or with null, clear) this machine's spare limit for a repository; it only ever lowers the declared count. */
 export async function setMachineSpareLimit(integrationRoot: string, count: number | null): Promise<void> {
   if (count !== null) machineCount(count);
-  const root = resolve(integrationRoot);
+  const root = checkoutIdentity(integrationRoot);
   await updateMachineConfig((config) => {
-    const limits = Object.fromEntries(Object.entries(machineSpareLimits(config)).filter(([path]) => resolve(path) !== root));
+    // Every spelling of the checkout is replaced, so no older entry outlives the new limit.
+    const limits = Object.fromEntries(Object.entries(machineSpareLimits(config)).filter(([path]) => checkoutIdentity(path) !== root));
     if (count !== null) limits[root] = count;
     const { spares: _previous, ...rest } = config;
     return Object.keys(limits).length ? { ...rest, spares: limits } : rest;
