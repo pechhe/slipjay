@@ -1,7 +1,8 @@
 import { validSubmissionHandoff, prepareSubmissionHandoff } from "./submission-handoff.ts";
 import type { RepairProof } from "./repair-claim.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
-import { BuildRefusal } from "./tracker.ts";
+import { BuildRefusal, trackerOf } from "./tracker.ts";
+import { BUILD_SESSION_ENV, buildLandingHandoff } from "./build-handoff.ts";
 import type { BuildReadAction } from "./tracker.ts";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
@@ -22,7 +23,7 @@ import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./
 import type { ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 import type { PromotionState } from "./release.ts";
-import type { RevisionFacts, WorkspaceContext } from "./workspace-jj.ts";
+import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "./workspace-jj.ts";
 import { releaseLandedWorkspace } from "./workspace-lifecycle.ts";
 import { metadataPath, readLandingState, statePath, workspaceMetadata } from "./workspace-state.ts";
 import { machineConfigPath, poolRefillLogPath, stateHome } from "./workspace-paths.ts";
@@ -50,10 +51,13 @@ async function updatePendingFacts(context: WorkspaceContext, update: (pending: P
 }
 
 /** Keep ambiguous requests across process restarts; only a known response releases the identity. */
+const landingRequestKey = (location: string, repo: string, commitId: string) =>
+  createHash("sha256").update(JSON.stringify([runnerBinding(location), repo, commitId])).digest("hex");
+
 async function landingRequestIdentity(context: WorkspaceContext, location: string, repo: string, commitId: string, acknowledge?: string): Promise<string | undefined> {
   // Direct/default checkouts have no assigned-workspace metadata; they retain the legacy follower contract.
   if (context.current.name === "default") return undefined;
-  const key = createHash("sha256").update(JSON.stringify([runnerBinding(location), repo, commitId])).digest("hex");
+  const key = landingRequestKey(location, repo, commitId);
   return withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
     const metadata = await workspaceMetadata(context.current.name);
     // A checkout outside workspace storage has nowhere durable to keep it: the legacy follower contract.
@@ -71,6 +75,45 @@ async function landingRequestIdentity(context: WorkspaceContext, location: strin
     pending[key] = id;
     await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, pendingLandingRequests: pending });
     return id;
+  }, { waitMs: 1000 });
+}
+
+/**
+ * The handoff `land` wrote for a candidate, replayed while that submission can still be retried: its request
+ * is unacknowledged, or (`awaitingAdmission`) its operation still awaits Build admission. A handoff regenerated
+ * from Build's current state could differ, and the runner refuses a retry whose evidence changed.
+ * Otherwise Build's current state is read afresh: a refused landing is retried under the lead's new bind.
+ * Each candidate keeps its own, recorded together with its request identity, so a caller racing another
+ * whose request is still unresolved replays it; one that loses the race after it was acknowledged follows
+ * the operation submitted first (the runner refuses its different evidence as `handoff_differs`).
+ */
+async function writtenLandingHandoff(context: WorkspaceContext, key: string, awaitingAdmission: boolean, write: () => Promise<SubmissionHandoff>): Promise<SubmissionHandoff> {
+  // Direct/default checkouts have nowhere durable to keep it; their chore handoff is the same each time.
+  if (context.current.name === "default") return await write();
+  const pendingOf = (metadata: WorkspaceMetadata | null) => ({ ...(metadata?.pendingLandingRequests as Record<string, string> | undefined) });
+  const handoffsOf = (metadata: WorkspaceMetadata | null) => ({ ...(metadata?.landingHandoffs as Record<string, SubmissionHandoff> | undefined) });
+  const replayable = (metadata: WorkspaceMetadata | null) => awaitingAdmission || pendingOf(metadata)[key] ? handoffsOf(metadata)[key] : undefined;
+  const retained = replayable(await workspaceMetadata(context.current.name));
+  if (retained) return retained;
+  const handoff = await write();
+  return withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
+    const metadata = await workspaceMetadata(context.current.name);
+    if (!metadata) return handoff;
+    const raced = replayable(metadata);
+    if (raced) return raced;
+    const pending = pendingOf(metadata);
+    if (!pending[key]) {
+      if (Object.keys(pending).length >= 32) throw new Error("Too many unresolved landing requests; reconcile earlier submissions before submitting more source");
+      pending[key] = randomUUID();
+    }
+    // The newest last. One whose request is unresolved is always kept (those are capped above); of the
+    // acknowledged, which a retry needs only while admission is pending, the newest 32.
+    const handoffs = handoffsOf(metadata);
+    delete handoffs[key];
+    const acknowledged = Object.keys(handoffs).filter((other) => !pending[other]).slice(0, -32);
+    const kept = Object.entries(handoffs).filter(([other]) => !acknowledged.includes(other));
+    await writeWorkspaceJson(metadataPath(context.current.name), { ...metadata, pendingLandingRequests: pending, landingHandoffs: Object.fromEntries([...kept, [key, handoff]]) });
+    return handoff;
   }, { waitMs: 1000 });
 }
 
@@ -524,7 +567,12 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
   } finally { connection.close(); }
 }
 
-export async function landThroughRunner(cwd: string, options: { direct?: boolean; handoff?: SubmissionHandoff; location: string; env?: NodeJS.ProcessEnv;
+/**
+ * `session` and `tickets` shape the handoff a Build-tracked landing writes itself when none is supplied
+ * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`) and further Tickets it completes.
+ */
+export async function landThroughRunner(cwd: string, options: { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
+  location: string; env?: NodeJS.ProcessEnv;
   onLine?(line: string): void; onStage?(stage: string): void; signal?: AbortSignal }): Promise<{ ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult }> {
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
@@ -541,9 +589,14 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
   const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
   const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env)) : preview;
-  if (options.handoff && (!validSubmissionHandoff(options.handoff) || options.handoff.source !== target.commitId))
-    throw new Error("Handoff must contain valid evidence for the exact landing source");
-  const handoff = options.handoff ? prepareSubmissionHandoff(options.handoff, { ...process.env, ...env }) : undefined;
+  const buildTracked = trackerOf(context.configuration) === "build";
+  if ((options.session !== undefined || options.tickets?.length) && (options.handoff || !buildTracked))
+    throw new Error(options.handoff ? "--session and --ticket shape the handoff land writes; with --handoff, put them in that file" : "--session and --ticket apply only in a Build-tracked repository");
+  const prepared = (supplied: SubmissionHandoff) => {
+    if (!validSubmissionHandoff(supplied) || supplied.source !== target.commitId) throw new Error("Handoff must contain valid evidence for the exact landing source");
+    return prepareSubmissionHandoff(supplied, { ...process.env, ...env });
+  };
+  let handoff = options.handoff ? prepared(options.handoff) : undefined;
   const token = await runnerToken(env);
   const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, cwd);
   const { baseUrl, name } = connection;
@@ -555,6 +608,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     let older = false;
     let requestId: string | undefined;
     let priorAttempt: Operation | undefined;
+    let awaitingAdmission = false;
     if (landedChange !== undefined) {
       // Only this workspace's own landed change finishes housekeeping here.
       // Operations come newest first.
@@ -563,6 +617,7 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
     } else {
       const existing = await operationsFor(target.changeId);
       priorAttempt = existing[0];
+      awaitingAdmission = existing.some((op) => op.kind === "landing" && op.admission === "pending" && !op.result && op.commitId === target.commitId);
       // Reattach to this commit's open operation, or to one that landed while nobody followed it.
       // One still awaiting Build admission is resubmitted instead, which retries that admission.
       operation = existing.find((op) => (op.status === "queued" && !(op.kind === "landing" && op.admission === "pending") || op.status === "running") && op.commitId === target.commitId)
@@ -580,6 +635,14 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
         const view = await ownership.json() as { claimed?: boolean; claim?: { claimId: string } };
         if (repair ? view.claim?.claimId !== repair.claimId : view.claimed)
           throw new Error("Repair ownership changed or belongs to another claimant; source was not submitted");
+      }
+      // A Build-tracked landing always tells Build what it is. Written only for a submission, so following
+      // an operation already submitted never depends on the session or on Build answering.
+      if (!handoff && buildTracked) {
+        const issueNumber = (await workspaceMetadata(context.current.name))?.issueNumber;
+        handoff = await writtenLandingHandoff(context, landingRequestKey(options.location, repo, target.commitId), awaitingAdmission, async () => prepared(await buildLandingHandoff({
+          source: target.commitId, description: target.description, issueNumber: typeof issueNumber === "number" ? issueNumber : null,
+          tickets: options.tickets ?? [], sessionId: options.session ?? env[BUILD_SESSION_ENV], read: (action, input) => readBuildThroughRunner(action, input, env) })));
       }
       requestId = await landingRequestIdentity(context, options.location, repo, target.commitId);
       const bookmark = candidateBookmark(target.changeId);
@@ -611,15 +674,21 @@ export async function landThroughRunner(cwd: string, options: { direct?: boolean
         if (error instanceof RunnerRequestRefused) throw error;
         throw new Error(`Landing submission outcome is unknown${requestId ? ` (request ${requestId})` : ""}; run slipjay land again from this workspace to reconcile. Do not assume it failed.`);
       }
-      let submitted: { operation: Operation; reattached?: boolean; requestId?: string };
+      let submitted: { operation: Operation; reattached?: boolean; requestId?: string; code?: string };
       try { submitted = await response.json() as typeof submitted; }
       catch { throw new Error("Landing submission response was unreadable; outcome is unknown. Run slipjay land again from this workspace to reconcile."); }
+      // Another landing of this candidate submitted the handoff it wrote first, from Build as it was then: follow that one.
+      const submittedFirst = submitted.code === "handoff_differs" && !options.handoff
+        ? (await operationsFor(target.changeId)).find((op) => (op.status === "queued" || op.status === "running") && op.commitId === target.commitId) : undefined;
+      if (submittedFirst) submitted = { operation: submittedFirst, reattached: true, requestId };
       if (!submitted.operation?.id) throw new Error("Runner refused landing request reconciliation; keep the unresolved request identity and inspect the candidate before retrying.");
-      if (requestId && response.status !== 409 && submitted.requestId !== requestId)
+      // A 409 with an operation is an older commit of this change, running already.
+      const olderRunning = response.status === 409 && !submittedFirst;
+      if (requestId && !olderRunning && submitted.requestId !== requestId)
         throw new Error("Runner did not acknowledge the persisted request identity; outcome is unknown. Keep this workspace and reconcile with slipjay land before retrying source.");
       operation = submitted.operation;
       reattached = submitted.reattached === true || response.status === 409;
-      older = response.status === 409;
+      older = olderRunning;
     }
     if (!older && requestId) await landingRequestIdentity(context, options.location, repo, target.commitId, requestId);
     await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });

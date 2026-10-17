@@ -41,6 +41,8 @@ import { readFileSync, writeSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 
+const LAND_USAGE = "Usage: slipjay land [--direct] [--handoff <json-file> | [--session <build-session-id>] [--ticket <n>]...]";
+
 /** Disk use of a checkout, for spotting retained workspaces worth reclaiming. */
 function diskUsage(root: string): string {
   try { return execFileSync("du", ["-sh", root], { encoding: "utf8", timeout: 60_000 }).split("\t")[0] ?? "?"; }
@@ -384,7 +386,7 @@ try {
     const flags = [...rest];
     if (handoffIndex >= 0) {
       const path = flags[handoffIndex + 1];
-      if (!path || path.startsWith("--")) throw new Error("Usage: slipjay land [--direct] [--handoff <json-file>]");
+      if (!path || path.startsWith("--")) throw new Error(LAND_USAGE);
       const file = await open(path, "r");
       try {
         // Read one bounded buffer even if the file grows after stat.
@@ -403,7 +405,21 @@ try {
       } finally { await file.close(); }
       flags.splice(handoffIndex, 2);
     }
-    if (flags.some((flag) => flag !== "--direct")) throw new Error("Usage: slipjay land [--direct] [--handoff <json-file>]");
+    let session: string | undefined;
+    const tickets: number[] = [];
+    for (let index = flags.indexOf("--session"); index >= 0; index = flags.indexOf("--session")) {
+      const value = flags[index + 1];
+      if (!value || value.startsWith("--") || session !== undefined) throw new Error(LAND_USAGE);
+      session = value;
+      flags.splice(index, 2);
+    }
+    for (let index = flags.indexOf("--ticket"); index >= 0; index = flags.indexOf("--ticket")) {
+      const value = Number(flags[index + 1]);
+      if (!Number.isInteger(value) || value <= 0) throw new Error(LAND_USAGE);
+      tickets.push(value);
+      flags.splice(index, 2);
+    }
+    if (flags.some((flag) => flag !== "--direct")) throw new Error(LAND_USAGE);
     // --direct lands the primary checkout itself, for a session explicitly working Direct.
     const location = runnerLocation();
     if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
@@ -414,7 +430,7 @@ try {
     process.once("SIGINT", stopFollowing);
     try {
       const runner = await landThroughRunner(process.cwd(), {
-        location, handoff, direct: flags.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
+        location, handoff, session, tickets, direct: flags.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
         onStage: (stage) => timing.stages.push([stage, Date.now()]),
       });
       // stderr, so stdout stays the JSON result.

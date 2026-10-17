@@ -196,7 +196,7 @@ export function createRunnerHandler(input: {
         if (existing?.commitId === body.commitId) {
           const original = input.log.events({ operationId: existing.id }).find((row) => row.event.type === "submitted")?.event;
           if (original?.type === "submitted" && (original.kind === undefined || original.kind === "landing") && original.handoffSha256 !== handoffDigest(body.handoff))
-            return json({ error: "Open candidate already has different handoff evidence" }, 409);
+            return json({ error: "Open candidate already has different handoff evidence", code: "handoff_differs" }, 409);
           if (requestFact) input.log.append(existing.id, requestFact);
           if (awaitingAdmission(existing)) return await admit(existing.id, body);
           return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });

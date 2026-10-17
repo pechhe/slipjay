@@ -14,7 +14,7 @@ export type Tracker = "github" | "build";
 export const trackerOf = (policy: { tracker?: unknown } | null | undefined): Tracker => policy?.tracker === "build" ? "build" : "github";
 
 /** Build's read-only actions the runner forwards; nothing else crosses that seam. */
-export const BUILD_READ_ACTIONS = ["read", "list", "waits"] as const;
+export const BUILD_READ_ACTIONS = ["read", "list", "waits", "binds"] as const;
 export type BuildReadAction = (typeof BUILD_READ_ACTIONS)[number];
 /** Reads Build, throwing a `BuildRefusal` when Build refuses and any other error when it gives no answer. */
 export type BuildReader = (action: BuildReadAction, input: Record<string, unknown>) => Promise<unknown>;
@@ -29,7 +29,7 @@ export class BuildRefusal extends Error {
 }
 
 /** The fields of a Build item SlipJay reads. */
-export type BuildItem = { id: string; number: number; kind: string; status: string; parentId: string | null; title: string };
+export type BuildItem = { id: string; number: number; kind: string; status: string; parentId: string | null; title: string; bodyRevision?: number | null };
 
 const CLOSED_STATUSES = new Set(["landed", "accepted", "dropped", "achieved", "superseded", "imported_closed"]);
 /** Closed: nothing is left to deliver. A `legacy` item, imported closed from GitHub, is closed whatever its status. */

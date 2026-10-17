@@ -1,19 +1,22 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
 import { withIssueTrailer } from "../src/lib/issue-references.ts";
 import { commitIssue, halfBuiltSpecs } from "../src/lib/release-specs.ts";
-import { readBuildThroughRunner } from "../src/lib/runner-client.ts";
+import { controlRunner, landThroughRunner, readBuildThroughRunner } from "../src/lib/runner-client.ts";
 import { createWorkspace } from "../src/lib/slipjay.ts";
+import { metadataPath } from "../src/lib/workspace-state.ts";
 import { buildRoute } from "../src/lib/build-admission.ts";
+import { buildLandingHandoff } from "../src/lib/build-handoff.ts";
 import { BuildRefusal, buildItemClosed, trackerOf, workItemClosed, workItemTitle } from "../src/lib/tracker.ts";
 import type { BuildItem, BuildReader } from "../src/lib/tracker.ts";
-import { landThroughTestRunner, project, withTestRunner } from "./support/workspace-project.ts";
+import { jj, landThroughTestRunner, project, withTestRunner } from "./support/workspace-project.ts";
 
 const item = (fields: Partial<BuildItem> & Pick<BuildItem, "number">): BuildItem =>
   ({ id: `00000000-0000-4000-8000-${String(fields.number).padStart(12, "0")}`, kind: "ticket", status: "ready", parentId: null, title: `Item ${fields.number}`, ...fields });
@@ -31,25 +34,46 @@ function build(items: BuildItem[]): { read: BuildReader; calls: string[] } {
   return { read, calls };
 }
 
-/** A stand-in for Build's runner route on loopback, answering `read` from `items`. */
-async function buildServer(token: string, items: BuildItem[]) {
-  const requests: { action: string; input: unknown }[] = [];
+/**
+ * A stand-in for Build's runner route on loopback: reads from `items` and `binds` (by Spec id), and
+ * accepts the runner's admissions and receipts, recording every request. Clearing `admits` leaves admissions
+ * unanswered; clearing `answers` leaves every request unanswered. A `held` promise delays the next `binds` answer until it settles.
+ */
+async function buildServer(token: string, items: BuildItem[], binds: Record<string, { generation: number; endedAt: string | null }[]> = {}) {
+  const requests: { action: string; input: Record<string, unknown> }[] = [];
+  const state: { admits: boolean; answers: boolean; held?: Promise<void> } = { admits: true, answers: true };
   const server = createServer((request, response) => {
     let text = "";
     request.on("data", (chunk) => { text += chunk; });
-    request.on("end", () => {
+    request.on("end", async () => {
       const reply = (status: number, body: unknown) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(body)); };
       if (request.url !== "/api/build/runner" || request.headers.authorization !== `Bearer ${token}`) return reply(401, { status: "unauthorised", code: "runner_unauthenticated" });
-      const { action, input } = JSON.parse(text) as { action: string; input: { number?: number } };
+      const { action, input } = JSON.parse(text) as { action: string; input: Record<string, unknown> };
       requests.push({ action, input });
-      const found = items.find((entry) => entry.number === input.number);
-      if (action !== "read") return reply(400, { status: "invalid", code: "runner_action_invalid" });
-      // As Build does: an unknown item is its `unavailable` outcome, which the route sends as 503.
-      return found ? reply(200, { status: "succeeded", value: found }) : reply(503, { status: "unavailable", code: "build_item_unavailable" });
+      if (!state.answers || action === "admitAttempt" && !state.admits) return reply(503, { status: "unavailable", code: "hq_build_store_unavailable" });
+      if (action === "read") {
+        const found = items.find((entry) => entry.number === input.number || entry.id === input.itemId);
+        // As Build does: an unknown item is its `unavailable` outcome, which the route sends as 503.
+        return found ? reply(200, { status: "succeeded", value: found }) : reply(503, { status: "unavailable", code: "build_item_unavailable" });
+      }
+      if (action === "binds" && state.held) { const held = state.held; state.held = undefined; await held; }
+      if (action === "binds") return reply(200, { status: "succeeded", value: binds[input.specId as string] ?? [] });
+      if (action === "admitAttempt") return reply(200, { status: "succeeded", value: { admission: { recordedAt: new Date().toISOString() } } });
+      if (["recordAttempt", "recordAttemptRun", "recordChoreLanding"].includes(action)) return reply(200, { status: "succeeded", value: null });
+      return reply(400, { status: "invalid", code: "runner_action_invalid" });
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  return { origin: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, requests, state, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+}
+
+/** Waits until `condition` holds, failing after `timeoutMs`. */
+async function until(condition: () => boolean, label: string, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
 }
 
 test("slipjay.json chooses the tracker: GitHub unless it declares Build, and nothing else", () => {
@@ -129,17 +153,25 @@ test("a client reads Build only through the runner, and only Build's read action
   }
 }, 120_000);
 
-test("a Build-tracked landing with no description takes its item's title from Build and a Build trailer", async () => {
+const SESSION = "11111111-2222-4333-8444-555555555555";
+
+test("a Build-tracked landing of a Ticket writes its own Build handoff: the Ticket's Spec, its current bind and the lead's session", async () => {
   const f = await project({ policy: { tracker: "build" } });
   const buildToken = "build-secret";
-  const fake = await buildServer(buildToken, [item({ number: 96611, title: "Title from Build" })]);
+  const spec = item({ number: 96610, kind: "spec", status: "in_progress", title: "The Spec", bodyRevision: 4 });
+  const ticket = item({ number: 96611, parentId: spec.id, title: "Title from Build" });
+  const fake = await buildServer(buildToken, [spec, ticket], { [spec.id]: [{ generation: 2, endedAt: "2026-10-16T00:00:00Z" }, { generation: 3, endedAt: null }] });
   const workspace = await createWorkspace("Placeholder task", f.repo, { issueNumber: 96611 });
   try {
     await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
-    const landed = await landThroughTestRunner(f, workspace.workspacePath, { build: { origin: fake.origin, token: buildToken } });
+    const landed = await landThroughTestRunner(f, workspace.workspacePath, { build: { origin: fake.origin, token: buildToken }, session: SESSION });
     assert.equal(landed.ok, true, landed.lines.join("\n"));
     const message = execFileSync("git", ["--git-dir", f.remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();
     assert.equal(message, "Title from Build\n\nBuild: #96611");
+    const admission = fake.requests.find((request) => request.action === "admitAttempt")?.input;
+    assert.ok(admission, "Build was asked to admit the landing");
+    assert.deepEqual({ specId: admission.specId, ticketIds: admission.ticketIds, specBodyRevision: admission.specBodyRevision, bindGeneration: admission.bindGeneration, sessionId: admission.sessionId },
+      { specId: spec.id, ticketIds: [ticket.id], specBodyRevision: 4, bindGeneration: 3, sessionId: SESSION });
   } finally {
     await rm(workspace.workspacePath, { recursive: true, force: true });
     await fake.close();
@@ -147,6 +179,126 @@ test("a Build-tracked landing with no description takes its item's title from Bu
   }
 }, 120_000);
 
+test("a Build-tracked landing with no Build item is reported to Build as a chore", async () => {
+  const f = await project({ policy: { tracker: "build" } });
+  const buildToken = "build-secret";
+  const fake = await buildServer(buildToken, []);
+  const workspace = await createWorkspace("Tidy", f.repo);
+  try {
+    await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
+    jj(workspace.workspacePath, ["describe", "-m", "Tidy the readme"]);
+    const landed = await landThroughTestRunner(f, workspace.workspacePath, { build: { origin: fake.origin, token: buildToken },
+      // Receipts go on the runner's own schedule: wait for the chore before the runner closes.
+      before: () => until(() => fake.requests.some((request) => request.action === "recordChoreLanding"), "the chore receipt") });
+    assert.equal(landed.ok, true, landed.lines.join("\n"));
+    const chore = fake.requests.find((request) => request.action === "recordChoreLanding")!.input;
+    assert.equal(chore.unassociated, true);
+    assert.equal(fake.requests.some((request) => request.action === "admitAttempt"), false, "a chore is never admitted");
+  } finally {
+    await rm(workspace.workspacePath, { recursive: true, force: true });
+    await fake.close();
+    await f.dispose();
+  }
+}, 120_000);
+
+test("a retried Build landing replays the handoff it first wrote, and following one needs neither the session nor Build", async () => {
+  const f = await project({ policy: { tracker: "build" } });
+  const buildToken = "build-secret";
+  const spec = item({ number: 96620, kind: "spec", status: "in_progress", bodyRevision: 4 });
+  const ticket = item({ number: 96621, parentId: spec.id });
+  const binds = { [spec.id]: [{ generation: 3, endedAt: null as string | null }] };
+  const fake = await buildServer(buildToken, [spec, ticket], binds);
+  const workspace = await createWorkspace("Placeholder task", f.repo, { issueNumber: 96621 });
+  try {
+    await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
+    await withTestRunner(f, async ({ location, env }) => {
+      const land = (session?: string) => landThroughRunner(workspace.workspacePath, { location, env, session, onLine: () => {} });
+      fake.state.admits = false;
+      await assert.rejects(land(SESSION), /Build admission did not complete/);
+      // Another candidate written meanwhile keeps its own handoff, not this one's, and retention beyond
+      // its cap forgets only acknowledged ones: here 40 older candidates whose requests were acknowledged.
+      const metadataFile = metadataPath(workspace.current.name);
+      const metadata = JSON.parse(await readFile(metadataFile, "utf8")) as { landingHandoffs: Record<string, unknown> };
+      const older = Object.fromEntries(Array.from({ length: 40 }, (_, index) => [`acknowledged-${index}`, {}]));
+      await writeFile(metadataFile, JSON.stringify({ ...metadata, landingHandoffs: { ...older, ...metadata.landingHandoffs } }));
+      const first = jj(workspace.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]).trim();
+      jj(workspace.workspacePath, ["new"]);
+      await writeFile(join(workspace.workspacePath, "b.txt"), "b\n");
+      await assert.rejects(land(SESSION), /Build admission did not complete/);
+      jj(workspace.workspacePath, ["edit", first]);
+      const retained = Object.keys((JSON.parse(await readFile(metadataFile, "utf8")) as { landingHandoffs: Record<string, unknown> }).landingHandoffs);
+      assert.deepEqual([retained.length, retained.filter((key) => key.startsWith("acknowledged-")).length], [34, 32]);
+      // Build moves on before the retry: regenerated evidence would no longer match what was submitted.
+      spec.bodyRevision = 5;
+      binds[spec.id] = [{ generation: 3, endedAt: "2026-10-17T00:00:00Z" }, { generation: 4, endedAt: null }];
+      fake.state.admits = true;
+      await controlRunner(location, "pause", env);
+      const retrying = fake.requests.length;
+      const following = new AbortController();
+      const retried = landThroughRunner(workspace.workspacePath, { location, env, signal: following.signal, onLine: () => {} }).catch(() => undefined);
+      await until(() => fake.requests.slice(retrying).some((request) => request.action === "admitAttempt"), "the retried admission");
+      following.abort();
+      await retried;
+      // Nothing is read from Build again: the admission carries the evidence first written.
+      const retry = fake.requests.slice(retrying);
+      assert.deepEqual([...new Set(retry.map((request) => request.action))], ["admitAttempt"]);
+      for (const { input } of retry) assert.deepEqual([input.specBodyRevision, input.bindGeneration, input.sessionId], [4, 3, SESSION]);
+      // The submitted landing is followed with no session while Build answers nothing.
+      fake.state.answers = false;
+      const reads = fake.requests.length;
+      await controlRunner(location, "resume", env);
+      const landed = await land();
+      assert.equal(landed.ok, true);
+      assert.equal(fake.requests.slice(reads).some((request) => request.action === "read" || request.action === "binds"), false, "following reads nothing from Build");
+    }, { build: { origin: fake.origin, token: buildToken } });
+  } finally {
+    await rm(workspace.workspacePath, { recursive: true, force: true });
+    await fake.close();
+    await f.dispose();
+  }
+}, 180_000);
+
+test("of two landings of one candidate racing to submit, the later follows the one submitted first", async () => {
+  const f = await project({ policy: { tracker: "build" } });
+  const buildToken = "build-secret";
+  const spec = item({ number: 96630, kind: "spec", status: "in_progress", bodyRevision: 1 });
+  const ticket = item({ number: 96631, parentId: spec.id });
+  const binds = { [spec.id]: [{ generation: 1, endedAt: null as string | null }] };
+  const fake = await buildServer(buildToken, [spec, ticket], binds);
+  const workspace = await createWorkspace("Placeholder task", f.repo, { issueNumber: 96631 });
+  try {
+    await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
+    await withTestRunner(f, async ({ location, env }) => {
+      await controlRunner(location, "pause", env);
+      const following = new AbortController();
+      // Each landing settles as following the operation, or the error that stopped it.
+      const land = () => new Promise<string>((resolve) => {
+        landThroughRunner(workspace.workspacePath, { location, env, session: SESSION, signal: following.signal, onLine: () => resolve("followed") })
+          .then(() => resolve("followed"), (error: unknown) => resolve(String(error)));
+      });
+      let release!: () => void;
+      fake.state.held = new Promise<void>((resolve) => { release = resolve; });
+      // The slower landing reads Build first, but its bind is answered only after the other has submitted.
+      const slower = land();
+      await until(() => fake.requests.some((request) => request.action === "binds"), "the held bind read");
+      assert.equal(await land(), "followed");
+      // Acknowledged: the request identity is cleared, while the operation waits behind the paused queue.
+      const metadata = () => JSON.parse(readFileSync(metadataPath(workspace.current.name), "utf8")) as { pendingLandingRequests?: object };
+      assert.deepEqual(metadata().pendingLandingRequests, {});
+      binds[spec.id] = [{ generation: 1, endedAt: "2026-10-17T00:00:00Z" }, { generation: 2, endedAt: null }];
+      release();
+      // Build changed since the first was written, so its evidence differs: it follows the operation submitted first.
+      assert.equal(await slower, "followed");
+      assert.deepEqual(metadata().pendingLandingRequests, {}, "the later landing leaves no unresolved request");
+      following.abort();
+      assert.deepEqual([...new Set(fake.requests.filter((request) => request.action === "admitAttempt").map((request) => request.input.bindGeneration))], [1]);
+    }, { build: { origin: fake.origin, token: buildToken } });
+  } finally {
+    await rm(workspace.workspacePath, { recursive: true, force: true });
+    await fake.close();
+    await f.dispose();
+  }
+}, 180_000);
 
 test("Build's 503 for an unknown item is its refusal; any other 503 is no answer", async () => {
   const answering = (status: number, body: unknown) => buildRoute({ origin: "https://hq.example.com", token: "t",
@@ -154,4 +306,29 @@ test("Build's 503 for an unknown item is its refusal; any other 503 is no answer
   assert.deepEqual(await answering(503, { status: "unavailable", code: "build_item_unavailable" })("read", { number: 1 }), { kind: "refused", code: "build_item_unavailable" });
   assert.equal((await answering(503, { status: "unavailable", code: "hq_build_store_unavailable" })("read", { number: 1 })).kind, "unavailable");
   assert.equal((await answering(503, "<html>Service Unavailable</html>")("read", { number: 1 })).kind, "unavailable");
+});
+
+test("a Build-tracked landing refuses before submitting when Build cannot confirm whose delivery it is", async () => {
+  const spec = item({ number: 10, kind: "spec", status: "in_progress" });
+  const other = item({ number: 20, kind: "spec", status: "in_progress" });
+  const { read } = build([spec, other, item({ number: 11, parentId: spec.id }), item({ number: 12, parentId: spec.id }), item({ number: 21, parentId: other.id }),
+    item({ number: 30, kind: "decision", status: "proposed" })]);
+  const binds: Record<string, { generation: number; endedAt: string | null }[]> = { [spec.id]: [{ generation: 1, endedAt: null }] };
+  const reader: BuildReader = (action, input) => action === "binds" ? Promise.resolve(binds[input.specId as string] ?? []) : read(action, input);
+  const request = (fields: Partial<Parameters<typeof buildLandingHandoff>[0]>) =>
+    buildLandingHandoff({ source: "a".repeat(40), description: "Do it\n\nBody", issueNumber: 11, tickets: [], sessionId: SESSION, read: reader, ...fields });
+
+  assert.deepEqual((await request({})).build, { specId: spec.id, ticketIds: [item({ number: 11 }).id], bodyRevision: null, bindGeneration: 1, sessionId: SESSION });
+  assert.deepEqual((await request({ issueNumber: 10 })).build, { specId: spec.id, ticketIds: [], bodyRevision: null, bindGeneration: 1, sessionId: SESSION }, "a Spec lands with no Tickets");
+  assert.deepEqual((await request({ tickets: [12, 11] })).build, { specId: spec.id, ticketIds: [item({ number: 11 }).id, item({ number: 12 }).id], bodyRevision: null, bindGeneration: 1, sessionId: SESSION });
+  assert.deepEqual((await request({ issueNumber: null })).build, { unassociated: true });
+  assert.equal((await request({})).intent, "Do it");
+
+  await assert.rejects(request({ sessionId: undefined }), /hq_build_start_session.*--session <id>.*HQ_BUILD_SESSION_ID/);
+  await assert.rejects(request({ sessionId: "not-a-session" }), /not a session id/);
+  await assert.rejects(request({ issueNumber: 21 }), /Spec #20 has no current lead: bind it with hq_build_bind/);
+  await assert.rejects(request({ tickets: [21] }), /#21 is not a Ticket of Spec #10/);
+  await assert.rejects(request({ issueNumber: 30 }), /is a decision, not a Spec or a Spec's Ticket/);
+  await assert.rejects(request({ issueNumber: 99 }), /Build has no item #99/);
+  await assert.rejects(request({ issueNumber: null, tickets: [11] }), /--ticket needs a workspace with a Build item/);
 });

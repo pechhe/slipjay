@@ -153,13 +153,16 @@ export async function withTestRunner<T>(f: { root: string; repo: string; remote:
  * `keep` holds the workspace with another process while it lands, so the landing
  * keeps it as it would any workspace in use; `direct` lands the primary checkout.
  */
-export function landThroughTestRunner(f: { root: string; repo: string; remote: string }, cwd: string, options: { direct?: boolean; keep?: boolean; build?: { origin: string; token: string } } = {}) {
+export function landThroughTestRunner(f: { root: string; repo: string; remote: string }, cwd: string, options: { direct?: boolean; keep?: boolean; build?: { origin: string; token: string };
+  session?: string; before?: () => Promise<void> } = {}) {
   return withTestRunner(f, async ({ location, env }) => {
     // Its own process group: the landing ignores its caller's group as it would the CLI's.
     const holder = options.keep ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd, stdio: "ignore", detached: true }) : null;
     const lines: string[] = [];
     try {
-      const result = await landThroughRunner(cwd, { location, env, direct: options.direct, onLine: (line) => { lines.push(line); } });
+      const result = await landThroughRunner(cwd, { location, env, direct: options.direct, session: options.session, onLine: (line) => { lines.push(line); } });
+      // Anything the test waits for while the runner is still up, such as its Build receipts.
+      await options.before?.();
       return { ...result, lines };
     } finally {
       holder?.kill();

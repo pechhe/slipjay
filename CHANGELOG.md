@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## v3.24.0
+
+- **A Build-tracked landing always reaches Build:** without `--handoff`, `slipjay land` now writes
+  the Build handoff itself. A workspace with no Build item lands as a chore. One with an item
+  (`--issue <n>`) lands as delivery of its Spec, under the Spec's current bind and the lead's
+  session, from `--session <id>` or `HQ_BUILD_SESSION_ID`; `--ticket <m>` adds Tickets of the
+  same Spec. A missing session, a Spec with no current bind, or an item that is neither a Spec nor
+  a Ticket is refused before anything is submitted, naming `hq_build_start_session` or
+  `hq_build_bind`. Following a submitted landing needs neither the session nor Build, and a
+  retried submission replays the handoff first written. The runner now also forwards Build's
+  `binds` read.
+
 ## v3.23.2
 
 - **An unknown Build number is skipped, not mistaken for an outage:** Build answers a read of
