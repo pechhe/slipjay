@@ -250,7 +250,7 @@ consumer requires a SlipJay version that implements this environment contract.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.29.0
+bun add -g github:pechhe/slipjay#v3.30.0
 slipjay status
 ```
 
@@ -489,7 +489,9 @@ and held state through the existing recovery path.
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")
   otherwise. A release that was running is recorded as failed with the
-  `slipjay promote --confirm` command that reruns it. A reset that was running is
+  `slipjay promote --confirm` command that reruns it. A pre-verification that was
+  running is queued again; one whose green staging deploy was recorded without it is
+  queued then. A reset that was running is
   recorded as failed ("run slipjay reset again"); the schedule waits a full interval
   after it. A deploy that was running is
   recorded as failed, and the schedule deploys that commit again; a production

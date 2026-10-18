@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.30.0
+
 - **Promotions are verified before the owner approves them (#97):** a green staging deploy
   queues a pre-verification of its commit on the runner. It runs `requiredReleaseVerification`
   as a confirm would, after the repository's landings, and yields to a landing that arrives
