@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.28.0
+
 - **Promotion no longer warns about half-built Specs:** `slipjay promote` plans and `--confirm`
   results drop `halfBuiltSpecs`, and planning no longer queries GitHub or Build for the open
   Specs a release range served. A repository that gates unaccepted work itself (as YardSmith's
