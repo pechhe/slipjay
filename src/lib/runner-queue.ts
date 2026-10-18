@@ -524,11 +524,12 @@ export function createRunnerQueue(input: {
   }
   /**
    * Queue a pre-verification of `commitId`, superseding queued ones of older commits, unless one
-   * of it is already queued, running or passed. A running one finishes.
+   * of it is already queued or running. A running one finishes. One that passed is verified
+   * again: the release branch may have moved since, which a confirm would not reuse it across.
    */
   function queueVerification(repo: string, commitId: string): void {
     const existing = log.verifications(repo);
-    if (existing.some((entry) => entry.commitId === commitId && (entry.status === "queued" || entry.status === "running" || entry.status === "verified"))) return;
+    if (existing.some((entry) => entry.commitId === commitId && (entry.status === "queued" || entry.status === "running"))) return;
     const id = newOperationId();
     for (const stale of existing.filter((entry) => entry.status === "queued")) append(stale.id, { type: "superseded", by: id });
     append(id, { type: "submitted", kind: "verification", repo, commitId, submittedBy: `${executor.host}:staging` });
@@ -605,10 +606,11 @@ export function createRunnerQueue(input: {
     for (const entry of running.values()) {
       const verification = entry.operation;
       if (verification.kind !== "verification" || yielding.has(verification.id)) continue;
-      // It yields to its repository lane's work, and to any work it keeps from a worker.
+      // A release of the same commit waits to reuse it, and would otherwise verify beside the landings anyway.
+      if (open.some((other) => other.kind === "release" && other.commitId === verification.commitId && repositoryKey(other.repo) === repositoryKey(verification.repo))) continue;
+      // It yields to its repository lane's work, and to work that waits for nothing but the worker it holds.
       const waiting = open.find((other) => other.status === "queued" && holdsBack(other, verification, open)
-        || other.status === "queued" && other.kind !== "deploy" && other.kind !== "verification" && runnable(other, open) && admitted.size >= workers
-          && !lanes.has(admissionLane(laneOf(other.repo), other.repo, other.kind)));
+        || admitted.size >= workers && waitsOnlyForWorker(other, open));
       if (!waiting) continue;
       yielding.set(verification.id, label(waiting));
       entry.controller.abort();
@@ -619,6 +621,10 @@ export function createRunnerQueue(input: {
     void inLane(lane, () => processOperation(operation))
       .finally(() => { admitted.delete(operation.id); wakeMain(); });
   }
+  /** Whether queued `operation` would be admitted now but for a free worker. */
+  const waitsOnlyForWorker = (operation: Operation, open: readonly Operation[]): boolean =>
+    operation.kind !== "deploy" && operation.kind !== "verification" && runnable(operation, open) && !resetConflict(operation)
+      && !lanes.has(admissionLane(laneOf(operation.repo), operation.repo, operation.kind)) && !prefixes.get(operation.repo)?.length;
   /** Whether `operation` is queued and free to start, as far as Build admission goes. */
   const runnable = (operation: Operation, open: readonly Operation[]): boolean => operation.status === "queued"
     && !(operation.kind === "landing" && operation.admission === "pending") && !awaitingReplacement(operation, open);

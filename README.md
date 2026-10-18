@@ -323,7 +323,10 @@ same repository's queue. A confirmed release verifies in a release queue and a
 checkout of its own, beside the repository's landings, and takes a turn in the
 repository's queue only to publish (see [Release](#release)). A release and a reset
 of one repository never overlap, and a repository in a shared `lane` verifies its
-releases in that lane, since its gates share external state.
+releases in that lane, since its gates share external state. A pre-verification of a
+promotion candidate takes the release queue's turn only when nothing else of its
+repository is waiting, and yields to a landing, reset or release that arrives (see
+[Release](#release)).
 
 Each gate command gets a temporary directory (`TMPDIR`) of its checkout's own, emptied
 at each turn, so a lock or file a gate keeps there never makes another operation wait:
@@ -340,7 +343,10 @@ the runner's `limits` bound concurrent runs together.
   worker is busy, the next operation of an idle queue waits, oldest first, and names
   what holds the workers (`a worker (landing …)`); one waiting behind its own queue
   names the running operation, or the release or reset holding it. A release holds a
-  worker from verification until it has published.
+  worker from verification until it has published. A pre-verification holds one only
+  while no other operation waits for it: it yields the worker, and goes back to the
+  queue, when an operation that could otherwise start needs it. The exception is when a
+  release of the same commit is waiting to reuse its pass.
 - **Limits.** On a systemd host every run, deploys included, joins `slipjay.slice`, so
   the workers' gates and everything they start share one cap: `limits` in the runner
   config sets `memoryHigh` (throttled above, default `40G`), `memoryMax` (the hard
@@ -441,8 +447,9 @@ and held state through the existing recovery path.
   checkout's integration bookmark back to the remote
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
 - **Owner controls.** From any machine with the location, `slipjay runner kill <operation>` stops
-  that running landing or release while it is still fetching, rebasing, installing or
-  verifying, and a reset while it is fetching or resetting: verification's and the
+  that running landing, release or pre-verification while it is still fetching, rebasing, installing or
+  verifying (a killed pre-verification is not queued again until staging next deploys that commit
+  green), and a reset while it is fetching or resetting: verification's and the
   reset's commands are killed at once (an earlier stage finishes its
   current step, such as an install, then stops before verification), it ends
   `cancelled` with "killed by the owner, not run to completion" (never a pass),

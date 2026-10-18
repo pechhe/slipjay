@@ -11,6 +11,8 @@
   `failed` with `failedCommand`, `passed` or `none`). `--confirm` of a candidate whose
   pre-verification passed against the current release base publishes without verifying
   again. A failing release check now shows up before the approval round instead of after it.
+  A pre-verification that a confirm of the same commit waits on does not yield. A newer
+  client planning against an older runner reports `verification: none`.
 - **The plan says whether an earlier approval covers the candidate (#97):** `approval`
   (`approvedCandidate`, `covered`, `reasons`) is true only when the changes since an approved,
   unshipped candidate add no migration artifact and name no work item (`Build:`/`Issue:`

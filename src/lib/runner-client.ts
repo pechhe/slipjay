@@ -999,7 +999,9 @@ export async function readPromotionState(cwd: string, options: { location: strin
       ((await (await request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo, ...query })}`)).json()) as { operations: T[] }).operations;
     const staging = await read<DeployOperation>("/v1/deploys", { environment: "staging" });
     const releases = await read<ReleaseOperation>("/v1/releases", {});
-    const verifications = await read<VerificationOperation>("/v1/verifications", {});
+    // A runner from before pre-verification has no such route: it has pre-verified nothing.
+    const verifications = await read<VerificationOperation>("/v1/verifications", {})
+      .catch((error: unknown) => { if (error instanceof Error && /HTTP 404$/.test(error.message)) return []; throw error; });
     return {
       verifications,
       stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,

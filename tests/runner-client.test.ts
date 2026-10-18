@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../src/lib/workspace-create.ts";
 import { listWorkspaces } from "../src/lib/workspace-state.ts";
-import { controlRunner, landThroughRunner, operationRunnerLocation, releaseThroughRunner } from "../src/lib/runner-client.ts";
+import { controlRunner, landThroughRunner, operationRunnerLocation, readPromotionState, releaseThroughRunner } from "../src/lib/runner-client.ts";
 import { patchTask, setPolicy, showPolicy } from "../src/lib/policy-command.ts";
 import { createRunnerHandler } from "../src/lib/runner-api.ts";
 import { candidateBookmark } from "../src/lib/runner-contract.ts";
@@ -102,6 +102,22 @@ test("following a server-side submission race records reattachment", async () =>
     assert.equal(fact?.type === "client" && fact.fact.kind === "land_follow" && fact.fact.reattached, true);
     f.append(op.id, { type: "cancelled", reason: "fixture done" });
     await running;
+  } finally { await f.dispose(); }
+}, 60_000);
+
+test("a promotion plan reads no pre-verifications from a runner older than them, and any other failure still fails it", async () => {
+  const f = await fixture();
+  try {
+    const older = (status: number) => serveRunner(async (request) => new URL(request.url).pathname.endsWith("/verifications")
+      ? Response.json({ error: "not found" }, { status }) : Response.json({ operations: [] }), { host: "127.0.0.1", port: 0 });
+    const missing = await older(404);
+    try {
+      assert.deepEqual(await readPromotionState(f.cwd, { location: missing.url, env: f.options.env }), { stagingGreen: null, approved: [], verifications: [] });
+    } finally { await missing.close(); }
+    const broken = await older(500);
+    try {
+      await assert.rejects(readPromotionState(f.cwd, { location: broken.url, env: f.options.env }), /HTTP 500/);
+    } finally { await broken.close(); }
   } finally { await f.dispose(); }
 }, 60_000);
 
