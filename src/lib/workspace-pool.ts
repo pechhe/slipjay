@@ -148,19 +148,34 @@ function dependencySeeds(integrationRoot: string, workspacePath: string): (insta
  * `node_modules` are cloned from another checkout that has those inputs installed; with
  * `replace` (a spare, which holds nothing of its own), stale ones are discarded for that
  * clone too. Only when no checkout has them does the install run in place. Either way the
- * install runs, as the verification. Installs of one repository's checkouts on this machine
- * run one at a time, so a second waits for the first and then clones its result instead of
- * installing the same inputs beside it. `installInputs` is the workspace's fingerprint when
- * the caller has already computed it for this tree.
+ * install runs, as the verification. A start's installs into one repository's checkouts on
+ * this machine run one at a time, so a second waits for the first and then clones its result
+ * instead of installing the same inputs beside it. A refill installs under the machine's
+ * refill lock instead (`refillDependencies`), so a start never queues behind a background
+ * refill. `installInputs` is the workspace's fingerprint when the caller has already
+ * computed it for this tree.
  */
 export async function refreshDependencies(integrationRoot: string, workspacePath: string, options: { quiet?: boolean; replace?: boolean; installInputs?: string | null } = {}): Promise<ReturnType<typeof prepareWorkspaceDependencies> extends Promise<infer R> ? R : never> {
-  return withWorkspaceTransaction(`install:${resolve(integrationRoot)}`, () => prepareWorkspaceDependencies(workspacePath, {
-    quiet: options.quiet, recordInputs: true, replace: options.replace, installInputs: options.installInputs,
-    seedFrom: dependencySeeds(integrationRoot, workspacePath),
-  }), { waitMs: INSTALL_WAIT_MS });
+  return withWorkspaceTransaction(`install:${resolve(integrationRoot)}`, () => installDependencies(integrationRoot, workspacePath, options), { waitMs: INSTALL_WAIT_MS });
 }
 
-/** How long an install waits for another install of the same repository on this machine. */
+/**
+ * A refill's `refreshDependencies`: refills of every repository on this machine install one
+ * at a time, each holding the machine-wide refill lock only for its install, so another
+ * repository's refill gets its turn between spares. A spare being prepared is never a seed,
+ * so a start's install beside it never clones a partial tree.
+ */
+async function refillDependencies(integrationRoot: string, workspacePath: string, options: { replace?: boolean; installInputs?: string | null } = {}) {
+  return withWorkspaceTransaction("refill", () => installDependencies(integrationRoot, workspacePath, { ...options, quiet: true }), { waitMs: REFILL_WAIT_MS });
+}
+
+const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; replace?: boolean; installInputs?: string | null }) =>
+  prepareWorkspaceDependencies(workspacePath, {
+    quiet: options.quiet, recordInputs: true, replace: options.replace, installInputs: options.installInputs,
+    seedFrom: dependencySeeds(integrationRoot, workspacePath),
+  });
+
+/** How long a start's install waits for another of the same repository on this machine. */
 const INSTALL_WAIT_MS = 30 * 60_000;
 
 /**
@@ -202,7 +217,7 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<{ pro
       await jj(root, ["workspace", "add", "--name", name, "--revision", context.integrationBranch, workspacePath]);
     }
     await linkSharedPaths(root, workspacePath);
-    const { state, packageManager, installInputs } = await refreshDependencies(root, workspacePath, { quiet: true });
+    const { state, packageManager, installInputs } = await refillDependencies(root, workspacePath);
     const { preparingPid: _done, ...metadata } = (await workspaceMetadata(name)) ?? {};
     await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedDependencies: { state, packageManager, installInputs } });
     return { provisioned: true, workspacePath, name };
@@ -253,7 +268,7 @@ export async function refreshSpares(cwd: string): Promise<SpareRefresh[]> {
       let outcome: SpareRefresh["dependencies"] = "reused";
       let current: PreparedDependencies | undefined = prepared;
       if (!reusableDependencies(spare.root, prepared, installInputs)) {
-        const installed = await refreshDependencies(root, spare.root, { quiet: true, replace: true, installInputs });
+        const installed = await refillDependencies(root, spare.root, { replace: true, installInputs });
         outcome = installed.seeded ? "seeded" : "installed";
         current = { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs };
       }
@@ -292,18 +307,19 @@ export async function retireExcessSpares(cwd: string): Promise<string[]> {
   return excess;
 }
 
-/** How long a refill waits for another repository's refill on this machine. */
+/** How long a refill waits for an earlier refill of its repository, or for another refill's install, on this machine. */
 const REFILL_WAIT_MS = 60 * 60_000;
 
 /**
  * The pool refill (`startSpareRefill`'s child, and `slipjay pool refill`): retire spares beyond
  * this machine's allowance or top the pool up to it one spare at a time, then refresh stale
- * spares, reporting each
- * outcome. It holds a machine-wide refill lock throughout, so refills of every
- * repository on this machine install one after another; claims never take that lock.
+ * spares, reporting each outcome. One repository's refills run one after another; refills of
+ * different repositories interleave, installing one at a time (`refillDependencies`). Claims
+ * never take either lock.
  */
 export async function refillPool(root: string, report: (outcome: object) => void): Promise<void> {
-  await withWorkspaceTransaction("refill", async () => {
+  const integrationRoot = (await workspaceContext(root))?.integration.root ?? root;
+  await withWorkspaceTransaction(`refill:${resolve(integrationRoot)}`, async () => {
     for (const retired of await retireExcessSpares(root)) report({ retired });
     for (;;) {
       const outcome = await provisionSpare(root);

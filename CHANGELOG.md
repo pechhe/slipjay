@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Starts no longer wait behind a background refill (#95):** a refill installs under the
+  machine-wide refill lock instead of the repository's install lock, so a claim whose spare needs
+  an install (after a lockfile change, or a miss on an empty pool) runs it at once instead of
+  queuing behind the refill's. That lock is now held only for each install, so one repository's
+  long refill no longer starves another's pool, and one repository's refills still run in turn.
+  On a loaded Mac a t3code spare took up to 17 minutes to provision, during which t3code claims
+  waited up to 29 minutes and the YardSmith pool ran empty behind it.
+
 ## v3.28.0
 
 - **Promotion no longer warns about half-built Specs:** `slipjay promote` plans and `--confirm`
