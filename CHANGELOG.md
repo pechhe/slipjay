@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.29.0
+
 - **Starts no longer wait behind a background refill (#95):** a refill installs under the
   machine-wide refill lock instead of the repository's install lock, so a claim whose spare needs
   an install (after a lockfile change, or a miss on an empty pool) runs it at once instead of
