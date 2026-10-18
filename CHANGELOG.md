@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.30.1
+
 - **One queue snapshot serves every watcher:** the runner builds the `/v1/queue` snapshot once per
   ledger position and shares it for up to a second, instead of rebuilding it for each of the 20 or
   so watchers that ask after every event. Its finished history (`recentReleases`,
