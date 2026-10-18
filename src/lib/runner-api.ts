@@ -37,6 +37,15 @@ export function createRunnerHandler(input: {
 }): RunnerHandler {
   let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
+  // Every watcher asks for the queue after each event, so build each sequence's snapshot once and
+  // share it; refresh after a second so its clock-derived timing does not go stale.
+  let queue: { seq: number; at: number; body: string } | undefined;
+  function queueSnapshot(): Response {
+    const seq = input.log.latestSeq();
+    if (!queue || queue.seq !== seq || Date.now() - queue.at > 1_000)
+      queue = { seq, at: Date.now(), body: JSON.stringify(input.log.snapshot(input.runnerName)) };
+    return new Response(queue.body, { headers: { "content-type": "application/json;charset=utf-8" } });
+  }
   /**
    * Offers a pending Build-bound landing to Build and records the answer. Unanswered, it stays pending and
    * unqueued, and the receipt drain keeps offering it: resubmitting only asks again sooner.
@@ -93,7 +102,7 @@ export function createRunnerHandler(input: {
     }
     if (request.method === "GET" && path === `${RUNNER_API}/health`)
       return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null, held: input.log.held() });
-    if (request.method === "GET" && path === `${RUNNER_API}/queue`) return json(input.log.snapshot(input.runnerName));
+    if (request.method === "GET" && path === `${RUNNER_API}/queue`) return queueSnapshot();
     if (request.method === "GET" && path === `${RUNNER_API}/metrics/events`) {
       const raw = url.searchParams.get("since") ?? "0";
       const bound = url.searchParams.get("limit") ?? "1000";

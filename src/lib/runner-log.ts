@@ -218,9 +218,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         return { version: 1, runner, seq, observedAt: now.toISOString(),
           lanes: { serial: open.filter((op) => op.kind !== "deploy"), deploy: open.filter((op) => op.kind === "deploy") },
           paused: paused(), held: held(),
-          recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10),
-          recentProductionDeploys: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.environment') = 'production' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is DeployOperation => op.kind === "deploy"),
-          lastStagingDeploys: repos.flatMap((repo) => { const latest = projectIds((db.prepare(`SELECT e.operation_id FROM events e WHERE e.type = 'submitted' AND json_extract(e.data, '$.kind') = 'deploy' AND json_extract(e.data, '$.repo') = ? AND json_extract(e.data, '$.environment') = 'staging' AND EXISTS (SELECT 1 FROM events d WHERE d.operation_id = e.operation_id AND d.type IN ${terminalTypes}) ORDER BY e.seq DESC LIMIT 1`).all(repo) as { operation_id: string }[]).map((row) => row.operation_id)).find((op) => op.kind === "deploy"); return latest?.kind === "deploy" ? [latest] : []; }),
+          recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10).map(withoutRuns),
+          recentProductionDeploys: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.environment') = 'production' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is DeployOperation => op.kind === "deploy").map(withoutRuns),
+          lastStagingDeploys: repos.flatMap((repo) => { const latest = projectIds((db.prepare(`SELECT e.operation_id FROM events e WHERE e.type = 'submitted' AND json_extract(e.data, '$.kind') = 'deploy' AND json_extract(e.data, '$.repo') = ? AND json_extract(e.data, '$.environment') = 'staging' AND EXISTS (SELECT 1 FROM events d WHERE d.operation_id = e.operation_id AND d.type IN ${terminalTypes}) ORDER BY e.seq DESC LIMIT 1`).all(repo) as { operation_id: string }[]).map((row) => row.operation_id)).find((op) => op.kind === "deploy"); return latest?.kind === "deploy" ? [withoutRuns(latest)] : []; }),
           lastSuite: { status: "unavailable" }, build: deliveryState(log) };
       } finally { db.exec("COMMIT"); }
     },
@@ -271,6 +271,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   };
   return log;
 }
+
+/** A finished operation as the snapshot's history shows it: its result without its runs' evidence. */
+const withoutRuns = <T extends Operation>({ runs: _runs, ...rest }: T): Omit<T, "runs"> => rest;
 
 /** How a queued operation names the one running ahead of it. */
 export const label = (operation: Operation): string =>

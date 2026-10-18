@@ -516,7 +516,8 @@ export type QueueSnapshot = {
   version: 1; runner: string; seq: number; observedAt: string;
   lanes: { serial: WatchOperation[]; deploy: WatchOperation[] };
   paused: { by: string; at: string } | null; held: HeldIntegrationState[];
-  recentReleases: ReleaseOperation[]; recentProductionDeploys: DeployOperation[]; lastStagingDeploys: DeployOperation[];
+  /** Finished history carries its result but not its runs, which `runner log` and the outcome endpoint keep. */
+  recentReleases: Omit<ReleaseOperation, "runs">[]; recentProductionDeploys: Omit<DeployOperation, "runs">[]; lastStagingDeploys: Omit<DeployOperation, "runs">[];
   lastSuite: { status: "unavailable" };
   /** Receipt delivery to Build; null while the runner has never admitted a Build-bound landing. */
   build: import("./build-receipts.ts").BuildDeliveryState | null;

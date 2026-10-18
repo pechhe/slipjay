@@ -302,11 +302,13 @@ test("snapshot retains a completed production outcome for a new watcher", () => 
       environment: "production", commitId: "candidate", previous: "previous", changes: [], projects: [],
       rollback: { automatic: true, reason: "health failed" },
     } });
+    log.append("production", { type: "run_started", runId: "run-1", command: "bun scripts/deploy.ts", host: "runner" });
     const snapshot = log.snapshot("runner");
     assert.deepEqual(snapshot.lanes.deploy, []);
     const outcome = snapshot.recentProductionDeploys[0];
     assert.equal(outcome?.id, "production");
     assert.equal(outcome?.result?.type === "failed" && outcome.result.deployment?.rollback?.automatic, true);
+    assert.equal(outcome !== undefined && "runs" in outcome, false);
   } finally { log.close(); }
 });
 

@@ -107,6 +107,24 @@ test("HTTP runner refuses missing and wrong credentials, reports health and reje
   }
 });
 
+test("watchers at one ledger position share a queue snapshot, and a new event refreshes it", async () => {
+  const runner = await fixture();
+  try {
+    const build = runner.log.snapshot;
+    let builds = 0;
+    runner.log.snapshot = (...args) => { builds++; return build(...args); };
+    const first = await (await runner.request("/queue")).text();
+    const second = await (await runner.request("/queue")).text();
+    assert.equal(builds, 1);
+    assert.equal(second, first);
+    runner.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    const after = await (await runner.request("/queue")).json() as { seq: number; paused: { by: string } | null };
+    assert.equal(builds, 2);
+    assert.equal(after.paused?.by, "owner");
+    assert.ok(after.seq > (JSON.parse(first) as { seq: number }).seq);
+  } finally { await runner.close(); }
+});
+
 test("client operations are attributed to their repository and never enter the work queue", async () => {
   const f = await fixture();
   try {

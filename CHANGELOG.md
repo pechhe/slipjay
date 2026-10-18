@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **One queue snapshot serves every watcher:** the runner builds the `/v1/queue` snapshot once per
+  ledger position and shares it for up to a second, instead of rebuilding it for each of the 20 or
+  so watchers that ask after every event. Its finished history (`recentReleases`,
+  `recentProductionDeploys`, `lastStagingDeploys`) keeps each result but drops each run's command
+  evidence, which `runner log` and the outcome endpoint still serve, so a snapshot fell from 470 KB
+  to 260 KB.
+
 - **The runner no longer slows down as its ledger grows:** reading one operation's events used
   the `operation_id` index again instead of scanning the whole ledger, so each projection costs
   its own events rather than every event ever recorded. On a 48,000-event ledger a queue snapshot,
