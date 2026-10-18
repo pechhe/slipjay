@@ -5,7 +5,7 @@ import { deliveryState } from "./build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { admissionLane, awaitingReplacement, recoveryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState } from "./runner-contract.ts";
+import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState, VerificationOperation } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -93,7 +93,23 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         else if (index === 0 && operation.kind !== "deploy" && busy.length >= workers) operation.waitingFor = `a worker (${busy.map(label).join(", ")})`;
       });
     }
+    // A pre-verification waits behind any other work of its repository lane, then for staging to catch up.
+    for (const operation of serial) if (operation.kind === "verification" && operation.status === "queued") {
+      const ahead = serial.find((other) => other.kind !== "verification" && lane(other.repo) === lane(operation.repo));
+      if (ahead) operation.waitingFor = label(ahead);
+      else if (stagingDue(operation.repo)) operation.waitingFor = "a staging deploy of the latest landing";
+    }
     return open;
+  }
+  function lastLanded(repo: string): { commitId: string; at: string } | null {
+    const row = landed.get(repo) as { at: string; data: string } | undefined;
+    const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
+    return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
+  }
+  function stagingDue(repo: string): boolean {
+    const latest = lastLanded(repo);
+    return latest !== null && !projectIds((deployIds.all(repo, "staging", "staging") as { operation_id: string }[]).map((row) => row.operation_id))
+      .some((entry) => entry.commitId === latest.commitId && entry.result !== undefined);
   }
   /** The lane an operation queues in: its admission lane, or the deploys. */
   const laneOf = (operation: Operation) => queue().filter((entry) => entry.kind === "deploy" ? operation.kind === "deploy"
@@ -102,10 +118,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   function placed<T extends Operation>(projected: T, open: Operation[]): T {
     return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;
   }
-  function ofKind<K extends "release" | "reset">(repo: string, kind: K): Extract<ReleaseOperation | ResetOperation, { kind: K }>[] {
+  function ofKind<K extends "release" | "verification" | "reset">(repo: string, kind: K): Extract<ReleaseOperation | VerificationOperation | ResetOperation, { kind: K }>[] {
     const open = queue();
     return projectIds((kindIds.all(kind, repo) as { operation_id: string }[]).map((row) => row.operation_id))
-      .filter((entry): entry is Extract<ReleaseOperation | ResetOperation, { kind: K }> => entry.kind === kind)
+      .filter((entry): entry is Extract<ReleaseOperation | VerificationOperation | ResetOperation, { kind: K }> => entry.kind === kind)
       .map((entry) => placed(entry, open));
   }
   function operation(id: string): Operation | null {
@@ -227,12 +243,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         .map((entry) => placed(entry, open));
     },
     releases: (repo) => ofKind(repo, "release"),
+    verifications: (repo) => ofKind(repo, "verification"),
     resets: (repo) => ofKind(repo, "reset"),
-    lastLanded: (repo) => {
-      const row = landed.get(repo) as { at: string; data: string } | undefined;
-      const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
-      return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
-    },
+    lastLanded,
+    stagingDue,
     paused,
     held,
     buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
@@ -255,7 +269,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
 }
 
 /** How a queued operation names the one running ahead of it. */
-const label = (operation: Operation): string =>
+export const label = (operation: Operation): string =>
   operation.kind === "landing" ? `landing ${operation.changeId.slice(0, 12)}` : `${operation.kind} ${operation.commitId.slice(0, 12)}`;
 
 function project(id: string, events: StoredEvent[]): Operation | null {
@@ -272,6 +286,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     : submitted.event.kind === "deploy"
       ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
       : submitted.event.kind === "reset" ? { ...fields, kind: "reset" }
+      : submitted.event.kind === "verification" ? { ...fields, kind: "verification" }
       : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark, ...submitted.event.admission ? { admission: "pending" } : {} };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {
@@ -296,11 +311,16 @@ function project(id: string, events: StoredEvent[]): Operation | null {
         }
         break;
       }
+      case "yielded":
+        operation.status = "queued";
+        operation.stage = "queued";
+        break;
       case "build_admitted":
         if (operation.kind === "landing") operation.admission = "admitted";
         break;
       case "landed":
       case "released":
+      case "verified":
       case "deployed":
       case "reset":
       case "failed":

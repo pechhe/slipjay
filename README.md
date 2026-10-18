@@ -651,6 +651,56 @@ that commit in the deploy lane, and `--confirm` follows it: the promotion ends
 `deployed`, or `deploy failed: <project> (<reason>)` (exit 1). Rerunning `--confirm`
 deploys a failed promotion again and reuses one that deployed.
 
+A promotion is verified before anyone approves it. When staging records a green
+deploy of a commit, the runner queues a **pre-verification** of it. This runs the
+candidate's `requiredReleaseVerification` exactly as a confirm would, in the release
+checkout, and publishes nothing. Pre-verifications come after landings. One starts
+only while none of its repository lane's landings, resets or releases is queued or
+running, staging has finished a deploy of the latest landing (which may be a newer
+candidate), and a worker is free. If one of those arrives while it runs, it yields: its
+commands are stopped, the operation records `yielded` and goes back to the queue.
+A release of the same commit is the exception: it waits for the pre-verification
+and reuses its pass. So at most one pre-verification runs per repository, and
+landings never wait for it. A newer green staging deploy supersedes a queued
+pre-verification; a running one finishes. The runner lists them at `GET
+/v1/verifications?repo=`.
+
+The plan reports the candidate's pre-verification. It also says whether the earlier
+approval covers the candidate:
+
+```json
+"verification": { "status": "failed", "commit": "<candidate>", "operationId": "op_…",
+  "failedCommand": "bun run verify:release" },
+"approval": { "approvedCandidate": "<earlier candidate>", "covered": false,
+  "reasons": ["4f0c2a9e1b7d (Add exports) names Build: #2961, which the approved range does not"] }
+```
+
+- `verification.status` is `queued`, `running`, `failed` (with the `failedCommand`
+  when a check failed), `passed`, or `none`. `passed` means the candidate's newest
+  pre-verification passed against the current release base with the checks the
+  candidate declares. A pass against an older base or other checks counts as `none`.
+  `operationId` is null for `none`.
+- `--confirm` of that candidate reuses a `passed` pre-verification. It skips
+  installing and verifying, still rechecks the release base before publishing, and
+  its result's `verification` is `{ "preverified": "<operationId>" }`. Otherwise it
+  verifies as described below.
+- `approval.covered` is true only when the owner approved an earlier candidate that
+  has not shipped, and both of these hold:
+  - no commit since it adds or changes a file under
+    `migrationFinalization.artifactPaths`;
+  - every commit since it names no work item, or only items the approved range
+    (`base..approvedCandidate`) already names. Work items are read from `Build: #N`
+    and `Issue:` trailer lines.
+
+  A re-ask of exactly the approved candidate is covered. `reasons` names each rule
+  that failed and the commits involved. It is also non-empty when there is no such
+  approval, when the candidate does not descend from it, or when SlipJay cannot
+  compare them. When coverage holds, `next` says so. SlipJay decides no authority.
+  `covered` is a conservative signal that the earlier yes saw everything that
+  matters. Whether to act on it is the approver's policy.
+
+Both fields appear on promotion plans that have commits to release.
+
 When recovery can be proven, a failed production promotion is rolled back
 automatically: production
 keeps (or is moved back to) what it served before, the release branch returns to
@@ -685,7 +735,8 @@ nothing, so it rolls back and restores earlier projects as usual.
    submits it to the runner (see [Runner](#runner)); a confirm needs a runner
    location. Releases take turns in their repository's release queue on the runner,
    beside its landings: the runner checks the exact candidate out in the release
-   checkout, prepares its dependencies and runs the checks while landings go on.
+   checkout, prepares its dependencies and runs the checks while landings go on
+   (a promotion whose pre-verification passed skips this; see above).
    Their failure publishes nothing and prints the failing command and its output
    verbatim. A verified release then waits for the repository's running landing or
    reset (its progress says `Verified; publishing after <repo>'s running turn`), and

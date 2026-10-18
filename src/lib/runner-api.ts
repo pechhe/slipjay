@@ -333,6 +333,12 @@ export function createRunnerHandler(input: {
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.releases(repositoryKey(repo)) });
     }
+    if (request.method === "GET" && path === `${RUNNER_API}/verifications`) {
+      const repo = url.searchParams.get("repo");
+      if (!repo)
+        return json({ error: "repo is required" }, 400);
+      return json({ operations: input.log.verifications(repositoryKey(repo)) });
+    }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {
       const repo = url.searchParams.get("repo");

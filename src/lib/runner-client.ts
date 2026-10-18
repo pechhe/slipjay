@@ -19,7 +19,7 @@ import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, pub
 import { githubRepository } from "./issue-references.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent } from "./runner-contract.ts";
+import type { ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "./workspace-jj.ts";
 import type { PromotionState } from "./release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "./workspace-jj.ts";
@@ -985,7 +985,7 @@ export async function releaseThroughRunner(cwd: string, options: { candidate: st
   } finally { connection.close(); }
 }
 
-/** For a promotion plan: the newest commit staging deployed, and the candidates already submitted for release, newest first. */
+/** For a promotion plan: the newest commit staging deployed, the candidates already submitted for release and the pre-verifications, newest first. */
 export async function readPromotionState(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv }): Promise<PromotionState> {
   const env = options.env ?? process.env;
   const context = await workspaceContext(cwd);
@@ -999,7 +999,9 @@ export async function readPromotionState(cwd: string, options: { location: strin
       ((await (await request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo, ...query })}`)).json()) as { operations: T[] }).operations;
     const staging = await read<DeployOperation>("/v1/deploys", { environment: "staging" });
     const releases = await read<ReleaseOperation>("/v1/releases", {});
+    const verifications = await read<VerificationOperation>("/v1/verifications", {});
     return {
+      verifications,
       stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,
       approved: releases.filter((operation) => operation.status !== "cancelled" && operation.status !== "superseded").map((operation) => operation.commitId),
     };

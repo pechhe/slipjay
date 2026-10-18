@@ -11,6 +11,10 @@
  * is the verified tree, and publishes it. Verification runs beside the repository's
  * landings; the runner orders only publication against them and other releases.
  *
+ * `verifyRelease` is that verification alone, run by the runner on a commit staging
+ * deployed before anyone approves it (a pre-verification). A confirm of exactly that
+ * commit, with the same checks and the release base unchanged, reuses its pass.
+ *
  * jj commands ignore working copies, except checking the candidate out.
  */
 import { readExecutionPolicyAtCommit } from "./execution-policy.ts";
@@ -19,7 +23,7 @@ import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { jj, run, workspaceContext } from "./workspace-jj.ts";
 
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { RunnerStage } from "./runner-contract.ts";
+import type { RunnerStage, VerificationOperation } from "./runner-contract.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 import type { WorkspaceCommandResult } from "./workspace-command.ts";
 
@@ -34,6 +38,8 @@ export type ReleasePlan = {
   candidate: string;
   commits: Array<{ commitId: string; subject: string }>;
   migrationArtifacts: string[];
+  /** The candidate's `migrationFinalization.artifactPaths`: what counts as a migration artifact. */
+  migrationPaths: string[];
   /** The SQL migration artifacts that are not additive (see `nonAdditiveSql`): a failed promotion carrying one is not rolled back automatically. */
   nonAdditiveMigrations: string[];
   /** Every path the release changes. */
@@ -57,8 +63,32 @@ export type PromotionDelta = {
   migrationArtifacts: string[];
 };
 
-/** What the runner knows of a promotion: the newest commit staging is green on, and the candidates approved before, newest first. */
-export type PromotionState = { stagingGreen: string | null; approved: string[] };
+/**
+ * What the runner knows of a promotion: the newest commit staging is green on, the
+ * candidates approved before, and its pre-verifications, each newest first.
+ */
+export type PromotionState = { stagingGreen: string | null; approved: string[]; verifications: VerificationOperation[] };
+
+/**
+ * The candidate's pre-verification, as its newest pre-verification that was not
+ * superseded or cancelled reports it. `passed` only for one against the plan's base
+ * with the plan's checks, which a confirm reuses; a pass against anything else is `none`.
+ */
+export type ReleaseVerificationState = {
+  status: "passed" | "failed" | "running" | "queued" | "none";
+  commit: string;
+  operationId: string | null;
+  failedCommand?: string;
+};
+
+/**
+ * Whether the owner's approval of `approvedCandidate`, which has not shipped, covers
+ * this candidate: only when the changes since it add or change no migration artifact
+ * and every commit among them names no work item, or only items the approved range
+ * already names (`Build: #N` and `Issue:` trailers). `reasons` names each rule that
+ * failed. Anything SlipJay cannot establish leaves it uncovered.
+ */
+export type ApprovalCoverage = { approvedCandidate: string | null; covered: boolean; reasons: string[] };
 
 export type ReleaseSummary = {
   integrationBranch: string;
@@ -75,9 +105,13 @@ export type ReleaseSummary = {
   delta?: PromotionDelta;
 };
 
+/** What a promotion's plan adds: its candidate's pre-verification, and whether an earlier approval covers it. */
+export type PromotionPlan = { verification?: ReleaseVerificationState; approval?: ApprovalCoverage };
+
 export type ReleaseResult =
-  | ({ ok: true; status: "up_to_date" } & ReleaseSummary)
-  | ({ ok: true; status: "planned"; subjects: string[]; next: string } & ReleaseSummary)
+  | ({ ok: true; status: "up_to_date" } & ReleaseSummary & PromotionPlan)
+  | ({ ok: true; status: "planned"; subjects: string[]; next: string } & ReleaseSummary & PromotionPlan)
+  /** `verification` names the reused pre-verification as `preverified` when the confirm ran no checks of its own. */
   | ({ ok: true; status: "released"; merge: string; verification: unknown; releasedAt: string } & ReleaseSummary)
   /**
    * The release branch already contains the candidate (an earlier or newer
@@ -90,6 +124,11 @@ export type ReleaseResult =
   | ({ ok: true; status: "released_by"; merge: string; releasedBy: string | null } & ReleaseSummary)
   | { ok: false; status: "refused"; reason: string }
   | { ok: false; status: "verification_failed"; reason: string; evidence: RequiredVerificationError["evidence"] };
+
+/** A pre-verification's pass: `checks` ran on `candidate`'s tree while the release branch was at `base`. */
+export type VerifiedRelease = { ok: true; status: "verified"; base: string; candidate: string; checks: VerificationDeclaration[] };
+
+type VerifyOptions = Pick<ConfirmReleaseOptions, "onProgress" | "onStage" | "run" | "environment">;
 
 export type ConfirmReleaseOptions = {
   /** The full candidate commit id a human approved. */
@@ -107,6 +146,8 @@ export type ConfirmReleaseOptions = {
    * planned base keeps a verification that ran beside other work valid.
    */
   exclusively?: <T>(publication: () => Promise<T>) => Promise<T>;
+  /** The id of a passed pre-verification matching the plan (see `passedVerification`): the confirm reuses it instead of verifying. */
+  preverified?: (plan: ReleasePlan) => string | null;
 };
 
 const COMMIT_PREFIX = /^[a-f0-9]{12,64}$/;
@@ -339,6 +380,10 @@ async function commitOf(cwd: string, revset: string): Promise<string | null> {
   return ids.length === 1 ? ids[0]! : null;
 }
 
+/** Whether `file` is one of `paths` or lies under one. */
+const under = (paths: string[], file: string): boolean => paths.some((path) => file === path || file.startsWith(`${path}/`));
+const short = (commit: string): string => commit.slice(0, 12);
+
 const fetch = (cwd: string, remote: string, branch: string): Promise<WorkspaceCommandResult> => jjRun(cwd, ["git", "fetch", "--remote", remote, "--branch", branch]);
 
 /**
@@ -381,7 +426,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   });
   const artifactPaths = policy.migrationFinalization?.artifactPaths ?? [];
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
-  const migrationArtifacts = changed.filter((file) => artifactPaths.some((path: string) => file === path || file.startsWith(`${path}/`)));
+  const migrationArtifacts = changed.filter((file) => under(artifactPaths, file));
   const nonAdditiveMigrations: string[] = [];
   for (const file of migrationArtifacts.filter((name) => name.endsWith(".sql"))) {
     const shown = await jjRun(root, ["file", "show", "-r", candidate, "--", `root-file:${symbol(file)}`]);
@@ -389,9 +434,18 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
     if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
   }
   const production = policy.deployments?.environments.production;
-  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks,
+  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, migrationPaths: artifactPaths, nonAdditiveMigrations, paths: changed, checks,
     promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations) };
 }
+
+/** The newest of `approved` the release branch does not hold: approvals it holds shipped. */
+async function unshippedApproval(plan: ReleasePlan, approved: string[]): Promise<string | null> {
+  const released = `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`;
+  for (const since of approved) if (!await commitOf(plan.root, `${since} & ::${released}`)) return since;
+  return null;
+}
+
+const descendsFrom = async (plan: ReleasePlan, since: string): Promise<boolean> => Boolean(await commitOf(plan.root, `${since} & ::${plan.candidate}`));
 
 /**
  * The changes since the newest of `approved` that the candidate has moved past and
@@ -399,17 +453,69 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
  * re-ask of the same candidate, shows the whole release).
  */
 export async function promotionDelta(plan: ReleasePlan, approved: string[]): Promise<PromotionDelta | null> {
-  const released = `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`;
-  for (const since of approved) {
-    // Approvals the release branch already holds shipped; the newest that did not is the one to diff against.
-    if (await commitOf(plan.root, `${since} & ::${released}`)) continue;
-    if (since === plan.candidate || !await commitOf(plan.root, `${since} & ::${plan.candidate}`)) return null;
-    const delta = new Set(await commitIds(plan.root, `::${plan.candidate} ~ ::${since}`));
-    const paths = lines(await jjOut(plan.root, ["diff", "--from", since, "--to", plan.candidate, "--name-only"]));
-    return { since, commits: plan.commits.filter((commit) => delta.has(commit.commitId)),
-      paths, migrationArtifacts: plan.migrationArtifacts.filter((file) => paths.includes(file)) };
+  const since = await unshippedApproval(plan, approved);
+  if (!since || since === plan.candidate || !await descendsFrom(plan, since)) return null;
+  const delta = new Set(await commitIds(plan.root, `::${plan.candidate} ~ ::${since}`));
+  const paths = lines(await jjOut(plan.root, ["diff", "--from", since, "--to", plan.candidate, "--name-only"]));
+  return { since, commits: plan.commits.filter((commit) => delta.has(commit.commitId)),
+    paths, migrationArtifacts: plan.migrationArtifacts.filter((file) => paths.includes(file)) };
+}
+
+/** The work items a commit description names in its `Build:` and `Issue:` trailer lines, as written. */
+const workItems = (description: string): string[] =>
+  [...description.matchAll(/^(Build|Issue):[ \t]*(\S.*?)[ \t]*$/gm)].map((match) => `${match[1]}: ${match[2]}`);
+
+async function describedCommits(root: string, revset: string): Promise<Array<{ commitId: string; description: string }>> {
+  return lines(await jjOut(root, ["log", "--no-graph", "-r", revset, "-T", 'commit_id ++ "\\t" ++ description.escape_json() ++ "\\n"'])).map((line) => {
+    const [commitId, encoded] = line.split("\t");
+    return { commitId: commitId!, description: JSON.parse(encoded!) as string };
+  });
+}
+
+/** See `ApprovalCoverage`. A re-ask of exactly the approved candidate is covered. */
+export async function approvalCoverage(plan: ReleasePlan, approved: string[]): Promise<ApprovalCoverage> {
+  const since = await unshippedApproval(plan, approved);
+  if (!since) return { approvedCandidate: null, covered: false, reasons: ["No earlier approval that has not shipped"] };
+  const uncovered = (reasons: string[]): ApprovalCoverage => ({ approvedCandidate: since, covered: false, reasons });
+  if (since === plan.candidate) return { approvedCandidate: since, covered: true, reasons: [] };
+  try {
+    if (!await descendsFrom(plan, since)) return uncovered([`${short(plan.candidate)} does not descend from the approved ${short(since)}`]);
+    const reasons: string[] = [];
+    const approvedItems = new Set((await describedCommits(plan.root, `::${since} ~ ::${plan.base}`)).flatMap((commit) => workItems(commit.description)));
+    for (const commit of await describedCommits(plan.root, `::${plan.candidate} ~ ::${since}`)) {
+      const named = `${short(commit.commitId)} (${commit.description.split("\n")[0]})`;
+      // Each commit's own changes, so a migration a later commit reverts still counts.
+      const migrations = lines(await jjOut(plan.root, ["diff", "-r", commit.commitId, "--name-only"])).filter((file) => under(plan.migrationPaths, file));
+      if (migrations.length) reasons.push(`${named} adds or changes migration artifacts: ${migrations.join(", ")}`);
+      const unapproved = workItems(commit.description).filter((item) => !approvedItems.has(item));
+      if (unapproved.length) reasons.push(`${named} names ${unapproved.join(", ")}, which the approved range does not`);
+    }
+    return { approvedCandidate: since, covered: reasons.length === 0, reasons };
+  } catch (error) {
+    return uncovered([`Could not compare the candidate with the approved ${short(since)}: ${error instanceof Error ? error.message : String(error)}`]);
   }
-  return null;
+}
+
+/** The candidate's newest pre-verification that was not superseded or cancelled. */
+const currentVerification = (plan: ReleasePlan, operations: VerificationOperation[]): VerificationOperation | undefined =>
+  operations.find((operation) => operation.commitId === plan.candidate && operation.status !== "superseded" && operation.status !== "cancelled");
+
+/** The candidate's current pre-verification, when it passed against the plan's base with the plan's checks: what a confirm may reuse. */
+export function passedVerification(plan: ReleasePlan, operations: VerificationOperation[]): VerificationOperation | undefined {
+  const current = currentVerification(plan, operations);
+  return current?.result?.type === "verified" && current.result.base === plan.base
+    && JSON.stringify(current.result.checks) === JSON.stringify(plan.checks) ? current : undefined;
+}
+
+/** See `ReleaseVerificationState`. */
+export function verificationState(plan: ReleasePlan, operations: VerificationOperation[]): ReleaseVerificationState {
+  const current = currentVerification(plan, operations);
+  const state = (status: ReleaseVerificationState["status"]): ReleaseVerificationState => ({ status, commit: plan.candidate, operationId: status === "none" ? null : current!.id });
+  if (!current) return state("none");
+  if (current.status === "queued" || current.status === "running") return state(current.status);
+  if (passedVerification(plan, operations)) return state("passed");
+  if (current.result?.type === "failed") return { ...state("failed"), ...current.result.command ? { failedCommand: current.result.command } : {} };
+  return state("none");
 }
 
 /** The release merge on the release branch that first shipped `plan.candidate`, and its candidate. */
@@ -535,19 +641,22 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion }:
 } = {}): Promise<ReleaseResult> {
   try {
     let plan = await planRelease(cwd);
-    let delta: PromotionDelta | null = null;
+    let promotion: Pick<ReleaseSummary, "delta"> & PromotionPlan = {};
     if (plan.promotes) {
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
-      const { stagingGreen, approved } = await readPromotion();
+      const { stagingGreen, approved, verifications } = await readPromotion();
       if (!stagingGreen) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
       if (stagingGreen !== plan.candidate) plan = await planRelease(cwd, { candidate: stagingGreen });
-      delta = await promotionDelta(plan, approved);
+      const delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
+      promotion = { ...delta ? { delta } : {},
+        ...plan.commits.length ? { verification: verificationState(plan, verifications), approval: await approvalCoverage(plan, approved) } : {} };
     }
-    const summary = { ...describePlan(plan), ...delta ? { delta } : {} };
+    const summary = { ...describePlan(plan), ...promotion };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
-    return { ok: true, status: "planned", ...summary, subjects: (delta?.commits ?? plan.commits).map((commit) => commit.subject),
-      next: `After explicit human approval: slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
+    return { ok: true, status: "planned", ...summary, subjects: (promotion.delta?.commits ?? plan.commits).map((commit) => commit.subject),
+      next: (promotion.approval?.covered ? `The approval of ${short(promotion.approval.approvedCandidate!)} covers this candidate: ` : "After explicit human approval: ")
+        + `slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
         + (!plan.promotes && plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "")
         + (plan.promotes && plan.migrationArtifacts.length ? `. The runner applies its migrations (${plan.migrationArtifacts.join(", ")}) to production before it activates` : "")
         + (plan.promotes && plan.nonAdditiveMigrations.length ? `. Not additive: ${plan.nonAdditiveMigrations.join(", ")}; if production fails its health check, it is not rolled back automatically` : "") };
@@ -583,12 +692,46 @@ async function requireCandidateTree(checkout: string, candidate: string): Promis
 }
 
 /**
+ * Check `plan`'s candidate out in `checkout`, prepare its dependencies and run its
+ * release checks; refuse if they changed its source.
+ */
+async function verifyCandidate(checkout: string, plan: ReleasePlan, { onProgress = () => {}, onStage = () => {}, run: runCommand, environment }: VerifyOptions): Promise<unknown> {
+  onStage("installing");
+  await jj(checkout, ["new", plan.candidate]);
+  await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand, ...(environment ? { env: environment() } : {}) });
+  onStage("verifying");
+  const verification = plan.checks.length
+    ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,
+      ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
+    : { passed: [], gaps: [] };
+  await requireCandidateTree(checkout, plan.candidate);
+  return verification;
+}
+
+/**
+ * Pre-verify `candidate` in `checkout`, which this call owns for its duration (the
+ * runner's release checkout), exactly as a confirm would verify it; publishes nothing.
+ * A candidate the release branch already holds is refused: there is nothing to verify.
+ */
+export async function verifyRelease(checkout: string, options: VerifyOptions & { candidate: string }): Promise<VerifiedRelease | Extract<ReleaseResult, { ok: false }>> {
+  try {
+    const plan = await planRelease(checkout, { candidate: options.candidate });
+    if (!plan.commits.length) refuse(`${short(plan.candidate)} is already on ${plan.releaseBranch}`);
+    await verifyCandidate(checkout, plan, options);
+    return { ok: true, status: "verified", base: plan.base, candidate: plan.candidate, checks: plan.checks };
+  } catch (error) {
+    return refusalOf(error) as Extract<ReleaseResult, { ok: false }>;
+  }
+}
+
+/**
  * Verify and publish the approved `candidate` from `checkout`, which this call owns
  * for its duration (the runner's release checkout: it checks the candidate out there).
- * A candidate the release branch already holds verifies nothing.
+ * A candidate the release branch already holds verifies nothing, and nor does one
+ * `preverified` names a matching pre-verification of.
  */
 export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
-  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, exclusively = (publication) => publication() } = options;
+  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, exclusively = (publication) => publication(), preverified = () => null } = options;
   try {
     const plan = await planRelease(checkout, { candidate });
     if (!plan.commits.length) {
@@ -600,15 +743,9 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
     }
     requireMigrationsReady(plan, migrationsReady);
     const summary = describePlan(plan);
-    onStage("installing");
-    await jj(checkout, ["new", plan.candidate]);
-    await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand, ...(environment ? { env: environment() } : {}) });
-    onStage("verifying");
-    const verification = plan.checks.length
-      ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,
-        ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
-      : { passed: [], gaps: [] };
-    await requireCandidateTree(checkout, plan.candidate);
+    const reused = preverified(plan);
+    if (reused) onProgress(`[release] ${short(plan.candidate)} passed pre-verification ${reused} against ${plan.releaseBranch} ${short(plan.base)}; not verifying again`);
+    const verification = reused ? { preverified: reused } : await verifyCandidate(checkout, plan, options);
     return await exclusively(async () => {
       onStage("publishing");
       // The base must still be what was planned: a moved release branch needs a new plan.

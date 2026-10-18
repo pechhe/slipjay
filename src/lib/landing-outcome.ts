@@ -1,4 +1,4 @@
-import type { LandingOperation, LandingOutcome, StoredEvent } from "./runner-contract.ts";
+import { isLandingSubmission, type LandingOperation, type LandingOutcome, type StoredEvent } from "./runner-contract.ts";
 import { owedReceipts, receiptSettlement } from "./build-receipts.ts";
 
 /** Pure operation-local history: publication elsewhere is never inferred from age or a failed push. */
@@ -51,7 +51,7 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     ...(result.command ? { command: result.command } : {}), ...(result.output !== undefined ? { excerpt: result.output.slice(0, 6000) } : {}),
     excerptTruncated: (result.output?.length ?? 0) > 6000 }
     : result?.type === "cancelled" || result?.type === "declined" ? { reason: result.reason, excerptTruncated: false } : undefined;
-  const bound = events.find((event) => event.type === "submitted" && event.kind !== "release" && event.kind !== "deploy" && event.kind !== "reset" && (event.admission || event.chore));
+  const bound = events.filter(isLandingSubmission).find((event) => event.admission || event.chore);
   // Operation-local: a publication confirmed later by another operation is counted by the drain and the snapshot.
   const owed = bound ? owedReceipts(operation, history) : [];
   const settled = owed.filter((receipt) => receipt.after === undefined || receiptSettlement(history, { operationId: receipt.operationId, key: receipt.after })?.state !== "parked")

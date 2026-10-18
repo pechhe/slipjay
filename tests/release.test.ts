@@ -5,8 +5,36 @@ import { execFileSync } from "node:child_process";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { confirmRelease, nonAdditiveSql, releaseIntegration, returnRelease } from "../src/lib/release.ts";
+import { confirmRelease, nonAdditiveSql, releaseIntegration, returnRelease, verifyRelease } from "../src/lib/release.ts";
 import type { PromotionState } from "../src/lib/release.ts";
+import type { OperationEvent, VerificationOperation } from "../src/lib/runner-contract.ts";
+
+/** A promoting fixture that also declares production migrations, with a commit helper that writes straight to main. */
+async function promotingProject() {
+  const f = await releaseProject({ migrations: true, promotes: true });
+  const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
+  const commit = async (files: Record<string, string>, message: string) => {
+    for (const [file, content] of Object.entries(files)) {
+      await mkdir(join(f.repo, file, ".."), { recursive: true });
+      await writeFile(join(f.repo, file), content);
+    }
+    git(["add", "-A"]); git(["commit", "-qm", message]); git(["push", "-q", "origin", "main"]);
+    jj(f.repo, ["git", "import"]);
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.repo, encoding: "utf8" }).trim();
+  };
+  const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+  const step = { executable: "node", args: ["-e", ""] };
+  policy.deployments.environments.production.migrations = { verify: step, apply: step };
+  await commit({ "slipjay.json": JSON.stringify(policy) }, "Declare production migrations");
+  const plan = (stagingGreen: string, approved: string[], verifications: VerificationOperation[] = []) =>
+    releaseIntegration(f.repo, { readPromotion: async () => ({ stagingGreen, approved, verifications }) });
+  return { ...f, commit, plan, checks: policy.requiredReleaseVerification as unknown[] };
+}
+
+const verificationOf = (commitId: string, status: VerificationOperation["status"], result?: OperationEvent): VerificationOperation =>
+  ({ id: `op_${status}_${commitId.slice(0, 6)}`, kind: "verification", repo: "fixture/repo", commitId, submittedBy: "runner:staging", status,
+    stage: status === "running" ? "verifying" : "queued", submittedAt: new Date().toISOString(), runs: [], lastSeq: 1,
+    ...result ? { result: result as VerificationOperation["result"] } : {} });
 
 test("release dependency preparation uses its runner executor and cannot bypass a refused install", async () => {
   const f = await releaseProject();
@@ -64,10 +92,10 @@ test("a promotion plans the newest commit staging is green on, with its paths, a
     const plan = (state: PromotionState) => releaseIntegration(f.repo, { readPromotion: async () => state });
     const offline = await releaseIntegration(f.repo);
     assert.ok(!offline.ok && /reads staging from the runner/.test(offline.reason), JSON.stringify(offline));
-    const red = await plan({ stagingGreen: null, approved: [] });
+    const red = await plan({ stagingGreen: null, approved: [], verifications: [] });
     assert.ok(!red.ok && /green on no commit/.test(red.reason), JSON.stringify(red));
 
-    const first = await plan({ stagingGreen: b, approved: [a] });
+    const first = await plan({ stagingGreen: b, approved: [a], verifications: [] });
     assert.ok(first.ok && first.status === "planned", JSON.stringify(first));
     assert.equal(first.candidate, b, "the candidate is what staging verified, not the integration tip");
     assert.deepEqual(first.paths.filter((path) => path.endsWith(".txt")), ["a.txt", "b.txt"]);
@@ -75,18 +103,105 @@ test("a promotion plans the newest commit staging is green on, with its paths, a
     assert.match(first.next, new RegExp(`slipjay promote --confirm ${b.slice(0, 12)}`));
 
     // b was approved, its release failed and c landed: the next ask shows only c.
-    const moved = await plan({ stagingGreen: c, approved: [b, a] });
+    const moved = await plan({ stagingGreen: c, approved: [b, a], verifications: [] });
     assert.ok(moved.ok && moved.status === "planned", JSON.stringify(moved));
     assert.equal(moved.candidate, c);
     assert.deepEqual(moved.delta, { since: b, commits: [{ commitId: c, subject: moved.subjects[0] }], paths: ["c.txt"], migrationArtifacts: [] });
     assert.equal(moved.subjects.length, 1);
     assert.ok(moved.commits > 1, "the summary still counts the whole release");
 
-    const again = await plan({ stagingGreen: c, approved: [c, b] });
+    const again = await plan({ stagingGreen: c, approved: [c, b], verifications: [] });
     assert.ok(again.ok && again.status === "planned" && !again.delta, "a re-ask of the same candidate shows the whole release");
   } finally {
     await f.dispose();
   }
+});
+
+test("an earlier approval covers a candidate whose changes since add no migration and name only work items the approved range names", async () => {
+  const f = await promotingProject();
+  try {
+    const approved = await f.commit({ "feature.txt": "a\n" }, "Add the feature\n\nBuild: #5");
+    await f.commit({ "format.txt": "b\n" }, "Fix formatting");
+    const sameItem = await f.commit({ "feature.txt": "a2\n" }, "Finish the feature\n\nBuild: #5");
+    const covered = await f.plan(sameItem, [approved]);
+    assert.ok(covered.ok && covered.status === "planned", JSON.stringify(covered));
+    assert.deepEqual(covered.approval, { approvedCandidate: approved, covered: true, reasons: [] });
+    assert.match(covered.next, /covers this candidate/);
+
+    const again = await f.plan(approved, [approved]);
+    assert.ok(again.ok && again.status === "planned");
+    assert.deepEqual(again.approval, { approvedCandidate: approved, covered: true, reasons: [] }, "a re-ask of exactly the approved candidate");
+
+    const first = await f.plan(sameItem, []);
+    assert.ok(first.ok && first.status === "planned");
+    assert.deepEqual(first.approval, { approvedCandidate: null, covered: false, reasons: ["No earlier approval that has not shipped"] });
+    assert.match(first.next, /^After explicit human approval/);
+
+    const stranger = "0123456789abcdef0123456789abcdef01234567";
+    const unrelated = await f.plan(sameItem, [stranger]);
+    assert.ok(unrelated.ok && unrelated.status === "planned");
+    assert.equal(unrelated.approval?.covered, false);
+    assert.match(unrelated.approval!.reasons.join(), /does not descend from the approved 0123456789ab/);
+
+    const newItem = await f.commit({ "other.txt": "c\n" }, "Start another feature\n\nIssue: pechhe/slipjay#9");
+    const migration = await f.commit({ "migrations/0001.sql": "create table t (a int);\n" }, "Add a table");
+    const uncovered = await f.plan(migration, [approved]);
+    assert.ok(uncovered.ok && uncovered.status === "planned", JSON.stringify(uncovered));
+    assert.equal(uncovered.approval?.covered, false);
+    assert.deepEqual(uncovered.approval?.reasons, [
+      `${migration.slice(0, 12)} (Add a table) adds or changes migration artifacts: migrations/0001.sql`,
+      `${newItem.slice(0, 12)} (Start another feature) names Issue: pechhe/slipjay#9, which the approved range does not`,
+    ]);
+  } finally { await f.dispose(); }
+});
+
+test("a promotion plan reports its candidate's pre-verification, passed only against the plan's base and checks", async () => {
+  const f = await promotingProject();
+  try {
+    const candidate = await f.commit({ "feature.txt": "a\n" }, "Add the feature");
+    const older = await f.commit({ "next.txt": "b\n" }, "Next");
+    const base = remoteRef(f, "release");
+    const state = async (verifications: VerificationOperation[]) => {
+      const plan = await f.plan(candidate, [], verifications);
+      assert.ok(plan.ok && plan.status === "planned", JSON.stringify(plan));
+      return plan.verification;
+    };
+    const passed = { type: "verified", base, candidate, checks: f.checks } as OperationEvent;
+    assert.deepEqual(await state([]), { status: "none", commit: candidate, operationId: null });
+    assert.deepEqual(await state([verificationOf(older, "verified", passed)]), { status: "none", commit: candidate, operationId: null }, "another commit's pass is not this one's");
+    assert.equal((await state([verificationOf(candidate, "queued")]))?.status, "queued");
+    assert.equal((await state([verificationOf(candidate, "running")]))?.status, "running");
+    const pass = verificationOf(candidate, "verified", passed);
+    assert.deepEqual(await state([pass]), { status: "passed", commit: candidate, operationId: pass.id });
+    assert.equal((await state([verificationOf(candidate, "verified", { ...passed, base: older } as OperationEvent)]))?.status, "none", "a pass against another release base");
+    assert.equal((await state([verificationOf(candidate, "verified", { ...passed, checks: [] } as OperationEvent)]))?.status, "none", "a pass with other checks");
+    const failed = verificationOf(candidate, "failed", { type: "failed", stage: "verifying", reason: "exited 1", command: "bun run verify:release" });
+    assert.deepEqual(await state([failed, pass]), { status: "failed", commit: candidate, operationId: failed.id, failedCommand: "bun run verify:release" }, "the newest counts");
+    assert.equal((await state([verificationOf(candidate, "superseded"), pass]))?.status, "passed", "a superseded one is passed over");
+  } finally { await f.dispose(); }
+});
+
+test("a pre-verification runs the release checks and publishes nothing; a confirm that reuses it publishes without running them", async () => {
+  const f = await releaseProject();
+  try {
+    const base = remoteRef(f, "release");
+    const candidate = await landFile(f, "feature.txt");
+    const verified = await verifyRelease(f.repo, { candidate });
+    assert.ok(verified.ok, JSON.stringify(verified));
+    assert.equal(verified.base, base);
+    assert.equal(verified.candidate, candidate);
+    assert.equal(remoteRef(f, "release"), base, "nothing published");
+    assert.equal((await readFile(f.verifiedRelease, "utf8")).split("\n").filter(Boolean).length, 1);
+
+    const result = await confirmRelease(f.repo, { candidate, preverified: (plan) => plan.base === base ? "op_pre" : null });
+    assert.ok(result.ok && result.status === "released", JSON.stringify(result));
+    assert.deepEqual(result.verification, { preverified: "op_pre" });
+    assert.equal((await readFile(f.verifiedRelease, "utf8")).split("\n").filter(Boolean).length, 1, "the confirm ran no check");
+    assert.deepEqual(remoteParents(f, remoteRef(f, "release")), [base, candidate]);
+
+    const shipped = await verifyRelease(f.repo, { candidate });
+    assert.ok(!shipped.ok && /already on release/.test(shipped.reason), JSON.stringify(shipped));
+  } finally { await f.dispose(); }
 });
 
 test("a failed release check publishes nothing", async () => {
@@ -167,7 +282,7 @@ test("a promotion's migrations are the runner's to apply: it needs a declared pr
     await mkdir(join(f.repo, "migrations"), { recursive: true });
     await writeFile(join(f.repo, "migrations", "0001.sql"), "create table t (a int);\n");
     const undeclared = commit("Add a migration");
-    const plan = (stagingGreen: string) => releaseIntegration(f.repo, { readPromotion: async () => ({ stagingGreen, approved: [] }) });
+    const plan = (stagingGreen: string) => releaseIntegration(f.repo, { readPromotion: async () => ({ stagingGreen, approved: [], verifications: [] }) });
     const refused = await plan(undeclared);
     assert.ok(!refused.ok && /declares no deployments production migrations/.test(refused.reason), JSON.stringify(refused));
     assert.ok(!(await confirmRelease(f.repo, { candidate: undeclared })).ok, "the runner refuses it too");

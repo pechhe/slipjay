@@ -1,5 +1,6 @@
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
 import type { ReleaseResult } from "./release.ts";
+import type { VerificationDeclaration } from "./verification-policy.ts";
 
 /**
  * The runner's contract: one long-lived control plane that owns the landing queue
@@ -42,7 +43,7 @@ export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
 export const RUNNER_CONTROL_ID = "runner";
 
 /** Terminal and live states of an operation, derived from its events. */
-export type OperationStatus = "queued" | "running" | "landed" | "released" | "deployed" | "reset" | "failed" | "declined" | "superseded" | "cancelled";
+export type OperationStatus = "queued" | "running" | "landed" | "released" | "verified" | "deployed" | "reset" | "failed" | "declined" | "superseded" | "cancelled";
 
 /** A release the runner verified and published, or found already published. */
 export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
@@ -158,6 +159,8 @@ export type OperationEvent =
   | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
   | { type: "submitted"; kind: "deploy"; repo: string; environment: string; commitId: string; submittedBy: string; promotion?: PromotionFacts }
+  /** Release verification of `commitId`, which staging deployed, before anyone approves it: see `VerificationOperation`. */
+  | { type: "submitted"; kind: "verification"; repo: string; commitId: string; submittedBy: string }
   /** A reset of the repository's declared target; `commitId` is its last landed commit at submission, for reading only. */
   | { type: "submitted"; kind: "reset"; repo: string; commitId: string; submittedBy: string }
   | { type: "stage"; stage: RunnerStage }
@@ -171,6 +174,10 @@ export type OperationEvent =
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
   /** A release's outcome. A promotion names `deploy`, the production deploy of its candidate, which the deploy lane runs. */
   | { type: "released"; result: CompletedRelease; deploy?: string }
+  /** A pre-verification passed: `checks` ran against `candidate`'s tree while the release branch was at `base`. */
+  | { type: "verified"; base: string; candidate: string; checks: VerificationDeclaration[] }
+  /** A running pre-verification stopped for `to` (a landing, reset, release or restart) and is queued again; its runs so far stay on record. */
+  | { type: "yielded"; to: string }
   /** Every project of the environment deployed. */
   | { type: "deployed"; record: DeployRecord }
   /** The declared reset step ran against `target` from the exact source of `source`, the integration tip. */
@@ -188,6 +195,11 @@ export type OperationEvent =
   | { type: "integration_held"; repo: string; commitId: string; reason: string }
   | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean };
 
+/** A landing's `submitted` event; rows from before releases existed carry no `kind`. */
+export type LandingSubmission = Extract<OperationEvent, { type: "submitted"; changeId: string }>;
+export const isLandingSubmission = (event: OperationEvent | undefined): event is LandingSubmission =>
+  event?.type === "submitted" && (event.kind === undefined || event.kind === "landing");
+
 /** A stored event: `seq` is global and strictly increasing across operations. */
 export type StoredEvent = { seq: number; operationId: string; at: string; event: OperationEvent };
 
@@ -198,7 +210,7 @@ export type RunRecord = {
 };
 
 /** Event types that close an operation. */
-export const TERMINAL_EVENT_TYPES = ["landed", "released", "deployed", "reset", "failed", "declined", "superseded", "cancelled"] as const;
+export const TERMINAL_EVENT_TYPES = ["landed", "released", "verified", "deployed", "reset", "failed", "declined", "superseded", "cancelled"] as const;
 
 type OperationFields = {
   id: string; repo: string; commitId: string; submittedBy: string;
@@ -244,6 +256,15 @@ export type LandingOutcome = {
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
 
+/**
+ * Release verification of a commit staging deployed, run before the owner approves it so a
+ * confirm of the same commit can skip straight to publication. It runs in its repository's
+ * release lane, behind landings: it starts only while none of its repository's landings,
+ * resets or other releases is queued or running, and yields to one that arrives. It never
+ * counts as an approval.
+ */
+export type VerificationOperation = OperationFields & { kind: "verification" };
+
 /** Deploys take turns in their own lane, so a slow deploy never holds a landing. */
 export type DeployOperation = OperationFields & { kind: "deploy"; environment: string; promotion?: PromotionFacts };
 
@@ -254,7 +275,7 @@ export type DeployOperation = OperationFields & { kind: "deploy"; environment: s
 export type ResetOperation = OperationFields & { kind: "reset" };
 
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
-export type Operation = LandingOperation | ReleaseOperation | DeployOperation | ResetOperation;
+export type Operation = LandingOperation | ReleaseOperation | VerificationOperation | DeployOperation | ResetOperation;
 
 /** The append-only log and its projections. One implementation, on `node:sqlite`. */
 export interface OperationLog {
@@ -276,8 +297,15 @@ export interface OperationLog {
   deployments(repo: string, environment?: string): DeployOperation[];
   /** A repository's release operations, newest first. */
   releases(repo: string): ReleaseOperation[];
+  /** A repository's pre-verifications, newest first. */
+  verifications(repo: string): VerificationOperation[];
   /** A repository's reset operations, newest first. */
   resets(repo: string): ResetOperation[];
+  /**
+   * Whether staging has yet to finish a deploy of the repository's latest landing: a newer
+   * candidate may be coming, so a pre-verification waits rather than verify one it would replace.
+   */
+  stagingDue(repo: string): boolean;
   /** The latest landing a repository published, if any. */
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /** The owner's pause, while it holds. */
@@ -464,7 +492,7 @@ export const repositoryLane = (config: Pick<RunnerConfig, "repos">, repo: string
  * repositories' gates share, so a release there verifies in the shared lane itself.
  */
 export const admissionLane = (lane: string, repo: string, kind: Operation["kind"]): string =>
-  kind === "release" && lane === repositoryKey(repo) ? `${lane}\0release` : lane;
+  (kind === "release" || kind === "verification") && lane === repositoryKey(repo) ? `${lane}\0release` : lane;
 
 /**
  * Whether a queued landing must wait because a newer candidate of its change awaits Build admission: Build may admit

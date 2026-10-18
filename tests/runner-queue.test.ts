@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../src/lib/runner-contract.ts";
-import type { Executor, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
+import type { Executor, LandingOperation, StoredEvent, SubmitRequest } from "../src/lib/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../src/lib/runner-log.ts";
 import { createReceiptDrain } from "../src/lib/build-receipts.ts";
 import { importSubmissionSource, retainSubmissionSource } from "../src/lib/submission-source.ts";
@@ -1597,6 +1597,82 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.ok(again?.type === "released" && again.result.status === "released_by", JSON.stringify(again));
     assert.equal(again.deploy, outcome.deploy, "a deployed promotion is not deployed twice");
     assert.equal(f.log.deployments("fixture/repo", "production").length, 1);
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("a green staging deploy pre-verifies its commit behind landings, yields to one that arrives, and a confirm of it publishes without verifying again", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  try {
+    const verifications = () => f.log.verifications("fixture/repo");
+    const releaseChecks = async () => (await f.lines("release-verified.log")).length;
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    await f.queue.idle();
+    const [first] = verifications();
+    assert.ok(first?.result?.type === "verified", JSON.stringify(first));
+    assert.equal(first.commitId, f.main());
+    assert.equal(first.result.base, f.releaseRef());
+    assert.equal(await releaseChecks(), 1, "it ran the release checks");
+    assert.equal(f.releaseRef(), first.result.base, "and published nothing");
+
+    // b's pre-verification is running when a landing arrives: it yields, and c's green deploy supersedes it.
+    await rm(join(f.root, "release-started"));
+    await writeFile(join(f.root, "hold-release"), "");
+    f.submit(await f.candidate("b.txt"));
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    const yielded = verifications()[0]!;
+    assert.equal(yielded.status, "running");
+    const c = f.submit(await f.candidate("c.txt"));
+    f.queue.wake();
+    await until(() => f.result(c));
+    assert.equal(f.result(c)?.type, "landed", "the landing did not wait for the pre-verification");
+    const yields = f.log.events({ operationId: yielded.id }).flatMap((stored) => stored.event.type === "yielded" ? [stored.event.to] : []);
+    assert.deepEqual(yields, [`landing ${(f.log.operation(c) as LandingOperation).changeId.slice(0, 12)}`]);
+    await until(() => verifications().length === 3 || undefined);
+    await rm(join(f.root, "hold-release"));
+    await f.queue.idle();
+    assert.equal(f.log.operation(yielded.id)?.status, "superseded");
+    const latest = verifications()[0]!;
+    assert.ok(latest.result?.type === "verified", JSON.stringify(latest.result));
+    assert.equal(latest.commitId, f.main());
+
+    const checksBefore = await releaseChecks();
+    const promotion = f.submitRelease(latest.commitId);
+    await f.land(promotion);
+    await f.queue.idle();
+    const outcome = f.result(promotion);
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
+    assert.deepEqual(outcome.result.verification, { preverified: latest.id });
+    assert.equal(await releaseChecks(), checksBefore, "the confirm ran no release check");
+    assert.ok(!stagesOf(f, promotion).includes("verifying"));
+    assert.deepEqual(f.parents(f.releaseRef()), [latest.result.base, latest.commitId]);
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("recovery queues the pre-verification a green staging deploy recorded just before a restart never queued", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  try {
+    await f.land(f.submit(await f.candidate("a.txt")));
+    await f.queue.idle();
+    const [green] = f.log.deployments("fixture/repo", "staging");
+    assert.ok(green?.result?.type === "deployed");
+    // b's staging deploy fails, so nothing pre-verifies it; then the log is made to say it went green, as a deploy recorded just before a restart would.
+    await writeFile(join(f.root, "fail-deploy-app"), "");
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.queue.idle();
+    await rm(join(f.root, "fail-deploy-app"));
+    const b = f.main();
+    assert.deepEqual(f.log.verifications("fixture/repo").map((entry) => entry.commitId), [green.commitId]);
+    const recorded = newOperationId();
+    f.log.append(recorded, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "staging", commitId: b, submittedBy: "test" });
+    f.log.append(recorded, { type: "deployed", record: { ...green.result.record, commitId: b } });
+    await f.queue.recover();
+    await f.queue.idle();
+    const [latest] = f.log.verifications("fixture/repo");
+    assert.equal(latest?.commitId, b);
+    assert.equal(latest?.status, "verified", JSON.stringify(latest?.result));
+    await f.queue.recover();
+    assert.equal(f.log.verifications("fixture/repo").length, 2, "a second recovery queues nothing more");
   } finally { await f.dispose(); }
 }, 180_000);
 

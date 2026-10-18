@@ -1,4 +1,4 @@
-import { RUNNER_CONTROL_ID, type CauseClass, type RunnerStage, type StoredEvent } from "./runner-contract.ts";
+import { isLandingSubmission, RUNNER_CONTROL_ID, type CauseClass, type RunnerStage, type StoredEvent } from "./runner-contract.ts";
 
 export type MetricTiming = { samples: number; medianMs: number; p90Ms: number };
 export type FlakeCandidate = {
@@ -88,7 +88,7 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
   const passes: Pass[] = [];
 
   for (const op of all.values()) {
-    if (!op.submitted || op.submitted.kind === "release" || op.submitted.kind === "deploy" || op.submitted.kind === "reset") continue;
+    if (!isLandingSubmission(op.submitted)) continue;
     const commandByRun = new Map<string, string>();
     for (const row of op.events) if (row.event.type === "run_started") commandByRun.set(row.event.runId, row.event.command);
     for (const row of op.events) {
@@ -213,7 +213,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string): 
       commandSamples.set(started.command, samples);
     }
 
-    if (submitted.kind !== "release" && submitted.kind !== "deploy" && submitted.kind !== "reset") {
+    if (isLandingSubmission(submitted)) {
       const key = JSON.stringify([submitted.repo, submitted.changeId]);
       const group = attemptsByChange.get(key) ?? { repo: submitted.repo, changeId: submitted.changeId, operations: [] };
       group.operations.push(op);
@@ -222,7 +222,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string): 
   }
 
   const attempts = [...attemptsByChange.values()].map((group) => {
-    const history = [...histories.values()].filter((op) => op.submitted?.kind !== "release" && op.submitted?.kind !== "deploy" && op.submitted?.kind !== "reset" && op.submitted?.repo === group.repo && op.submitted.changeId === group.changeId).sort((a, b) => a.submittedEvent!.seq - b.submittedEvent!.seq);
+    const history = [...histories.values()].filter((op) => isLandingSubmission(op.submitted) && op.submitted.repo === group.repo && op.submitted.changeId === group.changeId).sort((a, b) => a.submittedEvent!.seq - b.submittedEvent!.seq);
     const landedAt = history.findIndex((op) => op.events.some((row) => row.event.type === "landed"));
     const throughLanded = history.slice(0, landedAt < 0 ? undefined : landedAt + 1);
     return { repo: group.repo, changeId: group.changeId, operationIds: throughLanded.map((op) => op.id), attempts: throughLanded.length, landed: landedAt >= 0 };

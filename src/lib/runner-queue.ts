@@ -16,7 +16,7 @@ import { createResetScheduler } from "./reset-scheduler.ts";
 import { runReset } from "./reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "./deploy.ts";
 import { readExactExecutionPolicy } from "./post-integration-source.ts";
-import { confirmRelease, returnRelease } from "./release.ts";
+import { confirmRelease, passedVerification, returnRelease, verifyRelease } from "./release.ts";
 import type { BuildReader } from "./tracker.ts";
 import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "./build-check-access.ts";
 import type { BuildCheckAccess } from "./build-check-access.ts";
@@ -24,15 +24,19 @@ import { RequiredVerificationError, runRequiredVerification } from "./required-v
 import { readPolicyTextAtCommit } from "./execution-policy.ts";
 import { settingsLanding } from "./policy-settings.ts";
 import { verificationEvidence } from "./verification-policy.ts";
-import { admissionLane, awaitingReplacement, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
-import { newOperationId } from "./runner-log.ts";
+import { admissionLane, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { label, newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { commandEvidence } from "./command-evidence.ts";
 import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "./verification-failure.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerLimits, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose } from "./runner-contract.ts";
+import type { CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerLimits, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-contract.ts";
+
+/** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
+const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
+  Boolean(configuration?.deployments?.environments.production && configuration.releaseBranch && configuration.requiredReleaseVerification);
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -279,6 +283,13 @@ export function runnerWorkers(config: Pick<RunnerConfig, "workers">, executor: P
  * as one until it has published; an operation waiting for a worker is admitted oldest
  * first. Deploys take turns in a separate lane that only reads the warm store, so a
  * deploy that waits minutes on its build never holds a landing.
+ *
+ * A green staging deploy of a promoting repository queues a pre-verification of its
+ * commit in the release lane. It takes only what landings leave: it starts once none of
+ * its repository lane's landings, resets or releases is queued or running, staging has
+ * deployed the latest landing (which may be a newer candidate), and a worker is free; and
+ * it yields (stops and requeues) when a landing, reset or release arrives that it would
+ * hold up.
  */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
@@ -322,6 +333,8 @@ export function createRunnerQueue(input: {
   const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
   const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
+  /** Running pre-verifications told to yield, with what they yield to. */
+  const yielding = new Map<string, string>();
   /** Recovery holds every lane: nothing is admitted until it finishes. */
   let recovering: Promise<void> | undefined;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
@@ -336,7 +349,7 @@ export function createRunnerQueue(input: {
         `${result.diagnosticOutput?.stdout ?? ""}\n${result.diagnosticOutput?.stderr ?? ""}\n${result.stdout}\n${result.stderr}`, request.cwd, request.env)) }) };
   }
   const repoCheckout = (repo: string) => join(home, "repos", repo);
-  const checkoutPath = (operation: Operation) => operation.kind === "release" ? join(home, "releases", operation.repo) : repoCheckout(operation.repo);
+  const checkoutPath = (operation: Operation) => operation.kind === "release" || operation.kind === "verification" ? join(home, "releases", operation.repo) : repoCheckout(operation.repo);
   /**
    * The temporary directory of every gate command run in `checkout`, emptied at each turn.
    * It isolates a checkout's temporary state from other operations', including any lock a
@@ -413,6 +426,7 @@ export function createRunnerQueue(input: {
     const progress = (line: string) => append(operation.id, { type: "progress", line });
     let verdict: OperationEvent;
     append(operation.id, { type: "stage", stage: "deploying" });
+    let promotes = false;
     try {
       const repository = configuredRepository(config, operation.repo);
       if (!repository) throw new Error(`Repository ${operation.repo} is not configured on this runner`);
@@ -428,6 +442,7 @@ export function createRunnerQueue(input: {
       await ensureOnIntegrationBranch(gitDirectory, repository.url, branch, operation.commitId);
       const policy = exact.configuration?.deployments?.environments[operation.environment];
       if (!policy) throw new Error(`${operation.commitId.slice(0, 12)} declares no ${operation.environment} deployment`);
+      promotes = promotesFrom(exact.configuration);
       // The environment served a commit once any of its projects served it.
       const earlier = log.deployments(operation.repo, operation.environment).filter((entry) => entry.id !== operation.id).map((entry) => ({ entry, record: recordOf(entry) }));
       const previous = earlier.find(({ record }) => record?.projects.some(servedDeploy))?.entry.commitId ?? null;
@@ -467,6 +482,8 @@ export function createRunnerQueue(input: {
       verdict = { type: "failed", stage: "deploying", reason: message(error) };
     }
     append(operation.id, verdict);
+    // Promotion reads staging: what it deployed green is the next candidate, so verify it ahead of the approval.
+    if (verdict.type === "deployed" && operation.environment === "staging" && promotes) queueVerification(operation.repo, operation.commitId);
     // Landings that arrived while this deploy ran were told to wait for it; a deploy that
     // never reached its projects is retried once the interval passes.
     await scheduleLatest(operation.repo, progress);
@@ -493,6 +510,29 @@ export function createRunnerQueue(input: {
     return returned.returned
       ? { automatic: true, releaseBranch: returned.releaseBranch, reason: `rolled back: production serves what it served before, and the release branch is back on ${returned.releaseBranch.slice(0, 12)}` }
       : { automatic: false, reason: `rollback incomplete: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
+  }
+  /**
+   * After a restart: the newest green staging deploy may have been recorded without the
+   * pre-verification it queues (the runner stopped between the two). Queue it when that commit
+   * has no pre-verification at all; one the owner killed or that was superseded stays as it is.
+   */
+  async function reconcileVerification(repo: string): Promise<void> {
+    const green = log.deployments(repo, "staging").find((entry) => entry.result?.type === "deployed");
+    if (!green || log.verifications(repo).some((entry) => entry.commitId === green.commitId)) return;
+    const configuration = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), green.commitId).then((exact) => exact.configuration, () => null);
+    if (promotesFrom(configuration)) queueVerification(repo, green.commitId);
+  }
+  /**
+   * Queue a pre-verification of `commitId`, superseding queued ones of older commits, unless one
+   * of it is already queued, running or passed. A running one finishes.
+   */
+  function queueVerification(repo: string, commitId: string): void {
+    const existing = log.verifications(repo);
+    if (existing.some((entry) => entry.commitId === commitId && (entry.status === "queued" || entry.status === "running" || entry.status === "verified"))) return;
+    const id = newOperationId();
+    for (const stale of existing.filter((entry) => entry.status === "queued")) append(stale.id, { type: "superseded", by: id });
+    append(id, { type: "submitted", kind: "verification", repo, commitId, submittedBy: `${executor.host}:staging` });
+    wakeMain();
   }
   /** Run `work` in the repository's lane, after its running turn, and resume the queue after it. */
   function serially<T>(repo: string, work: () => Promise<T>): Promise<T> {
@@ -529,8 +569,8 @@ export function createRunnerQueue(input: {
     if (recovering || log.paused()) return;
     const open = log.openOperations();
     for (const operation of open) {
-      if (admitted.size >= workers) return;
-      if (operation.kind === "deploy" || operation.status !== "queued" || (operation.kind === "landing" && operation.admission === "pending") || awaitingReplacement(operation, open)) continue;
+      if (admitted.size >= workers) break;
+      if (operation.kind === "deploy" || operation.kind === "verification" || !runnable(operation, open)) continue;
       const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
       const active = prefixes.get(operation.repo) ?? [];
       const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
@@ -538,7 +578,7 @@ export function createRunnerQueue(input: {
         if (active.length >= 2 || lanes.has(lane) || resetConflict(operation)) continue;
         // A queued reset/release is an arrival-order fence, even while no lane is held.
         const before = log.openOperations(operation.repo).slice(0, log.openOperations(operation.repo).findIndex((entry) => entry.id === operation.id));
-        if (before.some((entry) => entry.kind !== "landing" && entry.kind !== "deploy")) continue;
+        if (before.some((entry) => entry.kind !== "landing" && entry.kind !== "deploy" && entry.kind !== "verification")) continue;
         const turn: PrefixTurn = { operation, attempt: 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
           prepared: deferred(), completed: deferred(), invalidation: new AbortController(), predecessor: active.at(-1) };
         prefixes.set(operation.repo, [...active, turn]);
@@ -553,10 +593,44 @@ export function createRunnerQueue(input: {
         continue;
       }
       if (active.length || lanes.has(lane) || resetConflict(operation)) continue;
-      admitted.set(operation.id, operation);
-      void inLane(lane, () => processOperation(operation))
-        .finally(() => { admitted.delete(operation.id); wakeMain(); });
+      admit(lane, operation);
     }
+    // Pre-verifications take only what landings, resets and releases leave.
+    for (const operation of open) {
+      if (admitted.size >= workers) break;
+      if (operation.kind !== "verification" || operation.status !== "queued" || open.some((other) => holdsBack(other, operation, open)) || log.stagingDue(operation.repo)) continue;
+      const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
+      if (!lanes.has(lane)) admit(lane, operation);
+    }
+    for (const entry of running.values()) {
+      const verification = entry.operation;
+      if (verification.kind !== "verification" || yielding.has(verification.id)) continue;
+      // It yields to its repository lane's work, and to any work it keeps from a worker.
+      const waiting = open.find((other) => other.status === "queued" && holdsBack(other, verification, open)
+        || other.status === "queued" && other.kind !== "deploy" && other.kind !== "verification" && runnable(other, open) && admitted.size >= workers
+          && !lanes.has(admissionLane(laneOf(other.repo), other.repo, other.kind)));
+      if (!waiting) continue;
+      yielding.set(verification.id, label(waiting));
+      entry.controller.abort();
+    }
+  }
+  function admit(lane: string, operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation): void {
+    admitted.set(operation.id, operation);
+    void inLane(lane, () => processOperation(operation))
+      .finally(() => { admitted.delete(operation.id); wakeMain(); });
+  }
+  /** Whether `operation` is queued and free to start, as far as Build admission goes. */
+  const runnable = (operation: Operation, open: readonly Operation[]): boolean => operation.status === "queued"
+    && !(operation.kind === "landing" && operation.admission === "pending") && !awaitingReplacement(operation, open);
+  /**
+   * Whether `other`, open in the queue, keeps `verification` from running: any landing, reset or
+   * release of its repository lane, except a release of the same commit, which waits for it
+   * and reuses its pass.
+   */
+  function holdsBack(other: Operation, verification: VerificationOperation, open: readonly Operation[]): boolean {
+    if (other.kind === "deploy" || other.kind === "verification" || laneOf(other.repo) !== laneOf(verification.repo)) return false;
+    if (other.kind === "release" && other.commitId === verification.commitId) return false;
+    return other.status === "running" || runnable(other, open);
   }
   /**
    * A reset rewrites the external state a release may verify against, so a release
@@ -568,7 +642,7 @@ export function createRunnerQueue(input: {
     return operation.kind === "release"
       && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
   }
-  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation, prefix?: PrefixTurn): Promise<void> {
+  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation, prefix?: PrefixTurn): Promise<void> {
     let stage: RunnerStage = "queued";
     let stageStarted = Date.now();
     let installSource: "fresh" | "existing" | undefined;
@@ -599,7 +673,7 @@ export function createRunnerQueue(input: {
         const events = log.events({ operationId: operation.id }).map((row) => row.event);
         const submitted = events.find((event) => event.type === "submitted");
         const admitted = events.find((event) => event.type === "build_admitted");
-        const binding = admitted && submitted?.type === "submitted" && submitted.kind !== "release" && submitted.kind !== "deploy" && submitted.kind !== "reset"
+        const binding = admitted && isLandingSubmission(submitted)
           ? submitted.admission?.binding : undefined;
         // Without Build on the runner its checks get nothing from Build, and a check that needs it refuses by name.
         if (!binding || !readBuild) return { ...read?.environment };
@@ -714,9 +788,10 @@ export function createRunnerQueue(input: {
       // other branch would be mutable, and the candidate cleanup below would abandon it.
       await jj(checkout, ["config", "set", "--repo", 'revset-aliases."trunk()"', `${branch}@${remote}`]);
       // The release checkout holds no integration: what the repository lane finishes is not its concern.
-      if (operation.kind === "release") {
+      if (operation.kind === "release" || operation.kind === "verification") {
         await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
-        await release(operation);
+        if (operation.kind === "release") await release(operation);
+        else verdict = await verify();
         return;
       }
       const recordedHold = log.held().find((entry) => entry.repo === operation.repo);
@@ -910,7 +985,7 @@ export function createRunnerQueue(input: {
         && (prefix.predecessor ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
-      else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
+      else if (controller.signal.aborted) verdict = yielding.has(operation.id) ? { type: "yielded", to: yielding.get(operation.id)! } : { type: "cancelled", reason: OWNER_KILL_REASON };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
       else if (error instanceof HeldIntegration) {
         append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message });
@@ -950,6 +1025,7 @@ export function createRunnerQueue(input: {
       if (token) buildChecks!.revoke(token);
       if (stage !== "queued") append(operation.id, stageDetail());
       running.delete(operation.id);
+      yielding.delete(operation.id);
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
       if (!retryPrefix && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
@@ -1027,6 +1103,7 @@ export function createRunnerQueue(input: {
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
+        preverified: (plan) => passedVerification(plan, log.verifications(operation.repo))?.id ?? null,
         exclusively: (publication) => {
           // A shared-lane release owns the publication lane for its whole turn.
           // Rejoining it would wait for this very release to finish.
@@ -1044,6 +1121,16 @@ export function createRunnerQueue(input: {
       });
       else if (!result.ok && result.status === "refused") append(operation.id, { type: "failed", stage, reason: result.reason });
       else throw new Error(`Unexpected release result ${result.status}`);
+    }
+    /** Pre-verify the candidate as a confirm would, recording what passed against which release base. */
+    async function verify(): Promise<OperationEvent> {
+      const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
+      // A yield or kill stops its commands, which then read as failures.
+      if (controller.signal.aborted) throw new OwnerKill();
+      if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks };
+      if (result.status === "verification_failed") return { type: "failed", stage: "verifying", reason: result.reason,
+        command: result.evidence.command, output: result.evidence.stdoutTail + result.evidence.stderrTail };
+      return { type: "failed", stage, reason: result.reason };
     }
   }
   async function recoverRunning(): Promise<void> {
@@ -1063,6 +1150,11 @@ export function createRunnerQueue(input: {
       if (operation.kind === "reset") {
         // The schedule waits a full interval after this one; the owner can reset again at once.
         append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; run slipjay reset again` });
+        continue;
+      }
+      if (operation.kind === "verification") {
+        // It publishes nothing: it queues again, behind whatever arrived meanwhile.
+        append(operation.id, { type: "yielded", to: "a runner restart" });
         continue;
       }
       if (operation.kind === "release") {
@@ -1175,7 +1267,10 @@ export function createRunnerQueue(input: {
       recovering = Promise.allSettled([...lanes.values(), ...attempts]).then(async () => { await executor.recover?.(); await recoverRunning(); await reconcileHeld(); })
         .finally(() => { recovering = undefined; });
       await recovering;
-      for (const repo of Object.keys(config.repos).map(repositoryKey)) await scheduleLatest(repo);
+      for (const repo of Object.keys(config.repos).map(repositoryKey)) {
+        await reconcileVerification(repo);
+        await scheduleLatest(repo);
+      }
     },
     cancelled(operation) {
       if (operation.kind !== "landing") return;

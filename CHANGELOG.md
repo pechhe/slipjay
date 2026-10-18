@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Promotions are verified before the owner approves them (#97):** a green staging deploy
+  queues a pre-verification of its commit on the runner. It runs `requiredReleaseVerification`
+  as a confirm would, after the repository's landings, and yields to a landing that arrives
+  while it runs. The `slipjay promote` plan reports it as `verification` (`queued`, `running`,
+  `failed` with `failedCommand`, `passed` or `none`). `--confirm` of a candidate whose
+  pre-verification passed against the current release base publishes without verifying
+  again. A failing release check now shows up before the approval round instead of after it.
+- **The plan says whether an earlier approval covers the candidate (#97):** `approval`
+  (`approvedCandidate`, `covered`, `reasons`) is true only when the changes since an approved,
+  unshipped candidate add no migration artifact and name no work item (`Build:`/`Issue:`
+  trailers) the approved range lacks. `reasons` names each failed rule and its commits.
+
 ## v3.29.0
 
 - **Starts no longer wait behind a background refill (#95):** a refill installs under the

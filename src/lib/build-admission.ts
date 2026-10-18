@@ -1,5 +1,5 @@
 import type { BuildBinding, SubmissionHandoff } from "./submission-handoff.ts";
-import type { OperationLog, StoredEvent } from "./runner-contract.ts";
+import { isLandingSubmission, type OperationLog, type StoredEvent } from "./runner-contract.ts";
 import { BUILD_ITEM_UNAVAILABLE, BuildRefusal, readBuildItem } from "./tracker.ts";
 import type { BuildReadAction, BuildReader } from "./tracker.ts";
 
@@ -81,7 +81,7 @@ export function admissionSettled(history: readonly StoredEvent[]): boolean {
  */
 export async function settleAdmission(log: OperationLog, admit: BuildAdmitter, operationId: string): Promise<{ resolved: true } | { resolved: false; reason: string }> {
   const submitted = log.events({ operationId }).find((row) => row.event.type === "submitted");
-  if (submitted?.event.type !== "submitted" || submitted.event.kind === "release" || submitted.event.kind === "deploy" || submitted.event.kind === "reset" || !submitted.event.admission)
+  if (!isLandingSubmission(submitted?.event) || !submitted.event.admission)
     throw new Error(`Operation ${operationId} has no Build admission to resolve`);
   const { repo, changeId, commitId, admission } = submitted.event;
   if (admissionSettled(log.events({ operationId }))) return { resolved: true };
