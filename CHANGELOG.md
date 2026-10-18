@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.31.0
+
 - **The runner pushes its metrics export to HQ Build (#99):** a runner configured with `build.origin`
   and `YARDSMITH_SLIPJAY_BUILD_TOKEN` posts pages of `/v1/metrics/events` to HQ's
   `/api/build/runner/pipeline` every 30 minutes, following HQ's cursor. It runs apart from landings
