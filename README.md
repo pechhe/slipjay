@@ -486,6 +486,7 @@ and held state through the existing recovery path.
     the runner also sets `snapshot.max-new-file-size` to 64MiB unless `jj` overrides it, so none of these depend on the host's jj config.
     An optional `build.origin` names the HQ that Build admission and receipts go to; it takes effect
     only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
+    With both, the runner also pushes its metrics export to HQ (see Pipeline metrics relay).
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
   - `logs/<operation>.log`: the run logs. A reset's step output goes to the owner-only
     `logs/<operation>.reset-output` beside it, never into the log.
@@ -1177,6 +1178,16 @@ records following and reattachment on its landing operation. Hosts may call the
 public `recordClientFacts` library export for preview and transport observations,
 or `slipjay record-preview <port>` after starting a workspace preview. These
 observations never enter the landing queue.
+
+**Pipeline metrics relay.** HQ runs where it cannot reach the runner, so a runner with
+`build.origin` and `YARDSMITH_SLIPJAY_BUILD_TOKEN` pushes its own export: at start and every 30
+minutes it `POST`s pages of `/v1/metrics/events` (`{since, events, nextSeq, hasMore}`) to
+`{origin}/api/build/runner/pipeline` with the same bearer as Build admission. HQ owns the cursor: a
+pass opens with an empty page to learn it and follows any 409 to the cursor HQ names, so resending
+a stored page is harmless and the relay keeps no state. A page is read again with a lower `limit`
+until its body fits 3 MiB. It shares nothing with the landing queue or the receipt drain; every
+read and POST is aborted after 30 seconds, and a failure is logged to the runner's stderr and
+retried at the next tick.
 
 SSH forwarding failures in an assigned workspace are retained as pending delivery
 fields in its existing metadata until the same runner address can be reached.

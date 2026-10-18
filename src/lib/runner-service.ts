@@ -9,6 +9,7 @@ import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
 import { BUILD_TOKEN_ENV, buildAdmitter, buildReader, buildRoute } from "./build-admission.ts";
 import { createBuildCheckAccess } from "./build-check-access.ts";
+import { createPipelineRelay, localPipelineReader } from "./build-pipeline-relay.ts";
 import { createReceiptDrain } from "./build-receipts.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
@@ -72,6 +73,10 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     },
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   buildChecks?.serve(server.url);
+  // The metrics export goes to HQ on its own timer, reading this runner's API like any client; it shares nothing with the receipt drain.
+  const relay = config.build && buildToken
+    ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }) }) : undefined;
+  relay?.start();
   // Queued operations from before a restart resume here.
   queue.wake();
   receipts?.wake();
@@ -81,5 +86,5 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   prune();
   const retention = setInterval(prune, 6 * 60 * 60 * 1000);
   retention.unref();
-  return { url: server.url, close: async () => { clearInterval(retention); await pruning; await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
+  return { url: server.url, close: async () => { clearInterval(retention); await pruning; relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
 }
