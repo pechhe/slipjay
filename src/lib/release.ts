@@ -3,7 +3,7 @@
  * branch its committed policy declares. `releaseIntegration` only plans, on the
  * author's machine: it names the candidate (the integration branch on the
  * remote), the base (the release branch on the remote), the commits between them,
- * any migration artifacts and any half-built Specs (warned about, never refused).
+ * and any migration artifacts.
  *
  * `confirmRelease` runs on the runner, in a checkout of its own, for the candidate
  * commit a human approved: it checks that exact commit out, runs
@@ -14,19 +14,14 @@
  * jj commands ignore working copies, except checking the candidate out.
  */
 import { readExecutionPolicyAtCommit } from "./execution-policy.ts";
-import { githubRepository } from "./issue-references.ts";
-import { halfBuiltSpecs } from "./release-specs.ts";
 import { RequiredVerificationError, runRequiredVerification } from "./required-verification.ts";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { jj, run, workspaceContext } from "./workspace-jj.ts";
 
 import type { BoundedProcessRequest, BoundedProcessResult } from "./bounded-process.ts";
-import type { GraphqlRunner, HalfBuiltSpecs } from "./release-specs.ts";
 import type { RunnerStage } from "./runner-contract.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 import type { WorkspaceCommandResult } from "./workspace-command.ts";
-import { trackerOf } from "./tracker.ts";
-import type { BuildReader, Tracker } from "./tracker.ts";
 
 export type ReleasePlan = {
   root: string;
@@ -37,7 +32,7 @@ export type ReleasePlan = {
   base: string;
   /** The integration commit being released. */
   candidate: string;
-  commits: Array<{ commitId: string; subject: string; description: string }>;
+  commits: Array<{ commitId: string; subject: string }>;
   migrationArtifacts: string[];
   /** The SQL migration artifacts that are not additive (see `nonAdditiveSql`): a failed promotion carrying one is not rolled back automatically. */
   nonAdditiveMigrations: string[];
@@ -48,8 +43,6 @@ export type ReleasePlan = {
   promotes: boolean;
   /** The candidate's production deployment declares `migrations`: the runner applies the promotion's migrations itself. */
   appliesMigrations: boolean;
-  /** Where the candidate's policy says its work is tracked, for the half-built Spec check. */
-  tracker: Tracker;
 };
 
 /**
@@ -80,8 +73,6 @@ export type ReleaseSummary = {
   checks: string[];
   /** Present when the candidate moved past an earlier approval that did not ship. */
   delta?: PromotionDelta;
-  /** Open Specs with Tickets in the range; absent when the range is empty. */
-  halfBuiltSpecs?: HalfBuiltSpecs;
 };
 
 export type ReleaseResult =
@@ -110,9 +101,6 @@ export type ConfirmReleaseOptions = {
   /** Where each verification command runs (the runner's executor). */
   run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   environment?: () => NodeJS.ProcessEnv;
-  graphql?: GraphqlRunner;
-  /** Reads Build for a Build-tracked candidate's half-built Spec check; defaults to reading through the runner. */
-  readBuild?: BuildReader;
   /**
    * Runs publication, which moves the release branch, once nothing else may move it (the
    * runner's repository lane). Its own recheck that the release branch is still the
@@ -387,10 +375,9 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   if (!base) refuse(`${releaseBranch}@${remote} does not exist; publish the release branch once before releasing to it`);
 
   const commits = lines(await jjOut(root, ["log", "--no-graph", "-r", `::${candidate} ~ ::${base}`,
-    "-T", 'commit_id ++ "\\t" ++ description.escape_json() ++ "\\n"'])).map((line) => {
+    "-T", 'commit_id ++ "\\t" ++ description.first_line().escape_json() ++ "\\n"'])).map((line) => {
     const [commitId, encoded] = line.split("\t");
-    const description = JSON.parse(encoded!) as string;
-    return { commitId: commitId!, subject: description.split("\n")[0]!, description };
+    return { commitId: commitId!, subject: JSON.parse(encoded!) as string };
   });
   const artifactPaths = policy.migrationFinalization?.artifactPaths ?? [];
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
@@ -402,7 +389,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
     if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
   }
   const production = policy.deployments?.environments.production;
-  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks, tracker: trackerOf(policy),
+  return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, nonAdditiveMigrations, paths: changed, checks,
     promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations) };
 }
 
@@ -419,7 +406,7 @@ export async function promotionDelta(plan: ReleasePlan, approved: string[]): Pro
     if (since === plan.candidate || !await commitOf(plan.root, `${since} & ::${plan.candidate}`)) return null;
     const delta = new Set(await commitIds(plan.root, `::${plan.candidate} ~ ::${since}`));
     const paths = lines(await jjOut(plan.root, ["diff", "--from", since, "--to", plan.candidate, "--name-only"]));
-    return { since, commits: plan.commits.filter((commit) => delta.has(commit.commitId)).map(({ commitId, subject }) => ({ commitId, subject })),
+    return { since, commits: plan.commits.filter((commit) => delta.has(commit.commitId)),
       paths, migrationArtifacts: plan.migrationArtifacts.filter((file) => paths.includes(file)) };
   }
   return null;
@@ -506,17 +493,12 @@ export async function returnRelease(checkout: string, { merge, candidate }: { me
   }
 }
 
-/** The result fields describing `plan`; the Spec check runs again on every call, as a Spec's Tickets may have closed in between. */
-async function describePlan(plan: ReleasePlan, graphql: GraphqlRunner | undefined, readBuild: BuildReader | undefined): Promise<ReleaseSummary> {
-  const summary: ReleaseSummary = { integrationBranch: plan.integrationBranch, releaseBranch: plan.releaseBranch, remote: plan.remote,
+/** The result fields describing `plan`. */
+function describePlan(plan: ReleasePlan): ReleaseSummary {
+  return { integrationBranch: plan.integrationBranch, releaseBranch: plan.releaseBranch, remote: plan.remote,
     base: plan.base, candidate: plan.candidate, commits: plan.commits.length, migrationArtifacts: plan.migrationArtifacts,
     nonAdditiveMigrations: plan.nonAdditiveMigrations, paths: plan.paths,
     checks: plan.checks.map((check) => [check.executable, ...check.args].join(" ")) };
-  if (!plan.commits.length) return summary;
-  const remotes = await jjRun(plan.root, ["git", "remote", "list"]);
-  summary.halfBuiltSpecs = await halfBuiltSpecs(remotes.code === 0 ? githubRepository(remotes.stdout, plan.remote) : null,
-    plan.commits.map((commit) => commit.description), { graphql, tracker: plan.tracker, readBuild });
-  return summary;
 }
 
 /**
@@ -548,8 +530,8 @@ const refusalOf = (error: unknown): ReleaseResult => {
  * commit staging is green on, read through `readPromotion` (the runner), and the plan
  * carries the delta since an earlier approval the candidate has moved past.
  */
-export async function releaseIntegration(cwd = process.cwd(), { graphql, readBuild, readPromotion }: {
-  graphql?: GraphqlRunner; readBuild?: BuildReader; readPromotion?: () => Promise<PromotionState>;
+export async function releaseIntegration(cwd = process.cwd(), { readPromotion }: {
+  readPromotion?: () => Promise<PromotionState>;
 } = {}): Promise<ReleaseResult> {
   try {
     let plan = await planRelease(cwd);
@@ -562,7 +544,7 @@ export async function releaseIntegration(cwd = process.cwd(), { graphql, readBui
       delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
     }
-    const summary = { ...await describePlan(plan, graphql, readBuild), ...delta ? { delta } : {} };
+    const summary = { ...describePlan(plan), ...delta ? { delta } : {} };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
     return { ok: true, status: "planned", ...summary, subjects: (delta?.commits ?? plan.commits).map((commit) => commit.subject),
       next: `After explicit human approval: slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
@@ -606,7 +588,7 @@ async function requireCandidateTree(checkout: string, candidate: string): Promis
  * A candidate the release branch already holds verifies nothing.
  */
 export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
-  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, graphql, readBuild, exclusively = (publication) => publication() } = options;
+  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, run: runCommand, environment, exclusively = (publication) => publication() } = options;
   try {
     const plan = await planRelease(checkout, { candidate });
     if (!plan.commits.length) {
@@ -614,10 +596,10 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
       onProgress(`[release] ${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}`
         + (releasedBy ? `, released by ${releasedBy.slice(0, 12)}` : ""));
       onStage("finalizing");
-      return { ok: true, status: "released_by", ...await describePlan(plan, graphql, readBuild), merge, releasedBy };
+      return { ok: true, status: "released_by", ...describePlan(plan), merge, releasedBy };
     }
     requireMigrationsReady(plan, migrationsReady);
-    const summary = await describePlan(plan, graphql, readBuild);
+    const summary = describePlan(plan);
     onStage("installing");
     await jj(checkout, ["new", plan.candidate]);
     await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand, ...(environment ? { env: environment() } : {}) });

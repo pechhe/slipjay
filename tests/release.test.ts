@@ -37,14 +37,11 @@ test("a release plans, then verifies the exact candidate in the confirming check
     assert.equal(plan.candidate, candidate);
     assert.equal(plan.base, base);
     assert.equal(plan.commits, 2);
-    assert.deepEqual(plan.halfBuiltSpecs, { checked: false, reason: "the repository has no GitHub remote" },
-      "a repository without GitHub still plans, saying the Spec check could not run");
     assert.equal(remoteRef(f, "release"), base, "planning publishes nothing");
 
     const released = await confirmRelease(f.repo, { candidate: candidate.slice(0, 12) });
     assert.equal(released.status, "released", JSON.stringify(released));
     assert.ok(released.ok && released.status === "released");
-    assert.equal(released.halfBuiltSpecs?.checked, false, "confirm re-runs the Spec check");
     assert.equal(remoteRef(f, "release"), released.merge);
     assert.deepEqual(remoteParents(f, released.merge), [base, candidate]);
     assert.equal(remoteTree(f, released.merge), remoteTree(f, candidate));

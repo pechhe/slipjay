@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { githubRepository } from "../src/lib/issue-references.ts";
+import { commitIssue, githubRepository } from "../src/lib/issue-references.ts";
 import { createWorkspace } from "../src/lib/slipjay.ts";
 import { landThroughRunner } from "../src/lib/runner-client.ts";
 import { jj, project, withTestRunner } from "./support/workspace-project.ts";
@@ -84,3 +84,11 @@ test("a real runner clones, fetches and pushes locally while JJ exposes the conf
     assert.equal(githubRepository(jj(f.repo, ["git", "remote", "list"]), "origin"), null);
   } finally { await f.dispose(); }
 }, 60000);
+
+test("a commit's Issue comes from its trailer for this repository, else a closing reference or (#N)", () => {
+  assert.equal(commitIssue("Add a thing\n\nIssue: owner/app#12", "owner/app"), 12);
+  assert.equal(commitIssue("Add a thing\n\nIssue: #13", "owner/app"), 13);
+  assert.equal(commitIssue("Add a thing (#14)\n\nIssue: other/repo#99", "owner/app"), 14);
+  assert.equal(commitIssue("Fix it\n\nCloses #15", "owner/app"), 15);
+  assert.equal(commitIssue("Tidy up", "owner/app"), null);
+});

@@ -6,7 +6,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { githubRepository } from "./issue-references.ts";
+import { commitIssue, githubRepository } from "./issue-references.ts";
 import { publicationRemote } from "./landing-steps.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { downloadSubmissionSource, manageRepairClaim, readBuildThroughRunner, readLandingHandoff, readLandingOutcome, readRepairState, RunnerRequestRefused } from "./runner-client.ts";
@@ -14,7 +14,6 @@ import type { LandingOutcome } from "./runner-contract.ts";
 import { importSourceBundle } from "./submission-source-export.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { isBuildBinding } from "./submission-handoff.ts";
-import { commitIssue } from "./release-specs.ts";
 import { readBuildItem, trackerOf } from "./tracker.ts";
 import type { BuildReader } from "./tracker.ts";
 import { createWorkspace } from "./workspace-create.ts";

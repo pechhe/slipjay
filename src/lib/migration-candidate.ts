@@ -7,8 +7,7 @@ export type MigrationRunPurpose = "migration_generate" | "migration_verify";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
 import { migrationCommandFailure, redactMigrationOutput } from "./migration-command-evidence.ts";
 import { checkoutCwd } from "./checkout-cwd.ts";
-import { githubRepository } from "./issue-references.ts";
-import { commitIssue } from "./release-specs.ts";
+import { commitIssue, githubRepository } from "./issue-references.ts";
 
 const matches = (roots: string[], file: string): boolean => roots.some(root => file === root || file.startsWith(root + "/"));
 const changedPaths = (summary: string): string[] => summary.split(/\r?\n/).filter(Boolean).map(line => line.replace(/^[A-Z?]\s+/, ""));

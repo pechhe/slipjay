@@ -199,7 +199,7 @@ async function runPromote(args: string[]): Promise<number> {
   const location = runnerLocation();
   if (options.confirm === undefined) {
     const plan = await releaseIntegration(process.cwd(),
-      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }), readBuild: (action, input) => readBuildThroughRunner(action, input) } : {});
+      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }) } : {});
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
   }

@@ -8,8 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
 import { parseExecutionPolicy } from "../src/lib/execution-policy.ts";
-import { withIssueTrailer } from "../src/lib/issue-references.ts";
-import { commitIssue, halfBuiltSpecs } from "../src/lib/release-specs.ts";
+import { commitIssue, withIssueTrailer } from "../src/lib/issue-references.ts";
 import { controlRunner, landThroughRunner, readBuildThroughRunner } from "../src/lib/runner-client.ts";
 import { createWorkspace } from "../src/lib/slipjay.ts";
 import { metadataPath } from "../src/lib/workspace-state.ts";
@@ -112,24 +111,6 @@ test("a Build item is closed once nothing is left to deliver, and a legacy item 
   assert.equal(await workItemClosed("/unused", "build", 8, read), null);
   assert.equal(await workItemClosed("/unused", "build", 6), null);
   assert.equal(await workItemTitle("/unused", "build", 6), null);
-});
-
-test("promotion reports a Build-tracked release's open parent Specs with their Tickets' progress", async () => {
-  const open = item({ number: 10, kind: "spec", status: "in_progress", title: "Open Spec" });
-  const done = item({ number: 20, kind: "spec", status: "landed", title: "Landed Spec" });
-  const { read, calls } = build([open, done,
-    item({ number: 11, parentId: open.id, status: "landed" }), item({ number: 12, parentId: open.id, status: "dropped" }), item({ number: 13, parentId: open.id }),
-    item({ number: 21, parentId: done.id, status: "landed" }), item({ number: 30 })]);
-  const result = await halfBuiltSpecs("o/r", ["A\n\nBuild: #11", "B\n\nBuild: #12", "C\n\nBuild: #21", "D\n\nBuild: #30", "E"], { tracker: "build", readBuild: read });
-  assert.deepEqual(result, { checked: true, specs: [{ number: 10, title: "Open Spec", url: null, closedTickets: 2, totalTickets: 3, summary: "#10 Open Spec: 2 of 3 Tickets closed" }] });
-  assert.equal(calls.filter((call) => call.startsWith(`read {"itemId":"${open.id}"`)).length, 1, "each parent Spec is read once");
-
-  assert.deepEqual(await halfBuiltSpecs("o/r", ["A\n\nBuild: #11"], { tracker: "build" }), { checked: false, reason: "could not check Build for half-built Specs: no Build reader" });
-  // A number Build does not know serves no Spec; Build not answering means the check could not run.
-  assert.deepEqual(await halfBuiltSpecs("o/r", ["A\n\nBuild: #99"], { tracker: "build", readBuild: read }), { checked: true, specs: [] });
-  const down: BuildReader = async () => { throw new Error("Build did not answer: Build answered HTTP 503"); };
-  assert.deepEqual(await halfBuiltSpecs("o/r", ["A\n\nBuild: #11"], { tracker: "build", readBuild: down }),
-    { checked: false, reason: "could not check Build for half-built Specs: Build did not answer: Build answered HTTP 503" });
 });
 
 test("a client reads Build only through the runner, and only Build's read actions", async () => {

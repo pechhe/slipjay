@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Promotion no longer warns about half-built Specs:** `slipjay promote` plans and `--confirm`
+  results drop `halfBuiltSpecs`, and planning no longer queries GitHub or Build for the open
+  Specs a release range served. A repository that gates unaccepted work itself (as YardSmith's
+  Spec gates do) has nothing left for the warning to catch. Candidate approval, migration
+  classification and confirmation, verification, deployment and rollback are unchanged (#44).
+
 - **A landing record naming another delivery is explained, not promised away:** a landed
   workspace whose landing record names an artifact already archived as another workspace's
   landing is kept by cleanup and the sweep with a reason naming that workspace, and `prune --plan`

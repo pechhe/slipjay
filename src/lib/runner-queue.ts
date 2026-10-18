@@ -283,7 +283,7 @@ export function runnerWorkers(config: Pick<RunnerConfig, "workers">, executor: P
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
   environment?: () => NodeJS.ProcessEnv;
-  /** Reads Build for a Build-tracked release's half-built Spec check; absent, that check reports it could not run. */
+  /** Reads Build for a Build-tracked repository's landing check context; absent, those checks get none. */
   readBuild?: BuildReader;
   /** Read-only Build access for a Build-tracked repository's landing checks; absent, the runner has no Build. */
   buildChecks?: BuildCheckAccess;
@@ -1026,7 +1026,7 @@ export function createRunnerQueue(input: {
         return;
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
-        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), ...(readBuild ? { readBuild } : {}),
+        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
         exclusively: (publication) => {
           // A shared-lane release owns the publication lane for its whole turn.
           // Rejoining it would wait for this very release to finish.

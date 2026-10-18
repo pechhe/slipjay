@@ -45,7 +45,7 @@ export function referencesIssue(description: string | null | undefined, issueNum
 /**
  * `description` plus a git trailer naming its work item, unless it has none or already names it:
  * `Issue: owner/repo#N` for a GitHub Issue, or `Build: #N` for a Build item. A Build item is named only
- * by that trailer, since `#N` in a description may be a GitHub reference, so promotion always finds it.
+ * by that trailer, since `#N` in a description may be a GitHub reference.
  */
 export function withIssueTrailer(description: string, issueNumber: number | null | undefined, repository: string | null, tracker: Tracker = "github"): string {
   const text = (description ?? "").trimEnd();
@@ -62,4 +62,17 @@ export function withIssueTrailer(description: string, issueNumber: number | null
 export function buildTrailerItem(description: string | null | undefined): number | null {
   const match = /^Build: #(\d+)\s*$/m.exec(description ?? "");
   return match ? Number(match[1]) : null;
+}
+
+/**
+ * The work item a commit description served in `repository`: its `Issue:` trailer, else a closing
+ * reference or `(#N)`. In a Build-tracked repository only its `Build:` trailer counts: any other `#N`
+ * is a GitHub number, which a Build number is not.
+ */
+export function commitIssue(description: string | null | undefined, repository: string | null, tracker: Tracker = "github"): number | null {
+  if (tracker === "build") return buildTrailerItem(description);
+  for (const match of (description ?? "").matchAll(/^Issue: ([\w.-]+\/[\w.-]+)?#(\d+)\s*$/gm)) {
+    if (!match[1] || match[1] === repository) return Number(match[2]);
+  }
+  return originatingIssue(null, description);
 }
