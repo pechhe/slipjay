@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The runner no longer slows down as its ledger grows:** reading one operation's events used
+  the `operation_id` index again instead of scanning the whole ledger, so each projection costs
+  its own events rather than every event ever recorded. On a 48,000-event ledger a queue snapshot,
+  which every watching client requests after each event, fell from 1.2 s to 0.1 s, and the
+  runner's event loop, pinned at 100% CPU behind those snapshots, stopped delaying landings.
+
 ## v3.30.0
 
 - **Promotions are verified before the owner approves them (#97):** a green staging deploy

@@ -31,11 +31,15 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     CREATE UNIQUE INDEX IF NOT EXISTS events_submission_request ON events(json_extract(data, '$.repo'), json_extract(data, '$.requestId')) WHERE type = 'submission_request'`);
   const listeners = new Set<(event: StoredEvent) => void>();
   const insert = db.prepare("INSERT INTO events (operation_id, at, type, data) VALUES (?, ?, ?, ?)");
+  // Separate statements: an `OR operation_id = ?` would hide the index and scan the whole ledger per operation.
   const select = db.prepare(`SELECT seq, operation_id, at, data FROM events
-    WHERE seq > ? AND (? IS NULL OR operation_id = ?) ORDER BY seq LIMIT ?`);
+    WHERE seq > ? ORDER BY seq LIMIT ?`);
+  const selectOperation = db.prepare(`SELECT seq, operation_id, at, data FROM events
+    WHERE operation_id = ? AND seq > ? ORDER BY seq LIMIT ?`);
   const events: OperationLog["events"] = (options = {}) => {
-    const id = options.operationId ?? null;
-    return (select.all(options.afterSeq ?? 0, id, id, options.limit ?? -1) as EventRow[]).map((row) => ({
+    const after = options.afterSeq ?? 0, limit = options.limit ?? -1;
+    const rows = options.operationId === undefined ? select.all(after, limit) : selectOperation.all(options.operationId, after, limit);
+    return (rows as EventRow[]).map((row) => ({
       seq: row.seq, operationId: row.operation_id, at: row.at,
       event: JSON.parse(row.data) as OperationEvent,
     }));
