@@ -9,6 +9,12 @@
   Where the environment activates, traffic still moves only once every project has passed. A
   YardSmith release that builds its three sites on the runner takes as long as its slowest site
   instead of all three added together.
+- **Source is organised by capability (#104):** `src/lib` and `tests` are grouped into `workspace`,
+  `landing`, `runner`, `release`, `build`, `policy` and `infra` folders, and the client-facts,
+  spare-refill and housekeeping entries moved to `src/launcher`. `bun run check` now also rejects
+  library imports of `src/launcher` and closure escapes in type-only syntax. Behaviour, exports and
+  the installed binary are unchanged; `tests/integration/installed-package.test.ts` proves the packed
+  package works from outside the checkout.
 
 ## v3.31.0
 

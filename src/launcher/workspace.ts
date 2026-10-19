@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner-client.ts";
-import { pipelineMetrics, formatPipelineMetrics } from "../lib/pipeline-metrics.ts";
-import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/submission-handoff.ts";
-import type { SubmissionHandoff } from "../lib/submission-handoff.ts";
-import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace-attempts.ts";
-import type { SweepOptions } from "../lib/workspace-sweep.ts";
+import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
+import { pipelineMetrics, formatPipelineMetrics } from "../lib/runner/pipeline-metrics.ts";
+import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/landing/submission-handoff.ts";
+import type { SubmissionHandoff } from "../lib/landing/submission-handoff.ts";
+import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
+import type { SweepOptions } from "../lib/workspace/workspace-sweep.ts";
 import { open } from "node:fs/promises";
 import { hostname } from "node:os";
-import { confirmableCandidate } from "../lib/release.ts";
-import { startRunner } from "../lib/runner-service.ts";
+import { confirmableCandidate } from "../lib/release/release.ts";
+import { startRunner } from "../lib/runner/runner-service.ts";
 
 import {
   attachWorkspaceIssue,
@@ -35,14 +35,14 @@ import {
   cutover,
   cutoverPending,
 } from "../lib/slipjay.ts";
-import { legacyStateHome, machineConfigPath } from "../lib/workspace-paths.ts";
-import { checkoutIdentity, machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "../lib/machine-config.ts";
-import { setPolicy, showPolicy } from "../lib/policy-command.ts";
-import { retiredFieldsWarning } from "../lib/execution-policy.ts";
-import { workspaceMetadata } from "../lib/workspace-state.ts";
-import { landingGuardDecision } from "../lib/landing-guard.ts";
-import { landingTimingLine } from "../lib/landing-timing.ts";
-import { repairFailedLanding } from "../lib/repair-workspace.ts";
+import { legacyStateHome, machineConfigPath } from "../lib/workspace/workspace-paths.ts";
+import { checkoutIdentity, machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "../lib/policy/machine-config.ts";
+import { setPolicy, showPolicy } from "../lib/policy/policy-command.ts";
+import { retiredFieldsWarning } from "../lib/policy/execution-policy.ts";
+import { workspaceMetadata } from "../lib/workspace/workspace-state.ts";
+import { landingGuardDecision } from "../lib/landing/landing-guard.ts";
+import { landingTimingLine } from "../lib/landing/landing-timing.ts";
+import { repairFailedLanding } from "../lib/landing/repair-workspace.ts";
 import { execFileSync, spawn } from "node:child_process";
 import { readFileSync, writeSync } from "node:fs";
 import { resolve } from "node:path";

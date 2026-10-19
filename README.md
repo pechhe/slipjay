@@ -591,7 +591,7 @@ integration branch; `production` deploys only through a promotion (see
   served before (the last deploy any project succeeded in), the commits between them,
   and each project's outcome. A deploy that failed before its projects ran (the commit
   is not on the integration branch, or the runner restarted) records only its reason.
-  `slipjay deploys` reads them back. The contract is `src/lib/runner-contract.ts`.
+  `slipjay deploys` reads them back. The contract is `src/lib/runner/runner-contract.ts`.
 
 ### Reset
 
@@ -723,7 +723,7 @@ be moved back is named, and the release branch stays on the release because
 production may still serve the candidate. Rollback is
 code only. The plan's `nonAdditiveMigrations` names migration artifacts that drop,
 rename, retype, delete or rewrite something, or tighten what an existing table accepts
-(a heuristic, `nonAdditiveSql` in `src/lib/release.ts`: it does not flag tables or
+(a heuristic, `nonAdditiveSql` in `src/lib/release/release.ts`: it does not flag tables or
 columns the migration itself adds, or a CHECK dropped and added back under the same
 name as an `IN (...)` list over one column, so an enum that gained a value is additive), and its `next` repeats them: a
 failed promotion carrying one, including a rerun confirm of it, is left as it is,
@@ -1155,7 +1155,7 @@ historical projection cannot certify current remote refs or external migration s
 has `automaticRetry: false`. A read never claims a repair lease or releases the
 author workspace. Owner cancellation and supersession remain terminal history.
 
-Cause rules in `src/lib/failure-classification.ts` carry their version on every
+Cause rules in `src/lib/runner/failure-classification.ts` carry their version on every
 `classified` event: `gate` for a failed verification, `conflict` for a rebase
 conflict, `infrastructure` for fetch/install/executor problems or a timeout before
 test execution, `policy` for declined paths, `killed` for the owner's kill,
@@ -1216,8 +1216,10 @@ import { createWorkspace, landThroughRunner, workspaceContext } from "@pechhe/sl
 workspaces, landing and its verification, repository policy and post-integration
 finalization, plus the process and text utilities that hosts share. Other
 modules under `src/lib` are internal, and `bun run check` enforces that the
-`src/` closure imports only itself, Node built-ins, `effect` and `proper-lockfile`,
-with no runtime cycles (type-only imports are not edges). A host that brokers child processes injects its broker with
+`src/` closure imports only itself, Node built-ins, `effect` and `proper-lockfile`
+(type-only imports included), that nothing outside `src/launcher` imports it, and
+that there are no runtime cycles (type-only imports are not runtime edges).
+[docs/architecture.md](docs/architecture.md) maps the capability folders. A host that brokers child processes injects its broker with
 `setProcessBroker`. Before the cutover, any library call that reads or writes
 state rejects with an error whose `code` is `SLIPJAY_CUTOVER_REQUIRED`;
 `cutoverPending()` reports that state and `cutover()` runs the cutover.
@@ -1242,7 +1244,7 @@ Every Vitest file runs under its own disposable `HOME`
 (`scripts/vitest-hermetic-env.ts`). `scripts/hermetic-home-guard.ts` fails a test
 that would otherwise write the real `~/.slipjay` or `~/.pi`. The cutover tests build
 pre-v1.0.0 state in that disposable `HOME` and never touch the real one. Run a single file with
-`bunx vp test tests/<file>.test.ts`.
+`bunx vp test tests/<capability>/<file>.test.ts`.
 
 
 ## Watching the runner

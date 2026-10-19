@@ -2,8 +2,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
-import { landThroughRunner } from "../../src/lib/runner-client.ts";
-import { startRunner } from "../../src/lib/runner-service.ts";
+import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
+import { startRunner } from "../../src/lib/runner/runner-service.ts";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
 // HOME they leak into ~/.pi and race live sessions, so a runner that skipped the
