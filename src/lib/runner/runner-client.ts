@@ -25,12 +25,11 @@ import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOpe
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
-import { releaseLandedWorkspace } from "../workspace/workspace-lifecycle.ts";
 import { metadataPath, readLandingState, statePath, workspaceMetadata } from "../workspace/workspace-state.ts";
 import { poolRefillLogPath, stateHome } from "../workspace/workspace-paths.ts";
 import { runnerSetting } from "../policy/machine-config.ts";
-import { sweepDisposableWorkspaces } from "../workspace/workspace-sweep.ts";
-import type { SweepResult } from "../workspace/workspace-sweep.ts";
+import { startLandedHousekeeping } from "../workspace/workspace-housekeeping.ts";
+import { callerPids } from "../workspace/workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 
 type PendingRunnerFact = {
@@ -640,7 +639,9 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
 type LandOptions = { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
   location: string; env?: NodeJS.ProcessEnv; resubmitAfterOutcome?: boolean;
   onLine?(line: string): void; onStage?(stage: string): void; onOperation?(operationId: string): void; signal?: AbortSignal };
-type LandResult = { ok: boolean; operation: Operation; logUrl: string; sweep?: SweepResult };
+/** A landing's detached housekeeping (`startLandedHousekeeping`): its process and log, or why it did not start. */
+type LandedHousekeeping = { started: boolean; pid?: number; logPath?: string; reason?: string };
+type LandResult = { ok: boolean; operation: Operation; logUrl: string; housekeeping?: LandedHousekeeping };
 
 /** A landing that failed before it submitted anything or followed an operation: the runner holds nothing of it. */
 export class LandingNotSubmitted extends Error {
@@ -802,7 +803,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     // The forward and its port end with this call, so the log is named by a command, not a URL.
     const logUrl = runLogCommand(operation.id);
     const result = operation.result;
-    let sweep: SweepResult | undefined;
+    let housekeeping: LandedHousekeeping | undefined;
     if (older && result?.type === "landed") {
       onLine(`[runner ${name}] followed an older commit (${operation.commitId}); land again to publish your current commit`);
       onLine(logUrl);
@@ -824,16 +825,12 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`))
         await dropSupersededCandidate(cwd, context.current.root, target, result.commitId, onLine);
       await finishLandedWorkspace(context, state);
-      // Release other delivered or idle checkouts; the sweep never fails the landing.
-      sweep = await sweepDisposableWorkspaces(context.integration.root, { protectedRoots: [cwd, context.current.root],
-        readBuild: (action, input) => readBuildThroughRunner(action, input, env) }).catch(() => undefined);
-      for (const removed of sweep?.removed ?? []) onLine(`Removed workspace: ${removed}`);
-      // An undelivered checkout kept by its session is the normal case; a delivered one is a leftover.
-      for (const skipped of sweep?.skipped ?? []) if (skipped.landed) onLine(`Kept landed workspace ${skipped.name}: ${skipped.reason}`);
-      if (context.current.name !== "default") {
-        const released = await releaseLandedWorkspace(context).catch((error: unknown) => ({ cleaned: false, reason: String(error) }));
-        if (!released.cleaned) onLine(`Kept landed workspace ${context.current.name}: ${released.reason}`);
-      }
+      // Releasing this checkout and sweeping the others deletes whole checkouts, which takes minutes
+      // in a large repository, so it runs detached and the verdict is reported now.
+      housekeeping = await startLandedHousekeeping(context, await callerPids()).catch((error: unknown) => ({ started: false, reason: String(error) }));
+      onLine(housekeeping.started
+        ? `Releasing this workspace and sweeping others in the background; outcomes go to ${housekeeping.logPath}`
+        : `Housekeeping not started: ${housekeeping.reason}`);
     } else if (result?.type === "declined") {
       // A Build refusal of admission, or a runner from before migration landings; nothing lands locally now.
       onLine(`[runner ${name}] declined: ${result.reason}\n${result.paths.join("\n")}`);
@@ -846,7 +843,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       onLine(`[runner ${name}] ${operation.status}${result?.type === "cancelled" ? `: ${result.reason}` : ""}`);
     }
     if (older) onLine(`[runner ${name}] followed an older commit; land again to submit your current commit`);
-    return { ok: !older && result?.type === "landed", operation, logUrl, ...(sweep ? { sweep } : {}) };
+    return { ok: !older && result?.type === "landed", operation, logUrl, ...(housekeeping ? { housekeeping } : {}) };
   } finally { connection.close(); }
 }
 

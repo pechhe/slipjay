@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { jj } from "../support/workspace-project.ts";
-import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
+import { fixture, released, waitFor } from "./fixtures/runner-client-fixture.ts";
 
 test("a landing's stages end with this machine's housekeeping once the runner reports its verdict", async () => {
   const f = await fixture(false, true);
@@ -31,7 +31,7 @@ test("a published landing finishes housekeeping and releases the author workspac
     const result = await running;
     assert.equal(result.ok, true);
     assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), op.commitId);
-    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+    await released(f.cwd);
   } finally { await f.dispose(); }
 });
 
@@ -71,7 +71,7 @@ test("a landed stack the runner rebased leaves none of its submitted commits beh
     const result = await running;
     assert.equal(result.ok, true, f.lines.join("\n"));
     // Nothing undelivered remained, so housekeeping released the workspace.
-    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+    await released(f.cwd);
     assert.equal(jj(f.repo, ["log", "-r", `(${f.commit} | ${op.commitId}) & ::visible_heads()`, "--no-graph", "-T", 'commit_id ++ "\\n"']), "");
   } finally { await f.dispose(); }
 });
@@ -93,7 +93,7 @@ test("a landing finishes housekeeping even when abandoning the rewritten submitt
     const result = await running;
     assert.equal(result.ok, true);
     // The working copy moved onto the landed commit, so housekeeping released the workspace.
-    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+    await released(f.cwd);
     assert.ok(f.lines.some((line) => line.includes(`jj abandon '::${op.commitId}`)), f.lines.join("\n"));
   } finally { await f.dispose(); }
 });

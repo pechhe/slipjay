@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { startRunner } from "../../src/lib/runner/runner-service.ts";
+import { poolRefillLogPath } from "../../src/lib/workspace/workspace-paths.ts";
 import { configureLocalGithubTransport } from "./workspace-project.ts";
 
 // Kept apart from workspace-project.ts so a test that only needs a project does not import the runner.
@@ -43,7 +44,13 @@ export function landThroughTestRunner(f: { root: string; repo: string; remote: s
     const holder = options.keep ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd, stdio: "ignore", detached: true }) : null;
     const lines: string[] = [];
     try {
+      const logged = (await readFile(poolRefillLogPath(), "utf8").catch(() => "")).length;
       const result = await landThroughRunner(cwd, { location, env, direct: options.direct, session: options.session, onLine: (line) => { lines.push(line); } });
+      // The landing's housekeeping runs detached after its verdict: wait for it, and report its lines as the landing's.
+      if (result.housekeeping?.pid) {
+        await waitForExit(result.housekeeping.pid);
+        lines.push(...(await readFile(poolRefillLogPath(), "utf8")).slice(logged).split("\n").filter(Boolean));
+      }
       // Anything the test waits for while the runner is still up, such as its Build receipts.
       await options.before?.();
       return { ...result, lines };
@@ -51,4 +58,14 @@ export function landThroughTestRunner(f: { root: string; repo: string; remote: s
       holder?.kill();
     }
   }, options.build ? { build: options.build } : {});
+}
+
+/** Wait until process `pid` has exited. */
+async function waitForExit(pid: number, timeoutMs = 120_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  while (alive()) {
+    if (Date.now() > deadline) throw new Error(`process ${pid} still running after ${timeoutMs}ms`);
+    await new Promise((settle) => setTimeout(settle, 50));
+  }
 }

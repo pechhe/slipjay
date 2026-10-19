@@ -6,7 +6,7 @@ import { existsSync, readlinkSync } from "node:fs";
 import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import { cleanupLandedWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { pruneWorkspaceState } from "../../src/lib/workspace/workspace-state-prune.ts";
@@ -98,8 +98,9 @@ test("the CLI's own working directory inside the workspace does not keep it afte
       execFile("bun", [cli, "land"], { cwd: workspace.workspacePath, env }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
     }));
     assert.equal(JSON.parse(stdout).ok, true, stderr);
-    assert.doesNotMatch(stderr, /Kept landed workspace/);
-    assert.equal(existsSync(workspace.workspacePath), false);
+    assert.match(stderr, /in the background/);
+    // Released after the verdict by the detached housekeeping, which ignores the CLI's own processes.
+    await vi.waitFor(() => assert.equal(existsSync(workspace.workspacePath), false), { timeout: 120_000, interval: 100 });
   } finally {
     await f.dispose();
   }

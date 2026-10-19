@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { startBackgroundEntry } from "./workspace-background.ts";
 import { workspaceContext } from "../infra/workspace-jj.ts";
+import type { WorkspaceContext } from "../infra/workspace-jj.ts";
 import { stateHome } from "./workspace-paths.ts";
 import { readJsonOptional } from "./workspace-state.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
@@ -56,4 +57,17 @@ export async function startHousekeeping(cwd: string = process.cwd(), options: { 
   // The stamp is keyed by the integration root, which is what the child sweeps.
   if (await recentlySwept(context.integration.root, Date.now(), HOUSEKEEPING_INTERVAL_MS)) return { started: false, reason: "recent" };
   return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", options);
+}
+
+/**
+ * A landing's own housekeeping, started once its verdict is known: a detached child releases the
+ * landed workspace (unless it is the integration checkout), then sweeps the repository's other
+ * delivered or idle checkouts at once, whatever the interval. Deleting a checkout takes minutes in
+ * a large repository, so none of it delays the verdict; each outcome is a line in the background
+ * log. `ignore` are the landing's own processes and the session that ran it, which never keep the
+ * landed workspace, as `releaseLandedWorkspace` ignores its caller's.
+ */
+export async function startLandedHousekeeping(context: WorkspaceContext, ignore: Iterable<number>, options: { command?: string[] } = {}): ReturnType<typeof startBackgroundEntry> {
+  const args = ["--landing", "--ignore", [...ignore].join(","), ...context.current.name === "default" ? [] : ["--release", context.current.root]];
+  return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", { ...options, args });
 }

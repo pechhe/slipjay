@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access } from "node:fs/promises";
 import { test } from "vite-plus/test";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { jj, project } from "../support/workspace-project.ts";
-import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
+import { fixture, released, waitFor } from "./fixtures/runner-client-fixture.ts";
 
 test("rerunning after an unfollowed landing reattaches to it and finishes housekeeping without resubmitting", async () => {
   const f = await fixture();
@@ -21,7 +20,7 @@ test("rerunning after an unfollowed landing reattaches to it and finishes housek
     assert.equal(result.ok, true);
     assert.equal(result.operation.id, "op_landed");
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
-    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+    await released(f.cwd);
   } finally { await f.dispose(); }
 });
 
@@ -47,7 +46,7 @@ test("a reland after the change landed, with an empty working copy on an immutab
     assert.equal(result.operation.id, "op_landed");
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
     assert.throws(() => execFileSync("git", ["--git-dir", f.remote, "rev-parse", "--verify", `refs/heads/${candidateBookmark(baseChange)}`], { stdio: "ignore" }));
-    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+    await released(f.cwd);
   } finally { await f.dispose(); }
 });
 

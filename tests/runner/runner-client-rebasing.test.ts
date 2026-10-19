@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { access, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { jj } from "../support/workspace-project.ts";
-import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
+import { fixture, released, waitFor } from "./fixtures/runner-client-fixture.ts";
 
 test("a full fetch while the candidate is queued does not leave the landed commit divergent or the author's commit immutable", async () => {
   const f = await fixture();
@@ -93,6 +93,6 @@ test("a landed candidate made immutable by a re-imported remote bookmark is stil
     f.append(op.id, { type: "landed", base, commitId: landed, branch: "main", remote: "origin" });
     const result = await running;
     assert.equal(result.ok, true);
-    await assert.rejects(access(f.cwd), { code: "ENOENT" });
+    await released(f.cwd);
   } finally { await f.dispose(); }
 });

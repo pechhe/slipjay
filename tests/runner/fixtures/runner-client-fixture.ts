@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../../../src/lib/workspace/workspace-create.ts";
@@ -86,3 +86,5 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
 }
 
 export const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 20 });
+/** The landing releases its checkout after its verdict, in a detached child: wait until it is gone. */
+export const released = (path: string) => vi.waitFor(() => assert.rejects(access(path), { code: "ENOENT" }), { timeout: 120_000, interval: 100 });

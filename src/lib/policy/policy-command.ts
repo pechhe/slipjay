@@ -108,13 +108,15 @@ export async function setPolicy(cwd: string, options: { base: string; patch: unk
   const message = `Set ${Object.keys(patch).join(", ")} in ${EXECUTION_POLICY_PATH}\n\nA settings change made by slipjay policy set.\n\n${POLICY_BASE_TRAILER}: ${baseDigest}\n`;
   // A rerun after an uncertain outcome reattaches to the attempt it made, never submitting a second.
   // Only an attempt that holds exactly this patch can have been submitted; any other is prepared again.
-  const earlier = (await listWorkspaces(root)).find((workspace) => workspace.metadata?.task === task && workspace.root);
+  const attempts = (await listWorkspaces(root)).filter((workspace) => workspace.metadata?.task === task && workspace.root);
+  const earlier = attempts[0];
   const prepared = earlier ? await attemptHolds(earlier.root, patched, message) : false;
   const current = await readIntegrationPolicy(root, { hintRoot: root });
   const currentText = await readPolicyTextAtCommit(root, current.commitId);
   if (currentText !== null && policyDigest(currentText) === policyDigest(patched)) {
-    // Published, perhaps by the runner retrying an integration it held: an earlier attempt is spent.
-    if (earlier?.root) await removeWorkspace(root, (await repository(earlier.root)).current.name, { allowWork: true }).catch(() => undefined);
+    // Published, perhaps by the runner retrying an integration it held: every earlier attempt is spent,
+    // including the one that landed, whose detached release may still be removing it.
+    for (const attempt of attempts) await removeWorkspace(root, attempt.name, { allowWork: true }).catch(() => undefined);
     return { ok: true, phase: "already-applied", revision: current.commitId };
   }
   if (!prepared) {
