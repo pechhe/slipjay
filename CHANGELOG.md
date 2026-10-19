@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.36.1
+
+- **`scripts/setup-runner.sh` keeps the runner's other settings and stops it cleanly (#3360):** re-running it, the way
+  to take the stop behaviour of v3.36.0, no longer rewrites `config.json` without its `build` section, and the unit's
+  `ExecStop` (`stop-runner.sh`, beside the config) signals only the runner process so a restart waits for an integration in
+  flight without cutting off the `jj` and `git` commands it started. Re-run it on a runner host that has v3.36.0 or later. Also in this release: the submission probe runs before admission
+  and names a refused replacement's queued predecessor (the Build #3356 follow-up).
+
 ## v3.36.0
 
 - **A landing that would conflict is refused at submission (Build #3356):** before a candidate
