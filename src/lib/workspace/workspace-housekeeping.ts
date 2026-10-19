@@ -9,6 +9,7 @@ import { readJsonOptional } from "./workspace-state.ts";
 import { sweepDisposableWorkspaces } from "./workspace-sweep.ts";
 import type { SweepOptions, SweepResult } from "./workspace-sweep.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { startEmptyingTrash } from "./workspace-trash.ts";
 
 /** Minimum time between background sweeps of one repository. */
 export const HOUSEKEEPING_INTERVAL_MS: number = 15 * 60_000;
@@ -35,6 +36,8 @@ async function recentlySwept(root: string, now: number, intervalMs: number) {
 export async function runHousekeeping(root: string, options: SweepOptions & { intervalMs?: number } = {}): Promise<HousekeepingOutcome> {
   const { intervalMs = HOUSEKEEPING_INTERVAL_MS, ...sweep } = options;
   try {
+    // A trash deletion a crash interrupted is finished here, whether or not this sweep runs.
+    await startEmptyingTrash();
     return await withWorkspaceTransaction(`housekeeping:${root}`, async () => {
       const now = sweep.now ?? Date.now();
       if (await recentlySwept(root, now, intervalMs)) return { ran: false as const, reason: "recent" as const };

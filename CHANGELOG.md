@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Removing a workspace no longer waits for its files to be deleted (#123):** cleanup, `slipjay remove`
+  and every sweep move the checkout into `~/.slipjay/trash`, which is a rename, and a detached process at
+  `nice -n 19` deletes it. Before this, deleting one t3code checkout took 239 s inside the removal and its
+  locks. A deletion a crash interrupted is restarted by the next sweep.
+
 ## v3.34.0
 
 - **A landing reports its verdict before its housekeeping (#110):** once the runner publishes or

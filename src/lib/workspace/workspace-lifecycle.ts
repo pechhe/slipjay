@@ -16,6 +16,7 @@ import { callerPids, describeHolders, processAlive, workspaceHolders } from "./w
 import { archiveIntegratedWorkspaceEvidence, conflictingArchive } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
+import { discardCheckout } from "./workspace-trash.ts";
 
 /** Host seams for retiring a checkout: its guarded forget and lifecycle event. */
 export interface RetirementHooks {
@@ -565,11 +566,11 @@ async function evidenceUnchanged(integrationRoot: string, root: string, inventor
   return JSON.stringify(await evidenceInventory(root, generated, evidence)) === inventory;
 }
 
-/** Unregister a workspace from JJ and delete its checkout, through the host's guarded forget when given. */
+/** Unregister a workspace from JJ and discard its checkout (`discardCheckout`), through the host's guarded forget when given. */
 export async function forgetWorkspace(integrationRoot: string, workspaceName: string, workspacePath: string, hooks: Pick<RetirementHooks, "forget"> = {}): Promise<void> {
   if (hooks.forget) return hooks.forget(integrationRoot, workspaceName, workspacePath);
   await jj(integrationRoot, ["--ignore-working-copy", "workspace", "forget", workspaceName]);
-  await rm(workspacePath, { recursive: true, force: true });
+  await discardCheckout(workspacePath);
   // JJ 0.46+ backs a colocated workspace with a Git worktree and leaves its registration behind
   // when the checkout was already gone, which blocks a new workspace at the same path. Not a
   // worktree (older JJ, non-colocated repository) is the usual case and fails harmlessly.

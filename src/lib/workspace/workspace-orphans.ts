@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { readdir, readFile, realpath, rm, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { describeHolders, processAlive, processWorkingDirectories, workspaceHolders } from "./workspace-holders.ts";
 import { nonReproducibleFiles } from "./workspace-lifecycle.ts";
@@ -7,6 +7,7 @@ import { workspaceStorageHomes } from "./workspace-paths.ts";
 import { run } from "../infra/workspace-jj.ts";
 import { workspaceMetadata } from "./workspace-state.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
+import { discardCheckout } from "./workspace-trash.ts";
 
 /**
  * Directories in workspace storage that no repository lists as a workspace: a checkout JJ
@@ -118,7 +119,7 @@ export async function retireOrphanedCheckouts(options: { now?: number } = {}): P
         const again = await inspectOrphan(orphan.root, orphan.name, new Map(), undefined, options.now ?? Date.now());
         if (again?.action !== "remove") continue;
         // Not `retireWorkspace`: an orphan has no registration to forget and no policy whose teardown applies.
-        await rm(orphan.root, { recursive: true, force: true });
+        await discardCheckout(orphan.root);
         removed.push(orphan.root);
       }
       return removed;

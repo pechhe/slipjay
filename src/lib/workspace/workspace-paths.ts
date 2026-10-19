@@ -62,6 +62,9 @@ export const workspaceStorageHomes = (): string[] => [workspaceHome(), legacyWor
 /** Checkout mode (`isolated`/`direct`) chosen through `slipjay mode`. */
 export const modePath = (): string => settled(join(slipjayHome(), "mode.json"));
 
+/** Removed checkouts awaiting background deletion; on the same volume as the workspaces, so moving one here is a rename. */
+export const trashHome = (): string => settled(join(slipjayHome(), "trash"));
+
 /** Machine-local landing state: top-level landing sidecars. */
 export const stateHome = (): string => settled(join(slipjayHome(), "state"));
 

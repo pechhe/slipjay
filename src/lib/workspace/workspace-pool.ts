@@ -2,7 +2,7 @@ import { timed } from "./start-steps.ts";
 import type { StartSteps } from "./start-steps.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, realpath, rm } from "node:fs/promises";
+import { mkdir, readdir, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { repositoryProjectCode, run, workspaceContext } from "../infra/workspace-jj.ts";
@@ -17,6 +17,7 @@ import { machineSpareLimit } from "../policy/machine-config.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { removeWorkspace, withinWorkspaceStorage } from "./workspace-lifecycle.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { discardCheckout } from "./workspace-trash.ts";
 
 /**
  * A pool of prepared, unassigned JJ workspaces per Project (`spares` in
@@ -225,7 +226,7 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<{ pro
       // An interrupted add may have left a half-made checkout under this spare's own name.
       if (!await withinWorkspaceStorage(workspacePath)) throw new Error(`Spare ${name} is outside workspace storage`);
       await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });
-      await rm(workspacePath, { recursive: true, force: true });
+      await discardCheckout(workspacePath);
       await jj(root, ["workspace", "add", "--name", name, "--revision", context.integrationBranch, workspacePath]);
     }
     await linkSharedPaths(root, workspacePath);
