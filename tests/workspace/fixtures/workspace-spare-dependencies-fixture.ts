@@ -23,7 +23,8 @@ export function advance(repo: string, message: string) {
 
 /**
  * A Bun workspace project whose root `postinstall` runs a tracked script that
- * imports a sibling: each install appends a line to `installs.log`.
+ * imports a sibling: each install appends a line to `installs.log`. `FIXTURE_INSTALL_HOLD` names a file
+ * each install waits for, so a test can keep an install running until it creates it.
  */
 export async function bunProject(policy?: Record<string, unknown>) {
   const f = await project({ ignore: "node_modules\n", policy });
@@ -37,12 +38,14 @@ export async function bunProject(policy?: Record<string, unknown>) {
     "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0" }),
     "scripts/count-install.mjs": 'import { record } from "./install-log.mjs";\nrecord();\n',
     "scripts/install-log.mjs": [
-      'import { appendFileSync } from "node:fs";',
+      'import { appendFileSync, existsSync } from "node:fs";',
       "export function record() {",
       "  const delay = Number(process.env.FIXTURE_INSTALL_DELAY_MS) || 0;",
+      "  const hold = process.env.FIXTURE_INSTALL_HOLD;",
       "  const start = Date.now();",
       '  if (process.env.FIXTURE_INSTALL_STARTED) appendFileSync(process.env.FIXTURE_INSTALL_STARTED, process.cwd() + "\\n");',
       "  if (delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);",
+      "  while (hold && !existsSync(hold)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);",
       '  appendFileSync(process.env.FIXTURE_INSTALL_LOG, process.cwd() + "\\n");',
       '  if (process.env.FIXTURE_INSTALL_SPANS) appendFileSync(process.env.FIXTURE_INSTALL_SPANS, JSON.stringify([start, Date.now()]) + "\\n");',
       "}",

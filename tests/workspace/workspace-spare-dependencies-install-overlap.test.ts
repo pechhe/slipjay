@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
@@ -10,24 +10,41 @@ test("refills of two repositories install one after the other, and a claim never
   const a = await bunProject({ spares: 2 });
   const b = await bunProject({ spares: 1 });
   const spans = join(a.root, "spans.jsonl");
+  const started = join(a.root, "started.log");
+  const hold = join(a.root, "release-installs");
+  let release: NodeJS.Timeout | undefined;
+  let refills: Promise<unknown>[] = [];
   try {
     await provisionSpare(a.repo);
     process.env.FIXTURE_INSTALL_SPANS = spans;
-    process.env.FIXTURE_INSTALL_DELAY_MS = "3000";
-    const refills = Promise.all([refill(a.repo), refill(b.repo)]);
-    const claimedAt = Date.now();
+    process.env.FIXTURE_INSTALL_STARTED = started;
+    process.env.FIXTURE_INSTALL_HOLD = hold;
+    refills = [refill(a.repo), refill(b.repo)];
+    const both = Promise.all(refills);
+    const finishedFirst = both.then(() => assert.fail("both refills finished before an install started"));
+    finishedFirst.catch(() => undefined);
+    // Claim while a refill's install is held open: a claim that waited for it could only return once it is released.
+    // A refill that fails before its install starts fails the test here instead of leaving it polling.
+    while (!(await readFile(started, "utf8").catch(() => ""))) await Promise.race([finishedFirst, new Promise((done) => setTimeout(done, 25))]);
+    // Should the claim wait after all, release the install so the test fails below instead of hanging.
+    release = setTimeout(() => void writeFile(hold, ""), 60_000);
     const created = await createWorkspace("task", a.repo);
     assert.equal(created.pooled, true, "the claim took the ready spare");
-    assert.ok(Date.now() - claimedAt < 3_000, `the claim did not wait for a refill install: ${Date.now() - claimedAt}ms`);
-    await refills;
+    assert.equal(await readFile(spans, "utf8").catch(() => ""), "", "the claim returned while the refill's install was still running");
+    await writeFile(hold, "");
+    await both;
     const installs = (await readFile(spans, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as [number, number]).sort((x, y) => x[0] - y[0]);
     assert.ok(installs.length >= 2, `both repositories installed: ${installs.length}`);
     for (let index = 1; index < installs.length; index += 1) {
       assert.ok(installs[index]![0] >= installs[index - 1]![1], `installs did not overlap: ${JSON.stringify(installs)}`);
     }
   } finally {
+    clearTimeout(release);
+    await writeFile(hold, "");
+    await Promise.allSettled(refills);
     delete process.env.FIXTURE_INSTALL_SPANS;
-    delete process.env.FIXTURE_INSTALL_DELAY_MS;
+    delete process.env.FIXTURE_INSTALL_STARTED;
+    delete process.env.FIXTURE_INSTALL_HOLD;
     await a.dispose();
     await b.dispose();
   }
