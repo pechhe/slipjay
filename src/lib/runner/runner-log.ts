@@ -34,7 +34,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     at TEXT NOT NULL,
     type TEXT NOT NULL,
     data TEXT NOT NULL
-  ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type);
+  ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type); CREATE INDEX IF NOT EXISTS events_at ON events(at);
     CREATE UNIQUE INDEX IF NOT EXISTS events_submission_request ON events(json_extract(data, '$.repo'), json_extract(data, '$.requestId')) WHERE type = 'submission_request'`);
   const listeners = new Set<(event: StoredEvent) => void>();
   const insert = db.prepare("INSERT INTO events (operation_id, at, type, data) VALUES (?, ?, ?, ?)");
@@ -129,8 +129,13 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         if (operation.status !== "queued") return;
         if (held) operation.stage = "paused";
         // A depth-two landing verifies beside the one landing its repository runs, when a place is free.
-        const successor = index === 1 && running !== undefined && entries[0] === running && running.kind === "landing" && operation.kind === "landing" && depth(operation.repo) === 2;
-        if (running && !successor) operation.waitingFor = label(running);
+        const turn = index === 1 && running !== undefined && entries[0] === running && running.kind === "landing" && operation.kind === "landing" && depth(operation.repo) === 2;
+        // As the queue does, an older reset, release or audit of its repository fences a successor.
+        const fence = turn ? open.slice(0, open.indexOf(operation)).find((other) => repositoryKey(other.repo) === repositoryKey(operation.repo)
+          && other.kind !== "landing" && other.kind !== "deploy" && other.kind !== "verification") : undefined;
+        const successor = turn && !fence;
+        if (fence) operation.waitingFor = label(fence);
+        else if (running && !successor) operation.waitingFor = label(running);
         else if (operation.kind !== "deploy" && (index === 0 || successor)) {
           const places = capacity(operation, successor);
           if (places) placeless.add(operation);

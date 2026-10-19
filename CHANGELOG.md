@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **A depth-two successor held back by its repository's release names the release (Build #3010):** before,
+  it named the workers or its own queue's head, though the queue would not start it until the release
+  finished. The short class refreshes from an index on the ledger's event time instead of scanning the whole
+  ledger, and README's Workers section now states the short-landing place and T3 Code's current depth.
+
 ## v3.38.0
 
 - **A short landing gets past busy workers (Build #3010):** with a systemd budget, a landing of a repository

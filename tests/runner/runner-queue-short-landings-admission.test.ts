@@ -83,6 +83,17 @@ test("a depth-two successor counts as long and names the workers holding it", ()
   log.close();
 });
 
+test("an older release of its repository holds a depth-two successor back, and the successor names it", () => {
+  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 });
+  verified(log, "acme/t", 10, 20_000);
+  landing(log, "acme/t", "long");
+  const release = newOperationId();
+  log.append(release, { type: "submitted", kind: "release", repo: "acme/t", commitId: "e".repeat(40), migrationsReady: false, submittedBy: "test" });
+  const successor = landing(log, "acme/t");
+  assert.match(waiting(log, successor) ?? "", /^release /, "the queue fences it on the release, so the log names the release");
+  log.close();
+});
+
 test("a short landing starts beside two long ones, one more waits, and a long one starts when a long one ends", async () => {
   const { f, held, release, status, running, settle } = await queueFixture();
   try {

@@ -354,14 +354,14 @@ the runner's `limits` bound concurrent runs together.
 
 - **Workers.** Different repositories share no checkout, branch, reset target or
   environment, so their queues run at once: at most `workers` of them (runner config,
-  default 2; `1` is a single queue for every repository). Without a systemd user
+  default 2; `1` is a single queue for every repository), plus one short landing (below). Without a systemd user
   manager there is no combined budget, so the runner admits one operation at a time,
   runs every command (deploys and concurrent verification stages included) one at a
   time, and refuses to start with `workers` above 1. Repositories whose gates do
   share external state (a database, a deploy environment, fixed ports) must share a
-  queue: give them the same `lane` in the runner config's `repos` entries. When every
-  worker is busy, the next operation of an idle queue waits, oldest first, and names
-  what holds the workers (`a worker (landing …)`); one waiting behind its own queue
+  queue: give them the same `lane` in the runner config's `repos` entries. When the
+  rule below leaves no place for it, the next operation of an idle queue waits, oldest
+  first, and names what holds the places (`a worker (landing …)` or `every place (…)`); one waiting behind its own queue
   names the running operation, or the release or reset holding it. A release holds a
   worker from verification until it has published. A pre-verification holds one only
   while no other operation waits for it: it yields the worker, and goes back to the
@@ -378,7 +378,7 @@ the runner's `limits` bound concurrent runs together.
   successors always count as long. Places go to operations that can start, oldest
   first. A short landing waiting because all `workers + 1` places are full names them
   (`every place (landing …)`); a long one names the long operations holding the
-  workers. The ledger marks a landing admitted as short (`shortLanding` on its first
+  workers (`a worker (…)`) when they fill them, and every place otherwise. The ledger marks a landing admitted as short (`shortLanding` on its first
   stage).
 - **Limits.** On a systemd host every run, deploys included, joins `slipjay.slice`, so
   the workers' gates and everything they start share one cap: `limits` in the runner
@@ -402,10 +402,14 @@ its repository name. A configured shared `lane` cannot use depth two. The execut
 must enforce combined resource limits; an uncapped executor refuses this setting.
 Each admitted operation holds one place until its terminal outcome: the head of a
 short repository may take the short place, and its successor always counts as long, so
-it waits for a worker (`a worker (…)`) even when its own queue could take it. Of the
-repositories SlipJay itself lands, only T3 Code's gates qualify: YardSmith's share the
-Development database, SlipJay's real-systemd tests are not yet shown safe in parallel,
-and agent-config's and splay's landings are too short to gain from it.
+it waits for a worker (`a worker (…)`) even when its own queue could take it. An older
+reset, release or audit of its repository holds a successor back, and it names that
+operation. Of the repositories SlipJay itself lands, only T3 Code is a candidate: it
+runs at depth one until its gates are shown safe in independent checkouts on
+`t3peach`, including a controlled pair through its upstream-receipt check.
+YardSmith's gates share the Development database, SlipJay's real-systemd tests are not
+yet shown safe in parallel, and agent-config's and splay's landings are too short to
+gain from it.
 
 For integration D and submissions A then B, the queue prepares immutable CA on D
 and CB on that exact CA, in two independent warm verifier repositories. B can
