@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **A retiring workspace's dependencies become the next spare (#124):** when the pool is short, a
+  retiring workspace's `node_modules` are moved (a rename) into a new spare on the integration head,
+  and its refill installs over them in place. Before this, each claim topped the pool up by cloning a
+  whole `node_modules` (t3code: 6.6 GB, about 2.6 minutes, and fseventsd at 60–135% CPU), and each
+  retirement deleted another. A no-op install over an up-to-date t3code tree takes 5–18 s.
+
 - **Unused empty workspaces are swept after an hour, not a day:** a workspace allocated for a thread
   that never edits anything (as T3 does for most threads) used to keep its whole checkout and
   `node_modules` for 24 hours. On the Mac on 2026-10-19 that was 58 of 143 workspaces. One holding a

@@ -17,6 +17,8 @@ import { archiveIntegratedWorkspaceEvidence, conflictingArchive } from "./worksp
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 import { discardCheckout } from "./workspace-trash.ts";
+import { releaseSpareHandover, reserveSpareForHandover } from "./workspace-spares.ts";
+import { moveNodeModules } from "./workspace-dependencies.ts";
 
 /** Host seams for retiring a checkout: its guarded forget and lifecycle event. */
 export interface RetirementHooks {
@@ -602,27 +604,41 @@ export async function retireWorkspace(integrationRoot: string, workspace: { name
   if (hasPendingRunnerFacts(metadata)) throw new Error(`jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`);
   await runWorkspaceTeardown(integrationRoot, workspace, { timeoutMs: hooks.teardownTimeoutMs });
   const present = Boolean(workspace.root) && existsSync(workspace.root);
-  const preserved = present ? await preserveWorkspaceEvidence(integrationRoot, workspace) : null;
+  // A spare is retired only when the pool has too many; any other checkout's dependencies may become
+  // the next spare. It is made now, before the last checks, so they stay next to the forget.
+  const handover = present && metadata?.spare !== true ? await reserveSpareForHandover(integrationRoot, workspace.root).catch(() => null) : null;
   try {
-    await hooks.afterEvidence?.();
-    // The last look before the point of no return, after the teardown and the evidence copy: a working
-    // copy that moved since it was judged (an edit snapshots into a new commit) is never forgotten, or its
-    // commit would be orphaned, and neither is one that gained a file no history holds or whose evidence
-    // changed since it was copied.
-    if (options.expectedCommitId && present) {
-      const current = await workingCopyCommit(workspace.root).catch(() => null);
-      if (current !== options.expectedCommitId) throw new WorkingCopyChangedError(workspace.name);
+    const preserved = present ? await preserveWorkspaceEvidence(integrationRoot, workspace) : null;
+    try {
+      await hooks.afterEvidence?.();
+      // The last look before the point of no return, after the teardown and the evidence copy: a working
+      // copy that moved since it was judged (an edit snapshots into a new commit) is never forgotten, or its
+      // commit would be orphaned, and neither is one that gained a file no history holds or whose evidence
+      // changed since it was copied.
+      if (options.expectedCommitId && present) {
+        const current = await workingCopyCommit(workspace.root).catch(() => null);
+        if (current !== options.expectedCommitId) throw new WorkingCopyChangedError(workspace.name);
+      }
+      if (options.retainMaterial && present && (await retainedWorkspaceMaterial(workspace.root, integrationRoot, 1)).length) {
+        throw new WorkingCopyChangedError(workspace.name);
+      }
+      if (preserved && !await evidenceUnchanged(integrationRoot, workspace.root, preserved.inventory)) throw new WorkingCopyChangedError(workspace.name);
+    } catch (error) {
+      // The checkout is kept, evidence and all: a later retirement copies it afresh.
+      if (preserved) await rm(preserved.directory, { recursive: true, force: true });
+      throw error;
     }
-    if (options.retainMaterial && present && (await retainedWorkspaceMaterial(workspace.root, integrationRoot, 1)).length) {
-      throw new WorkingCopyChangedError(workspace.name);
+    const moved = handover ? await moveNodeModules(workspace.root, handover.path, handover.manifests) : [];
+    try {
+      await forgetWorkspace(integrationRoot, workspace.name, workspace.root, hooks);
+    } catch (error) {
+      // A checkout that stays keeps its dependencies.
+      if (handover) await moveNodeModules(handover.path, workspace.root, moved);
+      throw error;
     }
-    if (preserved && !await evidenceUnchanged(integrationRoot, workspace.root, preserved.inventory)) throw new WorkingCopyChangedError(workspace.name);
-  } catch (error) {
-    // The checkout is kept, evidence and all: a later retirement copies it afresh.
-    if (preserved) await rm(preserved.directory, { recursive: true, force: true });
-    throw error;
+  } finally {
+    if (handover) await releaseSpareHandover(handover);
   }
-  await forgetWorkspace(integrationRoot, workspace.name, workspace.root, hooks);
   await rm(metadataPath(workspace.name), { force: true });
   for (const path of landingStatePaths(workspace.name)) await rm(path, { force: true });
   await rm(lockPath(workspace.name), { force: true });

@@ -2,18 +2,15 @@ import { timed } from "./start-steps.ts";
 import type { StartSteps } from "./start-steps.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, realpath } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { repositoryProjectCode, run, workspaceContext } from "../infra/workspace-jj.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { metadataHome, workspaceHome } from "./workspace-paths.ts";
-import { listWorkspaces, metadataPath, readJsonOptional, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
-import { processAlive } from "./workspace-holders.ts";
-import { startBackgroundEntry } from "./workspace-background.ts";
+import { listWorkspaces, metadataPath, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
+import { countsTowardPool, spareAllowance, spareRecords } from "./workspace-spares.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
-import { DEFAULT_SPARES } from "../policy/execution-policy.ts";
-import { machineSpareLimit } from "../policy/machine-config.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { removeWorkspace, withinWorkspaceStorage } from "./workspace-lifecycle.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
@@ -42,15 +39,6 @@ interface PreparedDependencies {
   installInputs?: string | null;
 }
 
-/** A spare's registration, including a possibly unfinished preparation. */
-interface SpareRecord {
-  spare: true;
-  integrationRoot: string;
-  workspaceName: string;
-  workspacePath: string;
-  prepared?: boolean;
-  preparingPid?: number | null;
-}
 
 /** Pool registration either declines a refill or reserves a workspace. */
 type SpareRegistration = { reason: string; name?: never; workspacePath?: never }
@@ -62,31 +50,6 @@ async function jj(cwd: string, args: string[]): Promise<string> {
   return result.stdout.trim();
 }
 
-/** How many spares this machine keeps for a repository, and why. */
-export interface SpareAllowance {
-  spares: number;
-  /** The repository's `spares` (or the default). */
-  declared: number;
-  /** This machine's limit for the repository, or null when it sets none. */
-  machineLimit: number | null;
-  /**
-   * Where `declared` was read: the policy committed on the integration bookmark at this commit,
-   * never the primary checkout's working files, so an unlanded or stale local edit cannot change it.
-   */
-  source: { integrationBranch: string; commitId: string | null };
-}
-
-/**
- * This machine's spare count for the repository: its declared `spares`, lowered (never
- * raised) by the machine's limit, `spares` in ~/.slipjay/config.json keyed by the
- * integration checkout's absolute path. A malformed limit fails rather than being ignored.
- */
-export async function spareAllowance(context: WorkspaceContext): Promise<SpareAllowance> {
-  const declared = context.configuration.spares ?? DEFAULT_SPARES;
-  const machineLimit = machineSpareLimit(context.integration.root);
-  return { spares: machineLimit === null ? declared : Math.min(declared, machineLimit), declared, machineLimit,
-    source: { integrationBranch: context.integrationBranch, commitId: context.policyCommitId ?? null } };
-}
 
 /** Whether a listed workspace is a spare ready to claim. */
 const isReadySpare = (workspace: WorkspaceEntry): boolean =>
@@ -97,31 +60,6 @@ export async function readySpares(cwd: string): Promise<WorkspaceEntry[]> {
   return (await listWorkspaces(cwd)).filter(isReadySpare);
 }
 
-/**
- * Every spare registered for the repository, ready, in progress or abandoned, from its metadata
- * records: those naming its integration checkout by real path (so a symlinked or differently
- * spelled path still matches), and, when a record names a checkout path that no longer exists,
- * any that is still one of its JJ workspaces, so spares recorded under an old checkout path still
- * count against the allowance and can be retired.
- */
-async function spareRecords(integrationRoot: string): Promise<SpareRecord[]> {
-  const records: SpareRecord[] = [];
-  const root = await realpath(integrationRoot).catch(() => resolve(integrationRoot));
-  let members: Set<string> | undefined;
-  for (const file of await readdir(metadataHome()).catch(() => [])) {
-    if (!file.endsWith(".json")) continue;
-    const metadata = await readJsonOptional(join(metadataHome(), file)) as SpareRecord | null;
-    if (metadata?.spare !== true || typeof metadata.integrationRoot !== "string") continue;
-    const recorded = await realpath(metadata.integrationRoot).catch(() => null);
-    if (recorded === root) records.push(metadata);
-    else if (recorded === null) {
-      // Rare, so JJ is read only then.
-      members ??= new Set((await listWorkspaces(integrationRoot, { readOnly: true })).map((workspace) => workspace.name));
-      if (members.has(metadata.workspaceName)) records.push(metadata);
-    }
-  }
-  return records;
-}
 
 /**
  * Roots whose `node_modules` may seed an install of `workspacePath` with these install
@@ -206,10 +144,10 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<{ pro
   const registration: SpareRegistration = await withWorkspaceTransaction(`pool:${root}`, async (): Promise<SpareRegistration> => {
     const records = await spareRecords(root);
     // A ready spare, or one a live process is preparing, counts toward the pool.
-    if (records.filter((record) => record.prepared === true || processAlive(record.preparingPid)).length >= wanted) {
+    if (records.filter(countsTowardPool).length >= wanted) {
       return { reason: wanted === 0 ? "pool-disabled" : "spare-exists" };
     }
-    const abandoned = records.find((record) => record.prepared !== true && !processAlive(record.preparingPid));
+    const abandoned = records.find((record) => !countsTowardPool(record));
     const name = abandoned?.workspaceName ?? `${await repositoryProjectCode(root)}-spare-${randomUUID().slice(0, 6)}`;
     const workspacePath = abandoned?.workspacePath ?? join(workspaceHome(), name);
     await mkdir(metadataHome(), { recursive: true, mode: 0o700 });
@@ -326,7 +264,7 @@ export async function retireExcessSpares(cwd: string): Promise<string[]> {
   const { spares: allowed } = await spareAllowance(context);
   const excess = await withWorkspaceTransaction(`pool:${root}`, async () => {
     const records = await spareRecords(root);
-    const counted = records.filter((record) => record.prepared === true || processAlive(record.preparingPid)).length;
+    const counted = records.filter(countsTowardPool).length;
     const retiring = records.filter((record) => record.prepared === true).slice(0, Math.max(0, counted - allowed));
     for (const record of retiring) {
       await writeWorkspaceJson(metadataPath(record.workspaceName), { ...await workspaceMetadata(record.workspaceName), prepared: false, preparingPid: process.pid });
@@ -405,18 +343,4 @@ async function claimReadySpare(context: WorkspaceContext, name: string, base?: s
   return { root: spare.root, name: assigned, dependencies, installInputs };
 }
 
-/**
- * Refill the repository's spare pool without blocking the caller: a detached,
- * `nice`d child runs the package's own refill entry (`src/launcher/spare-refill.ts`,
- * in source and in the installed package) for the integration root,
- * appending its outcome to the pool-refill log in the state home. Concurrent refills
- * serialise on the pool transaction, and a ready spare makes one a no-op. While
- * a refill is in flight, a claim finds no ready spare and installs a fresh
- * workspace instead of waiting. `started` means the child process spawned; its
- * outcome is only in the log. `command` replaces the spawned runner (tests); the
- * integration root is always its last argument.
- */
-export async function startSpareRefill(cwd: string = process.cwd(), options: { command?: string[] } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
-  return await startBackgroundEntry(cwd, "../../launcher/spare-refill.ts", options);
-}
 

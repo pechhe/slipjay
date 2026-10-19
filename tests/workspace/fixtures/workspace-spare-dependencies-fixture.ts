@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { readySpares, refillPool, spareAllowance } from "../../../src/lib/workspace/workspace-pool.ts";
+import { readySpares, refillPool } from "../../../src/lib/workspace/workspace-pool.ts";
+import { spareAllowance } from "../../../src/lib/workspace/workspace-spares.ts";
 import { machineConfigPath } from "../../../src/lib/workspace/workspace-paths.ts";
 
 export const BUN_VERSION = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();

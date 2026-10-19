@@ -20,7 +20,8 @@ export type { AllocationAttempt, AttemptRelease } from "./workspace/workspace-at
 export {
   cleanupLandedWorkspace, describeRetention, removeWorkspace, retainedWorkspaceMaterial, retireWorkspace,
 } from "./workspace/workspace-lifecycle.ts";
-export { provisionSpare, readySpares, refillPool, refreshSpares, spareAllowance, startSpareRefill } from "./workspace/workspace-pool.ts";
+export { provisionSpare, readySpares, refillPool, refreshSpares } from "./workspace/workspace-pool.ts";
+export { spareAllowance, startSpareRefill } from "./workspace/workspace-spares.ts";
 export { runHousekeeping, startHousekeeping } from "./workspace/workspace-housekeeping.ts";
 export { planDisposableWorkspaces, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace/workspace-sweep.ts";
 export type { PlannedWorkspace } from "./workspace/workspace-sweep.ts";

@@ -2,7 +2,7 @@
 // The detached spare-pool refill (`startSpareRefill`): runs `refillPool` for the
 // integration root given as the only argument and writes one line per outcome to its
 // log. It is an executable entry: nothing in
-// src/lib imports it, and workspace-pool.ts spawns it.
+// src/lib imports it, and workspace-spares.ts spawns it.
 import { refillPool } from "../lib/workspace/workspace-pool.ts";
 
 const root = process.argv[2];

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { lstat, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { migrationCommandFailure } from "../landing/migration-command-evidence.ts";
@@ -38,7 +38,7 @@ async function workspaceDependencyCommand(workspacePath: string): Promise<{ comm
 }
 
 /** The workspace's tracked `package.json` paths, relative to its root, or null when JJ cannot list them. */
-async function trackedManifests(workspacePath: string): Promise<string[] | null> {
+export async function trackedManifests(workspacePath: string): Promise<string[] | null> {
   const listed = await run("jj", ["--color=never", "--ignore-working-copy", "file", "list", 'root-glob:"**/package.json"'], { cwd: workspacePath });
   return listed.code === 0 ? listed.stdout.split("\n").filter(Boolean) : null;
 }
@@ -114,6 +114,23 @@ async function cloneNodeModules(source: string, workspacePath: string): Promise<
     }
   }
   return created.length ? created : null;
+}
+
+/**
+ * Move the `node_modules` tree beside each of `manifests` (repository-relative `package.json`
+ * paths) from `source` to the same place in `target`, where it has none yet. Each move is a rename,
+ * instant on one volume, and like a clone keeps relative links resolving in the new checkout. A
+ * tree that cannot be renamed stays where it is. Returns the manifests whose trees moved.
+ */
+export async function moveNodeModules(source: string, target: string, manifests: string[]): Promise<string[]> {
+  const moved: string[] = [];
+  for (const manifest of manifests) {
+    const from = join(source, dirname(manifest), "node_modules");
+    const to = join(target, dirname(manifest), "node_modules");
+    if (!existsSync(from) || existsSync(to)) continue;
+    if (await rename(from, to).then(() => true, () => false)) moved.push(manifest);
+  }
+  return moved;
 }
 
 /**
