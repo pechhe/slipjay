@@ -1,5 +1,5 @@
-import { localExecutor } from "../../src/lib/runner/runner-queue.ts";
-import type { LocalExecutorOptions } from "../../src/lib/runner/runner-queue.ts";
+import { localExecutor } from "../../src/lib/runner/local-executor.ts";
+import type { LocalExecutorOptions } from "../../src/lib/runner/local-executor.ts";
 
 /**
  * A disposable budget slice for tests, so they never set the limits of a live runner's

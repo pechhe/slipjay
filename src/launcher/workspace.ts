@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
+import { readAudits, recordAuditCause, cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/runner/pipeline-metrics.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/landing/submission-handoff.ts";
@@ -270,6 +270,40 @@ async function runReset(args: string[]): Promise<number> {
   return outcome?.type === "reset" ? 0 : 1;
 }
 
+/**
+ * `audit [status]` shows the repository's nightly audits and what they say; `audit cause` records why its failing
+ * audit failed, which lifts the promotion refusal: culprit landings (operation ids or published commits), or exactly
+ * one of `--flake`, `--infrastructure`, `--unresolved`.
+ */
+async function runAudit(args: string[]): Promise<number> {
+  const usage = "Usage: slipjay audit [status] | slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> [--audit <id>] [--note <text>]";
+  const location = runnerLocation();
+  if (!location) throw new Error("slipjay audit runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
+  if (!args.length || (args.length === 1 && args[0] === "status")) {
+    const { operations, summary } = await readAudits(process.cwd(), { location });
+    console.log(JSON.stringify({ summary, audits: operations.slice(0, 10).map((operation) => ({ id: operation.id, status: operation.status, slot: operation.slot,
+      ...operation.head ? { head: operation.head } : {}, ...operation.finishedAt ? { finishedAt: operation.finishedAt } : {},
+      ...operation.result?.type === "failed" ? { reason: operation.result.reason } : {}, ...operation.cause ? { cause: operation.cause.cause } : {} })) }, null, 2));
+    return 0;
+  }
+  if (args[0] !== "cause") throw new Error(usage);
+  const landings: string[] = [], kinds: ("flake" | "infrastructure" | "unresolved")[] = [];
+  let audit: string | undefined, note: string | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "--flake" || arg === "--infrastructure" || arg === "--unresolved") kinds.push(arg.slice(2) as "flake" | "infrastructure" | "unresolved");
+    else if (arg === "--audit" && args[index + 1]) audit = args[++index];
+    else if (arg === "--note" && args[index + 1]) note = args[++index];
+    else if (!arg.startsWith("-")) landings.push(arg);
+    else throw new Error(usage);
+  }
+  if (kinds.length + (landings.length ? 1 : 0) !== 1) throw new Error(`Name the cause exactly once: culprit landings, or one of --flake, --infrastructure, --unresolved\n${usage}`);
+  const { operation, summary } = await recordAuditCause(process.cwd(), { location, ...audit ? { audit } : {}, ...note ? { note } : {},
+    ...landings.length ? { landings } : { kind: kinds[0]! } });
+  console.log(JSON.stringify({ ok: true, audit: operation.id, cause: operation.cause?.cause, openFailure: summary.openFailure, escapes: summary.escapes }, null, 2));
+  return 0;
+}
+
 /** `deploys [--environment <name>] [--json]`: what each deploy put where, newest first. */
 async function runDeploys(args: string[]): Promise<number> {
   let environment: string | undefined;
@@ -381,7 +415,7 @@ async function runPolicy(args: string[]): Promise<number> {
     if (flags[0] === "--json") console.log(JSON.stringify(view, null, 2));
     else {
       console.log(`${view.integrationBranch} @ ${view.revision.slice(0, 12)}${view.declared ? "" : " (no slipjay.json)"}`);
-      console.log(`spares: ${view.settings.spares}\nprocess: ${view.settings.process}`);
+      console.log(`spares: ${view.settings.spares}\nprocess: ${view.settings.process}${view.settings.budgets ? `\nbudgets: ${JSON.stringify(view.settings.budgets)}` : ""}`);
       console.log(`requiredLandingVerification:${view.settings.requiredLandingVerification.length ? "" : " (none)"}`);
       for (const check of view.settings.requiredLandingVerification as { executable: string; args: string[] }[]) console.log(`  ${[check.executable, ...check.args].join(" ")}`);
       const retired = retiredFieldsWarning(view.declared);
@@ -633,12 +667,20 @@ try {
   } else if (command === "promote") {
     process.exitCode = await runPromote(rest);
   } else if (command === "metrics") {
-    if (rest.length && (rest.length !== 2 || rest[0] !== "--since")) throw new Error("Usage: slipjay metrics [--since <ISO date>]");
-    const since = rest[1] ?? new Date().toISOString().slice(0, 10);
+    const usage = "Usage: slipjay metrics [--since <ISO date>] [--repo <owner/name>] [--json]";
+    const flags: { since?: string; repo?: string; json?: true } = {};
+    for (let index = 0; index < rest.length; index++) {
+      const flag = rest[index];
+      if (flag === "--json" && !flags.json) flags.json = true;
+      else if ((flag === "--since" || flag === "--repo") && rest[index + 1] !== undefined && flags[flag.slice(2) as "since" | "repo"] === undefined) flags[flag.slice(2) as "since" | "repo"] = rest[++index]!;
+      else throw new Error(usage);
+    }
+    const since = flags.since ?? new Date().toISOString().slice(0, 10);
     if (!Number.isFinite(Date.parse(since))) throw new Error("Invalid metrics date");
     const location = runnerLocation();
     if (!location) throw new Error("Metrics requires a runner location");
-    console.log(formatPipelineMetrics(pipelineMetrics(await readMetricsEvents(location), since)));
+    const metrics = pipelineMetrics(await readMetricsEvents(location), since, flags.repo ? { repo: flags.repo } : {});
+    console.log(flags.json ? JSON.stringify(metrics, null, 2) : formatPipelineMetrics(metrics));
   } else if (command === "record-preview") {
     const port = Number(rest[0]);
     if (rest.length !== 1 || !Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("Usage: slipjay record-preview <port>");
@@ -681,6 +723,8 @@ try {
     process.exitCode = await runDeploy(rest);
   } else if (command === "reset") {
     process.exitCode = await runReset(rest);
+  } else if (command === "audit") {
+    process.exitCode = await runAudit(rest);
   } else if (command === "deploys") {
     process.exitCode = await runDeploys(rest);
   } else if (command === "runner") {
@@ -735,7 +779,7 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
     process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|metrics [--since <ISO date>]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

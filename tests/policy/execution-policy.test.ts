@@ -1,4 +1,5 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -12,7 +13,7 @@ import {
   parseExecutionPolicy, readExecutionPolicy, readExecutionPolicyAtCommit, readIntegrationPolicy, resolveIntegrationBranch,
 } from "../../src/lib/policy/execution-policy.ts";
 import { readExactExecutionPolicy } from "../../src/lib/release/post-integration-source.ts";
-import { workspaceContext } from "../../src/lib/slipjay.ts";
+import { workspaceContext } from "../../src/lib/infra/workspace-jj.ts";
 
 // peach-pi's policy as extracted (pechhe/peach-pi 37a32367): its landing records
 // carry this declaration's digest, so the parser must keep reproducing it.
@@ -79,7 +80,7 @@ test("slipjay's own policy gates a landing on static checks and the test suite",
   assert.equal(parsed.integrationBranch, "main");
   assert.equal(parsed.remote, "origin");
   assert.deepEqual(parsed.requiredLandingVerification.map((step: { args: string[] }) => step.args.join(" ")),
-    ["install --frozen-lockfile", "run check", "run typecheck", "run test"]);
+    ["install --frozen-lockfile", "run check", "run typecheck", "run test:landing"]);
 });
 
 test("a YardSmith-shaped policy keeps every declaration it makes", () => {

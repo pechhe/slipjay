@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import { readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
-import { createWorkspace, provisionSpare, resolveStartBase } from "../../src/lib/slipjay.ts";
+import { createWorkspace, resolveStartBase } from "../../src/lib/workspace/workspace-create.ts";
+import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { startFetchHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { withWorkspaceTransaction } from "../../src/lib/infra/workspace-transaction.ts";
 

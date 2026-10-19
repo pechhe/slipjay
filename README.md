@@ -298,13 +298,15 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `repair <failed-operation> [--json]` | Set up a repair of a failed landing from the runner's retained evidence: claim it, restore the exact candidate into a fresh workspace and write a repair brief (see [Repairing a failed landing](#repairing-a-failed-landing)). `--json` prints `operationId`, `workspacePath`, `workspaceName`, `claimId`, `source`, `changeId`, `issueNumber`, `briefPath` and `resumed`. |
 | `preview` | Diffstat of what a landing would integrate. |
 | `record-preview <port>` | Record a host's started workspace preview in the runner ledger. |
-| `metrics [--since <ISO date>]` | Pipeline outcomes, causes, stage and queue percentiles, held integrations, attempts and flake candidates from the runner ledger. |
+| `metrics [--since <ISO date>] [--repo <owner/name>] [--json]` | Pipeline outcomes and causes; stage, queue and command percentiles per repository and operation kind; each repository's landing verify time against its budgets, and its slowest, growing and over-budget test files; held integrations, attempts and flake candidates, from the runner ledger. |
 | `land [--direct]` | Send the current workspace (or, with `--direct`, the primary checkout) to the runner, which verifies, integrates and publishes it (see [Runner](#runner)); without a runner location it refuses. Afterwards it moves the primary checkout onto the new integration, carrying its uncommitted edits along when they apply cleanly; edits that would conflict there, a conflicted checkout and unlanded commits under it stay where they are (`status` reports the outcome as `landing.primaryCheckout`). It removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
 | `land [--session <id>] [--ticket <n>]...` | In a Build-tracked repository (`tracker`), a landing without `--handoff` writes its own Build handoff, so Build always learns of it. A workspace with no Build item lands as a chore (`build: { "unassociated": true }`, titled by the description's first line). One started with `--issue <n>` (or `attach-issue <n>`) lands as delivery of item `n`'s Spec: `n` itself when it is a Spec, else the Spec of Ticket `n`, which it lists with each `--ticket <m>` of the same Spec. The binding takes the Spec's body revision and its current bind's generation from Build, and the lead's open Build session from `--session` or `HQ_BUILD_SESSION_ID`. Land refuses before submitting when the session is missing (start one with `hq_build_start_session`), the Spec has no current bind (`hq_build_bind`), or the item is neither a Spec nor a Ticket; Build's admission then checks the session and bind itself. The handoff is written only for a new submission: rerunning `land` to follow a submitted landing needs neither the session nor Build, and a retry of a submission still unacknowledged or awaiting Build admission replays the handoff first written, so Build changing meanwhile cannot make it unreconcilable. `--session` and `--ticket` cannot be combined with `--handoff`, and need a Build-tracked repository. |
 | `promote [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
 | `deploys [--environment <name>] [--json]` | Each deploy, newest first: environment, commit, outcome per project, and the commits it added since the previous deploy. |
 | `reset` | Have the runner reset the repository's declared `reset` target now (or follow its open reset) and print the verdict as JSON; exits 0 once it is `reset` (see [Reset](#reset)). |
+| `audit [status]` | The repository's nightly audits and what they say: the last green audit, the latest verdict, whether the last green one is overdue, the open failure with its suspects and recorded cause, and the escapes counted (see [Audit](#audit)). |
+| `audit cause <landing...\|--flake\|--infrastructure\|--unresolved> [--audit <id>] [--note <text>]` | Record why the repository's failing audit failed: one or more culprit landings (a landing's operation id, or its published commit in full or by 12 or more hex digits), or exactly one of `--flake`, `--infrastructure`, `--unresolved`. It covers the whole open failure, or the failing audit `--audit` names, and lifts the promotion refusal. |
 | `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
 | `remove <path>` | Remove the workspace at `path` if it has landed or is untouched (a landing record naming an artifact already archived as another workspace's landing counts as no landing) and it holds no file that no history holds; otherwise keep it and exit 1. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `promote`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
@@ -503,7 +505,8 @@ and held state through the existing recovery path.
   running is queued again; one whose green staging deploy was recorded without it is
   queued then. A reset that was running is
   recorded as failed ("run slipjay reset again"); the schedule waits a full interval
-  after it. A deploy that was running is
+  after it. An audit that was running is recorded as interrupted (cancelled), and the schedule
+  submits it again. A deploy that was running is
   recorded as failed, and the schedule deploys that commit again; a production
   deploy's failure names the `slipjay promote --confirm` that deploys it again. A
   restart can stop a promotion's deploy between activations: projects it already
@@ -635,6 +638,60 @@ never runs at promotion:
   `SLIPJAY_RESET_REASON_FILE` names; the reason carries that line (first line only,
   control characters removed, at most 300 characters), so it must hold no secret.
   `GET /v1/resets?repo=<owner/name>` lists a repository's resets, newest first.
+
+### Audit
+
+The nightly audit is a repository's complete-run baseline: its own list of commands, run in
+full on the exact integration-branch head at a wall-clock time, recording that commit.
+Landings and releases keep their checks. Declare it in `slipjay.json`:
+
+```json
+{ "audit": { "commands": [
+    { "executable": "bun", "args": ["install", "--frozen-lockfile"] },
+    { "executable": "bun", "args": ["run", "verify:release", "--full"] } ],
+  "timeOfDay": "02:00", "timeZone": "Europe/London" } }
+```
+
+`commands` take the shape of `requiredLandingVerification` entries and must list at least one;
+`timeOfDay` (24-hour `HH:MM`) and `timeZone` (an IANA name) default to 02:00 Europe/London.
+
+- **When.** Once for every scheduled time on the zone's clock, which follows daylight saving, not
+  an interval after the last run. The latest time that has passed is covered once an audit for it
+  reached a verdict, green or failing; until then an audit is submitted at once. So a time the
+  runner missed (it was down, or the repository declared the audit only now) and a run that was
+  cancelled or killed are submitted again at the next opportunity (a queued audit's cancellation
+  is one), and several missed times are one run. A failing audit is a verdict: it is not retried before the next time. The schedule
+  reads `audit` at the repository's integration head, so a repository audits without any landing
+  in the ledger; it is rebuilt at startup and after every landing and every audit.
+- **Where.** An audit takes its repository's lane like a landing and waits its turn behind queued
+  work (unlike a pre-verification, which yields to delivery work). The runner fetches the
+  integration branch, resolves the published head, records it (`audit_head`), checks that exact
+  commit out and runs the commands in order, with the landing gate's bounds. It leaves the
+  integration bookmark alone, so a held integration stays held. `runner kill` stops it while it
+  verifies. A head that declares no audit ends the audit `cancelled`.
+- **Green.** Only an audit whose commands all ran and passed counts: none skipped (a command
+  whose capability is unavailable fails the audit rather than passing it) and none reused. It
+  ends `audited` with its commit and commands. A failing command ends it `failed`, as for a landing.
+  A runner restart mid-audit records it `cancelled` (interrupted) and the schedule runs it again;
+  neither is a verdict.
+- **Suspects, then escapes.** A failing audit records its suspects: the landings published, by the
+  integration-branch ancestry the ledger recorded (each landing's base and published commit),
+  between the last green audit's commit and the failing one, or all of them when none was green
+  (or the green one is not an ancestor, when only the landings the two share are left out). Failing
+  audits with no green one between are one open failure. Anyone then records its cause with
+  `slipjay audit cause`. Only a culprit whose landing passed the landing checks is an **escape**
+  (a settings landing, whose checks did not run, is not); escapes are counted per repository, once each.
+  Nothing bisects automatically.
+- **Promotion.** While the latest audit failed and its failure has no recorded cause (a culprit,
+  `flake`, `infrastructure` or `unresolved`), `slipjay promote` refuses at planning, which for an
+  audited repository always reads the runner, and the runner fails a confirmed release, asking
+  again just before it publishes in case an audit failed while the release verified. A cause lasts until a green audit closes the failure.
+- **Overdue.** `slipjay audit` flags a repository overdue when its last green audit finished more
+  than 26 hours ago (when it has never been green: since its first audit).
+
+`GET /v1/audits?repo=<owner/name>` lists a repository's audits, newest first, with the summary
+above; `POST /v1/audits/cause` records a cause (`src/lib/runner/runner-contract.ts`). The ledger reads
+are `auditSummary` in `src/lib/release/audit-ledger.ts`.
 
 ## Release
 
@@ -775,12 +832,43 @@ nothing, so it rolls back and restores earlier projects as usual.
 The runner's append-only SQLite operation log is the pipeline ledger. `land` keeps
 its timing line on stderr, one duration per runner stage, then `housekeeping`: this
 machine's own work after the verdict (recording the landing, sweeping other workspaces); `landings.jsonl` and `releases.jsonl` are no longer written.
-`slipjay metrics [--since <ISO date>]` reads that ledger and prints outcomes, cause
-classes, median and p90 stage and command durations, active and paused queue waits,
+`slipjay metrics [--since <ISO date>] [--repo <owner/name>] [--json]` reads that ledger and prints outcomes, cause
+classes, and for each repository and operation kind (landing, release, verification,
+deploy, reset) its median and p90 stage and command durations and active and paused
+queue waits; kinds and repositories are never pooled. For each repository it then
+gives its landing verify time against its budgets, and its test files; then
 held integrations, attempts per change, flake candidates, and workspace starts (per
 repository and machine: starts, how many came from the spare pool, median and p90 claim time, and
 median spares available, and the median of each start step that recorded `steps`, as in `start --json`). The claim time is the allocation itself, not `slipjay`'s own startup. The default range
-starts at midnight UTC today. Older operations retain their original evidence;
+starts at midnight UTC today. `--json` prints the same as JSON; `--repo` keeps one repository.
+
+**Budgets.** A repository declares `budgets` in `slipjay.json`, a settings field
+(`slipjay policy set`): `verifyP50Seconds` and `verifyP90Seconds` for its landings'
+verifying stage, and `testFileSeconds` for any one test file's median at landing (an audit's
+complete run is listed, not judged against it). The runner records them
+with each landing's verification, so metrics judge a repository by its latest. A
+verify sample is a landing whose checks ran (not a settings landing, not cancelled),
+timed by its verifying stage, over the 7 days ending now; each retry is its own sample.
+A budget with fewer than 10 samples reports `insufficient-samples`, never pass or fail;
+a test file is judged on its own landings, so one with fewer than 10 is listed but never over.
+
+**Test reports.** Each gate command runs with `SLIPJAY_TEST_REPORT_DIR`, an empty
+directory of its own. A command that writes reports there, with a manifest
+`slipjay-test-reports.json` (`{"version":1,"reports":[{"format":"vitest-json"|"bun-junit","path":"<file in the directory>","suite":"<name>","cwd":"<repository-relative directory>"}]}`),
+gets one `{file, suite, ms, status}` row per test file in its run's evidence. A test
+file's samples are its executed (not skipped) rows within one operation kind, so a
+landing's related run and the audit's complete one are listed apart. A test
+file is growing when the later half of its samples has a median over 1.2 times the
+earlier half's, from at least 3 each. The command's exit status stays its verdict; a
+command that wrote no manifest is recorded as `missing` and a malformed report as
+`malformed`, and neither contributes rows. Each stage also
+records the runner's load average, memory and running operations as it began, and
+the queue snapshot gives each operation's `startedAt`, when it left the queue.
+
+**Flake candidates** are a test failing for two different changes, or a test that
+failed and then passed on a retry of the same source commit.
+
+Older operations retain their original evidence;
 missing instrumentation is not synthesized as a measured fact.
 
 Assigned-workspace landings persist a request identity in local workspace metadata
@@ -1236,7 +1324,22 @@ including retries that started on an empty continuation child.
 
 - **Per landing**, the gate runs `bun install --frozen-lockfile`, then
   `bun run check` (Oxlint and the closure boundary), `bun run typecheck` and the
-  test suite (`bun run test`) concurrently.
+  affected tests (`bun run test:landing`) concurrently. The selector validates the exact
+  rebased JJ candidate and its single integration parent, then uses `vp test related`
+  plus explicit runtime fixture readers and source CLI/subprocess callers. Toolchain,
+  lockfile, test setup, deletions, unknown paths and unreadable/ambiguous candidates
+  run the complete landing suite. Only an explicit harmless list (docs, README,
+  CHANGELOG, GLOSSARY, AGENTS and .gitignore) can skip Vitest; runtime tests always run.
+  Command output records the candidate, changed paths, selection and reasons.
+  `tests/quarantine.json` lists `{file, issue, reason}` entries naming an open Issue;
+  those files are excluded even from complete landing runs, but still run in
+  `bun run test` (release) and `bun run test:audit` (the nightly audit's complete
+  suite, which writes the same reports). Remove entries when their Issue closes.
+  With `SLIPJAY_TEST_REPORT_DIR`, the gate writes Vitest JSON, Bun JUnit and a
+  version-1 `slipjay-test-reports.json` manifest there; command exit status remains
+  authoritative when a report is missing. `bun scripts/test-landing.ts --replay`
+  replays selection for the last 30 main commits using their exact parent diffs
+  and historical import graphs in disposable scratch trees, without running test bodies.
 - **At release**, `bun run verify:release` runs the complete suite again
   against the exact commit to be tagged. It prints that commit and exits non-zero
   on failure. Tag only a commit it passed. To trace a release failure to its

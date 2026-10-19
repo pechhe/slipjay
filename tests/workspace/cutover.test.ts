@@ -1,4 +1,5 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -10,7 +11,9 @@ import lockfile from "proper-lockfile";
 import { beforeEach, test } from "vite-plus/test";
 import { assertHermeticHome } from "../../scripts/hermetic-home-guard.ts";
 import { cutover } from "../../src/lib/workspace/cutover.ts";
-import { cleanupLandedWorkspace, createWorkspace, readWorkspaceMode } from "../../src/lib/slipjay.ts";
+import { cleanupLandedWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { readWorkspaceMode } from "../../src/lib/workspace/workspace-state.ts";
 import { CUTOVER_REQUIRED_CODE, cutoverMarkerPath, legacyModePath, legacyStateHome, slipjayHome } from "../../src/lib/workspace/workspace-paths.ts";
 
 // Every case builds pre-v1.0.0 state in this file's disposable HOME and cuts it

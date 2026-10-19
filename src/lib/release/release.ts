@@ -49,6 +49,8 @@ export type ReleasePlan = {
   promotes: boolean;
   /** The candidate's production deployment declares `migrations`: the runner applies the promotion's migrations itself. */
   appliesMigrations: boolean;
+  /** The candidate declares a nightly `audit`: a promotion waits on an unexplained failing one. */
+  audits: boolean;
 };
 
 /**
@@ -67,7 +69,9 @@ export type PromotionDelta = {
  * What the runner knows of a promotion: the newest commit staging is green on, the
  * candidates approved before, and its pre-verifications, each newest first.
  */
-export type PromotionState = { stagingGreen: string | null; approved: string[]; verifications: VerificationOperation[] };
+export type PromotionState = { stagingGreen: string | null; approved: string[]; verifications: VerificationOperation[];
+  /** Why the audits refuse a promotion (see `promotionRefusal`), or null; absent from a runner that does not audit. */
+  auditRefusal?: string | null };
 
 /**
  * The candidate's pre-verification, as its newest pre-verification that was not
@@ -148,6 +152,8 @@ export type ConfirmReleaseOptions = {
   exclusively?: <T>(publication: () => Promise<T>) => Promise<T>;
   /** The id of a passed pre-verification matching the plan (see `passedVerification`): the confirm reuses it instead of verifying. */
   preverified?: (plan: ReleasePlan) => string | null;
+  /** Asked once nothing else may move the release branch, just before publishing: a reason refuses the release (an audit that failed meanwhile). */
+  publicationRefusal?: () => string | null;
 };
 
 const COMMIT_PREFIX = /^[a-f0-9]{12,64}$/;
@@ -435,7 +441,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   }
   const production = policy.deployments?.environments.production;
   return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, migrationPaths: artifactPaths, nonAdditiveMigrations, paths: changed, checks,
-    promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations) };
+    promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations), audits: Boolean(policy.audit) };
 }
 
 /** The newest of `approved` the release branch does not hold: approvals it holds shipped. */
@@ -634,7 +640,8 @@ const refusalOf = (error: unknown): ReleaseResult => {
  * Plan a release; publishes nothing. The candidate is the integration branch on the
  * remote, unless that commit declares a production deployment: then it is the newest
  * commit staging is green on, read through `readPromotion` (the runner), and the plan
- * carries the delta since an earlier approval the candidate has moved past.
+ * carries the delta since an earlier approval the candidate has moved past. Any audited
+ * repository's plan is refused while its latest audit failed with no recorded cause.
  */
 export async function releaseIntegration(cwd = process.cwd(), { readPromotion }: {
   readPromotion?: () => Promise<PromotionState>;
@@ -644,13 +651,19 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion }:
     let promotion: Pick<ReleaseSummary, "delta"> & PromotionPlan = {};
     if (plan.promotes) {
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
-      const { stagingGreen, approved, verifications } = await readPromotion();
+      const { stagingGreen, approved, verifications, auditRefusal } = await readPromotion();
       if (!stagingGreen) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
       if (stagingGreen !== plan.candidate) plan = await planRelease(cwd, { candidate: stagingGreen });
+      if (plan.audits && auditRefusal) refuse(auditRefusal);
       const delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
       promotion = { ...delta ? { delta } : {},
         ...plan.commits.length ? { verification: verificationState(plan, verifications), approval: await approvalCoverage(plan, approved) } : {} };
+    } else if (plan.audits) {
+      // The audit ledger lives on the runner, so an audited release plans only against it.
+      if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} is audited on the runner, which a promotion plan reads: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
+      const { auditRefusal } = await readPromotion();
+      if (auditRefusal) refuse(auditRefusal);
     }
     const summary = { ...describePlan(plan), ...promotion };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
@@ -731,7 +744,7 @@ export async function verifyRelease(checkout: string, options: VerifyOptions & {
  * `preverified` names a matching pre-verification of.
  */
 export async function confirmRelease(checkout: string, options: ConfirmReleaseOptions): Promise<ReleaseResult> {
-  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, exclusively = (publication) => publication(), preverified = () => null } = options;
+  const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, exclusively = (publication) => publication(), preverified = () => null, publicationRefusal = () => null } = options;
   try {
     const plan = await planRelease(checkout, { candidate });
     if (!plan.commits.length) {
@@ -752,6 +765,8 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
       await fetch(plan.root, plan.remote, plan.releaseBranch);
       const base = await commitOf(plan.root, `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`);
       if (base !== plan.base) refuse(`${plan.releaseBranch}@${plan.remote} moved during the release; rerun it`);
+      const refusal = publicationRefusal();
+      if (refusal) refuse(refusal);
       const merge = await buildMerge(plan);
       await publish(plan, merge);
       onStage("finalizing");

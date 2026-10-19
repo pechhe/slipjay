@@ -157,7 +157,18 @@ function dependencySeeds(integrationRoot: string, workspacePath: string): (insta
  * computed it for this tree.
  */
 export async function refreshDependencies(integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; steps?: StartSteps } = {}): Promise<ReturnType<typeof prepareWorkspaceDependencies> extends Promise<infer R> ? R : never> {
-  return withWorkspaceTransaction(`install:${resolve(integrationRoot)}`, () => installDependencies(integrationRoot, workspacePath, options), { waitMs: INSTALL_WAIT_MS });
+  return withWorkspaceTransaction(`install:${resolve(integrationRoot)}`, async () => {
+    const installed = await installDependencies(integrationRoot, workspacePath, options);
+    if (installed.installInputs) {
+      const context = await workspaceContext(workspacePath);
+      if (!context) throw new Error(`Workspace disappeared while recording dependency readiness: ${workspacePath}`);
+      const { state, packageManager, installInputs } = installed;
+      // Publish the seed before releasing the lock: the next install must be able to find it.
+      const name = context.current.name;
+      await writeWorkspaceJson(metadataPath(name), { ...await workspaceMetadata(name), preparedDependencies: { state, packageManager, installInputs } });
+    }
+    return installed;
+  }, { waitMs: INSTALL_WAIT_MS });
 }
 
 /**

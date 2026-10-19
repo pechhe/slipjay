@@ -2,7 +2,8 @@ import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "../landin
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "../landing/repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
+import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
@@ -24,7 +25,7 @@ export function createRunnerHandler(input: {
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
   retainSubmission?(operationId: string, request: SubmitRequest): Promise<Extract<import("./runner-contract.ts").OperationEvent, { type: "source_retained" }>>;
   kill(operationId?: string): KillOutcome;
-  /** A queued operation was cancelled: its candidate bookmark is the queue's to delete. */
+  /** A queued operation was cancelled: a landing's candidate bookmark is the queue's to delete, and an audit's slot is due again. */
   onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
   /** Build admission for Build-bound landings; absent, the runner refuses them rather than skipping admission. */
@@ -331,6 +332,39 @@ export function createRunnerHandler(input: {
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.resets(repositoryKey(repo)) });
     }
+    if (request.method === "GET" && path === `${RUNNER_API}/audits`) {
+      const repo = url.searchParams.get("repo");
+      if (!repo)
+        return json({ error: "repo is required" }, 400);
+      const key = repositoryKey(repo);
+      const operations = input.log.audits(key);
+      return json({ operations, summary: auditSummary({ audits: operations, landings: input.log.landings(key) }, new Date()) });
+    }
+    if (request.method === "POST" && path === `${RUNNER_API}/audits/cause`) {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!validAuditCause(body))
+        return json({ error: "Invalid audit cause" }, 400);
+      const key = repositoryKey(body.repo);
+      const audits = input.log.audits(key), landings = input.log.landings(key);
+      const target = auditToExplain(audits, auditSummary({ audits, landings }, new Date()), body.audit);
+      if (!target.ok)
+        return json({ error: target.reason }, 400);
+      let cause: AuditCause;
+      if (body.landings) {
+        const culprits = resolveCulprits(body.landings, landings);
+        if (!culprits.ok)
+          return json({ error: culprits.reason }, 400);
+        cause = { kind: "culprits", landings: culprits.commits };
+      } else cause = { kind: body.kind! };
+      input.log.append(target.audit.id, { type: "audit_cause", cause, by: body.by, ...body.note ? { note: body.note } : {} });
+      const after = input.log.audits(key);
+      return json({ operation: after.find((operation) => operation.id === target.audit.id), summary: auditSummary({ audits: after, landings }, new Date()) });
+    }
     if (request.method === "GET" && path === `${RUNNER_API}/deploys`) {
       const repo = url.searchParams.get("repo");
       if (!repo)
@@ -502,6 +536,19 @@ function validReset(body: unknown): body is ResetRequest {
     return false;
   const value = body as Record<string, unknown>;
   return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0);
+}
+
+function validAuditCause(body: unknown): body is AuditCauseRequest {
+  if (typeof body !== "object" || body === null)
+    return false;
+  const value = body as Record<string, unknown>;
+  const text = (field: unknown, limit: number) => typeof field === "string" && field.trim().length > 0 && field.length <= limit;
+  if (!text(value.repo, 200) || !text(value.by, 200)) return false;
+  if (value.audit !== undefined && !(typeof value.audit === "string" && /^op_[0-9a-z]+_[0-9a-f]+$/.test(value.audit))) return false;
+  if (value.note !== undefined && !text(value.note, 1_000)) return false;
+  if (value.landings !== undefined)
+    return value.kind === undefined && Array.isArray(value.landings) && value.landings.length >= 1 && value.landings.length <= 50 && value.landings.every((landing) => text(landing, 100));
+  return value.kind === "flake" || value.kind === "infrastructure" || value.kind === "unresolved";
 }
 
 function validDeploy(body: unknown): body is DeployRequest {

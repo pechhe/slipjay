@@ -328,8 +328,8 @@ export async function resolveStartBase(cwd: string, revision: string): Promise<s
  * workspace is bound (unless it has landed). With `issueNumber`, the Issue's
  * workspace is resumed, or its surviving checkout recovered, before a new one is
  * made. Allocation is serialized per repository; dependency installation runs
- * after that lock is released, serialized only per checkout, so concurrent starts
- * of different workspaces install in parallel.
+ * after that lock is released, serialized per checkout. Built-in dependency installs
+ * also serialize per repository so later starts can clone the earlier install.
  */
 export async function createWorkspace<Readiness = unknown>(task: string, cwd: string = process.cwd(), options: WorkspaceCreationOptions<Readiness> = {}): Promise<CreatedWorkspace<Readiness>> {
   const context = await workspaceContext(cwd);
@@ -394,7 +394,8 @@ async function describeAssignedWorkspace(context: WorkspaceContext, task: string
 async function ready({ hooks, context, issueNumber, prepared, installInputs: claimedInputs, steps, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
   if (prepared) console.error(`[deps] ${basename(context.current.root)}: install inputs unchanged since the spare was prepared; reusing its dependencies`);
   const readiness = prepared ?? await timed(steps, "install", () => prepare(hooks, context.integration.root, context.current.root, claimedInputs, steps));
-  const { state, packageManager, installInputs } = (hooks.prepare ? {} : readiness) as { state?: string; packageManager?: string | null; installInputs?: string | null };
+  // Fresh installs publish readiness under their install lock; reused spares need their record restored after assignment.
+  const { state, packageManager, installInputs } = (hooks.prepare ? {} : prepared ?? {}) as { state?: string; packageManager?: string | null; installInputs?: string | null };
   if (installInputs) {
     await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs } });
   }

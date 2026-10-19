@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { DEFAULT_SPARES, EXECUTION_POLICY_PATH, processLevel, readIntegrationPolicy, readPolicyTextAtCommit, RETIRED_POLICY_FIELDS } from "./execution-policy.ts";
 import { applyPolicyPatch, parsePolicyPatch, POLICY_BASE_TRAILER, policyDigest } from "./policy-settings.ts";
 import type { PolicyPatch } from "./policy-settings.ts";
+import type { TimeBudgets } from "./execution-policy.ts";
 import { LandingNotSubmitted, landThroughRunner } from "../runner/runner-client.ts";
 import { publicationRemote } from "../landing/landing-steps.ts";
 import { createWorkspace } from "../workspace/workspace-create.ts";
@@ -24,7 +25,7 @@ export type PolicyView = {
   /** The file as committed, or null when the repository declares none. */
   declared: Record<string, unknown> | null;
   /** The settings in force, defaults filled in. */
-  settings: { spares: number; process: "standard" | "light"; requiredLandingVerification: unknown[] };
+  settings: { spares: number; process: "standard" | "light"; budgets: TimeBudgets | null; requiredLandingVerification: unknown[] };
   /** Declared fields that drive nothing; `policy set` drops them. */
   retired: string[];
 };
@@ -63,7 +64,7 @@ export async function showPolicy(cwd: string): Promise<PolicyView> {
   const declared = text === null ? null : JSON.parse(text) as Record<string, unknown>;
   return {
     integrationBranch, revision: commitId, digest: text === null ? null : policyDigest(text), declared,
-    settings: { spares: policy?.spares ?? DEFAULT_SPARES, process: processLevel(policy?.process), requiredLandingVerification: policy?.requiredLandingVerification ?? [] },
+    settings: { spares: policy?.spares ?? DEFAULT_SPARES, process: processLevel(policy?.process), budgets: policy?.budgets ?? null, requiredLandingVerification: policy?.requiredLandingVerification ?? [] },
     retired: RETIRED_POLICY_FIELDS.filter((field) => declared?.[field] !== undefined),
   };
 }

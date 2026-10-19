@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-// Release verification. A landing runs only the fast static gate in
+// Release verification. A landing runs static checks and conservatively selected tests in
 // the repository policy (slipjay.json); the complete suite, including the disposable-repository
 // landing tests, runs here, once, against the exact commit being tagged. It prints
 // the commit it verified and exits non-zero on failure. Trace a failure to its

@@ -8,7 +8,8 @@ import { test } from "vite-plus/test";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { importSourceBundle } from "../../src/lib/landing/submission-source-export.ts";
-import { jj, project, withTestRunner } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { withTestRunner } from "../support/test-runner.ts";
 
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
 test("fresh isolated CLI claimant restores and repairs a failed candidate while the stale author is fenced", async () => {

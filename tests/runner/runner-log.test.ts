@@ -33,7 +33,7 @@ test("operation log projects stages, command runs and the latest terminal result
     const submitted = log.append(id, submission());
     log.append(id, { type: "stage", stage: "queued" });
     assert.equal(log.operation(id)?.status, "queued");
-    log.append(id, { type: "stage", stage: "verifying" });
+    const left = log.append(id, { type: "stage", stage: "verifying" });
     const started = log.append(id, { type: "run_started", runId: "run-1", command: "bun run check", host: "localhost" });
     const finished = log.append(id, { type: "run_finished", runId: "run-1", exitCode: 0, signal: null, timedOut: false, durationMs: 50 });
     log.append(id, { type: "run_started", runId: "run-2", command: "git push", host: "remote" });
@@ -43,7 +43,7 @@ test("operation log projects stages, command runs and the latest terminal result
     const { outcome: _outcome, ...legacyFields } = log.operation(id) as LandingOperation;
     assert.deepEqual(legacyFields, {
       id, kind: "landing", repo: "owner/repo", changeId: "k".repeat(32), commitId: "commit", bookmark: candidateBookmark("k".repeat(32)), submittedBy: "author",
-      status: "landed", stage: "publishing", submittedAt: submitted.at, finishedAt: landed.at,
+      status: "landed", stage: "publishing", submittedAt: submitted.at, startedAt: left.at, finishedAt: landed.at,
       runs: [
         { runId: "run-1", command: "bun run check", host: "localhost", startedAt: started.at, finishedAt: finished.at, exitCode: 0, signal: null, timedOut: false, durationMs: 50 },
         { runId: "run-2", command: "git push", host: "remote", startedAt: log.events({ operationId: id }).find((row) => row.event.type === "run_started" && row.event.runId === "run-2")!.at },

@@ -1,4 +1,5 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -6,7 +7,11 @@ import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { attachWorkspaceIssue, cleanupLandedWorkspace, createWorkspace, provisionSpare, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/slipjay.ts";
+import { attachWorkspaceIssue } from "../../src/lib/workspace/workspace-state.ts";
+import { cleanupLandedWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
+import { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
 import { lockPath } from "../../src/lib/workspace/workspace-state.ts";
 import { EMPTY_IDLE_MS } from "../../src/lib/workspace/workspace-sweep.ts";
 

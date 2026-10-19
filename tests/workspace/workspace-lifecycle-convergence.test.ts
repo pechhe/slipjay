@@ -1,4 +1,5 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -7,7 +8,9 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, findIssueWorkspace, removeWorkspace, renameWorkspace } from "../../src/lib/slipjay.ts";
+import { cleanupLandedWorkspace, removeWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
+import { createWorkspace, findIssueWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { renameWorkspace } from "../../src/lib/workspace/workspace-state.ts";
 import { statePath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
 import { withinWorkspaceStorage } from "../../src/lib/workspace/workspace-lifecycle.ts";
 import { landedHome, metadataHome, workspaceHome } from "../../src/lib/workspace/workspace-paths.ts";

@@ -7,7 +7,8 @@ import { patchTask, setPolicy, showPolicy } from "../../src/lib/policy/policy-co
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { controlRunner, landThroughRunner, readRunLog } from "../../src/lib/runner/runner-client.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
-import { jj, project, withTestRunner } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { withTestRunner } from "../support/test-runner.ts";
 
 // A landing check that takes five minutes: a settings landing that ran it would time the test out.
 const slowGate = () => "setTimeout(() => {}, 300_000)";

@@ -3,10 +3,11 @@ import { execFileSync } from "node:child_process";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { referencesIssue, withIssueTrailer } from "../../src/lib/build/issue-references.ts";
 import { metadataHome } from "../../src/lib/workspace/workspace-paths.ts";
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 
 const remoteMessage = (remote: string) => execFileSync("git", ["--git-dir", remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();
 

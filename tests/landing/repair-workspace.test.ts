@@ -11,7 +11,8 @@ import { landThroughRunner, manageRepairClaim, readLandingOutcome } from "../../
 import type { LandingOutcome } from "../../src/lib/runner/runner-contract.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { listWorkspaces } from "../../src/lib/workspace/workspace-state.ts";
-import { jj, project, withTestRunner } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { withTestRunner } from "../support/test-runner.ts";
 
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
 const failing = () => 'if (!require("node:fs").existsSync("fixed.txt")) { console.error("Error: correction required with s3cr3t-fixture-value"); process.exit(1); }';

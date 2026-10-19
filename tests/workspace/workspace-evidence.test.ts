@@ -1,4 +1,5 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -6,7 +7,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { cleanupLandedWorkspace, createWorkspace, planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/slipjay.ts";
+import { cleanupLandedWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
 import { parseExecutionPolicy } from "../../src/lib/policy/execution-policy.ts";
 import { MAX_EVIDENCE_BYTES } from "../../src/lib/workspace/workspace-lifecycle.ts";
 import { evidenceHome } from "../../src/lib/workspace/workspace-paths.ts";

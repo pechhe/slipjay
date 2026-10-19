@@ -1,10 +1,8 @@
-import { execFile, execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { stat, mkdir, readdir, readFile, rm } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { stat, mkdir, realpath, rm } from "node:fs/promises";
+import { availableParallelism, freemem, loadavg, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
-import { runBoundedProcess, sanitizedProcessEnv } from "../infra/bounded-process.ts";
+import { sanitizedProcessEnv } from "../infra/bounded-process.ts";
 import { integrateLandingCandidate, prepareLandingCandidate, rollbackFailure, verifyPreparedCandidate, integratePreparedCandidate } from "../landing/landing-candidate.ts";
 import type { PreparedLandingCandidate } from "../landing/landing-candidate.ts";
 import { importSubmissionSource } from "../landing/submission-source.ts";
@@ -13,6 +11,8 @@ import type { LandingArtifact } from "../landing/landing-artifact.ts";
 import { completeLanding, fetchIntegration, landingIO } from "../landing/landing-steps.ts";
 import { createDeployScheduler } from "../release/deploy-scheduler.ts";
 import { createResetScheduler } from "../release/reset-scheduler.ts";
+import { auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
+import { createAuditScheduler } from "../release/audit-scheduler.ts";
 import { runReset } from "../release/reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "../release/deploy.ts";
 import { readExactExecutionPolicy } from "../release/post-integration-source.ts";
@@ -21,10 +21,11 @@ import type { BuildReader } from "../build/tracker.ts";
 import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "../build/build-check-access.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
 import { RequiredVerificationError, runRequiredVerification } from "../landing/required-verification.ts";
+import { readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import { readPolicyTextAtCommit } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
-import { admissionLane, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_LIMITS, RUNNER_DEFAULT_WORKERS, RUNNER_SLICE, SYSTEMD_SLICE_ENV, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { admissionLane, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { label, newOperationId } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { commandEvidence } from "./command-evidence.ts";
@@ -32,11 +33,14 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerLimits, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-contract.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerHealth, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-contract.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
   Boolean(configuration?.deployments?.environments.production && configuration.releaseBranch && configuration.requiredReleaseVerification);
+
+/** How long after the remote could not be read to learn a repository's audit policy the runner tries again. */
+const AUDIT_DISCOVERY_RETRY_MS = 600_000;
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -66,200 +70,6 @@ class OwnerKill extends Error {
 
 /** A verified attempt lost its authoritative remote parent before integration. */
 class PrefixInvalidated extends Error {}
-
-/** Where a runner keeps commands and their budget: see `localExecutor`. */
-export type LocalExecutorOptions = {
-  host?: string; env?: NodeJS.ProcessEnv; limits?: RunnerLimits;
-  /**
-   * The runner home that owns the commands. A later process with the same home stops whatever an
-   * earlier one left running (`recover`); without one, nothing outlives this process's knowledge.
-   */
-  home?: string;
-  /** The systemd slice whose `limits` bound every run (RUNNER_SLICE); tests use a disposable one. */
-  slice?: string;
-};
-
-/**
- * Runs commands on this host. Each run's process group is killed on abort or
- * timeout, but a gate's own tools may start further groups (setsid) or systemd
- * scopes that a group signal never reaches. Under a systemd user manager each
- * run therefore gets a slice of its own beneath its owner's slice, its command
- * runs in a scope there, and killing the slice kills everything in it, on abort
- * and after every run; the owner's slice itself is stopped whenever no run is in progress. Commands learn their slice from SYSTEMD_SLICE_ENV; a
- * command that starts its own systemd user scope passes it as `--slice`, so the
- * scope stays inside the run and its limits. The owner's slice is named from
- * `home`, so a later process of the same runner can stop whatever an earlier one
- * left running (`recover`) without touching other units. Every slice sits beneath
- * `slice`, whose `limits` bound all runs together: the workers' gates, deploys and
- * every process they start, however they nest. Memory beyond `memoryHigh` is
- * throttled; `memoryMax` is the hard ceiling. A run that is itself a SlipJay
- * command nests beneath its own slice instead, inside the limits already set
- * above it.
- *
- * Elsewhere there is no combined budget, so the executor runs one command at a
- * time, kills the command's process group after it, and records the group under
- * `home` while it runs so `recover` can stop it after a crash. Tools that leave
- * the group are out of reach there.
- *
- * Either way, a run whose processes cannot be shown stopped makes every later run
- * fail until they are, so nothing reuses a checkout they may still hold.
- */
-export function localExecutor({ host = hostname(), env = process.env, limits = {}, home, slice: budget = RUNNER_SLICE }: LocalExecutorOptions = {}): Executor {
-  const runtimeDir = process.platform === "linux" ? env.XDG_RUNTIME_DIR : undefined;
-  const { settled, contained } = runContainment();
-  if (!runtimeDir) return groupExecutor(host, home, { settled, contained });
-  const systemctl = (args: string[]) => new Promise<{ failure: string | null; stdout: string }>((resolve) =>
-    execFile("systemctl", ["--user", ...args], { env: { ...process.env, XDG_RUNTIME_DIR: runtimeDir } }, (error, stdout, stderr) =>
-      resolve({ failure: error ? (stderr.trim() || error.message) : null, stdout: stdout.trim() })));
-  const parent = env[SYSTEMD_SLICE_ENV];
-  const nested = parent !== undefined && /^[0-9a-z]+(?:-[0-9a-z]+)*\.slice$/.test(parent);
-  const ownerSlice = `${(nested ? parent : budget).slice(0, -".slice".length)}-${createHash("sha256").update(home ?? randomUUID()).digest("hex").slice(0, 12)}.slice`;
-  /** Kill everything in `slice` and its children, then wait for systemd to stop them. */
-  const quiesce = async (slice: string) => {
-    await systemctl(["kill", "--signal=SIGKILL", slice]);
-    await systemctl(["stop", slice]);
-    const { failure, stdout } = await systemctl(["show", "--property=ActiveState", "--value", slice]);
-    return failure ?? (stdout === "inactive" ? null : `${slice} is ${stdout}`);
-  };
-  const { memoryHigh, memoryMax, cpuQuota, tasksMax } = { ...RUNNER_DEFAULT_LIMITS, ...limits };
-  // Runtime properties: they last until the user manager restarts, and each runner start sets them again.
-  // Refuse execution if the shared budget cannot be enforced; never run uncapped.
-  let sliced: Promise<void> | undefined;
-  const enforce = () => sliced ??= (nested ? Promise.resolve({ failure: null }) : systemctl(["set-property", "--runtime", budget,
-    `MemoryHigh=${memoryHigh}`, `MemoryMax=${memoryMax}`, `CPUQuota=${cpuQuota}`, `TasksMax=${tasksMax}`])).then(({ failure }) => {
-    if (failure === null) return;
-    sliced = undefined;
-    throw new Error(`SlipJay runner: could not enforce the limits of ${budget}: ${failure}`);
-  });
-  // The owner's slice is stopped whenever its last run ends, so no empty slice outlives the runs.
-  // A run that starts meanwhile waits for that stop, so the stop never reaches it. A stop that
-  // leaves the slice active is retried, with backoff, for as long as no run is in progress.
-  let active = 0;
-  let released: Promise<unknown> = Promise.resolve();
-  let retry: ReturnType<typeof setTimeout> | undefined;
-  const release = (delayMs = 1_000) => {
-    released = systemctl(["stop", ownerSlice]).then(async () => {
-      const { failure, stdout } = await systemctl(["show", "--property=ActiveState", "--value", ownerSlice]);
-      if ((failure === null && stdout === "inactive") || active > 0) return;
-      retry = setTimeout(() => { retry = undefined; if (active === 0) release(Math.min(delayMs * 2, 60_000)); }, delayMs);
-      retry.unref();
-    });
-  };
-  return {
-    host,
-    combinedLimits: true,
-    ...home === undefined ? {} : { async recover() {
-      const failure = await quiesce(ownerSlice);
-      if (failure) throw new Error(`SlipJay runner: could not stop the commands an earlier runner left in ${ownerSlice}: ${failure}`);
-    } },
-    async run(request) {
-      await enforce();
-      active += 1;
-      clearTimeout(retry);
-      try {
-        await released;
-        await settled();
-        const id = randomUUID().replaceAll("-", "");
-        const runSlice = `${ownerSlice.slice(0, -".slice".length)}-${id}.slice`;
-        const stop = () => { void quiesce(runSlice); };
-        request.abortSignal?.addEventListener("abort", stop, { once: true });
-        return await contained(runSlice, () => runBoundedProcess({
-          ...request, executable: "systemd-run",
-          args: ["--user", "--scope", "--quiet", "--collect", `--slice=${runSlice}`, `--unit=slipjay-run-${id}.scope`, "--", request.executable, ...request.args],
-          env: { ...request.env ?? sanitizedProcessEnv(), XDG_RUNTIME_DIR: runtimeDir, [SYSTEMD_SLICE_ENV]: runSlice },
-        }).finally(() => request.abortSignal?.removeEventListener("abort", stop)), () => quiesce(runSlice));
-      } finally {
-        active -= 1;
-        if (active === 0) release();
-      }
-    },
-  };
-}
-
-/**
- * Fences runs whose processes could not be shown stopped. `contained` runs `work`, then `stop`;
- * when `stop` reports a failure the run rejects and is remembered, and `settled`, which every run
- * awaits first, retries it and rejects until it succeeds.
- */
-export function runContainment() {
-  const unstopped = new Map<string, () => Promise<string | null>>();
-  return {
-    async settled() {
-      for (const [name, retry] of unstopped) {
-        const failure = await retry();
-        if (failure) throw new Error(`SlipJay runner: the processes of an earlier run (${name}) could not be stopped: ${failure}`);
-        unstopped.delete(name);
-      }
-    },
-    async contained<T>(name: string, work: () => Promise<T>, stop: () => Promise<string | null>): Promise<T> {
-      let result: T;
-      try { result = await work(); } finally {
-        const failure = await stop();
-        if (failure) unstopped.set(name, stop);
-      }
-      if (unstopped.has(name)) throw new Error(`SlipJay runner: could not stop the processes of ${name}: the next run waits until they stop`);
-      return result;
-    },
-  };
-}
-
-/** A process group's leader start time as `ps` reports it, or null once the leader is gone. */
-const processStart = (pid: number): string | null => {
-  try { return execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || null; } catch { return null; }
-};
-const groupAlive = (pid: number) => { try { process.kill(-pid, 0); return true; } catch { return false; } };
-/** SIGKILL a process group and wait for it to be gone; the failure, or null. */
-async function stopGroup(pid: number): Promise<string | null> {
-  try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
-  for (let waited = 0; groupAlive(pid); waited += 50) {
-    if (waited >= 10_000) return `process group ${pid} survived SIGKILL`;
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  return null;
-}
-
-/** The executor without a systemd user manager: see `localExecutor`. */
-function groupExecutor(host: string, home: string | undefined, { settled, contained }: ReturnType<typeof runContainment>): Executor {
-  const records = home === undefined ? undefined : join(home, "commands");
-  let turn: Promise<unknown> = Promise.resolve();
-  return {
-    host,
-    ...records === undefined ? {} : { async recover() {
-      const left = await readdir(records).catch(() => [] as string[]);
-      for (const name of left) {
-        const file = join(records, name);
-        const recorded = JSON.parse(await readFile(file, "utf8").catch(() => "null")) as { pid: number; started: string | null } | null;
-        // A leader that is alive with another start time is a reused pid, not ours.
-        const current = recorded && processStart(recorded.pid);
-        if (recorded && groupAlive(recorded.pid) && (current === null || current === recorded.started)) {
-          const failure = await stopGroup(recorded.pid);
-          if (failure) throw new Error(`SlipJay runner: could not stop the command an earlier runner left: ${failure}`);
-        }
-        await rm(file, { force: true });
-      }
-    } },
-    run(request) {
-      const run = turn.then(async () => {
-        await settled();
-        const id = randomUUID();
-        let pid: number | undefined;
-        const record = records && join(records, `${id}.json`);
-        if (records) await mkdir(records, { recursive: true });
-        return contained(`command ${id}`, () => runBoundedProcess({ ...request, onSpawn: (spawned) => {
-          pid = spawned;
-          if (record) writeFileSync(record, JSON.stringify({ pid, started: processStart(pid) }));
-          request.onSpawn?.(spawned);
-        } }), async () => {
-          const failure = pid === undefined ? null : await stopGroup(pid);
-          if (!failure && record) await rm(record, { force: true });
-          return failure;
-        });
-      });
-      turn = run.catch(() => {});
-      return run;
-    },
-  };
-}
 
 /**
  * How many operations run at once: the config's `workers`, or RUNNER_DEFAULT_WORKERS. Without
@@ -333,6 +143,8 @@ export function createRunnerQueue(input: {
   const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
   const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
+  const health = (): RunnerHealth => ({ load1: Math.round(loadavg()[0]! * 100) / 100, cpus: availableParallelism(),
+    freeMemoryBytes: freemem(), totalMemoryBytes: totalmem(), running: running.size });
   /** Running pre-verifications told to yield, with what they yield to. */
   const yielding = new Map<string, string>();
   /** Recovery holds every lane: nothing is admitted until it finishes. */
@@ -385,6 +197,42 @@ export function createRunnerQueue(input: {
     const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
     if (configuration?.deployments) scheduler.consider(repo, configuration.deployments.environments);
     resetScheduler.consider(repo, configuration?.reset ?? null);
+    auditScheduler.consider(repo, configuration?.audit ?? null);
+  }
+  /**
+   * Learn what the integration head on the remote declares for the audit and consider it, without any landing in the
+   * ledger to name a commit: a repository this runner never landed in audits all the same. It runs in the repository's
+   * lane, which it holds only to clone and fetch, so the warm checkout is never read while a landing moves it.
+   */
+  async function discoverAudit(repo: string): Promise<void> {
+    const repository = configuredRepository(config, repo);
+    if (!repository) return;
+    await inLane(laneOf(repo), async () => {
+      const checkout = repoCheckout(repo);
+      if (!await stat(checkout).then(() => true, () => false)) {
+        await mkdir(dirname(checkout), { recursive: true });
+        await jj(dirname(checkout), ["git", "clone", repository.url, checkout]);
+      }
+      const context = await workspaceContext(checkout, undefined, { fetchMissingBookmarks: true });
+      if (!context) throw new Error("Runner checkout is unavailable");
+      const remote = context.configuration.remote ?? "origin";
+      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", context.integrationBranch]);
+      const head = (await revisionFacts(checkout, `${context.integrationBranch}@${remote}`)).commitId;
+      knownHeads.set(repo, head);
+      auditScheduler.consider(repo, (await readExactExecutionPolicy(join(checkout, ".git"), head)).configuration?.audit ?? null);
+    });
+  }
+  /** Discover each configured repository's audit; one the remote could not be read for is tried again later. */
+  function discoverAudits(repos: readonly string[]): void {
+    for (const repo of repos) {
+      clearTimeout(auditDiscovery.get(repo));
+      const pending: Promise<void> = discoverAudit(repo).then(() => wakeMain(), () => {
+        const retry = setTimeout(() => { auditDiscovery.delete(repo); discoverAudits([repo]); }, AUDIT_DISCOVERY_RETRY_MS);
+        retry.unref?.();
+        auditDiscovery.set(repo, retry);
+      }).finally(() => { discoveries.delete(pending); });
+      discoveries.add(pending);
+    }
   }
   /** Re-ask the schedulers with the policy of the repository's last landed commit, if it has one. */
   async function scheduleLatest(repo: string, progress: (line: string) => void = () => {}): Promise<void> {
@@ -400,6 +248,18 @@ export function createRunnerQueue(input: {
       wakeMain();
     },
   });
+  const auditScheduler = createAuditScheduler({
+    log,
+    submit(repo, slot) {
+      const known = log.lastLanded(repo)?.commitId ?? knownHeads.get(repo) ?? log.audits(repo)[0]?.head ?? "";
+      log.append(newOperationId(), { type: "submitted", kind: "audit", repo, commitId: known, slot: new Date(slot).toISOString(), submittedBy: `${executor.host}:schedule` });
+      wakeMain();
+    },
+  });
+  const auditDiscovery = new Map<string, ReturnType<typeof setTimeout>>();
+  /** The integration head discovery last saw, which labels an audit of a repository that never landed here. */
+  const knownHeads = new Map<string, string>();
+  const discoveries = new Set<Promise<void>>();
   const scheduler = createDeployScheduler({
     log,
     submit(repo, environment, commitId) {
@@ -616,7 +476,7 @@ export function createRunnerQueue(input: {
       entry.controller.abort();
     }
   }
-  function admit(lane: string, operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation): void {
+  function admit(lane: string, operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation | AuditOperation): void {
     admitted.set(operation.id, operation);
     void inLane(lane, () => processOperation(operation))
       .finally(() => { admitted.delete(operation.id); wakeMain(); });
@@ -648,7 +508,7 @@ export function createRunnerQueue(input: {
     return operation.kind === "release"
       && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
   }
-  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation, prefix?: PrefixTurn): Promise<void> {
+  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation | AuditOperation, prefix?: PrefixTurn): Promise<void> {
     let stage: RunnerStage = "queued";
     let stageStarted = Date.now();
     let installSource: "fresh" | "existing" | undefined;
@@ -660,6 +520,8 @@ export function createRunnerQueue(input: {
     running.set(operation.id, { operation, stage, controller });
     let verdict: OperationEvent | undefined;
     let retryPrefix = false;
+    // The audit policy the audited head declared; null when it declares none, undefined until read.
+    let auditPolicy: import("../policy/audit-policy.ts").AuditPolicy | null | undefined;
     const checkout = prefix ? join(home, "verifiers", operation.repo, String(prefix.slot)) : checkoutPath(operation);
     const scratch = scratchOf(checkout);
     let remote: string | undefined;
@@ -712,6 +574,12 @@ export function createRunnerQueue(input: {
       const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
       if ((purpose === "migration_generate" || purpose === "migration_verify") && request.env?.SLIPJAY_MIGRATION_CONTEXT)
         runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
+      // A gate command may report per-file test timings into its own directory (see test-reports.ts).
+      const reports = runPurpose === "gate" && !privateRun ? join(scratch, "test-reports", runId) : undefined;
+      if (reports) {
+        await mkdir(reports, { recursive: true, mode: 0o700 });
+        runEnvironment![TEST_REPORT_DIR_ENV] = reports;
+      }
       const redact = privateRun ? request.redactOutput ?? ((value: string) => value) : (value: string) => redactVerificationOutput(value, checkout);
       const token = build[BUILD_READ_TOKEN_ENV];
       const result = await executor.run({ ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment,
@@ -722,6 +590,10 @@ export function createRunnerQueue(input: {
       const finished = runFinished(runId, result, started, request, privateRun);
       finished.artifact = await retainCommandArtifact({ home, operationId: operation.id, runId, request, result, privateOutput: privateRun });
       append(operation.id, finished);
+      if (reports) {
+        append(operation.id, { type: "test_report", runId, ...await readTestReports(reports, await realpath(checkout).catch(() => checkout)) });
+        await rm(reports, { recursive: true, force: true });
+      }
       return result;
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
@@ -748,7 +620,7 @@ export function createRunnerQueue(input: {
       stageStarted = Date.now();
       stage = next;
       running.set(operation.id, { operation, stage, controller });
-      append(operation.id, { type: "stage", stage });
+      append(operation.id, { type: "stage", stage, health: health() });
     };
     try {
       if (prefix?.predecessor) {
@@ -793,6 +665,10 @@ export function createRunnerQueue(input: {
       // jj's default trunk() names only main, master or trunk: published integration history on any
       // other branch would be mutable, and the candidate cleanup below would abandon it.
       await jj(checkout, ["config", "set", "--repo", 'revset-aliases."trunk()"', `${branch}@${remote}`]);
+      if (operation.kind === "audit") {
+        verdict = await audit(branch, remote);
+        return;
+      }
       // The release checkout holds no integration: what the repository lane finishes is not its concern.
       if (operation.kind === "release" || operation.kind === "verification") {
         await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
@@ -873,7 +749,8 @@ export function createRunnerQueue(input: {
         runCommand: run,
         adapter: {
           verify: async ({ base, candidate }) => {
-            append(operation.id, { type: "verification_base", base, candidate });
+            const { budgets } = candidateContext.configuration;
+            append(operation.id, { type: "verification_base", base, candidate, ...(budgets ? { budgets } : {}) });
             await recordShape(checkout, candidateContext.integrationBranch, candidate, candidateContext.configuration.migrationFinalization);
             // Decided for each prepared candidate, so again after any rebase or rebuilt attempt.
             const settings = await settingsLanding({
@@ -1050,6 +927,11 @@ export function createRunnerQueue(input: {
         await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
       // A reset, whatever its verdict, starts the next interval.
       if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
+      // An audit with a verdict waits for the next scheduled time; one without is due again now. What its head declared decides.
+      if (operation.kind === "audit") {
+        if (auditPolicy === undefined) auditScheduler.reconsider(operation.repo);
+        else auditScheduler.consider(operation.repo, auditPolicy);
+      }
     }
     if (retryPrefix && prefix) {
       // A fresh immutable attempt, never an owner kill, hold, source replacement or paused rebuild.
@@ -1070,6 +952,28 @@ export function createRunnerQueue(input: {
         testFiles: paths.filter((path) => /(?:test|spec)\.[cm]?[jt]sx?$/.test(path)),
         fileSet: createHash("sha256").update(tree.stdout.trim()).digest("hex"),
         sizeBucket: insertions + deletions <= 100 ? "small" : insertions + deletions <= 1000 ? "medium" : "large" });
+    }
+    /**
+     * Audit the integration branch's published head: resolve its exact commit, record it, check it out and run the
+     * audit its policy declares, in full. The branch itself is left alone, so a held integration stays held. An audit
+     * is green only when every declared command ran and passed, with none skipped or reused; a command a missing
+     * capability would skip makes it fail, never pass. A head that declares no audit ends it cancelled: nothing was run.
+     */
+    async function audit(branch: string, remote: string): Promise<OperationEvent> {
+      const head = (await revisionFacts(checkout, `${branch}@${remote}`)).commitId;
+      append(operation.id, { type: "audit_head", commit: head });
+      const { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), head);
+      auditPolicy = configuration?.audit ?? null;
+      if (!auditPolicy) return { type: "cancelled", reason: `${head.slice(0, 12)} declares no audit` };
+      progress(`Auditing ${head.slice(0, 12)}`);
+      await jj(checkout, ["new", head]);
+      setStage("verifying");
+      const commands = auditPolicy.commands.map((check) => [check.executable, ...check.args].join(" "));
+      const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, run });
+      // A kill stops its commands, which then read as failures.
+      if (controller.signal.aborted) throw new OwnerKill();
+      if (verification.gaps.length) return { type: "failed", stage, reason: `The audit did not run in full, so it is not green: ${verification.gaps.map((gap) => `${gap.command} (${gap.reason || gap.capability})`).join("; ")}` };
+      return { type: "audited", commit: head, commands, passed: verification.passed, skipped: [], reused: [] };
     }
     /**
      * Run the reset the integration tip declares, in its exact source: the integration
@@ -1102,6 +1006,14 @@ export function createRunnerQueue(input: {
      */
     async function release(operation: ReleaseOperation): Promise<void> {
       const { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), operation.commitId);
+      // A repository that audits promotes only while its latest audit is not an unexplained failure.
+      // Asked again under the publication lane: an audit can fail while the release verifies.
+      const unexplainedAudit = () => configuration?.audit ? promotionRefusal(auditSummary({ audits: log.audits(operation.repo), landings: log.landings(operation.repo) }, new Date())) : null;
+      const unexplained = unexplainedAudit();
+      if (unexplained) {
+        append(operation.id, { type: "failed", stage, reason: unexplained });
+        return;
+      }
       const promotes = Boolean(configuration?.deployments?.environments.production);
       if (promotes && !log.deployments(operation.repo, "staging").some((entry) => entry.commitId === operation.commitId && entry.result?.type === "deployed")) {
         append(operation.id, { type: "failed", stage, reason: `Staging is not green on ${operation.commitId.slice(0, 12)}: production promotes only a commit staging deployed` });
@@ -1110,6 +1022,7 @@ export function createRunnerQueue(input: {
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
         preverified: (plan) => passedVerification(plan, log.verifications(operation.repo))?.id ?? null,
+        publicationRefusal: unexplainedAudit,
         exclusively: (publication) => {
           // A shared-lane release owns the publication lane for its whole turn.
           // Rejoining it would wait for this very release to finish.
@@ -1156,6 +1069,11 @@ export function createRunnerQueue(input: {
       if (operation.kind === "reset") {
         // The schedule waits a full interval after this one; the owner can reset again at once.
         append(operation.id, { type: "failed", stage: operation.stage, reason: `runner restarted during ${operation.stage}; run slipjay reset again` });
+        continue;
+      }
+      if (operation.kind === "audit") {
+        // Recorded as interrupted, which is no verdict: the schedule submits the audit again at startup.
+        append(operation.id, { type: "cancelled", reason: AUDIT_INTERRUPTED_REASON });
         continue;
       }
       if (operation.kind === "verification") {
@@ -1277,8 +1195,13 @@ export function createRunnerQueue(input: {
         await reconcileVerification(repo);
         await scheduleLatest(repo);
       }
+      // A repository that landed here is scheduled above, from the policy of its last landing; only one that never
+      // did needs its policy read from the remote, which takes its lane for a fetch.
+      discoverAudits(Object.keys(config.repos).map(repositoryKey).filter((repo) => !log.lastLanded(repo)));
     },
     cancelled(operation) {
+      // A cancelled audit is no verdict: its slot is due again, or the next one gets its timer.
+      if (operation.kind === "audit") auditScheduler.reconsider(operation.repo);
       if (operation.kind !== "landing") return;
       // A submission that woke the queue while this cleanup held the lane is admitted after it.
       void inLane(laneOf(operation.repo), async () => {
@@ -1290,13 +1213,17 @@ export function createRunnerQueue(input: {
     async idle() {
       for (;;) {
         if (recovering) await recovering;
-        await Promise.allSettled([...lanes.values(), ...attempts]);
+        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries]);
         const lane = deploying;
         await lane;
-        if (!recovering && !lanes.size && !attempts.size && lane === deploying) return;
+        if (!recovering && !lanes.size && !attempts.size && !discoveries.size && lane === deploying) return;
       }
     },
-    close() { scheduler.close(); resetScheduler.close(); },
+    close() {
+      scheduler.close(); resetScheduler.close(); auditScheduler.close();
+      for (const retry of auditDiscovery.values()) clearTimeout(retry);
+      auditDiscovery.clear();
+    },
     kill(operationId) {
       const target = operationId === undefined ? undefined : running.get(operationId);
       if (operationId !== undefined && !target) return { status: "not_running", operation: log.operation(operationId) };

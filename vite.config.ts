@@ -11,7 +11,8 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
     environment: "node",
     pool: "forks",
-    maxWorkers: 4,
+    // Half the cores: on the 16-core runner, 8 workers took the suite from 585 s to 315 s, leaving room for other lanes.
+    maxWorkers: "50%",
     testTimeout: 120_000,
     hookTimeout: 120_000,
     setupFiles: [hermeticEnvironment],

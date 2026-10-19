@@ -5,7 +5,7 @@ import { deliveryState } from "../build/build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { admissionLane, awaitingReplacement, recoveryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState, VerificationOperation } from "./runner-contract.ts";
+import type { AuditOperation, DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState, VerificationOperation } from "./runner-contract.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -58,6 +58,23 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   const landed = db.prepare(`SELECT landed.at, landed.data FROM events landed
     JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
     WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq DESC LIMIT 1`);
+  const landings = db.prepare(`SELECT landed.operation_id, landed.at, landed.data, json_extract(submitted.data, '$.changeId') AS change_id FROM events landed
+    JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
+    WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq`);
+  const gateCandidates = (type: "verification_passed" | "verification_skipped") =>
+    new Set((db.prepare("SELECT json_extract(data, '$.candidate') AS candidate FROM events WHERE type = ?").all(type) as { candidate: string }[]).map((row) => row.candidate));
+  /** The commits a repository's landings published, each with whether the landing checks passed on it, or were skipped for a settings landing. */
+  function publishedLandings(repo: string): PublishedLanding[] {
+    const rows = landings.all(repo) as { operation_id: string; at: string; data: string; change_id: string }[];
+    if (!rows.length) return [];
+    const passed = gateCandidates("verification_passed"), skipped = gateCandidates("verification_skipped");
+    return rows.flatMap((row) => {
+      const event = JSON.parse(row.data) as OperationEvent;
+      if (event.type !== "landed") return [];
+      return [{ operationId: row.operation_id, changeId: row.change_id, commitId: event.commitId, base: event.base, at: row.at,
+        gate: skipped.has(event.commitId) ? "skipped" as const : passed.has(event.commitId) ? "green" as const : "none" as const }];
+    });
+  }
   const control = db.prepare(`SELECT seq, operation_id, at, data FROM events
     WHERE operation_id = ? AND type IN ('paused', 'resumed') ORDER BY seq DESC LIMIT 1`);
   function paused(): { by: string; at: string } | null {
@@ -122,10 +139,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   function placed<T extends Operation>(projected: T, open: Operation[]): T {
     return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;
   }
-  function ofKind<K extends "release" | "verification" | "reset">(repo: string, kind: K): Extract<ReleaseOperation | VerificationOperation | ResetOperation, { kind: K }>[] {
+  function ofKind<K extends "release" | "verification" | "reset" | "audit">(repo: string, kind: K): Extract<ReleaseOperation | VerificationOperation | ResetOperation | AuditOperation, { kind: K }>[] {
     const open = queue();
     return projectIds((kindIds.all(kind, repo) as { operation_id: string }[]).map((row) => row.operation_id))
-      .filter((entry): entry is Extract<ReleaseOperation | VerificationOperation | ResetOperation, { kind: K }> => entry.kind === kind)
+      .filter((entry): entry is Extract<ReleaseOperation | VerificationOperation | ResetOperation | AuditOperation, { kind: K }> => entry.kind === kind)
       .map((entry) => placed(entry, open));
   }
   function operation(id: string): Operation | null {
@@ -249,6 +266,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     releases: (repo) => ofKind(repo, "release"),
     verifications: (repo) => ofKind(repo, "verification"),
     resets: (repo) => ofKind(repo, "reset"),
+    audits: (repo) => ofKind(repo, "audit"),
+    landings: publishedLandings,
     lastLanded,
     stagingDue,
     paused,
@@ -294,6 +313,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
       ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
       : submitted.event.kind === "reset" ? { ...fields, kind: "reset" }
       : submitted.event.kind === "verification" ? { ...fields, kind: "verification" }
+      : submitted.event.kind === "audit" ? { ...fields, kind: "audit", slot: submitted.event.slot }
       : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark, ...submitted.event.admission ? { admission: "pending" } : {} };
   const runs = new Map<string, RunRecord>();
   for (const stored of events) {
@@ -301,6 +321,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     switch (event.type) {
       case "stage":
         operation.stage = event.stage;
+        if (event.stage !== "queued") operation.startedAt ??= stored.at;
         if (event.stage !== "queued" && !operation.result)
           operation.status = "running";
         break;
@@ -318,6 +339,14 @@ function project(id: string, events: StoredEvent[]): Operation | null {
         }
         break;
       }
+      case "test_report": {
+        const run = runs.get(event.runId);
+        if (run) {
+          const { type: _type, runId: _runId, ...report } = event;
+          run.testReport = report;
+        }
+        break;
+      }
       case "yielded":
         operation.status = "queued";
         operation.stage = "queued";
@@ -325,11 +354,18 @@ function project(id: string, events: StoredEvent[]): Operation | null {
       case "build_admitted":
         if (operation.kind === "landing") operation.admission = "admitted";
         break;
+      case "audit_head":
+        if (operation.kind === "audit") operation.head = event.commit;
+        break;
+      case "audit_cause":
+        if (operation.kind === "audit") operation.cause = { cause: event.cause, by: event.by, at: stored.at, ...event.note ? { note: event.note } : {} };
+        break;
       case "landed":
       case "released":
       case "verified":
       case "deployed":
       case "reset":
+      case "audited":
       case "failed":
       case "declined":
       case "superseded":

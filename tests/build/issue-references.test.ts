@@ -4,9 +4,10 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { commitIssue, githubRepository } from "../../src/lib/build/issue-references.ts";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
-import { jj, project, withTestRunner } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { withTestRunner } from "../support/test-runner.ts";
 
 test("GitHub repository identity uses the actual supported remote hostname and normal path", () => {
   for (const remote of [

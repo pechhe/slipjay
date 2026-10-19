@@ -1,3 +1,4 @@
+import type { AuditPolicy } from "./audit-policy.ts";
 import type { DeploymentPolicy } from "./deployment-policy.ts";
 import type { ResetPolicy } from "./post-integration-policy.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
@@ -37,13 +38,20 @@ export type ExecutionPolicy = {
   postIntegration?: unknown;
   /** The target the runner resets on a schedule and on demand; undefined when undeclared. */
   reset?: ResetPolicy;
+  /** The nightly complete-suite audit; undefined when undeclared. */
+  audit?: AuditPolicy;
   /** Environments the runner deploys; undefined when undeclared. */
   deployments?: DeploymentPolicy;
   /** Where the repository's work is tracked (see `tracker.ts`); GitHub Issues when undeclared. */
   tracker?: "github" | "build";
+  /** How long landing verification may take before `slipjay metrics` calls it over budget; undefined when undeclared. */
+  budgets?: TimeBudgets;
 };
 
 export type ProcessLevel = "standard" | "light";
+
+/** Landing time budgets, in seconds: the verifying stage's p50 and p90, and any one test file. */
+export type TimeBudgets = { verifyP50Seconds?: number; verifyP90Seconds?: number; testFileSeconds?: number };
 
 export type IntegrationBranchProbes = {
   originHead?: () => Promise<string | null>;
@@ -58,6 +66,7 @@ export type IntegrationBranchProbes = {
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { auditPolicy } from "./audit-policy.ts";
 import { deploymentPolicy } from "./deployment-policy.ts";
 import { postIntegrationPolicy, resetPolicy } from "./post-integration-policy.ts";
 import { declaredPublicationRemote } from "./source-publication-policy.ts";
@@ -223,6 +232,23 @@ export function processLevel(declared: unknown): ProcessLevel {
   return declared;
 }
 
+/** `budgets`: positive second counts for `verifyP50Seconds`, `verifyP90Seconds` and `testFileSeconds`, each optional. */
+export function timeBudgets(declared: unknown): TimeBudgets | undefined {
+  if (declared === undefined) return undefined;
+  if (!isObject(declared)) fail("budgets must be an object");
+  const fields = ["verifyP50Seconds", "verifyP90Seconds", "testFileSeconds"] as const;
+  const unknown = Object.keys(declared).filter((key) => !(fields as readonly string[]).includes(key));
+  if (unknown.length) fail(`budgets declares unknown ${unknown.join(", ")}`);
+  const budgets: TimeBudgets = {};
+  for (const field of fields) {
+    const value = declared[field];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) fail(`budgets.${field} must be a positive number of seconds`);
+    budgets[field] = value;
+  }
+  return budgets;
+}
+
 /** Declarations that drive nothing: a policy still declaring them loads, and `land` and `policy show` warn of them. */
 export const RETIRED_POLICY_FIELDS: readonly ["parallelExecution", "unattendedMergeToIntegration"] = Object.freeze(["parallelExecution", "unattendedMergeToIntegration"]);
 
@@ -280,6 +306,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   if (parsed.postRelease !== undefined) fail("declares postRelease, which no longer runs at promotion; declare it as reset with an intervalMs (see README)");
   if (parsed.reset !== undefined && parsed.integrationBranch == null) fail("declares reset without an integrationBranch");
   const reset = resetPolicy(parsed.reset);
+  const audit = auditPolicy(parsed.audit, { checks: gateChecks, fail });
   const deployments = deploymentPolicy(parsed.deployments);
   if (parsed.tracker !== undefined && parsed.tracker !== "github" && parsed.tracker !== "build") fail('declares a tracker other than "github" or "build"');
   generatedPathMatchers(parsed.generatedPaths);
@@ -287,6 +314,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   const sharedPaths = sharedPathList(parsed.sharedPaths);
   const spares = spareCount(parsed.spares);
   const level = processLevel(parsed.process);
+  const budgets = timeBudgets(parsed.budgets);
   return {
     ...parsed,
     version: 1,
@@ -299,8 +327,10 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
     ...(parsed.spares === undefined ? {} : { spares }),
     ...(parsed.process === undefined ? {} : { process: level }),
+    ...(budgets ? { budgets } : {}),
     ...(deployments ? { deployments } : {}),
     ...(reset ? { reset } : {}),
+    ...(audit ? { audit } : {}),
   };
 }
 

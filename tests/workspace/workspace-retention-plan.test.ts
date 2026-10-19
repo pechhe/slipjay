@@ -1,4 +1,5 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -6,8 +7,11 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { attachWorkspaceIssue, createWorkspace, planDisposableWorkspaces, provisionSpare, sweepDisposableWorkspaces } from "../../src/lib/slipjay.ts";
-import type { PlannedWorkspace } from "../../src/lib/slipjay.ts";
+import { attachWorkspaceIssue } from "../../src/lib/workspace/workspace-state.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
+import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
+import type { PlannedWorkspace } from "../../src/lib/workspace/workspace-sweep.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../../src/lib/workspace/workspace-finalization.ts";
 import { stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { lockPath, metadataPath, statePath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";

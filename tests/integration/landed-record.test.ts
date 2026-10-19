@@ -4,7 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { readLandedRecord } from "../../src/lib/slipjay.ts";
+import { readLandedRecord } from "../../src/lib/workspace/workspace-state.ts";
 import { landedHome, stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));

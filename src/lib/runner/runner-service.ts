@@ -15,7 +15,8 @@ import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProb
 import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
-import { createRunnerQueue, localExecutor, runnerWorkers } from "./runner-queue.ts";
+import { localExecutor } from "./local-executor.ts";
+import { createRunnerQueue, runnerWorkers } from "./runner-queue.ts";
 
 /** The runner's state directory: config, operation log, run logs and warm checkouts. */
 export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");

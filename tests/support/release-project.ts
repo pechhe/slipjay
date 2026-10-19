@@ -1,9 +1,10 @@
-import { jj, landThroughTestRunner, project, recordCheckout } from "./workspace-project.ts";
+import { jj, project, recordCheckout } from "./workspace-project.ts";
+import { landThroughTestRunner } from "./test-runner.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 
 /**
  * A project whose `main` is promoted to `release`, which starts at the initial

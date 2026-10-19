@@ -10,14 +10,15 @@ import { test } from "vite-plus/test";
 import { parseExecutionPolicy } from "../../src/lib/policy/execution-policy.ts";
 import { commitIssue, withIssueTrailer } from "../../src/lib/build/issue-references.ts";
 import { controlRunner, landThroughRunner, readBuildThroughRunner } from "../../src/lib/runner/runner-client.ts";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { metadataPath } from "../../src/lib/workspace/workspace-state.ts";
 import { repairFailedLanding } from "../../src/lib/landing/repair-workspace.ts";
 import { buildRoute } from "../../src/lib/build/build-admission.ts";
 import { buildLandingHandoff } from "../../src/lib/build/build-handoff.ts";
 import { BuildRefusal, buildItemClosed, trackerOf, workItemClosed, workItemTitle } from "../../src/lib/build/tracker.ts";
 import type { BuildItem, BuildReader } from "../../src/lib/build/tracker.ts";
-import { jj, landThroughTestRunner, project, withTestRunner } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner, withTestRunner } from "../support/test-runner.ts";
 
 const item = (fields: Partial<BuildItem> & Pick<BuildItem, "number">): BuildItem =>
   ({ id: `00000000-0000-4000-8000-${String(fields.number).padStart(12, "0")}`, kind: "ticket", status: "ready", parentId: null, title: `Item ${fields.number}`, ...fields });

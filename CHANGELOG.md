@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **A nightly audit runs the complete suite and records suspects (#115, #116):** a repository declares
+  `audit` in `slipjay.json` (its own commands, and a wall-clock `timeOfDay` and `timeZone`, default 02:00
+  Europe/London). The runner audits the exact integration head each night, even before any landing is
+  in its ledger, and counts an audit green only when every command ran and passed. A failing audit lists
+  the landings published since the last green audit as suspects; `slipjay audit cause` records a culprit
+  landing, `--flake`, `--infrastructure` or `--unresolved`. A promotion is refused while the latest audit
+  failed with no cause recorded, at planning and again just before publication. SlipJay audits itself with
+  `bun install`, `check`, `typecheck` and `test:audit`, the complete suite with test reports.
+- **Landings record per-file test timings and runner health (#111, #112, #103):** each gate command gets
+  `SLIPJAY_TEST_REPORT_DIR`; a Vitest JSON or Bun JUnit report written there (listed in
+  `slipjay-test-reports.json`) becomes the run's `testReport`, with each file's duration and outcome; a
+  command that wrote none is recorded as `missing`.
+  Each stage event records the runner's load, CPU count, memory and running operations, and the queue
+  snapshot gives each operation's `startedAt`.
+- **`slipjay metrics` judges each repository against its test budgets (#113):** a new `budgets` policy
+  setting (`verifyP50Seconds`, `verifyP90Seconds`, `testFileSeconds`) is recorded with each verification.
+  `slipjay metrics [--repo <name>] --json` reports per repository and operation kind, with verify-time
+  budget status, the slowest, growing and over-budget test files (executed runs only, per operation kind),
+  retry flake candidates and the audit summary.
+- **SlipJay's landing gate runs only the tests a candidate can affect (#114):** `bun run test:landing`
+  follows the candidate's import graph and falls back to the complete suite for any change it cannot map;
+  a version-only `package.json` change runs no tests. Tests import the module they exercise rather than the
+  package facade, and `localExecutor` moved to `src/lib/runner/local-executor.ts`, so fewer tests depend on
+  every module. A test listed in `tests/quarantine.json` stays out of landings but still runs in the audit
+  (#117).
+- **The heaviest test files are split by area (#107):** runner queue, runner client, release and spare
+  dependency tests now run as several files, and Vitest uses half the cores; the complete suite on the
+  runner went from 472 s to 329 s.
+
 ## v3.32.0
 
 - **An environment's projects deploy side by side:** each project's deploy command and health check

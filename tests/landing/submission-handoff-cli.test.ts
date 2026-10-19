@@ -7,7 +7,8 @@ import { promisify } from "node:util";
 import { test } from "vite-plus/test";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { readLandingHandoff } from "../../src/lib/runner/runner-client.ts";
-import { jj, project, withTestRunner } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { withTestRunner } from "../support/test-runner.ts";
 
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
 test("actual CLI submits bounded author handoff and retrieves it without the file or transcript", async () => {

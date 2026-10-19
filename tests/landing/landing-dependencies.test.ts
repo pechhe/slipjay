@@ -4,8 +4,9 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 
 const advance = (cwd: string, title: string) => { jj(cwd, ["commit", "-m", title]); jj(cwd, ["bookmark", "set", "main", "-r", "@-"]); jj(cwd, ["git", "push", "--bookmark", "main"]); };
 async function write(root: string, path: string, value: string) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), value); }

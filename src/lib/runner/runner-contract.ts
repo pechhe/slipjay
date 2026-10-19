@@ -2,6 +2,7 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bound
 import type { ReleaseResult } from "../release/release.ts";
 import type { VerificationDeclaration } from "../policy/verification-policy.ts";
 import type { StartSteps } from "../workspace/start-steps.ts";
+import type { TestReportReading } from "./test-reports.ts";
 
 /**
  * The runner's contract: one long-lived control plane that owns the landing queue
@@ -40,11 +41,13 @@ export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "insta
 export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying", "waiting-for-predecessor", "resetting"];
 /** The reason a killed operation carries; it is never reported as a pass. */
 export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
+/** The reason an audit carries when a runner restart stopped it mid-run: it is recorded as interrupted, never as a verdict, and runs again. */
+export const AUDIT_INTERRUPTED_REASON = "interrupted by a runner restart, not run to completion";
 /** The log's operation id for runner-wide control events (pause, resume). */
 export const RUNNER_CONTROL_ID = "runner";
 
 /** Terminal and live states of an operation, derived from its events. */
-export type OperationStatus = "queued" | "running" | "landed" | "released" | "verified" | "deployed" | "reset" | "failed" | "declined" | "superseded" | "cancelled";
+export type OperationStatus = "queued" | "running" | "landed" | "released" | "verified" | "deployed" | "reset" | "audited" | "failed" | "declined" | "superseded" | "cancelled";
 
 /** A release the runner verified and published, or found already published. */
 export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
@@ -106,6 +109,11 @@ export type ClientFact =
   | { kind: "ssh_forward_failure"; reason: string; observedAt: string }
   | { kind: "preview_start"; workspace: string; port: number };
 export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
+/**
+ * Why a failing audit failed, as the person who looked recorded it. `culprits` names the
+ * published commits of the landings that broke the suite; the others say no landing did.
+ */
+export type AuditCause = { kind: "culprits"; landings: string[] } | { kind: "flake" } | { kind: "infrastructure" } | { kind: "unresolved" };
 export type RunPurpose = "gate" | "dependencies" | "finalization" | "migration_generate" | "migration_verify" | "deploy" | "reset";
 export type CommandEvidence = { status: "unavailable"; reason: "capacity" } | {
   status: "recorded"; executable: string; args: string[]; cwd: string | null; environmentNames: string[];
@@ -133,7 +141,9 @@ export type OperationEvent =
   | { type: "held"; repo: string; commitId: string; retries: number; durationMs: number; published: boolean }
   | { type: "client"; id: string; fact: ClientFact }
   /** `candidate` is the exact revision verified on `base`; rows from before it was recorded lack it. */
-  | { type: "verification_base"; base: string; candidate?: string }
+  | { type: "verification_base"; base: string; candidate?: string;
+      /** The candidate policy's time budgets, so metrics can judge each repository by its own. */
+      budgets?: import("../policy/execution-policy.ts").TimeBudgets }
   | { type: "verification_passed"; base: string; candidate: string }
   /** A settings landing: only `fields` of the policy changed, so its landing checks did not run (see `policy-settings.ts`). */
   | { type: "verification_skipped"; base: string; candidate: string; fields: string[]; reason: string }
@@ -164,11 +174,24 @@ export type OperationEvent =
   | { type: "submitted"; kind: "verification"; repo: string; commitId: string; submittedBy: string }
   /** A reset of the repository's declared target; `commitId` is its last landed commit at submission, for reading only. */
   | { type: "submitted"; kind: "reset"; repo: string; commitId: string; submittedBy: string }
-  | { type: "stage"; stage: RunnerStage }
+  /**
+   * A nightly audit for the wall-clock `slot` (an ISO instant). `commitId` is the integration head last known at
+   * submission, for reading only: the audited head is the one `audit_head` records when the run resolves it.
+   */
+  | { type: "submitted"; kind: "audit"; repo: string; commitId: string; slot: string; submittedBy: string }
+  /** The exact integration-branch head an audit run resolved and is auditing; a rerun records its own. */
+  | { type: "audit_head"; commit: string }
+  /** An audit's declared commands all ran, in full, against `commit`: none skipped (`skipped`), none reused (`reused`). Anything less is not green. */
+  | { type: "audited"; commit: string; commands: string[]; passed: string[]; skipped: string[]; reused: string[] }
+  /** Someone recorded why this failing audit failed, for its whole open failure; the newest record stands. */
+  | { type: "audit_cause"; cause: AuditCause; by: string; note?: string }
+  | { type: "stage"; stage: RunnerStage; health?: RunnerHealth }
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
   | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence }
+  /** What a gate run's test reports said (see `test-reports.ts`); absent when the command wrote none. */
+  | ({ type: "test_report"; runId: string } & TestReportReading)
   | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
@@ -208,10 +231,15 @@ export type StoredEvent = { seq: number; operationId: string; at: string; event:
 export type RunRecord = {
   runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence;
   finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact;
+  /** The per-file timings its command reported (see `test-reports.ts`); absent when it wrote none. */
+  testReport?: TestReportReading;
 };
 
+/** The runner's machine as a stage began: 1-minute load average, memory, and operations then running. */
+export type RunnerHealth = { load1: number; cpus: number; freeMemoryBytes: number; totalMemoryBytes: number; running: number };
+
 /** Event types that close an operation. */
-export const TERMINAL_EVENT_TYPES = ["landed", "released", "verified", "deployed", "reset", "failed", "declined", "superseded", "cancelled"] as const;
+export const TERMINAL_EVENT_TYPES = ["landed", "released", "verified", "deployed", "reset", "audited", "failed", "declined", "superseded", "cancelled"] as const;
 
 type OperationFields = {
   id: string; repo: string; commitId: string; submittedBy: string;
@@ -223,6 +251,8 @@ type OperationFields = {
   /** While queued, the running operation it waits behind, e.g. `release 1a2b3c4d5e6f`. */
   waitingFor?: string;
   submittedAt: string; finishedAt?: string;
+  /** When it left the queue for its first stage; set once, so a yield back to the queue keeps it. */
+  startedAt?: string;
   runs: RunRecord[];
   /** The terminal event, when closed. */
   result?: Extract<OperationEvent, { type: (typeof TERMINAL_EVENT_TYPES)[number] }>;
@@ -275,8 +305,22 @@ export type DeployOperation = OperationFields & { kind: "deploy"; environment: s
  */
 export type ResetOperation = OperationFields & { kind: "reset" };
 
+/**
+ * The nightly audit: the complete suite on the exact integration head, at a wall-clock time. It takes its
+ * repository's lane like a landing (see `audit-scheduler.ts`). `slot` is the scheduled instant it covers; `head` the
+ * commit it resolved and audited (absent until it resolves one); `cause` the newest cause recorded on it.
+ */
+export type AuditOperation = OperationFields & { kind: "audit"; slot: string; head?: string; cause?: { cause: AuditCause; by: string; at: string; note?: string } };
+
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
-export type Operation = LandingOperation | ReleaseOperation | VerificationOperation | DeployOperation | ResetOperation;
+export type Operation = LandingOperation | ReleaseOperation | VerificationOperation | DeployOperation | ResetOperation | AuditOperation;
+
+/** A landing that published, as the audit ledger reads it: the integration commit it made, on `base`. */
+export type PublishedLanding = {
+  operationId: string; changeId: string; commitId: string; base: string; at: string;
+  /** `green`: the published commit passed the landing checks. `skipped`: a settings landing, whose checks did not run. */
+  gate: "green" | "skipped" | "none";
+};
 
 /** The append-only log and its projections. One implementation, on `node:sqlite`. */
 export interface OperationLog {
@@ -302,6 +346,10 @@ export interface OperationLog {
   verifications(repo: string): VerificationOperation[];
   /** A repository's reset operations, newest first. */
   resets(repo: string): ResetOperation[];
+  /** A repository's audits, newest first. */
+  audits(repo: string): AuditOperation[];
+  /** The landings a repository published, oldest first, each with the gate evidence of the commit it made. */
+  landings(repo: string): PublishedLanding[];
   /**
    * Whether staging has yet to finish a deploy of the repository's latest landing: a newer
    * candidate may be coming, so a pre-verification waits rather than verify one it would replace.
@@ -352,6 +400,13 @@ export type ResetRequest = { repo: string; submittedBy: string };
 export type ResetResponse = { operation: ResetOperation; reattached: boolean };
 
 /**
+ * POST /v1/audits/cause body: record why a failing audit failed. `audit` names the failing audit (default: the
+ * repository's open failure); `landings` are culprit landings, by operation id or by commit id (12 or more hex digits).
+ * Exactly one of `landings` (one or more) and `kind` (the other causes) is given.
+ */
+export type AuditCauseRequest = { repo: string; by: string; audit?: string; note?: string } & ({ landings: string[]; kind?: undefined } | { kind: "flake" | "infrastructure" | "unresolved"; landings?: undefined });
+
+/**
  * POST /v1/operations response.
  * - A known requestId returns its original operation, including a terminal result.
  *   Reusing it for different source/attribution returns 409 `{ error }` without submitting.
@@ -370,6 +425,8 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - POST /v1/deploys                            DeployRequest → DeployResponse
  * - POST /v1/resets                             ResetRequest → ResetResponse (400 until the repository has landed here)
  * - GET  /v1/resets?repo=<owner/name>           → `{ operations: ResetOperation[] }` newest first
+ * - GET  /v1/audits?repo=<owner/name>           → `{ operations: AuditOperation[], summary: AuditSummary }` newest first
+ * - POST /v1/audits/cause                       AuditCauseRequest → `{ operation: AuditOperation, summary: AuditSummary }` (400 when it names no failing audit or an unknown landing)
  * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
  * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first
  * - GET  /v1/operations/:id/source              → authenticated bounded Git bundle (no mutation)

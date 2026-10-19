@@ -16,10 +16,12 @@ import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "../infra/bounded-process.ts";
 import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "../landing/landing-steps.ts";
+import { promotionRefusal } from "../release/audit-ledger.ts";
+import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation } from "./runner-contract.ts";
+import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
@@ -1002,8 +1004,13 @@ export async function readPromotionState(cwd: string, options: { location: strin
     // A runner from before pre-verification has no such route: it has pre-verified nothing.
     const verifications = await read<VerificationOperation>("/v1/verifications", {})
       .catch((error: unknown) => { if (error instanceof Error && /HTTP 404$/.test(error.message)) return []; throw error; });
+    // A runner from before audits has no such route: it refuses nothing on their account.
+    const audits = await request(connection.baseUrl, token, `/v1/audits?${new URLSearchParams({ repo })}`)
+      .then(async (response) => ((await response.json()) as { summary: AuditSummary }).summary)
+      .catch((error: unknown) => { if (error instanceof Error && /HTTP 404$/.test(error.message)) return null; throw error; });
     return {
       verifications,
+      ...audits ? { auditRefusal: promotionRefusal(audits) } : {},
       stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,
       approved: releases.filter((operation) => operation.status !== "cancelled" && operation.status !== "superseded").map((operation) => operation.commitId),
     };
@@ -1080,6 +1087,38 @@ export async function resetThroughRunner(cwd: string, options: { location: strin
     onLine(`[runner ${connection.name}] ${reattached ? "following the open reset" : "resetting"} of ${repo}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
     return { operation, logUrl: runLogCommand(operation.id) };
+  } finally { connection.close(); }
+}
+
+/** The repository's audits and what they say (see `auditSummary`), through the runner. */
+export async function readAudits(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv }): Promise<{ operations: AuditOperation[]; summary: AuditSummary }> {
+  return withAuditRoute(cwd, options, (call) => call("/v1/audits", undefined));
+}
+
+/**
+ * Record why the repository's failing audit failed: culprit `landings`, or one of the other causes. `audit` names the
+ * failing audit when it is not the open failure's.
+ */
+export async function recordAuditCause(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv; audit?: string; note?: string; by?: string }
+  & ({ landings: string[]; kind?: undefined } | { kind: "flake" | "infrastructure" | "unresolved"; landings?: undefined })): Promise<{ operation: AuditOperation; summary: AuditSummary }> {
+  return withAuditRoute(cwd, options, (call, repo) => call("/v1/audits/cause", {
+    repo, by: options.by ?? `${hostname()}:${cwd}`, ...options.audit ? { audit: options.audit } : {}, ...options.note ? { note: options.note } : {},
+    ...options.landings ? { landings: options.landings } : { kind: options.kind },
+  }));
+}
+
+async function withAuditRoute<T>(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv }, work: (call: (route: string, body: unknown) => Promise<T>, repo: string) => Promise<T>): Promise<T> {
+  const env = options.env ?? process.env;
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Runner audits require a GitHub repository on the publication remote");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    return await work(async (route, body) => (await (await (body === undefined
+      ? request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo })}`)
+      : request(connection.baseUrl, token, route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }))).json()) as T, repo);
   } finally { connection.close(); }
 }
 

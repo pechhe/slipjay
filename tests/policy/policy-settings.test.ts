@@ -23,6 +23,17 @@ test("process round-trips, defaults to standard when absent, and refuses anythin
   assert.equal(parseExecutionPolicy(applyPolicyPatch(text, { process: null }).text).process, undefined);
 });
 
+test("budgets are a settings field of positive seconds, and anything else is refused", () => {
+  const budgets = { verifyP50Seconds: 90, verifyP90Seconds: 180, testFileSeconds: 30 };
+  const { text } = applyPolicyPatch(base, { budgets });
+  assert.deepEqual(parseExecutionPolicy(text).budgets, budgets);
+  assert.deepEqual(settingsOnlyDifference(base, text), ["budgets", "parallelExecution", "unattendedMergeToIntegration"]);
+  assert.equal(parseExecutionPolicy(applyPolicyPatch(text, { budgets: null }).text).budgets, undefined);
+  assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, budgets: { verifyP50Seconds: 0 } })), /budgets.verifyP50Seconds must be a positive number of seconds/);
+  assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, budgets: { landingSeconds: 5 } })), /budgets declares unknown landingSeconds/);
+  assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, budgets: [90] })), /budgets must be an object/);
+});
+
 test("a patch sets only settings fields, drops the retired ones and keeps every other declaration", () => {
   assert.throws(() => parsePolicyPatch({ spares: 3, releaseBranch: "release" }), /refused releaseBranch/);
   assert.throws(() => parsePolicyPatch({ migrationFinalization: null }), /refused migrationFinalization/);

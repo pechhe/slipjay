@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
 import { migrationCandidate } from "../../src/lib/landing/migration-candidate.ts";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { revisionFacts } from "../../src/lib/infra/workspace-jj.ts";
 import type { MigrationFinalizationPolicy } from "../../src/lib/policy/execution-policy.ts";
 import type { LandingRevision } from "../../src/lib/landing/landing-steps.ts";

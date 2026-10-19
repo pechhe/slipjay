@@ -15,7 +15,7 @@ test("captured runner and HTTP logs retain classified outcomes and measured pipe
     assert.ok(metrics.operations > 0);
     if (name === "landed") assert.equal(metrics.outcomes.landed, 2);
     else assert.ok(metrics.causes[(name === "held-recovered" ? "held" : name) as CauseClass] > 0, name);
-    assert.ok(metrics.queue.total && metrics.queue.total.samples > 0, name);
+    assert.ok(metrics.groups.some((group) => group.queue.total && group.queue.total.samples > 0), name);
     assert.match(formatPipelineMetrics(metrics), /Pipeline metrics since/);
     for (const row of events) {
       if (row.event.type === "classified") assert.equal(row.event.ruleVersion, 1);

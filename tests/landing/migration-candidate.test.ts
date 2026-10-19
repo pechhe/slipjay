@@ -4,8 +4,9 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace } from "../../src/lib/slipjay.ts";
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import { migrationCommandFailure } from "../../src/lib/landing/migration-command-evidence.ts";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 

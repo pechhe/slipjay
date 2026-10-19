@@ -1,11 +1,13 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { createWorkspace, readLandingState } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { readLandingState } from "../../src/lib/workspace/workspace-state.ts";
 import type { PrimaryCheckoutOutcome } from "../../src/lib/landing/landing-candidate.ts";
 
 // An Isolated landing integrates and pushes whatever the primary checkout holds, and

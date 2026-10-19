@@ -12,7 +12,7 @@ import type { ExecutionPolicy } from "./execution-policy.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 
 /** The policy fields a settings change may set, each of which only the next landing or refill reads. */
-export const SETTINGS_FIELDS: readonly ["spares", "process", "requiredLandingVerification"] = Object.freeze(["spares", "process", "requiredLandingVerification"]);
+export const SETTINGS_FIELDS: readonly ["spares", "process", "budgets", "requiredLandingVerification"] = Object.freeze(["spares", "process", "budgets", "requiredLandingVerification"]);
 export type SettingsField = (typeof SETTINGS_FIELDS)[number];
 /** A value sets the field; null removes it, restoring its default. */
 export type PolicyPatch = Partial<Record<SettingsField, unknown>>;

@@ -1,10 +1,12 @@
-import { jj, landThroughTestRunner, project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { createWorkspace, provisionSpare } from "../../src/lib/slipjay.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { landingGuardDecision } from "../../src/lib/landing/landing-guard.ts";
 
 const description = (cwd: string) => jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "description"]);
