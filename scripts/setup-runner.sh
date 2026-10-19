@@ -21,13 +21,28 @@ chmod 700 "$home"
 name="${SLIPJAY_RUNNER_USER_NAME:-$(git config --global user.name)}"
 email="${SLIPJAY_RUNNER_USER_EMAIL:-$(git config --global user.email)}"
 [ -n "$name" ] && [ -n "$email" ] || { echo "set SLIPJAY_RUNNER_USER_NAME and SLIPJAY_RUNNER_USER_EMAIL (or git's global user)" >&2; exit 1; }
-# Serialized by bun, so names with quotes or backslashes stay valid JSON.
+# Serialized by bun, so names with quotes or backslashes stay valid JSON. Settings this script does not own
+# (such as "build") survive a re-run.
 bun -e '
-const [host, name, email, ...pairs] = process.argv.slice(1);
+import { existsSync, readFileSync } from "node:fs";
+const [host, name, email, existing, ...pairs] = process.argv.slice(1);
 const repos = Object.fromEntries(pairs.map((pair) => { const at = pair.indexOf("="); return [pair.slice(0, at), { url: pair.slice(at + 1) }]; }));
-console.log(JSON.stringify({ name: host, listen: { host: "127.0.0.1", port: 7787 }, repos, jj: { "user.name": name, "user.email": email } }));
-' "$(hostname -s)" "$name" "$email" "$@" > "$home/config.json.tmp"
+const kept = existsSync(existing) ? JSON.parse(readFileSync(existing, "utf8")) : {};
+console.log(JSON.stringify({ ...kept, name: host, listen: { host: "127.0.0.1", port: 7787 }, repos, jj: { "user.name": name, "user.email": email } }));
+' "$(hostname -s)" "$name" "$email" "$home/config.json" "$@" > "$home/config.json.tmp"
 mv "$home/config.json.tmp" "$home/config.json"
+
+# A stop asks the runner alone to finish an integration in flight: systemd would signal every process in the
+# unit, the jj and git commands the runner started among them, and bws (the unit's main process) does not
+# forward signals. $1 is that main process; it is left alone, and so is everything outside the unit's cgroup.
+cat > "$home/stop-runner.sh" <<'STOP'
+#!/bin/sh
+cg=$(cut -d: -f3 /proc/self/cgroup)
+runner() { pgrep --cgroup "$cg" -f 'runner [s]erve' | grep -vx "$1"; }
+runner "$1" | xargs -r kill -TERM
+while runner "$1" | grep -q .; do sleep 1; done
+STOP
+chmod 755 "$home/stop-runner.sh"
 
 # PATH as this login shell sees it, so gate commands find bun, jj and node.
 cat > "$HOME/.config/systemd/user/slipjay-runner.service" <<UNIT
@@ -41,11 +56,8 @@ ExecStart=$(command -v bws) run -- $(command -v slipjay) runner serve
 Restart=always
 RestartSec=5
 KillMode=control-group
-# A stop first tells only the runner (never the jj and git commands it started) to finish an integration in
-# flight, and waits for the service to exit; systemd's signal to the whole group follows, up to this long.
-# The [s] keeps the pattern from matching this command's own line. bws does not forward signals, so the main
-# process is left alone.
-ExecStop=/bin/sh -c "for p in \$(pgrep -f 'runner [s]erve' | grep -vx \${MAINPID}); do kill -TERM \$p; done; while kill -0 \${MAINPID} 2>/dev/null; do sleep 1; done"
+# A stop waits for an integration in flight to publish (stop-runner.sh), up to this long, before systemd signals the group.
+ExecStop=$home/stop-runner.sh \${MAINPID}
 TimeoutStopSec=900
 
 [Install]

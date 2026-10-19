@@ -19,7 +19,8 @@
   (`delivery_pending`) while that delivery is held. Relanding the held commit follows that recovery. Stopping the
   runner (an upgrade's restart) waits for an operation that is integrating, finalizing, publishing or recovering,
   bounded by the unit's `TimeoutStopSec` (15 minutes), and the unit's `ExecStop` signals only the runner so the `jj` and `git`
-  commands it started are not cut off; both come from `scripts/setup-runner.sh`, which an existing runner host runs again.
+  commands it started are not cut off; both come from `scripts/setup-runner.sh`, which an existing runner host runs again
+  (it now keeps the other settings in `config.json`, such as `build`, instead of rewriting them away).
 
 ## v3.35.0
 

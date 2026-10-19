@@ -266,7 +266,8 @@ slipjay --version
 ```
 
 On a runner host, restart the unit afterwards (`systemctl --user restart slipjay-runner`): it finishes any integration
-in flight first (see [Runner](#runner)), so once the runner runs a release with the #3360 fix, installing needs no idle check.
+in flight first (see [Runner](#runner)). That needs a release with the #3360 fix and the unit `scripts/setup-runner.sh`
+now writes; until a host has both, wait until `slipjay watch --json` shows nothing running.
 
 Never clear Bun's package cache (`bun pm cache rm`) to upgrade: projects that set
 `globalStore = true` link every checkout's packages into it, so clearing it breaks
@@ -519,12 +520,13 @@ and held state through the existing recovery path.
 
   Stopping the runner (`systemctl --user restart slipjay-runner`) first stops admitting work
   and waits for every operation that is integrating, finalizing, publishing or recovering a held integration, and for a
-  deploy that is running. The unit's `ExecStop` signals only the runner process (`bws` does not forward signals, and
-  systemd would otherwise signal the `jj` and `git` commands it started along with it), so those commands finish; the
-  unit's `TimeoutStopSec` (15 minutes) bounds the wait, and a second SIGTERM to the runner stops it at once. Both are set by
-  `scripts/setup-runner.sh`, which an existing runner host runs again to take them. Work before integration is not waited
-  for: it is recorded as below. So an upgrade's restart does not interrupt a publication, but only a runner that already
-  runs this behaviour under that unit waits: the first restart onto it still stops the old process at once, so wait until
+  deploy that is running. The unit's `ExecStop` (`stop-runner.sh`, beside the config) signals only the runner process
+  (`bws` does not forward signals, and systemd would otherwise signal the `jj` and `git` commands it started along with
+  it), so those commands finish; the unit's `TimeoutStopSec` (15 minutes) bounds the wait, and a second SIGTERM to the
+  runner stops it at once. `scripts/setup-runner.sh` writes both and keeps the other settings in `config.json`, such as
+  `build`; an existing runner host runs it again to take them. Work before integration is not waited for: it is recorded
+  as below. So an upgrade's restart does not interrupt a publication, but only a runner that already runs this behaviour
+  under that unit waits: the first restart onto it still stops the old process at once, so wait until
   `slipjay watch --json` shows nothing running.
 
   On restart, queued operations resume. A landing that was running is recorded as
