@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.33.0
+
 - **A nightly audit runs the complete suite and records suspects (#115, #116):** a repository declares
   `audit` in `slipjay.json` (its own commands, and a wall-clock `timeOfDay` and `timeZone`, default 02:00
   Europe/London). The runner audits the exact integration head each night, even before any landing is
