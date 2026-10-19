@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.37.2
+
+- **A held integration a person discarded is released, and a failed recovery is retried (#3360):** the recovery turn
+  that finds its commit neither held nor on the remote (the README's manual fix) now records `integration_released`, so
+  relanding the commit is an ordinary submission instead of being redirected to a recovery that cancels each time. A
+  recovery turn that fails is queued again after 30 seconds, doubling to 15 minutes, until the hold publishes or is
+  released. `stop-runner.sh` reads the unified cgroup line only and fails loudly in the journal when it cannot find the
+  runner (a stop hook cannot hold systemd back, so the idle check before an upgrade stays the guard), and the stop log
+  line names every stage the drain waits for. Re-run `scripts/setup-runner.sh` to take the script.
+
 ## v3.37.1
 
 - **A landing for an unshaped Build Spec names the way through (Build #3359):** `slipjay land` for a

@@ -138,6 +138,62 @@ test("a restart publishes the integration a landing left held, with no further s
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a hold whose commit a person discarded is released, and the commit lands again as an ordinary submission", async () => {
+  const f = await fixture();
+  try {
+    const before = f.main();
+    const request = await f.candidate("discarded.txt");
+    await writeFile(join(f.root, "reject-push"), "");
+    const stranded = f.submit(request);
+    const failure = await f.land(stranded);
+    assert.equal(failure?.type === "failed" && failure.stage, "publishing", JSON.stringify(failure));
+    const [hold] = f.log.snapshot(f.executor.host).held;
+    assert.ok(hold);
+    // The README's manual fix: the runner checkout's bookmark goes back to the remote, discarding the integration.
+    await rm(join(f.root, "reject-push"));
+    const checkout = join(f.home, "repos", "fixture/repo");
+    jj(checkout, ["bookmark", "set", "main", "-r", "main@origin", "--allow-backwards"]);
+    jj(checkout, ["abandon", `${hold.commitId}`]);
+    assert.equal(f.main(), before);
+    await f.queue.recover();
+    await f.queue.idle();
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
+    const [recovery, ...rest] = recoveriesOf(f);
+    assert.deepEqual(rest, []);
+    assert.equal(recovery?.result?.type, "cancelled", JSON.stringify(recovery));
+    assert.ok(f.log.events({ operationId: recovery!.id }).some((row) => row.event.type === "integration_released" && row.event.commitId === hold.commitId));
+    // Nothing is held, so the reland is not sent back to a recovery: it is submitted and lands.
+    assert.equal(f.queue.recoverHeld("fixture/repo"), null);
+    const again = f.submit(await f.candidate("discarded-again.txt"));
+    assert.equal((await f.land(again))?.type, "landed");
+    assert.equal(recoveriesOf(f).length, 1);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a recovery that fails is queued again until it publishes, with no submission", async () => {
+  const f = await fixture(false, false, undefined, false, { recoveryRetryMs: 100 });
+  try {
+    const request = await f.candidate("retried.txt");
+    await writeFile(join(f.root, "reject-push"), "");
+    const failure = await f.land(f.submit(request));
+    assert.equal(failure?.type === "failed" && failure.stage, "publishing", JSON.stringify(failure));
+    const [hold] = f.log.snapshot(f.executor.host).held;
+    assert.ok(hold);
+    // The remote still refuses the push, so the restart's recovery fails and the hold stays.
+    await f.queue.recover();
+    await f.queue.idle();
+    assert.equal(recoveriesOf(f)[0]?.result?.type, "failed");
+    assert.equal(f.log.snapshot(f.executor.host).held.length, 1);
+    // The remote comes back: the runner retries by itself.
+    await rm(join(f.root, "reject-push"));
+    await until(() => f.log.snapshot(f.executor.host).held.length === 0 || undefined);
+    await f.queue.idle();
+    assert.equal(f.main(), hold.commitId);
+    assert.ok(recoveriesOf(f).length >= 2);
+    assert.equal(recoveriesOf(f).at(-1)?.result?.type, "landed");
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("a recovery interrupted by a restart queues again, and ends cancelled when nothing is held", async () => {
   const f = await fixture();
   try {

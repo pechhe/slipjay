@@ -473,6 +473,13 @@ and held state through the existing recovery path.
   failure needs a person: reconcile the target, then on the runner host move the
   checkout's integration bookmark back to the remote
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
+  The next recovery turn finds the commit neither held nor on the remote, records
+  `integration_released` to clear the hold and ends `cancelled`; land the commit again then, as
+  an ordinary submission. A recovery turn that fails (the remote is unreachable, say) is queued
+  again after 30 seconds, doubling per failure up to 15 minutes, until it publishes, releases the hold
+  or is stopped. Build accepts only a confirmed publication after an integration whose publication
+  was unknown, so it keeps refusing new admissions of that Spec (`delivery_pending`) after a release until
+  the delivery is closed in HQ.
 - **Owner controls.** From any machine with the location, `slipjay runner kill <operation>` stops
   that running landing, release or pre-verification while it is still fetching, rebasing, installing or
   verifying (a killed pre-verification is not queued again until staging next deploys that commit
@@ -530,7 +537,9 @@ and held state through the existing recovery path.
   `build`; an existing runner host runs it again to take them. Work before integration is not waited for: it is recorded
   as below. So an upgrade's restart does not interrupt a publication, but only a runner that already runs this behaviour
   under that unit waits: the first restart onto it still stops the old process at once, so wait until
-  `slipjay watch --json` shows nothing running.
+  `slipjay watch --json` shows nothing running. `stop-runner.sh` needs a cgroup v2 host and a `pgrep` with `--cgroup`;
+  where it cannot find the runner it fails loudly in the journal, and systemd then stops the whole unit at once, which a
+  stop hook cannot prevent, so the idle check above is the only guard there.
 
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")

@@ -764,10 +764,11 @@ try {
     } else if (rest.join(" ") === "serve") {
       const runner = await startRunner();
       console.error(`SlipJay runner listening on ${runner.url}`);
-      // systemd stops the unit with SIGTERM. A restart, such as an upgrade's, waits for an operation that is integrating or
-      // publishing (the unit's TimeoutStopSec bounds it); a gate still running is left to restart recovery.
+      // systemd stops the unit with SIGTERM. A restart, such as an upgrade's, waits for an operation that is integrating,
+      // finalizing, publishing or recovering a held integration, and for a running deploy (the unit's TimeoutStopSec bounds it);
+      // a gate still running is left to restart recovery.
       await new Promise<void>((resolve) => process.once("SIGTERM", () => resolve()));
-      console.error("SlipJay runner stopping once nothing is integrating or publishing");
+      console.error("SlipJay runner stopping once no integration is being finished and no deploy is running");
       await runner.drain();
       process.exit(0);
     } else throw new Error("Usage: slipjay runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>");

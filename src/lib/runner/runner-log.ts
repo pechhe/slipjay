@@ -158,10 +158,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     FROM events WHERE type = 'integration_held'
   ) SELECT h.seq, h.at, h.data,
     (SELECT MAX(b.seq) FROM events b WHERE b.seq < h.seq
-      AND b.type IN ('integration_held', 'integration_recovered')
+      AND b.type IN ('integration_held', 'integration_recovered', 'integration_released')
       AND json_extract(b.data, '$.repo') = json_extract(h.data, '$.repo')
-      AND ((b.type = 'integration_held' AND json_extract(b.data, '$.commitId') != json_extract(h.data, '$.commitId')) OR (b.type = 'integration_recovered' AND json_extract(b.data, '$.commitId') = json_extract(h.data, '$.commitId')))) AS boundary
-    FROM latest h WHERE h.rank = 1 AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type = 'integration_recovered' AND r.seq > h.seq AND json_extract(r.data, '$.repo') = json_extract(h.data, '$.repo') AND json_extract(r.data, '$.commitId') = json_extract(h.data, '$.commitId'))`);
+      AND ((b.type = 'integration_held' AND json_extract(b.data, '$.commitId') != json_extract(h.data, '$.commitId')) OR (b.type != 'integration_held' AND json_extract(b.data, '$.commitId') = json_extract(h.data, '$.commitId')))) AS boundary
+    FROM latest h WHERE h.rank = 1 AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type IN ('integration_recovered', 'integration_released') AND r.seq > h.seq AND json_extract(r.data, '$.repo') = json_extract(h.data, '$.repo') AND json_extract(r.data, '$.commitId') = json_extract(h.data, '$.commitId'))`);
   const heldHistory = db.prepare(`SELECT MIN(at) AS since, COUNT(*) - 1 AS retries FROM events
     WHERE type = 'integration_held' AND seq > ? AND seq <= ?
     AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.commitId') = ?`);

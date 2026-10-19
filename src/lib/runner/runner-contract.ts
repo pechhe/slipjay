@@ -219,7 +219,9 @@ export type OperationEvent =
   | { type: "paused"; by: string }
   | { type: "resumed"; by: string }
   | { type: "integration_held"; repo: string; commitId: string; reason: string }
-  | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean };
+  | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean }
+  /** A hold whose commit is neither in the runner's checkout nor on the remote: a person discarded it, so nothing is left to publish. */
+  | { type: "integration_released"; repo: string; commitId: string; reason: string };
 
 /** A landing's `submitted` event; rows from before releases existed carry no `kind`. */
 export type LandingSubmission = Extract<OperationEvent, { type: "submitted"; changeId: string }>;

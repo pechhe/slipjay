@@ -41,6 +41,9 @@ const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutio
 
 /** How long after the remote could not be read to learn a repository's audit policy the runner tries again. */
 const AUDIT_DISCOVERY_RETRY_MS = 600_000;
+/** How long after a recovery of a held integration fails the runner queues another, doubling per failure up to the cap. */
+const RECOVERY_RETRY_MS = 30_000;
+const RECOVERY_RETRY_MAX_MS = 900_000;
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
@@ -108,6 +111,8 @@ export function createRunnerQueue(input: {
   readBuild?: BuildReader;
   /** Read-only Build access for a Build-tracked repository's landing checks; absent, the runner has no Build. */
   buildChecks?: BuildCheckAccess;
+  /** The first delay before a failed recovery of a held integration is queued again; each further failure doubles it. */
+  recoveryRetryMs?: number;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /**
@@ -130,7 +135,7 @@ export function createRunnerQueue(input: {
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment, readBuild, buildChecks } = input;
+  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS } = input;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   const workers = runnerWorkers(config, executor);
@@ -706,7 +711,12 @@ export function createRunnerQueue(input: {
       if (operation.kind === "recovery") {
         // Nothing is held now, by this turn or by whoever published it first: the remote either has the commit or the hold is gone.
         if (!await revisionExists(checkout, `${settled} & ::${branch}@${remote}`)) {
-          verdict = { type: "cancelled", reason: `${settled.slice(0, 12)} is neither held nor on ${branch}@${remote}; nothing to recover` };
+          // The fetch above succeeded, so the remote does not have it: a person discarded the integration (the README's manual fix).
+          // Release the hold, or every reland of the commit would be sent back to a recovery that finds nothing.
+          const stale = `${settled.slice(0, 12)} is neither held nor on ${branch}@${remote}`;
+          if (log.held().some((entry) => entry.repo === operation.repo && entry.commitId === settled))
+            append(operation.id, { type: "integration_released", repo: operation.repo, commitId: settled, reason: stale });
+          verdict = { type: "cancelled", reason: `${stale}; nothing to recover. Land the commit again if it is still wanted` };
           return;
         }
         const [base = ""] = (await jj(checkout, ["log", "-r", `${settled}-`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n");
@@ -946,6 +956,7 @@ export function createRunnerQueue(input: {
         }
       }
       if (verdict) append(operation.id, verdict);
+      if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
       if (verdict?.type === "landed")
         await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
       // A reset, whatever its verdict, starts the next interval.
@@ -1195,6 +1206,21 @@ export function createRunnerQueue(input: {
       } catch { /* An unavailable checkout cannot prove recovery; retain recorded holds. */ }
     }
   }
+  const recoveryRetries = new Map<string, { failures: number; timer?: ReturnType<typeof setTimeout> }>();
+  /**
+   * A recovery that fails (the remote was unreachable, say) leaves the hold in place with nothing else to retry it, so queue
+   * another after a delay that doubles with each failure. Any other ending, or nothing left held, stops the retries.
+   */
+  function retryFailedRecovery(repo: string, failed: boolean): void {
+    const state = recoveryRetries.get(repo) ?? { failures: 0 };
+    clearTimeout(state.timer);
+    if (!failed || draining) { recoveryRetries.delete(repo); return; }
+    const delay = Math.min(Math.max(RECOVERY_RETRY_MAX_MS, recoveryRetryMs), recoveryRetryMs * 2 ** state.failures);
+    state.failures += 1;
+    state.timer = setTimeout(() => { recoverHeld(repo); }, delay);
+    state.timer.unref?.();
+    recoveryRetries.set(repo, state);
+  }
   function recoverHeld(repo: string): Operation | null {
     if (!log.held().some((entry) => entry.repo === repo)) return null;
     const open = log.openOperations(repo).find((entry) => entry.kind === "recovery");
@@ -1269,6 +1295,8 @@ export function createRunnerQueue(input: {
       scheduler.close(); resetScheduler.close(); auditScheduler.close();
       for (const retry of auditDiscovery.values()) clearTimeout(retry);
       auditDiscovery.clear();
+      for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
+      recoveryRetries.clear();
     },
     kill(operationId) {
       const target = operationId === undefined ? undefined : running.get(operationId);

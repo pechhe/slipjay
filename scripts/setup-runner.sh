@@ -37,9 +37,12 @@ mv "$home/config.json.tmp" "$home/config.json"
 # forward signals. $1 is that main process; it is left alone, and so is everything outside the unit's cgroup.
 cat > "$home/stop-runner.sh" <<'STOP'
 #!/bin/sh
-cg=$(cut -d: -f3 /proc/self/cgroup)
+cg=$(sed -n 's/^0:://p' /proc/self/cgroup)
+[ -n "$cg" ] || { echo "stop-runner: no unified (cgroup v2) hierarchy, so the runner cannot be found; systemd stops the whole unit at once" >&2; exit 1; }
 runner() { pgrep --cgroup "$cg" -f 'runner [s]erve' | grep -vx "$1"; }
-runner "$1" | xargs -r kill -TERM
+pids=$(runner "$1")
+[ -n "$pids" ] || { echo "stop-runner: no runner process in $cg (or pgrep lacks --cgroup); systemd stops the whole unit at once" >&2; exit 1; }
+echo "$pids" | xargs kill -TERM
 while runner "$1" | grep -q .; do sleep 1; done
 STOP
 chmod 755 "$home/stop-runner.sh"
