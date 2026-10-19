@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, TERMINAL_EVENT_TYPES } from "../../../src/lib/runner/runner-contract.ts";
@@ -9,7 +9,7 @@ import type { Executor, StoredEvent, SubmitRequest } from "../../../src/lib/runn
 import { newOperationId, openOperationLog } from "../../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue } from "../../../src/lib/runner/runner-queue.ts";
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
-import { testExecutor } from "../../support/executor.ts";
+import { directExecutor, testExecutor } from "../../support/executor.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
 // A committed `hang` file names where to record the pids of the gate, of a child in its
@@ -93,7 +93,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, recoveryRetryMs }: { recoveryRetryMs?: number; workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean } = {}) {
+  { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -174,9 +174,10 @@ export async function fixture(migrations = false, release = false, deployments?:
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
   const requestedTimeouts: { command: string; timeoutMs: number; migrationContext?: string }[] = [];
-  const local = testExecutor({ home });
-  // Unless told otherwise the fixture stands in for an enforced combined budget, so concurrent paths run on
-  // every platform: without systemd it runs commands directly rather than one at a time.
+  // Only a test of containment (`scopes`) runs commands in the production executor's systemd scopes, where
+  // the host has them. Otherwise the fixture stands in for an enforced combined budget, so concurrent paths
+  // run on every platform, and runs commands directly rather than one at a time.
+  const local = scopes ? testExecutor({ home }) : directExecutor(hostname());
   const run = local.combinedLimits ? local.run : runBoundedProcess;
   const executor: Executor = { ...local, combinedLimits, run: (request) => {
     requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs,

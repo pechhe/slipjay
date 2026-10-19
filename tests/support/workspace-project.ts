@@ -101,13 +101,11 @@ export async function configureLocalGithubTransport(f: { root: string; repo: str
   const gitWrapper = join(f.root, "fixture-git");
   const previousGit = jj(f.repo, ["config", "get", "git.executable-path"]);
   const previousOrigin = execFileSync("git", ["-C", f.repo, "config", "--get", "remote.origin.url"], { encoding: "utf8" }).trim();
-  await writeFile(gitWrapper, `#!/usr/bin/env node
-import { spawnSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
-const args = process.argv.slice(2);
-appendFileSync(${JSON.stringify(join(f.root, "git-transport.jsonl"))}, JSON.stringify(args) + "\\n");
-const result = spawnSync("git", ["-c", ${JSON.stringify(`url.${f.remote}.insteadOf=${github}`)}, ...args], { stdio: "inherit" });
-process.exit(result.status ?? 1);
+  // A shell script, not node: JJ runs it for every fetch and push. It logs each call's arguments, space-separated.
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  await writeFile(gitWrapper, `#!/bin/sh
+printf '%s\\n' "$*" >> ${quote(join(f.root, "git-transport.log"))}
+exec git -c ${quote(`url.${f.remote}.insteadOf=${github}`)} "$@"
 `);
   await chmod(gitWrapper, 0o755);
   // Source and runner clones share this test file's guarded disposable HOME.

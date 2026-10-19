@@ -15,7 +15,7 @@ import { retainSubmissionSource } from "../../src/lib/landing/submission-source.
 import { submissionSourceResponse, importSourceBundle } from "../../src/lib/landing/submission-source-export.ts";
 import { downloadSubmissionSource } from "../../src/lib/runner/runner-client.ts";
 import { jj, project } from "../support/workspace-project.ts";
-import { testExecutor } from "../support/executor.ts";
+import { directExecutor } from "../support/executor.ts";
 
 test("CLI retrieves retained source after author/upstream loss and a cold worker restores using only bundle evidence", async () => {
   const f = await project();
@@ -32,7 +32,7 @@ test("CLI retrieves retained source after author/upstream loss and a cold worker
     const home = join(f.root, "runner"); await mkdir(home);
     const operationId = "op_recovery";
     const request = { repo: "owner/repo", changeId, commitId: source, bookmark, submittedBy: "fixture" };
-    const retained = await retainSubmissionSource({ home, operationId, request, url: f.remote, executor: testExecutor() });
+    const retained = await retainSubmissionSource({ home, operationId, request, url: f.remote, executor: directExecutor("test") });
     log.append(operationId, { type: "submitted", ...request }); log.append(operationId, retained);
     log.append(operationId, { type: "failed", stage: "verifying", reason: "synthetic failure" });
     const before = log.events();
@@ -41,7 +41,7 @@ test("CLI retrieves retained source after author/upstream loss and a cold worker
     await rm(f.repo, { recursive: true, force: true });
     server = await serveRunner(createRunnerHandler({ log, token: "fixture-token", runnerName: "recovery", readLog: async () => "",
       onSubmitted: () => { throw new Error("Retrieval must not resubmit"); }, kill: () => ({ status: "idle" }), subscribe: log.subscribe,
-      readSource: (operation, signal) => submissionSourceResponse({ home, operationId: operation.id, repo: operation.repo, retained, executor: testExecutor(), signal }),
+      readSource: (operation, signal) => submissionSourceResponse({ home, operationId: operation.id, repo: operation.repo, retained, executor: directExecutor("test"), signal }),
     }), { host: "127.0.0.1", port: 0 });
     const destination = join(f.root, "recovered.bundle");
     const env = { ...process.env, SLIPJAY_RUNNER: server.url, SLIPJAY_RUNNER_TOKEN: "fixture-token" };

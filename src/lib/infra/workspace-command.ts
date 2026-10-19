@@ -43,10 +43,13 @@ export async function runWorkspaceCommand(
 ): Promise<WorkspaceCommandResult> {
   if (options.inherit) return runInherited(command, args, options);
   const timeoutMs = commandTimeoutMs(options);
+  const env = options.env ?? landingCommandEnvironment();
   const result = await runBoundedProcess({
     executable: command, args, cwd: options.cwd ?? process.cwd(), timeoutMs,
     maxOutputBytes: 2 * MAX_OUTPUT_BYTES, maxOutputBytesPerStream: MAX_OUTPUT_BYTES,
-    env: options.env ?? landingCommandEnvironment(),
+    // Without a terminal or COLUMNS, jj runs `tput cols` and `tput lines` on every call to learn
+    // a width it then does without; 80 is the width it falls back to.
+    env: command === "jj" && !env.COLUMNS ? { ...env, COLUMNS: "80" } : env,
   });
   const failure = result.timedOut ? `${command} ${args.slice(0, 3).join(" ")} timed out after ${Math.round(timeoutMs / 1000)}s`
     : result.error ? `${command} could not start: ${result.error}` : "";

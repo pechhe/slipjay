@@ -13,7 +13,7 @@ import { createBuildCheckAccess } from "../build/build-check-access.ts";
 import { createPipelineRelay, localPipelineReader } from "../build/build-pipeline-relay.ts";
 import { createReceiptDrain } from "../build/build-receipts.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_JJ_DEFAULTS, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
-import type { RunnerConfig } from "./runner-contract.ts";
+import type { Executor, RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
 import { localExecutor } from "./local-executor.ts";
@@ -30,7 +30,7 @@ export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");
  * loopback and process the queue. The token comes from the environment (the
  * systemd unit runs this under `bws run`).
  */
-export async function startRunner(options: { home?: string; env?: NodeJS.ProcessEnv; port?: number } = {}): Promise<{ url: string; close(): Promise<void>; drain(): Promise<void> }> {
+export async function startRunner(options: { home?: string; env?: NodeJS.ProcessEnv; port?: number; executor?: Executor } = {}): Promise<{ url: string; close(): Promise<void>; drain(): Promise<void> }> {
   const home = options.home ?? runnerHome();
   const env = options.env ?? process.env;
   const token = env[RUNNER_TOKEN_ENV];
@@ -39,7 +39,8 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const problem = runnerConfigProblem(config);
   if (problem) throw new Error(`${problem}; rerun scripts/setup-runner.sh or add it to ${join(home, "config.json")}`);
   mkdirSync(home, { recursive: true });
-  const executor = localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
+  // Tests whose subject is not containment run commands directly (tests/support/executor.ts).
+  const executor = options.executor ?? localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
   const log = openOperationLog(join(home, "operations.sqlite"), { workers: runnerWorkers(config, executor), lane: (repo) => repositoryLane(config, repo) });
   const buildToken = env[BUILD_TOKEN_ENV]?.trim();
   const build = config.build && buildToken ? buildRoute({ origin: config.build.origin, token: buildToken }) : undefined;

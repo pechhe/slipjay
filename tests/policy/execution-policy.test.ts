@@ -217,6 +217,26 @@ test("a checkout with main and master follows origin/HEAD=master and reads that 
   }
 }, 60_000);
 
+test("a committed policy read is remembered per commit, so a moved bookmark reads its new policy", async () => {
+  const f = await gitRepository({ main: "main" }, "main");
+  try {
+    const before = await readExecutionPolicyAtCommit(f.repo, "main");
+    assert.deepEqual(before.policy?.requiredLandingVerification, []);
+    jj(f.repo, ["new", "main"]);
+    await writeFile(join(f.repo, "slipjay.json"), policy({ integrationBranch: "main", requiredLandingVerification: [check("bun")] }));
+    jj(f.repo, ["commit", "-m", "Gate on tests"]);
+    jj(f.repo, ["bookmark", "set", "main", "-r", "@-"]);
+    const after = await readExecutionPolicyAtCommit(f.repo, "main");
+    assert.notEqual(after.commitId, before.commitId);
+    assert.deepEqual(after.policy?.requiredLandingVerification.map((command) => command.executable), ["bun"]);
+    assert.equal((await readIntegrationPolicy(f.repo, { hintRoot: f.repo })).commitId, after.commitId);
+    // The earlier commit still reads as it was committed.
+    assert.deepEqual((await readExecutionPolicyAtCommit(f.repo, before.commitId)).policy?.requiredLandingVerification, []);
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
+
 test("a release bookmark that names another integration branch is followed to it, and drift fails closed", async () => {
   const f = await gitRepository({ develop: "develop", master: "develop" }, "master");
   try {

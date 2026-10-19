@@ -371,8 +371,26 @@ async function policyAtCommitId(repo: string, commitId: string): Promise<{ commi
   return { commitId, policy: text === null ? null : parseExecutionPolicy(text, EXECUTION_POLICY_PATH) };
 }
 
+// A commit id names its tree, so the policy text at one never changes, in any
+// repository holding it. Bounded so a long-lived runner does not grow without end.
+const policyTextAtCommit = new Map<string, Promise<string | null>>();
+const POLICY_TEXT_CACHE_LIMIT = 256;
+
 /** The policy file's text committed at a resolved commit id, or null when that commit declares none. */
-export async function readPolicyTextAtCommit(repo: string, commitId: string): Promise<string | null> {
+export function readPolicyTextAtCommit(repo: string, commitId: string): Promise<string | null> {
+  // Only a full commit id is immutable; anything else is read afresh.
+  if (!/^[a-f0-9]{40,64}$/.test(commitId)) return showPolicyTextAtCommit(repo, commitId);
+  const cached = policyTextAtCommit.get(commitId);
+  if (cached) return cached;
+  const read = showPolicyTextAtCommit(repo, commitId);
+  if (policyTextAtCommit.size >= POLICY_TEXT_CACHE_LIMIT) policyTextAtCommit.delete(policyTextAtCommit.keys().next().value!);
+  policyTextAtCommit.set(commitId, read);
+  // A failed read (a missing commit, an unreadable repository) is not remembered.
+  read.catch(() => { if (policyTextAtCommit.get(commitId) === read) policyTextAtCommit.delete(commitId); });
+  return read;
+}
+
+async function showPolicyTextAtCommit(repo: string, commitId: string): Promise<string | null> {
   const shown = new Map<string, string>();
   const exists = async (candidate: string) => {
     const result = await jjRead(repo, ["file", "show", "-r", commitId, `root-file:${symbol(candidate)}`]);

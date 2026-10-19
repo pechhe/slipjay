@@ -72,8 +72,7 @@ test("a real runner clones, fetches and pushes locally while JJ exposes the conf
       assert.equal(githubRepository(remotes, "origin"), "fixture/project");
       const result = await landThroughRunner(workspace, { location, env, onLine: () => {} });
       assert.equal(result.ok, true);
-      const commands = (await readFile(join(f.root, "git-transport.jsonl"), "utf8")).trim().split("\n")
-        .map(line => JSON.parse(line) as string[]);
+      const commands = (await readFile(join(f.root, "git-transport.log"), "utf8")).trim().split("\n").map(line => line.split(" "));
       const checkout = join(f.root, "runner", "repos", "fixture", "project");
       assert.ok(existsSync(join(checkout, ".jj")), "the runner cloned its own checkout");
       assert.match(jj(checkout, ["git", "remote", "list"]), /^origin https:\/\/github\.com\/fixture\/project\.git$/m);

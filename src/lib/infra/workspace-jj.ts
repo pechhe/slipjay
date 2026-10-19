@@ -129,6 +129,23 @@ export async function jj(cwd: string, args: string[], options: Record<string, un
   return await checked("jj", ["--color=never", ...args], { cwd, ...options });
 }
 
+/**
+ * Set `settings` in a checkout's repository-level jj config, writing only the ones it does
+ * not already hold as those strings: one read instead of a write per setting on every use.
+ */
+export async function ensureRepoConfig(checkout: string, settings: Readonly<Record<string, string>>): Promise<void> {
+  const held = new Map<string, string>();
+  const listed = await jj(checkout, ["config", "list", "--repo", "-T", 'name ++ "\\t" ++ json(value) ++ "\\n"']);
+  for (const line of listed.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab > 0) held.set(line.slice(0, tab), line.slice(tab + 1));
+  }
+  // jj stores a value that parses as TOML (a number, a boolean) as that type, so it never
+  // matches its string form and is simply written again.
+  for (const [key, value] of Object.entries(settings))
+    if (held.get(key) !== JSON.stringify(value)) await jj(checkout, ["config", "set", "--repo", key, value]);
+}
+
 function unquoteWorkspaceName(value: string): string {
   if (value.startsWith('"') && value.endsWith('"')) {
     try {

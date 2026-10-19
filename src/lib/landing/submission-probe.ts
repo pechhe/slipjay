@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { jj, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
+import { ensureRepoConfig, jj, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import { repositoryKey } from "../runner/runner-contract.ts";
 import type { SubmitRequest } from "../runner/runner-contract.ts";
 import { duplicateLandingSource } from "./landing-artifact.ts";
@@ -38,7 +38,7 @@ export async function probeSubmission(input: { home: string; url: string; jjConf
     } finally { await rm(partial, { recursive: true, force: true }); }
   }
   // The runner's jj settings, as in its warm checkouts, so the probe rebases as `rebasing` does.
-  for (const [key, value] of Object.entries(input.jjConfig)) await jj(checkout, ["config", "set", "--repo", key, value]);
+  await ensureRepoConfig(checkout, input.jjConfig);
   const context = await workspaceContext(checkout, undefined, { fetchMissingBookmarks: true });
   if (!context) throw new Error("Probe checkout context is unavailable");
   const remote = context.configuration.remote ?? "origin";

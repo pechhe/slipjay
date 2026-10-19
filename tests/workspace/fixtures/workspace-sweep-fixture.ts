@@ -1,0 +1,21 @@
+import { landThroughTestRunner } from "../../support/test-runner.ts";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { EMPTY_IDLE_MS } from "../../../src/lib/workspace/workspace-sweep.ts";
+
+export const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
+
+/** A process working inside `cwd` until disposed, as a live session would be. */
+export function occupy(cwd: string) {
+  const child = spawn("sleep", ["60"], { cwd, stdio: "ignore" });
+  return () => child.kill();
+}
+
+export async function land(f: { root: string; repo: string; remote: string }, cwd: string, file: string, options: { keep?: boolean } = {}) {
+  await writeFile(join(cwd, file), `${file}\n`);
+  const result = await landThroughTestRunner(f, cwd, options);
+  assert.equal(result.ok, true, result.lines.join("\n"));
+  return result;
+}

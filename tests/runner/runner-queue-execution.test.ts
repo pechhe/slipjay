@@ -98,7 +98,7 @@ test("artifact capture failure keeps the original failed gate and selected diagn
 
 /** Resolves once `check` holds, polling; fails after `timeoutMs`. */
 test("the owner's kill stops a running gate: cancelled, never passed, main unchanged, and the queue moves on", async () => {
-  const f = await fixture();
+  const f = await fixture(false, false, undefined, false, { scopes: true });
   try {
     const before = f.main();
     const pids = join(f.root, "gate-pids.json");
@@ -286,7 +286,7 @@ exec ${JSON.stringify(real)} "$@"
 }, 60_000);
 
 (systemd ? test : test.skip)("after the runner is killed outright, the next process stops only the commands it left before reusing their checkout", async () => {
-  const f = await fixture(false, false, undefined, false, { durable: true });
+  const f = await fixture(false, false, undefined, false, { durable: true, scopes: true });
   const bystanderHome = await mkdtemp(join(tmpdir(), "runner-bystander-"));
   const bystanderStop = new AbortController();
   let child: ReturnType<typeof spawn> | undefined;

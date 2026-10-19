@@ -16,12 +16,14 @@ export const FIXTURE_READERS = { "tests/runner/fixtures/pipeline/": ["tests/runn
 // the import graph. A test whose child imports only modules the test itself imports (runner-queue's) needs no entry.
 export const PROCESS_TESTS = [
   "integration/cli", "integration/installed-package", "integration/landed-record",
-  "landing/landing-outcome", "landing/landing-primary-checkout", "landing/repair-claim-cli", "landing/repair-workspace",
+  "landing/landing-outcome", "landing/landing-primary-checkout-move", "landing/landing-primary-checkout-preserve", "landing/repair-claim-cli", "landing/repair-workspace",
   "landing/submission-handoff-cli", "landing/submission-source-export",
   "runner/command-artifact",
-  "workspace/bun-store-damage", "workspace/cutover", "workspace/workspace-attempts", "workspace/workspace-housekeeping",
-  "workspace/workspace-lifecycle-convergence", "workspace/workspace-retention-plan", "workspace/workspace-spare-dependencies-allocation",
-  "workspace/workspace-sweep",
+  "workspace/bun-store-damage", "workspace/cutover", "workspace/workspace-attempts", "workspace/workspace-housekeeping-cleanup",
+  "workspace/workspace-lifecycle-convergence-landing", "workspace/workspace-lifecycle-convergence-issue",
+  "workspace/workspace-retention-plan-inventory", "workspace/workspace-retention-plan-landing",
+  "workspace/workspace-spare-dependencies-allocation",
+  "workspace/workspace-sweep-guards",
 ].map((name) => `tests/${name}.test.ts`);
 // package.json is the single inventory for both complete and landing runtime runs.
 export function runtimeTestFiles(command: string): string[] {

@@ -12,7 +12,7 @@ import type { SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { jj, project } from "../support/workspace-project.ts";
-import { testExecutor } from "../support/executor.ts";
+import { directExecutor } from "../support/executor.ts";
 
 /** A runner handler that retains and probes submissions for real, over a disposable project. */
 async function runner() {
@@ -23,7 +23,7 @@ async function runner() {
   const handler = createRunnerHandler({
     log, token: "test-token", runnerName: "test-runner",
     readLog: async () => null, onSubmitted: () => {}, kill: () => ({ status: "idle" }), subscribe: () => () => {},
-    retainSubmission: (operationId, request) => retainSubmissionSource({ home, operationId, request, url: f.remote, executor: testExecutor() }),
+    retainSubmission: (operationId, request) => retainSubmissionSource({ home, operationId, request, url: f.remote, executor: directExecutor("test") }),
     probeSubmission: (request, ahead) => probeSubmission({ home, url: f.remote, jjConfig: RUNNER_JJ_DEFAULTS, request, ahead }),
   });
   const server = await serveRunner(handler, { host: "127.0.0.1", port: 0 });

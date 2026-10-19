@@ -7,7 +7,7 @@ import { test } from "vite-plus/test";
 import { retainSubmissionSource, importSubmissionSource, readSubmissionManifest } from "../../src/lib/landing/submission-source.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { jj, project } from "../support/workspace-project.ts";
-import { testExecutor } from "../support/executor.ts";
+import { directExecutor } from "../support/executor.ts";
 
 async function sourceFixture() {
   const f = await project();
@@ -28,7 +28,7 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
     const operationId = "retained-source";
     const request = { ...f.request, handoff: { version: 1 as const, source: f.request.commitId, intent: "Repair without author chat",
       scope: ["retained.txt"], spec: null, helpers: [], checks: [], reviews: [], toolchain: [], gaps: ["APP_SECRET=do-not-retain"] } };
-    const input = { home: f.home, operationId, request, url: f.remote, executor: testExecutor() };
+    const input = { home: f.home, operationId, request, url: f.remote, executor: directExecutor("test") };
     const retained = await retainSubmissionSource(input);
     assert.equal(retained.handoffComplete, false);
     assert.deepEqual(await retainSubmissionSource(input), retained);
@@ -61,7 +61,7 @@ test("retained source survives author loss, upstream deletion/GC and a fresh con
 test("retention rejects a moved candidate before recording a manifest", async () => {
   const f = await sourceFixture();
   try {
-    await assert.rejects(retainSubmissionSource({ home: f.home, operationId: "wrong-source", request: { ...f.request, commitId: "f".repeat(40) }, url: f.remote, executor: testExecutor() }), /differs/);
+    await assert.rejects(retainSubmissionSource({ home: f.home, operationId: "wrong-source", request: { ...f.request, commitId: "f".repeat(40) }, url: f.remote, executor: directExecutor("test") }), /differs/);
     assert.deepEqual(await readdir(join(f.home, "submissions")), []);
   } finally { await f.dispose(); }
 }, 120_000);
@@ -72,7 +72,7 @@ test("a Build binding survives retention exactly and is absent from an unbound s
     const build = { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: null, bindGeneration: 3, sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" };
     const handoff = { version: 1 as const, source: f.request.commitId, intent: "Bound", scope: [], spec: null, helpers: [], checks: [], reviews: [], toolchain: [], gaps: [] };
     const manifestOf = async (operationId: string, value: typeof handoff & { build?: typeof build }) => {
-      const retained = await retainSubmissionSource({ home: f.home, operationId, request: { ...f.request, handoff: value }, url: f.remote, executor: testExecutor() });
+      const retained = await retainSubmissionSource({ home: f.home, operationId, request: { ...f.request, handoff: value }, url: f.remote, executor: directExecutor("test") });
       return await readSubmissionManifest(f.home, f.request.repo, operationId, retained) as { handoff: { evidence: { build?: unknown } } };
     };
     assert.deepEqual((await manifestOf("bound", { ...handoff, build })).handoff.evidence.build, build);

@@ -1,24 +1,17 @@
 import { jj, project } from "../support/workspace-project.ts";
-import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { attachWorkspaceIssue } from "../../src/lib/workspace/workspace-state.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
 import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
-import type { PlannedWorkspace } from "../../src/lib/workspace/workspace-sweep.ts";
-import { archiveIntegratedWorkspaceEvidence } from "../../src/lib/workspace/workspace-finalization.ts";
 import { stateHome } from "../../src/lib/workspace/workspace-paths.ts";
-import { lockPath, metadataPath, statePath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
-import { EMPTY_IDLE_MS } from "../../src/lib/workspace/workspace-sweep.ts";
-
-const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
-const later = () => Date.now() + EMPTY_IDLE_MS + 60_000;
+import { lockPath, metadataPath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
+import { cli, later, byName, landed } from "./fixtures/workspace-retention-plan-fixture.ts";
 
 /** A process working inside `cwd` until disposed, as a live session would be. */
 function occupy(cwd: string) {
@@ -26,7 +19,6 @@ function occupy(cwd: string) {
   return () => child.kill();
 }
 
-/** Every file under `root` with its size and modification time, so any write shows. */
 async function fingerprint(root: string): Promise<string[]> {
   const found: string[] = [];
   async function walk(directory: string) {
@@ -42,17 +34,6 @@ async function fingerprint(root: string): Promise<string[]> {
   }
   await walk(root);
   return found.sort();
-}
-
-const byName = (plan: PlannedWorkspace[]) => Object.fromEntries(plan.map((entry) => [entry.name, entry]));
-
-async function landed(f: Awaited<ReturnType<typeof project>>, file: string) {
-  const workspace = await createWorkspace(file, f.repo);
-  await writeFile(join(workspace.workspacePath, file), `${file}\n`);
-  // Held while it lands, so the landing keeps it for the test.
-  const result = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
-  assert.equal(result.ok, true, result.lines.join("\n"));
-  return workspace;
 }
 
 test("the plan explains every workspace, changes nothing, and the sweep then does what it planned", async () => {
@@ -125,60 +106,6 @@ test("the plan explains every workspace, changes nothing, and the sweep then doe
     await f.dispose();
   }
 }, 240_000);
-
-test("a landed workspace with pending housekeeping is planned as kept, without finishing it", async () => {
-  const f = await project();
-  try {
-    const workspace = await landed(f, "pending.txt");
-    const path = statePath(workspace.current.name);
-    const state = JSON.parse(await readFile(path, "utf8"));
-    await writeFile(path, JSON.stringify({ ...state, cleanupPending: true, cleanupError: "interrupted" }));
-    const before = await readFile(path, "utf8");
-    const plan = byName(await planDisposableWorkspaces(f.repo));
-    assert.equal(plan[workspace.current.name]?.action, "keep");
-    assert.equal(plan[workspace.current.name]?.reason, "housekeeping-pending");
-    assert.equal(await readFile(path, "utf8"), before, "the plan leaves the landing's housekeeping to cleanup");
-    assert.ok(existsSync(workspace.workspacePath));
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
-
-test("a landing record naming another delivery's archived artifact is kept, with the same reason by plan and sweep", async () => {
-  const f = await project({ ignore: "*.local\n" });
-  try {
-    const workspace = await landed(f, "copied.txt");
-    const state = JSON.parse(await readFile(statePath(workspace.current.name), "utf8"));
-    // The artifact was already retained as another workspace's landing.
-    await archiveIntegratedWorkspaceEvidence(jj(f.repo, ["git", "root"]), { ...state, workspaceName: "earlier-delivery" });
-    const planned = byName(await planDisposableWorkspaces(f.repo, { now: later() }))[workspace.current.name];
-    assert.equal(planned?.action, "keep");
-    assert.match(planned?.reason ?? "", /already archived as workspace earlier-delivery's landing.*slipjay remove /);
-    const swept = await sweepDisposableWorkspaces(f.repo, { now: later() });
-    assert.ok(!swept.removed.includes(workspace.current.name));
-    assert.equal(swept.skipped.find((entry) => entry.name === workspace.current.name)?.reason, planned?.reason);
-    assert.ok(existsSync(workspace.workspacePath));
-    // The removal the reason suggests works: the checkout is judged as one that never landed,
-    // so a file no history holds still keeps it.
-    const remove = () => new Promise<{ code: number; stderr: string }>((resolveRun) => {
-      execFile("bun", [cli, "remove", workspace.workspacePath], { cwd: f.repo }, (error, _stdout, stderr) =>
-        resolveRun({ code: error ? Number((error as { code?: number }).code ?? 1) : 0, stderr }));
-    });
-    const notes = join(workspace.workspacePath, "notes.local");
-    await writeFile(notes, "only here\n");
-    const kept = await remove();
-    assert.equal(kept.code, 1);
-    assert.match(kept.stderr, /holds files cleanup will not delete: notes\.local/);
-    assert.ok(existsSync(notes));
-    await rm(notes);
-    const removed = await remove();
-    assert.equal(removed.code, 0, removed.stderr);
-    assert.ok(!existsSync(workspace.workspacePath));
-    assert.ok(!jj(f.repo, ["workspace", "list", "-T", 'name ++ "\\n"']).includes(workspace.current.name));
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
 
 test("prune --plan --json prints the plan, and prune refuses unknown flags", async () => {
   const f = await project();

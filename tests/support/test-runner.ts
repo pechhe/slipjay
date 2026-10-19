@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { startRunner } from "../../src/lib/runner/runner-service.ts";
 import { poolRefillLogPath } from "../../src/lib/workspace/workspace-paths.ts";
+import { directExecutor } from "./executor.ts";
 import { configureLocalGithubTransport } from "./workspace-project.ts";
 
 // Kept apart from workspace-project.ts so a test that only needs a project does not import the runner.
@@ -22,7 +23,7 @@ export async function withTestRunner<T>(f: { root: string; repo: string; remote:
     await mkdir(home, { recursive: true });
     await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: transport.github } },
       jj: { "user.name": "Fixture", "user.email": "fixture@example.com" }, ...options.build ? { build: { origin: options.build.origin } } : {} }));
-    const runner = await startRunner({ home, port: 0,
+    const runner = await startRunner({ home, port: 0, executor: directExecutor("test-runner"),
       env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token", ...options.build ? { YARDSMITH_SLIPJAY_BUILD_TOKEN: options.build.token } : {} } });
     try {
       return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });

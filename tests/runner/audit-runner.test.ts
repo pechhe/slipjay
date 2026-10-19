@@ -9,7 +9,7 @@ import { AUDIT_INTERRUPTED_REASON, candidateBookmark } from "../../src/lib/runne
 import type { AuditOperation, SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue } from "../../src/lib/runner/runner-queue.ts";
-import { testExecutor } from "../support/executor.ts";
+import { directExecutor } from "../support/executor.ts";
 
 // Every test builds its own origin, checkouts and queue under a fresh root, so they run together.
 const test = serialTest.concurrent;
@@ -51,7 +51,7 @@ while (fs.existsSync(${JSON.stringify(join(root, "hold-release"))})) Atomics.wai
   jj(seed, ["git", "push", "--remote", "origin", "--named", "release=main"]);
   jj(root, ["git", "clone", origin, author]);
   const log = openOperationLog(":memory:");
-  const queue = createRunnerQueue({ log, executor: testExecutor({ home }), home, config: { repos: { "Fixture/Repo": { url: origin } },
+  const queue = createRunnerQueue({ log, executor: directExecutor("test"), home, config: { repos: { "Fixture/Repo": { url: origin } },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } } });
   const main = () => execFileSync("git", ["--git-dir", origin, "rev-parse", "main"], { encoding: "utf8" }).trim();
   async function candidate(file: string): Promise<SubmitRequest> {
