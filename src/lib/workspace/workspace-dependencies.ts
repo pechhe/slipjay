@@ -114,11 +114,6 @@ async function cloneNodeModules(source: string, workspacePath: string): Promise<
   return created.length ? created : null;
 }
 
-/** Remove every `node_modules` tree of the workspace's tracked packages, so a later install can be seeded afresh. */
-export async function removeNodeModules(workspacePath: string): Promise<void> {
-  for (const manifest of await trackedManifests(workspacePath) ?? []) await rm(join(workspacePath, dirname(manifest), "node_modules"), { recursive: true, force: true });
-}
-
 /**
  * Install the workspace's dependencies. With `recordInputs`, the result also
  * carries the install-input fingerprint (see install-inputs.ts) of the tree it
@@ -128,8 +123,9 @@ export async function removeNodeModules(workspacePath: string): Promise<void> {
  * checkout that `seedFrom(inputs)` proves has the same install inputs (roots, tried
  * in order and found lazily, so later candidates are only proved when earlier ones
  * fail), so the install below only has to verify and repair instead of fetching and
- * linking everything. With `replace`, a workspace's existing `node_modules` is
- * discarded for such a clone once one is found. The install always runs: it is the
+ * linking everything. Existing `node_modules`, however stale, are never replaced by
+ * a clone: an install over them changes only what changed, while deleting and
+ * cloning a whole tree costs minutes in a large repository. The install always runs: it is the
  * verification, and if it fails on a seeded tree the clone is discarded and the
  * install repeated from scratch. `installInputs` is the workspace's fingerprint when
  * the caller has already computed it for this tree.
@@ -140,7 +136,6 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   runCommand?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   /** Roots whose `node_modules` may seed this install, given the workspace's install-input fingerprint. */
   seedFrom?: (installInputs: string) => AsyncIterable<string> | Iterable<string>;
-  replace?: boolean;
   installInputs?: string | null;
 } = {}): Promise<{
   state: "ready" | "not_required"; packageManager: string | null; installInputs: string | null; seeded?: true;
@@ -151,11 +146,9 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   if (!dependencyCommand) return { state: "not_required", packageManager: null, installInputs: options.recordInputs ? inputs : null };
   if (!options.quiet) console.log(`[deps] ${dependencyCommand.command} install in ${basename(workspacePath)}...`);
   let seeded: string[] | null = null;
-  let cleared = !existsSync(join(workspacePath, "node_modules"));
-  if (inputs && options.seedFrom && (cleared || options.replace)) {
+  if (inputs && options.seedFrom && !existsSync(join(workspacePath, "node_modules"))) {
     try {
       for await (const source of options.seedFrom(inputs)) {
-        if (!cleared) { await removeNodeModules(workspacePath); cleared = true; }
         seeded = await cloneNodeModules(source, workspacePath).catch(() => null);
         if (seeded) { console.error(`[deps] ${basename(workspacePath)}: seeded node_modules from ${source}`); break; }
       }

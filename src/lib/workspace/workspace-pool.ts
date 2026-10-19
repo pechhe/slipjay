@@ -145,17 +145,16 @@ function dependencySeeds(integrationRoot: string, workspacePath: string): (insta
 
 /**
  * Make a workspace's dependencies current, recording the install inputs they match. Absent
- * `node_modules` are cloned from another checkout that has those inputs installed; with
- * `replace` (a spare, which holds nothing of its own), stale ones are discarded for that
- * clone too. Only when no checkout has them does the install run in place. Either way the
- * install runs, as the verification. A start's installs into one repository's checkouts on
+ * `node_modules` are cloned from another checkout that has those inputs installed; stale ones
+ * are installed over in place (see `prepareWorkspaceDependencies`). Either way the install
+ * runs, as the verification. A start's installs into one repository's checkouts on
  * this machine run one at a time, so a second waits for the first and then clones its result
  * instead of installing the same inputs beside it. A refill installs under the machine's
  * refill lock instead (`refillDependencies`), so a start never queues behind a background
  * refill. `installInputs` is the workspace's fingerprint when the caller has already
  * computed it for this tree.
  */
-export async function refreshDependencies(integrationRoot: string, workspacePath: string, options: { quiet?: boolean; replace?: boolean; installInputs?: string | null } = {}): Promise<ReturnType<typeof prepareWorkspaceDependencies> extends Promise<infer R> ? R : never> {
+export async function refreshDependencies(integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null } = {}): Promise<ReturnType<typeof prepareWorkspaceDependencies> extends Promise<infer R> ? R : never> {
   return withWorkspaceTransaction(`install:${resolve(integrationRoot)}`, () => installDependencies(integrationRoot, workspacePath, options), { waitMs: INSTALL_WAIT_MS });
 }
 
@@ -165,13 +164,13 @@ export async function refreshDependencies(integrationRoot: string, workspacePath
  * repository's refill gets its turn between spares. A spare being prepared is never a seed,
  * so a start's install beside it never clones a partial tree.
  */
-async function refillDependencies(integrationRoot: string, workspacePath: string, options: { replace?: boolean; installInputs?: string | null } = {}) {
+async function refillDependencies(integrationRoot: string, workspacePath: string, options: { installInputs?: string | null } = {}) {
   return withWorkspaceTransaction("refill", () => installDependencies(integrationRoot, workspacePath, { ...options, quiet: true }), { waitMs: REFILL_WAIT_MS });
 }
 
-const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; replace?: boolean; installInputs?: string | null }) =>
+const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null }) =>
   prepareWorkspaceDependencies(workspacePath, {
-    quiet: options.quiet, recordInputs: true, replace: options.replace, installInputs: options.installInputs,
+    quiet: options.quiet, recordInputs: true, installInputs: options.installInputs,
     seedFrom: dependencySeeds(integrationRoot, workspacePath),
   });
 
@@ -219,7 +218,7 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<{ pro
     await linkSharedPaths(root, workspacePath);
     const { state, packageManager, installInputs } = await refillDependencies(root, workspacePath);
     const { preparingPid: _done, ...metadata } = (await workspaceMetadata(name)) ?? {};
-    await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedDependencies: { state, packageManager, installInputs } });
+    await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: { state, packageManager, installInputs } });
     return { provisioned: true, workspacePath, name };
   } catch (error) {
     // Hand the name back so another refill can adopt and finish it.
@@ -233,27 +232,35 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<{ pro
 export type SpareRefresh = { name: string; dependencies: "reused" | "seeded" | "installed" };
 
 /**
- * Move every ready spare that is behind the integration head onto it, one at a time,
- * so a claim finds dependencies that are already current. A spare already on the head
- * is refreshed too when its recorded install inputs are no longer its own, as after a
- * package-manager upgrade or a change of the fingerprint's format. A spare is reserved under
- * the pool lock first (unprepared, marked with this process), so no claim takes it
- * mid-refresh, and claims take the others meanwhile. Unchanged install inputs keep its
- * dependencies; otherwise, when a prepared checkout already has the new inputs, its
- * `node_modules` replaces the spare's by copy-on-write clone, and only when none has
- * them does the install run in place. Refreshing in turn, the first stale spare installs
- * and the rest clone it. A refresh that fails hands its spare back for the next refill.
+ * Keep the next claim's dependencies current, and no more. A claim moves its spare to the head
+ * itself (`jj new`) and keeps its dependencies when the install inputs there are the ones they
+ * were installed for, so moving spares ahead of time buys nothing. Only when no ready spare
+ * recorded the integration head's install inputs (read from the head's commit, with no checkout
+ * of it) is one spare refreshed: reserved under the pool lock, so no claim takes it meanwhile,
+ * moved to the head, and installed over its existing `node_modules`, which changes only what
+ * changed. The rest stay as they are until a claim or a later refill reaches them, so a landing
+ * costs at most one install, never one per spare. A claim takes the newest spare, so a matching
+ * spare that is not the newest (as after install inputs revert) is made the newest instead of
+ * refreshing another. Returns the spare refreshed, if any; a refresh that fails hands its spare
+ * back for the next refill.
  */
 export async function refreshSpares(cwd: string): Promise<SpareRefresh[]> {
   const context = await workspaceContext(cwd);
   if (!context) return [];
   const root = context.integration.root;
-  const head = await jj(root, ["--ignore-working-copy", "log", "--no-graph", "-r", context.integrationBranch, "-T", "commit_id"]);
-  const refreshed: SpareRefresh[] = [];
-  for (const spare of await readySpares(root)) {
-    const behind = await jj(spare.root, ["--ignore-working-copy", "log", "--no-graph", "-r", "@-", "-T", "commit_id"]) !== head;
-    // Judged outside the pool lock, which claims wait on only briefly; a claim meanwhile is caught under it.
-    if (!behind && reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | undefined, await installInputFingerprint(spare.root))) continue;
+  const headInputs = await installInputFingerprint(root, { revision: context.integrationBranch });
+  // Unknown inputs prove nothing reusable, so a claim installs whatever is done here.
+  if (!headInputs) return [];
+  const spares = newestFirst(await readySpares(root));
+  const covering = spares.find((spare) => reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | undefined, headInputs));
+  if (covering) {
+    if (covering !== spares[0]) await withWorkspaceTransaction(`pool:${root}`, async () => {
+      const metadata = await workspaceMetadata(covering.name);
+      if (metadata?.spare === true && metadata.prepared === true) await writeWorkspaceJson(metadataPath(covering.name), { ...metadata, preparedAt: new Date().toISOString() });
+    });
+    return [];
+  }
+  for (const spare of spares) {
     const reserved = await withWorkspaceTransaction(`pool:${root}`, async () => {
       const metadata = await workspaceMetadata(spare.name);
       if (metadata?.spare !== true || metadata.prepared !== true) return null; // claimed meanwhile
@@ -262,26 +269,35 @@ export async function refreshSpares(cwd: string): Promise<SpareRefresh[]> {
     });
     if (!reserved) continue;
     try {
-      if (behind) await jj(spare.root, ["new", context.integrationBranch]);
+      await jj(spare.root, ["new", context.integrationBranch]);
       const prepared = reserved.preparedDependencies as PreparedDependencies | undefined;
       const installInputs = await installInputFingerprint(spare.root);
       let outcome: SpareRefresh["dependencies"] = "reused";
       let current: PreparedDependencies | undefined = prepared;
       if (!reusableDependencies(spare.root, prepared, installInputs)) {
-        const installed = await refillDependencies(root, spare.root, { replace: true, installInputs });
+        const installed = await refillDependencies(root, spare.root, { installInputs });
         outcome = installed.seeded ? "seeded" : "installed";
         current = { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs };
       }
       const { preparingPid: _done, ...metadata } = (await workspaceMetadata(spare.name)) ?? {};
-      await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, prepared: true, preparedDependencies: current });
-      refreshed.push({ name: spare.name, dependencies: outcome });
+      await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: current });
+      return [{ name: spare.name, dependencies: outcome }];
     } catch (error) {
       const metadata = await workspaceMetadata(spare.name);
       if (metadata) await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, preparingPid: null }).catch(() => {});
       throw error;
     }
   }
-  return refreshed;
+  return [];
+}
+
+/**
+ * Spares most recently prepared or refreshed first: the likeliest to have the integration head's
+ * install inputs, so a claim takes one of them and a refresh leaves them alone.
+ */
+function newestFirst(spares: WorkspaceEntry[]): WorkspaceEntry[] {
+  const preparedAt = (spare: WorkspaceEntry) => Date.parse(String(spare.metadata?.preparedAt ?? spare.metadata?.createdAt ?? "")) || 0;
+  return [...spares].sort((a, b) => preparedAt(b) - preparedAt(a));
 }
 
 /**
@@ -312,8 +328,8 @@ const REFILL_WAIT_MS = 60 * 60_000;
 
 /**
  * The pool refill (`startSpareRefill`'s child, and `slipjay pool refill`): retire spares beyond
- * this machine's allowance or top the pool up to it one spare at a time, then refresh stale
- * spares, reporting each outcome. One repository's refills run one after another; refills of
+ * this machine's allowance or top the pool up to it one spare at a time, then refresh the next
+ * claim's spare when the install inputs changed (`refreshSpares`), reporting each outcome. One repository's refills run one after another; refills of
  * different repositories interleave, installing one at a time (`refillDependencies`). Claims
  * never take either lock.
  */
@@ -363,13 +379,13 @@ type ClaimedSpare = { root: string; name: string; dependencies: ReusedDependenci
 
 async function claimReadySpare(context: WorkspaceContext, name: string, base?: string): Promise<ClaimedSpare | null> {
   const workspaces = await listWorkspaces(context.integration.root);
-  const spare = workspaces.find(isReadySpare);
+  const [spare] = newestFirst(workspaces.filter(isReadySpare));
   if (!spare) return null;
   const { name: assigned } = await renameListedWorkspace(spare, workspaces, name);
   await jj(spare.root, ["new", base ?? context.integrationBranch]);
   const installInputs = await installInputFingerprint(spare.root);
   const dependencies = reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | null | undefined, installInputs);
-  const { spare: _released, prepared: _prepared, preparedDependencies: _dependencies, createdAt: _created, ...metadata } =
+  const { spare: _released, prepared: _prepared, preparedAt: _preparedAt, preparedDependencies: _dependencies, createdAt: _created, ...metadata } =
     (await workspaceMetadata(assigned)) ?? {};
   await writeWorkspaceJson(metadataPath(assigned), { ...metadata, workspaceName: assigned, claimedAt: new Date().toISOString() });
   return { root: spare.root, name: assigned, dependencies, installInputs };

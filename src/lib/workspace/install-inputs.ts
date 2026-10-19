@@ -51,13 +51,24 @@ interface TreeEntry {
   oid: string;
 }
 
-/** Every entry of the tree at `@` (snapshotting the working copy first unless `snapshot` is false), by path. */
-async function treeAtWorkingCopy(workspacePath: string, snapshot = true): Promise<Map<string, TreeEntry> | null> {
-  const commit = await run("jj", ["--color=never", ...(snapshot ? [] : ["--ignore-working-copy"]), "log", "-r", "@", "--no-graph", "-T", "commit_id"], { cwd: workspacePath });
+/** A commit's tree: every entry by path, and a file's content as committed (null when it is no file there). */
+interface Tree {
+  entries: Map<string, TreeEntry>;
+  read(path: string): Promise<string | null>;
+}
+
+/**
+ * The tree of `revision` in the repository holding `workspacePath`: `@` by default, snapshotting
+ * the working copy first unless `snapshot` is false, with files read from the checkout as before;
+ * any other revision is read from its commit, one object at a time, without touching the checkout.
+ */
+async function treeAt(workspacePath: string, { snapshot = true, revision = "@" }: { snapshot?: boolean; revision?: string } = {}): Promise<Tree | null> {
+  const commit = await run("jj", ["--color=never", ...(snapshot && revision === "@" ? [] : ["--ignore-working-copy"]), "log", "-r", revision, "--no-graph", "-T", "commit_id"], { cwd: workspacePath });
   const gitRoot = await run("jj", ["--color=never", "--ignore-working-copy", "git", "root"], { cwd: workspacePath });
   const commitId = commit.stdout.trim();
   if (commit.code !== 0 || gitRoot.code !== 0 || !/^[0-9a-f]{40,64}$/.test(commitId)) return null;
-  const listed = await run("git", ["--git-dir", gitRoot.stdout.trim(), "ls-tree", "-r", "-t", "-z", "--full-tree", commitId],
+  const gitDir = gitRoot.stdout.trim();
+  const listed = await run("git", ["--git-dir", gitDir, "ls-tree", "-r", "-t", "-z", "--full-tree", commitId],
     { cwd: workspacePath });
   if (listed.code !== 0 || listed.truncated) return null;
   const entries = new Map<string, TreeEntry>();
@@ -67,7 +78,15 @@ async function treeAtWorkingCopy(workspacePath: string, snapshot = true): Promis
     const [mode, type, oid] = record.slice(0, tab).split(" ");
     entries.set(record.slice(tab + 1), { mode: mode!, type: type!, oid: oid! });
   }
-  return entries;
+  const read = async (path: string) => {
+    if (revision === "@") return readFile(join(workspacePath, path), "utf8").catch(() => null);
+    const entry = entries.get(path);
+    if (entry?.type !== "blob") return null;
+    const blob = await run("git", ["--git-dir", gitDir, "cat-file", "blob", entry.oid], { cwd: workspacePath });
+    if (blob.code !== 0 || blob.truncated) throw new Error(`unreadable install input ${path}`);
+    return blob.stdout;
+  };
+  return { entries, read };
 }
 
 /** Every string in a manifest value that starts with `prefix`. */
@@ -163,8 +182,7 @@ function pnpmWorkspacePackages(source: string): string[] | null {
  * be read exactly, every manifest is judged: the fingerprint may be refused for it, never
  * trusted wrongly.
  */
-async function installedManifests(workspacePath: string, manifests: string[]): Promise<string[]> {
-  const read = (path: string) => readFile(join(workspacePath, path), "utf8").catch(() => null);
+async function installedManifests({ read }: Tree, manifests: string[]): Promise<string[]> {
   try {
     const root: PackageManifest | null = JSON.parse(await read("package.json") ?? "null");
     const declared = root?.workspaces;
@@ -185,7 +203,7 @@ async function installedManifests(workspacePath: string, manifests: string[]): P
 }
 
 /** The tracked inputs a set of manifests and their install lifecycle reach, beyond the manifests themselves. */
-async function referencedInputs(workspacePath: string, entries: Map<string, TreeEntry>, manifests: string[]): Promise<Set<string>> {
+async function referencedInputs({ entries, read }: Tree, manifests: string[]): Promise<Set<string>> {
   const selected = new Set<string>();
   const tracked = (path: string): boolean => entries.has(path);
   /** A tracked path an install reads; untracked or outside the repository is unknown, so fail. */
@@ -203,7 +221,7 @@ async function referencedInputs(workspacePath: string, entries: Map<string, Tree
     if (SCRIPT_SOURCE.test(path) || posix.basename(path) === ".pnpmfile.cjs") {
       // Imports, `new URL(..., import.meta.url)` and fs reads alike: any relative path the source mentions,
       // relative to the file or to the package directory it runs in.
-      const source = await readFile(join(workspacePath, path), "utf8");
+      const source = (await read(path))!;
       for (const [, literal] of source.matchAll(RELATIVE_LITERAL)) {
         for (const base of [posix.dirname(path), packageDirectory]) {
           const target = posix.normalize(posix.join(base, literal!));
@@ -223,7 +241,7 @@ async function referencedInputs(workspacePath: string, entries: Map<string, Tree
   }
   for (const manifest of manifests) {
     const directory = posix.dirname(manifest);
-    const parsed: PackageManifest = JSON.parse(await readFile(join(workspacePath, manifest), "utf8"));
+    const parsed: PackageManifest = JSON.parse((await read(manifest))!);
     const { scripts = {}, patchedDependencies = {}, dependenciesMeta = {}, ...declarations } = parsed;
     if (Object.values(dependenciesMeta).some((meta) => meta?.injected)) throw new Error("injected workspace dependencies");
     for (const target of stringsWithPrefix(declarations, "file:")) await requireInput(directory, target);
@@ -244,8 +262,8 @@ async function referencedInputs(workspacePath: string, entries: Map<string, Tree
 }
 
 /** Host facts a frozen install depends on beyond the repository tree. */
-async function installEnvironment(workspacePath: string): Promise<string[]> {
-  const declared: unknown = JSON.parse(await readFile(join(workspacePath, "package.json"), "utf8").catch(() => "{}")).packageManager;
+async function installEnvironment(workspacePath: string, { read }: Tree): Promise<string[]> {
+  const declared: unknown = JSON.parse(await read("package.json") ?? "{}").packageManager;
   const manager = typeof declared === "string" ? declared.split("@")[0] : "";
   const version = async (command: string): Promise<string> => {
     const result = await run(command, ["--version"], { cwd: workspacePath, env: process.env, timeoutMs: 30_000 });
@@ -270,27 +288,30 @@ async function installEnvironment(workspacePath: string): Promise<string[]> {
  * cannot be computed exactly (not JJ, unreadable tree or manifest, an input the
  * fingerprint cannot follow). Callers treat null as "inputs unknown" and install.
  * `snapshot: false` reads the last snapshot without touching the checkout, for
- * one (the primary) whose working copy a live session may own.
+ * one (the primary) whose working copy a live session may own. `revision` reads
+ * another commit instead, such as the integration head, with no checkout of it:
+ * every input comes from the commit, and only the host facts from this machine.
  */
-export async function installInputFingerprint(workspacePath: string, { snapshot = true }: { snapshot?: boolean } = {}): Promise<string | null> {
+export async function installInputFingerprint(workspacePath: string, { snapshot = true, revision }: { snapshot?: boolean; revision?: string } = {}): Promise<string | null> {
   try {
-    const entries = await treeAtWorkingCopy(workspacePath, snapshot);
-    if (!entries) return null;
+    const tree = await treeAt(workspacePath, { snapshot, revision });
+    if (!tree) return null;
+    const { entries } = tree;
     const selected = new Set<string>();
     for (const [path, entry] of entries) {
       if (entry.type === "blob" && INPUT_NAMES.has(posix.basename(path))) selected.add(path);
       if (path === "patches") selected.add(path);
     }
-    const manifests = await installedManifests(workspacePath, [...selected].filter((path) => posix.basename(path) === "package.json"));
-    const referenced = await referencedInputs(workspacePath, entries, manifests);
+    const manifests = await installedManifests(tree, [...selected].filter((path) => posix.basename(path) === "package.json"));
+    const referenced = await referencedInputs(tree, manifests);
     for (const path of referenced) selected.add(path);
     const hash = createHash("sha256").update("peach-install-inputs/v2\n");
-    for (const line of await installEnvironment(workspacePath)) hash.update(`${line}\n`);
+    for (const line of await installEnvironment(workspacePath, tree)) hash.update(`${line}\n`);
     for (const path of [...selected].sort()) {
       const { mode, type, oid } = entries.get(path)!;
       // An installed manifest counts by what an install reads of it; any other file, and a manifest
       // install lifecycle code reads itself, by its exact content.
-      const content = manifests.includes(path) && !referenced.has(path) ? createHash("sha256").update(installManifest(await readFile(join(workspacePath, path), "utf8"))).digest("hex") : oid;
+      const content = manifests.includes(path) && !referenced.has(path) ? createHash("sha256").update(installManifest((await tree.read(path))!)).digest("hex") : oid;
       hash.update(`${mode} ${type} ${content}\t${path}\n`);
     }
     return `sha256:${hash.digest("hex")}`;

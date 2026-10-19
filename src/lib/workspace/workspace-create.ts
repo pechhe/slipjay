@@ -89,10 +89,10 @@ async function addWorkspace(hooks: WorkspaceCreationHooks, integrationRoot: stri
 }
 
 // Default preparation records the install inputs it made ready, so this checkout can seed others (see
-// refreshDependencies); a claimed spare's stale dependencies are replaced by a clone when another checkout has current ones.
-const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, pooled = false, installInputs?: string | null) => hooks.prepare
+// refreshDependencies); a claimed spare's stale dependencies are installed over in place.
+const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, installInputs?: string | null) => hooks.prepare
   ? hooks.prepare(integrationRoot, workspacePath)
-  : refreshDependencies(integrationRoot, workspacePath, { replace: pooled, installInputs });
+  : refreshDependencies(integrationRoot, workspacePath, { installInputs });
 
 function acquired(hooks: WorkspaceCreationHooks, context: WorkspaceContext, issueNumber: number | undefined) {
   hooks.onAcquired?.({ workspaceName: context.current.name, projectRoot: context.integration.root, issueNumber: issueNumber ?? null });
@@ -386,7 +386,7 @@ async function describeAssignedWorkspace(context: WorkspaceContext, task: string
 /** Make an allocated workspace's checkout ready and report its acquisition. */
 async function ready({ hooks, context, issueNumber, prepared, installInputs: claimedInputs, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
   if (prepared) console.error(`[deps] ${basename(context.current.root)}: install inputs unchanged since the spare was prepared; reusing its dependencies`);
-  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root, workspace.pooled, claimedInputs);
+  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root, claimedInputs);
   const { state, packageManager, installInputs } = (hooks.prepare ? {} : readiness) as { state?: string; packageManager?: string | null; installInputs?: string | null };
   if (installInputs) {
     await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs } });
