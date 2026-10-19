@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.38.0
 
 - **A short landing gets past busy workers (Build #3010):** with a systemd budget, a landing of a repository
   whose verify-stage p90 over the last 7 days is at most `shortLandingP90Seconds` (runner config, default
