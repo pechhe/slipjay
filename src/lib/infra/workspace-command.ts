@@ -31,6 +31,14 @@ function commandTimeoutMs(options: { timeoutMs?: number }): number {
 }
 
 /**
+ * `env` for a jj process. Without a terminal or COLUMNS, jj runs `tput cols` and `tput lines`
+ * on every call to learn a width it then does without; 80 is the width it falls back to.
+ */
+export function jjEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return env.COLUMNS ? env : { ...env, COLUMNS: "80" };
+}
+
+/**
  * Run one workspace command with a timeout and an output bound. Resolves with
  * `{ code, signal, stdout, stderr, timedOut, truncated }`; a timeout or spawn
  * failure is a nonzero `code` with the reason in `stderr`. `inherit` streams to
@@ -47,9 +55,7 @@ export async function runWorkspaceCommand(
   const result = await runBoundedProcess({
     executable: command, args, cwd: options.cwd ?? process.cwd(), timeoutMs,
     maxOutputBytes: 2 * MAX_OUTPUT_BYTES, maxOutputBytesPerStream: MAX_OUTPUT_BYTES,
-    // Without a terminal or COLUMNS, jj runs `tput cols` and `tput lines` on every call to learn
-    // a width it then does without; 80 is the width it falls back to.
-    env: command === "jj" && !env.COLUMNS ? { ...env, COLUMNS: "80" } : env,
+    env: command === "jj" ? jjEnvironment(env) : env,
   });
   const failure = result.timedOut ? `${command} ${args.slice(0, 3).join(" ")} timed out after ${Math.round(timeoutMs / 1000)}s`
     : result.error ? `${command} could not start: ${result.error}` : "";

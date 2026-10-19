@@ -15,6 +15,7 @@ import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-deliv
 import { callerPids, describeHolders, processAlive, workspaceHolders } from "./workspace-holders.ts";
 import { archiveIntegratedWorkspaceEvidence, conflictingArchive } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
+import { jjEnvironment } from "../infra/workspace-command.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 import { discardCheckout } from "./workspace-trash.ts";
 import { releaseSpareHandover, reserveSpareForHandover } from "./workspace-spares.ts";
@@ -174,7 +175,7 @@ export async function nonReproducibleFiles(root: string, limit: number = 5): Pro
 function matchesSnapshot(root: string, path: string, size: number): Promise<boolean> {
   return new Promise((done) => {
     execFile("jj", ["--color=never", "--ignore-working-copy", "file", "show", "-r", "@", "--", `root-file:${JSON.stringify(path)}`],
-      { cwd: root, encoding: "buffer", maxBuffer: size + 1 }, async (error, stdout) => {
+      { cwd: root, env: jjEnvironment(process.env), encoding: "buffer", maxBuffer: size + 1 }, async (error, stdout) => {
         if (error || stdout.length !== size) return done(false);
         done(await readFile(join(root, path)).then((disk) => disk.equals(stdout), () => false));
       });

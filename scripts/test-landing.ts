@@ -23,7 +23,7 @@ export const PROCESS_TESTS = [
   "workspace/workspace-lifecycle-convergence-landing", "workspace/workspace-lifecycle-convergence-issue",
   "workspace/workspace-retention-plan-inventory", "workspace/workspace-retention-plan-landing",
   "workspace/workspace-spare-dependencies-allocation",
-  "workspace/workspace-sweep-guards",
+  "workspace/workspace-start-unused", "workspace/workspace-sweep-guards",
 ].map((name) => `tests/${name}.test.ts`);
 // package.json is the single inventory for both complete and landing runtime runs.
 export function runtimeTestFiles(command: string): string[] {
