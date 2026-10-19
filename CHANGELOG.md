@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v3.35.0
+
 - **A retiring workspace's dependencies become the next spare (#124):** when the pool is short, a
   retiring workspace's `node_modules` are moved (a rename) into a new spare on the integration head,
   and its refill installs over them in place. Before this, each claim topped the pool up by cloning a
