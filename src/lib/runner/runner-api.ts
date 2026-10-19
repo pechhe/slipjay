@@ -25,7 +25,7 @@ export function createRunnerHandler(input: {
   onSubmitted(): void;
   /**
    * Dry-run rebase of a landing onto the integration head and the landings queued ahead of it, before it queues;
-   * absent, or failing, the submission queues unchecked.
+   * absent, or answering null, the submission queues unchecked. Admission waits on it, so it bounds itself.
    */
   probeSubmission?(request: SubmitRequest, ahead: QueuedLanding[]): Promise<SubmissionConflict | null>;
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */

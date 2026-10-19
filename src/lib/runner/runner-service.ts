@@ -4,7 +4,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { readSubmissionManifest, retainSubmissionSource } from "../landing/submission-source.ts";
-import { probeSubmission } from "../landing/submission-probe.ts";
+import { submissionProbe } from "../landing/submission-probe.ts";
 import { readCommandArtifact } from "./command-artifact.ts";
 import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
@@ -12,12 +12,15 @@ import { BUILD_TOKEN_ENV, buildAdmitter, buildReader, buildRoute } from "../buil
 import { createBuildCheckAccess } from "../build/build-check-access.ts";
 import { createPipelineRelay, localPipelineReader } from "../build/build-pipeline-relay.ts";
 import { createReceiptDrain } from "../build/build-receipts.ts";
-import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
+import { RUNNER_DEFAULT_PORT, RUNNER_JJ_DEFAULTS, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
 import type { RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
 import { localExecutor } from "./local-executor.ts";
 import { createRunnerQueue, runnerWorkers } from "./runner-queue.ts";
+
+/** How long a submission's conflict probe may hold admission before the submission queues unchecked. */
+const PROBE_BUDGET_MS = 30_000;
 
 /** The runner's state directory: config, operation log, run logs and warm checkouts. */
 export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");
@@ -73,9 +76,8 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
       return readSubmissionManifest(home, operation.repo, operation.id, retained);
     },
     readArtifact: (operationId, runId, reference, offset, limit) => readCommandArtifact(home, operationId, runId, reference, offset, limit),
-    async probeSubmission(request, ahead) {
-      return probeSubmission({ home, url: configuredUrl(request.repo), request, ahead });
-    },
+    probeSubmission: submissionProbe({ home, url: configuredUrl, jjConfig: { ...RUNNER_JJ_DEFAULTS, ...config.jj }, budgetMs: PROBE_BUDGET_MS,
+      onSkipped: (repo, reason) => console.error(`[probe] ${repo}: submission queued without a conflict check: ${reason}`) }),
     async retainSubmission(operationId, request) {
       return retainSubmissionSource({ home, operationId, request, url: configuredUrl(request.repo), executor, env, gitExecutable: config.jj?.["git.executable-path"] });
     },

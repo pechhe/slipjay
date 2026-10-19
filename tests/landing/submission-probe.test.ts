@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
+import { createServer, type AddressInfo, type Socket } from "node:net";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { probeSubmission } from "../../src/lib/landing/submission-probe.ts";
+import { probeCheckout, probeSubmission, submissionProbe } from "../../src/lib/landing/submission-probe.ts";
 import { retainSubmissionSource } from "../../src/lib/landing/submission-source.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
-import { candidateBookmark, RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
+import { candidateBookmark, RUNNER_API, RUNNER_JJ_DEFAULTS } from "../../src/lib/runner/runner-contract.ts";
 import type { SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
@@ -23,7 +24,7 @@ async function runner() {
     log, token: "test-token", runnerName: "test-runner",
     readLog: async () => null, onSubmitted: () => {}, kill: () => ({ status: "idle" }), subscribe: () => () => {},
     retainSubmission: (operationId, request) => retainSubmissionSource({ home, operationId, request, url: f.remote, executor: testExecutor() }),
-    probeSubmission: (request, ahead) => probeSubmission({ home, url: f.remote, request, ahead }),
+    probeSubmission: (request, ahead) => probeSubmission({ home, url: f.remote, jjConfig: RUNNER_JJ_DEFAULTS, request, ahead }),
   });
   const server = await serveRunner(handler, { host: "127.0.0.1", port: 0 });
   /** A change on the remote's main, as another landing that already published. */
@@ -85,7 +86,7 @@ test("a submission that conflicts with the integration head alone is refused wit
       const commitId = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
       const bookmark = candidateBookmark(changeId);
       execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "-q", f.remote, `${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
-      return probeSubmission({ home: join(f.root, "runner"), url: f.remote, ahead: [],
+      return probeSubmission({ home: join(f.root, "runner"), url: f.remote, jjConfig: RUNNER_JJ_DEFAULTS, ahead: [],
         request: { repo: "owner/repo", changeId, commitId, bookmark, submittedBy: "fixture" } });
     })();
     assert.deepEqual(stale, { paths: ["README.md"], conflictsWith: null });
@@ -110,3 +111,33 @@ test("a merge candidate is probed after its first-parent line moves onto the lan
     assert.deepEqual(merge.body.conflictsWith, { operationId: ahead.body.operation!.id, changeId: ahead.changeId });
   } finally { await f.dispose(); }
 }, 120_000);
+
+test("the probe checkout carries the runner's jj settings", async () => {
+  const f = await runner();
+  try {
+    await f.submit("a.txt", "a\n");
+    const checkout = probeCheckout(join(f.root, "runner"), "owner/repo");
+    assert.equal(jj(checkout, ["config", "get", "snapshot.max-new-file-size"]), RUNNER_JJ_DEFAULTS["snapshot.max-new-file-size"]);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a probe over budget, or behind its repository's running probe, lets the submission queue unchecked", async () => {
+  const f = await project();
+  try {
+    const skipped: string[] = [];
+    // A remote that accepts the clone's connection and never answers, so the clone outlasts the budget.
+    const held = new Set<Socket>();
+    const silent = createServer((socket) => { held.add(socket); });
+    await new Promise<void>((resolve) => silent.listen(0, "127.0.0.1", resolve));
+    const { port } = silent.address() as AddressInfo;
+    const probe = submissionProbe({ home: join(f.root, "runner"), url: () => `http://127.0.0.1:${port}/repo.git`, jjConfig: {}, budgetMs: 200,
+      onSkipped: (_repo, reason) => skipped.push(reason) });
+    const request: SubmitRequest = { repo: "owner/repo", changeId: "c", commitId: "0".repeat(40), bookmark: "b", submittedBy: "fixture" };
+    assert.equal(await probe(request, []), null);
+    assert.match(skipped[0] ?? "", /over its 0s budget/);
+    assert.equal(await probe(request, []), null);
+    assert.equal(skipped[1], "the previous probe is still running");
+    for (const socket of held) socket.destroy();
+    silent.close();
+  } finally { await f.dispose(); }
+}, 30_000);

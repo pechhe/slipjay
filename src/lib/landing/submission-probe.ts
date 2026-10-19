@@ -22,11 +22,12 @@ export type SubmissionConflict = { paths: string[]; conflictsWith: { operationId
  * on its own, so it is left out of the stack. The candidate is tried after each step, so the first
  * conflict names the change that causes it.
  *
- * It runs in a checkout of its own, never one a lane holds; the caller serializes submissions.
+ * It runs in a checkout of its own, never one a lane holds; the caller serializes submissions
+ * (see `submissionProbe`).
  */
-export async function probeSubmission(input: { home: string; url: string; request: SubmitRequest; ahead: readonly QueuedLanding[] }): Promise<SubmissionConflict | null> {
+export async function probeSubmission(input: { home: string; url: string; jjConfig: Readonly<Record<string, string>>; request: SubmitRequest; ahead: readonly QueuedLanding[] }): Promise<SubmissionConflict | null> {
   const { home, request } = input;
-  const checkout = join(home, "probes", createHash("sha256").update(repositoryKey(request.repo)).digest("hex").slice(0, 16));
+  const checkout = probeCheckout(home, request.repo);
   if (!await stat(checkout).then(() => true, () => false)) {
     await mkdir(dirname(checkout), { recursive: true });
     // Cloned aside and renamed into place, so an interrupted clone never becomes the checkout.
@@ -36,11 +37,12 @@ export async function probeSubmission(input: { home: string; url: string; reques
       await rename(partial, checkout);
     } finally { await rm(partial, { recursive: true, force: true }); }
   }
+  // The runner's jj settings, as in its warm checkouts, so the probe rebases as `rebasing` does.
+  for (const [key, value] of Object.entries(input.jjConfig)) await jj(checkout, ["config", "set", "--repo", key, value]);
   const context = await workspaceContext(checkout, undefined, { fetchMissingBookmarks: true });
   if (!context) throw new Error("Probe checkout context is unavailable");
   const remote = context.configuration.remote ?? "origin";
   const head = `${context.integrationBranch}@${remote}`;
-  // Submissions wait on the probe, so a stalled fetch gives up and the candidate queues unchecked.
   await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", context.integrationBranch, "--branch", request.bookmark], { timeoutMs: 60_000 });
   // Each probe starts from the head: the last probe's copies and imported sources are dropped.
   await jj(checkout, ["new", head]);
@@ -67,4 +69,33 @@ export async function probeSubmission(input: { home: string; url: string; reques
     if (candidate.paths.length) return { paths: candidate.paths, conflictsWith: { operationId: landing.operationId, changeId: landing.changeId } };
   }
   return null;
+}
+
+/** The runner-owned checkout a repository's probes run in. */
+export const probeCheckout = (home: string, repo: string): string =>
+  join(home, "probes", createHash("sha256").update(repositoryKey(repo)).digest("hex").slice(0, 16));
+
+/**
+ * The runner's probe: every submission waits on it inside admission, so it never holds admission
+ * past `budgetMs`, and never starts while that repository's last probe still runs. Either way, and on
+ * failure (reported to `onSkipped`), the submission queues unchecked. An over-budget probe finishes
+ * in the background, so a slow first clone still readies the checkout for the next submission.
+ */
+export function submissionProbe(input: { home: string; url(repo: string): string; jjConfig: Readonly<Record<string, string>>; budgetMs: number;
+  onSkipped(repo: string, reason: string): void }): (request: SubmitRequest, ahead: QueuedLanding[]) => Promise<SubmissionConflict | null> {
+  const running = new Set<string>();
+  return async (request, ahead) => {
+    const repo = repositoryKey(request.repo);
+    if (running.has(repo)) { input.onSkipped(repo, "the previous probe is still running"); return null; }
+    running.add(repo);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const probe = (async () => probeSubmission({ home: input.home, url: input.url(request.repo), jjConfig: input.jjConfig, request, ahead }))()
+      .catch((error: unknown) => { input.onSkipped(repo, error instanceof Error ? error.message : String(error)); return null; })
+      .finally(() => { running.delete(repo); clearTimeout(timer); });
+    const budget = new Promise<null>((resolve) => {
+      timer = setTimeout(() => { input.onSkipped(repo, `over its ${Math.round(input.budgetMs / 1000)}s budget`); resolve(null); }, input.budgetMs);
+      timer.unref?.();
+    });
+    return Promise.race([probe, budget]);
+  };
 }

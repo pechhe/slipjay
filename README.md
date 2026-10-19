@@ -330,7 +330,8 @@ the integration head, then onto each landing of the repository queued ahead of i
 order, with no verification. A candidate that would conflict is refused before it waits,
 naming the conflicting paths and the queued landing (operation and change id) it clashes
 with, or the integration head. A landing ahead that conflicts on its own is left out of
-the stack, and a probe that cannot run lets the candidate queue unchecked. Resets take turns in the
+the stack. A probe that fails, runs past 30 seconds, or would start while the repository's
+previous probe still runs lets the candidate queue unchecked, and the runner logs why. Resets take turns in the
 same repository's queue. A confirmed release verifies in a release queue and a
 checkout of its own, beside the repository's landings, and takes a turn in the
 repository's queue only to publish (see [Release](#release)). A release and a reset
