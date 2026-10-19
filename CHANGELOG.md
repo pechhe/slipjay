@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.37.1
 
 - **A landing for an unshaped Build Spec names the way through (Build #3359):** `slipjay land` for a
   workspace whose Spec is still in Inbox or Shaping now says to set it to ready, bind it and start a
