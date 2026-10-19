@@ -125,7 +125,7 @@ async function writeWorkspaceTaskMetadata(context: WorkspaceContext, task: strin
   if (context.current.name === "default") return;
   const existing = await workspaceMetadata(context.current.name);
   if (!normalized) {
-    // Without a task, a resumed workspace still records its assignment time, which the sweep's grace measures.
+    // Without a task, a resumed workspace still records its assignment time, which the sweep's idle wait measures.
     if (existing) await writeFile(metadataPath(context.current.name), JSON.stringify({ ...existing, updatedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
     return;
   }

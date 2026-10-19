@@ -21,17 +21,14 @@ import { findOrphanedCheckouts, retireOrphanedCheckouts } from "./workspace-orph
  * unique untracked material always keeps a workspace. Unfinished work is never
  * swept: only `hasWork === false` checkouts qualify. An Issue's checkout is
  * swept once it has landed, or while empty once `gh` reports its Issue CLOSED
- * (never while the Issue is open or its state is unknown) and `ASSIGNMENT_GRACE_MS`
+ * (never while the Issue is open or its state is unknown) and `EMPTY_IDLE_MS`
  * has passed since it was assigned, so a checkout just allocated for a closed
  * Issue (`slipjay repair`, a resumed start) survives the sweep its allocation
  * triggers until its agent enters it. The sweep also prunes
  * machine-local state left by workspaces that no longer exist.
  */
-/** Minimum assignment age before an unused empty workspace is swept. */
-export const EMPTY_IDLE_MS: number = 60 * 60 * 1000;
-
-/** Minimum assignment age before a closed Issue's empty workspace is swept (never longer than `emptyIdleMs`). */
-export const ASSIGNMENT_GRACE_MS: number = 60 * 60 * 1000;
+/** Minimum assignment age before an unused empty workspace, of a closed Issue or of none, is swept. */
+export const EMPTY_IDLE_MS: number = 10 * 60 * 1000;
 
 /** Workspaces removed, retained, and machine-local state pruned by housekeeping. */
 export interface SweepResult {
@@ -172,8 +169,8 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
     }
     if (workspace.metadata?.spare) return keep("prepared spare", false);
     if (workspace.hasWork) return keep("unlanded work", false);
-    // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the short
-    // assignment grace instead of the idle wait; a live process or owner still protects it below.
+    // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the idle
+    // wait; a live process or owner still protects it below.
     const issueBound = !workspace.landed && Boolean(workspace.metadata?.issueNumber);
     const running = await processes();
     if (!running) return keep("process working directories unavailable", !issueBound);
@@ -190,8 +187,7 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
       const checks = await landedCleanupChecks(workspace.root, { readOnly: true });
       return checks.ready ? { remove: true, issueBound: false } : keep(describeRetention(checks.result));
     }
-    const idleMs = issueBound ? Math.min(emptyIdleMs, ASSIGNMENT_GRACE_MS) : emptyIdleMs;
-    if (idleMs > 0 && now - await assignedAt(workspace) < idleMs) return keep(issueBound ? "assigned within the grace period" : "assigned within the idle period", false);
+    if (emptyIdleMs > 0 && now - await assignedAt(workspace) < emptyIdleMs) return keep("assigned within the idle period", false);
     if (readOnly) {
       const edited = await unsnapshottedEdits(workspace.root, context.integration.root);
       if (edited.length) return keep(`edited since its last snapshot: ${edited.join(", ")}`);

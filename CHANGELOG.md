@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **An unused empty workspace is swept after 10 minutes, not an hour:** the idle wait and the separate
+  grace for a closed Issue's checkout are one 10-minute period. T3 Code now gives a thread whose
+  workspace was swept a fresh one on its next turn, so the long wait only kept empty checkouts (a bare
+  t3code one is 381 MB) on disk.
+
 ## v3.36.1
 
 - **`scripts/setup-runner.sh` keeps the runner's other settings and stops it cleanly (#3360):** re-running it, the way
