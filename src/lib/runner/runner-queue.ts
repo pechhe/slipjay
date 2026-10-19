@@ -8,7 +8,7 @@ import type { PreparedLandingCandidate } from "../landing/landing-candidate.ts";
 import { importSubmissionSource } from "../landing/submission-source.ts";
 import { duplicateLandingSource, retainLandingSource, retainLandingArtifact, importLandingArtifact, RETAINED_ARTIFACT_REVISIONS } from "../landing/landing-artifact.ts";
 import type { LandingArtifact } from "../landing/landing-artifact.ts";
-import { completeLanding, fetchIntegration, landingIO } from "../landing/landing-steps.ts";
+import { completeLanding, conflictedPaths, fetchIntegration, landingIO } from "../landing/landing-steps.ts";
 import { createDeployScheduler } from "../release/deploy-scheduler.ts";
 import { createResetScheduler } from "../release/reset-scheduler.ts";
 import { auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
@@ -781,7 +781,7 @@ export function createRunnerQueue(input: {
             await landingIO.assertStackConflictFree(cwd, branch, changeId);
           } catch (error) {
             rebaseConflict = true;
-            conflictFiles = (await jj(cwd, ["resolve", "--list", "-r", changeId]).catch(() => "")).split("\n").filter(Boolean).map((line) => line.split(/\s+/)[0]!);
+            conflictFiles = await conflictedPaths(cwd, changeId);
             throw error;
           }
         },

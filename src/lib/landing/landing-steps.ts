@@ -89,6 +89,11 @@ export async function landingPreview(cwd: string = process.cwd(), options: { all
   return { context, targetRevision, target, stat };
 }
 
+/** The paths `revision` leaves conflicted, as `jj resolve --list` names them; none when it has no conflict. */
+export async function conflictedPaths(cwd: string, revision: string): Promise<string[]> {
+  return (await jj(cwd, ["resolve", "--list", "-r", revision]).catch(() => "")).split("\n").filter(Boolean).map((line) => line.split(/\s+/)[0]!);
+}
+
 async function assertStackConflictFree(cwd: string, branch: string, changeId: string): Promise<void> {
   const conflicts = await jj(cwd, [
     "log",

@@ -225,9 +225,11 @@ async function request(baseUrl: string, token: string, path: string, init: Reque
   if (response.status === 401) throw new RunnerRequestRefused(401, "runner refused the credential; check SLIPJAY_RUNNER_TOKEN");
   if (response.ok || response.status === 409) return response;
   // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner;
-  // so does a known retryable one (503), such as Build admission that did not complete.
-  const refusal = response.status === 400 || response.status === 503 ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
+  // so does a landing that would conflict with what lands before it (422), and a known retryable one (503),
+  // such as Build admission that did not complete.
+  const refusal = [400, 422, 503].includes(response.status) ? ((await response.json().catch(() => null)) as { error?: unknown } | null)?.error : undefined;
   if (response.status === 400) throw new RunnerRequestRefused(400, `Runner request refused: HTTP 400: ${typeof refusal === "string" ? refusal : "invalid request"}`);
+  if (response.status === 422 && typeof refusal === "string") throw new RunnerRequestRefused(422, refusal);
   if (response.status === 503 && typeof refusal === "string") throw new RunnerRequestRefused(503, `Runner request refused: HTTP 503: ${refusal}`);
   throw new Error(`Runner request failed: HTTP ${response.status}`);
 }

@@ -1,0 +1,112 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { test } from "vite-plus/test";
+import { probeSubmission } from "../../src/lib/landing/submission-probe.ts";
+import { retainSubmissionSource } from "../../src/lib/landing/submission-source.ts";
+import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
+import { candidateBookmark, RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
+import type { SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
+import { serveRunner } from "../../src/lib/runner/runner-http.ts";
+import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { jj, project } from "../support/workspace-project.ts";
+import { testExecutor } from "../support/executor.ts";
+
+/** A runner handler that retains and probes submissions for real, over a disposable project. */
+async function runner() {
+  const f = await project();
+  const home = join(f.root, "runner");
+  await mkdir(home);
+  const log = openOperationLog(":memory:");
+  const handler = createRunnerHandler({
+    log, token: "test-token", runnerName: "test-runner",
+    readLog: async () => null, onSubmitted: () => {}, kill: () => ({ status: "idle" }), subscribe: () => () => {},
+    retainSubmission: (operationId, request) => retainSubmissionSource({ home, operationId, request, url: f.remote, executor: testExecutor() }),
+    probeSubmission: (request, ahead) => probeSubmission({ home, url: f.remote, request, ahead }),
+  });
+  const server = await serveRunner(handler, { host: "127.0.0.1", port: 0 });
+  /** A change on the remote's main, as another landing that already published. */
+  const publish = async (file: string, text: string) => {
+    jj(f.repo, ["new", "main@origin"]);
+    await writeFile(join(f.repo, file), text);
+    jj(f.repo, ["describe", "-m", `Publish ${file}`]);
+    jj(f.repo, ["bookmark", "set", "main", "-r", "@"]);
+    jj(f.repo, ["git", "push", "--remote", "origin", "--bookmark", "main"]);
+  };
+  /** A candidate on the current main, pushed under its bookmark and submitted. */
+  const submit = async (file: string, text: string, parents = ["main@origin"]) => {
+    jj(f.repo, ["new", ...parents]);
+    await writeFile(join(f.repo, file), text);
+    jj(f.repo, ["describe", "-m", `Change ${file}`]);
+    const at = (template: string) => jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", template]);
+    const changeId = at("change_id");
+    const commitId = at("commit_id");
+    const bookmark = candidateBookmark(changeId);
+    execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "-q", f.remote, `${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
+    const body: SubmitRequest = { repo: "owner/repo", changeId, commitId, bookmark, submittedBy: "fixture" };
+    const response = await fetch(`${server.url}${RUNNER_API}/operations`, { method: "POST", body: JSON.stringify(body),
+      headers: { authorization: "Bearer test-token" }, signal: AbortSignal.timeout(60_000) });
+    return { changeId, status: response.status, body: await response.json() as Record<string, unknown> & { operation?: { id: string } } };
+  };
+  return { ...f, log, publish, submit, dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
+}
+
+test("a submission that conflicts with a landing queued ahead is refused before it queues, naming the paths and that change", async () => {
+  const f = await runner();
+  try {
+    const ahead = await f.submit("README.md", "queued ahead\n");
+    assert.equal(ahead.status, 200, JSON.stringify(ahead.body));
+    const aheadId = ahead.body.operation!.id;
+    // A clean one queues behind it as before.
+    const clean = await f.submit("other.txt", "unrelated\n");
+    assert.equal(clean.status, 200, JSON.stringify(clean.body));
+    const conflicting = await f.submit("README.md", "candidate\n");
+    assert.equal(conflicting.status, 422, JSON.stringify(conflicting.body));
+    assert.equal(conflicting.body.code, "conflicts_ahead");
+    assert.deepEqual(conflicting.body.paths, ["README.md"]);
+    assert.deepEqual(conflicting.body.conflictsWith, { operationId: aheadId, changeId: ahead.changeId });
+    assert.match(String(conflicting.body.error), new RegExp(`${aheadId}.*README\\.md`));
+    assert.deepEqual(f.log.openOperations().map((operation) => operation.id), [aheadId, clean.body.operation!.id]);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a submission that conflicts with the integration head alone is refused without naming a queued change", async () => {
+  const f = await runner();
+  try {
+    const base = jj(f.repo, ["log", "-r", "main@origin", "--no-graph", "-T", "commit_id"]);
+    await f.publish("README.md", "published\n");
+    // The candidate was written on the older head.
+    jj(f.repo, ["new", base]);
+    await writeFile(join(f.repo, "README.md"), "candidate\n");
+    const stale = await (async () => {
+      jj(f.repo, ["describe", "-m", "Change README.md on the old head"]);
+      const changeId = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
+      const commitId = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+      const bookmark = candidateBookmark(changeId);
+      execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "-q", f.remote, `${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
+      return probeSubmission({ home: join(f.root, "runner"), url: f.remote, ahead: [],
+        request: { repo: "owner/repo", changeId, commitId, bookmark, submittedBy: "fixture" } });
+    })();
+    assert.deepEqual(stale, { paths: ["README.md"], conflictsWith: null });
+    assert.equal(f.log.openOperations().length, 0);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a merge candidate is probed after its first-parent line moves onto the landing ahead", async () => {
+  const f = await runner();
+  try {
+    const base = jj(f.repo, ["log", "-r", "main@origin", "--no-graph", "-T", "commit_id"]);
+    const ahead = await f.submit("README.md", "queued ahead\n");
+    assert.equal(ahead.status, 200, JSON.stringify(ahead.body));
+    // An upstream line merged in, with the integration line as first parent.
+    jj(f.repo, ["new", base]);
+    await writeFile(join(f.repo, "upstream.txt"), "upstream\n");
+    jj(f.repo, ["describe", "-m", "Upstream"]);
+    const upstream = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    const merge = await f.submit("README.md", "merge candidate\n", [base, upstream]);
+    assert.equal(merge.status, 422, JSON.stringify(merge.body));
+    assert.deepEqual(merge.body.paths, ["README.md"]);
+    assert.deepEqual(merge.body.conflictsWith, { operationId: ahead.body.operation!.id, changeId: ahead.changeId });
+  } finally { await f.dispose(); }
+}, 120_000);

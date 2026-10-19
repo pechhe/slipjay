@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A landing that would conflict is refused at submission (Build #3356):** before a candidate
+  queues, the runner dry-runs its rebase onto the integration head and every landing queued ahead of
+  it in its repository, the same duplicate-and-rebase it does at `rebasing`, with no verification.
+  A conflict fails `slipjay land` there, naming the conflicting paths and the queued landing it
+  clashes with. On 2026-10-19 YardSmith #2991 waited 7 minutes behind #2973 before failing at
+  `rebasing` over an import list and a README paragraph that this check finds in seconds.
+
 ## v3.35.0
 
 - **A retiring workspace's dependencies become the next spare (#124):** when the pool is short, a

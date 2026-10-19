@@ -323,7 +323,14 @@ runs the repository's declared gate in its own warm checkout, then integrates an
 publishes. A change that contains a merge, such as an upstream update merged into
 the integration line, lands as a merge: only its first-parent line moves onto the
 tip, and the merged-in history is kept rather than copied, so the integration line
-must be the merge's first parent. The authoring machine runs none of the gate. Resets take turns in the
+must be the merge's first parent. The authoring machine runs none of the gate.
+
+Before a landing queues, the runner dry-runs its rebase, in a checkout of its own: onto
+the integration head, then onto each landing of the repository queued ahead of it, in
+order, with no verification. A candidate that would conflict is refused before it waits,
+naming the conflicting paths and the queued landing (operation and change id) it clashes
+with, or the integration head. A landing ahead that conflicts on its own is left out of
+the stack, and a probe that cannot run lets the candidate queue unchecked. Resets take turns in the
 same repository's queue. A confirmed release verifies in a release queue and a
 checkout of its own, beside the repository's landings, and takes a turn in the
 repository's queue only to publish (see [Release](#release)). A release and a reset

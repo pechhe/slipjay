@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "vite-plus/test";
-import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
+import { LandingNotSubmitted, landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { jj } from "../support/workspace-project.ts";
@@ -66,6 +66,14 @@ test("an explicit submission refusal is not described as an unknown transport ou
       assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 0);
     } finally { await f.dispose(); }
   }
+});
+
+test("a landing the runner finds would conflict is reported as not submitted, with the runner's explanation", async () => {
+  const f = await fixture(false, false, 422);
+  try {
+    await assert.rejects(landThroughRunner(f.cwd, f.options), (error) => error instanceof LandingNotSubmitted && /fixture refusal/.test(error.message));
+    assert.equal(f.log.openOperations().length, 0);
+  } finally { await f.dispose(); }
 });
 
 test("a submission the runner refused is not pinned, so a retry goes to the current runner location", async () => {

@@ -11,6 +11,7 @@ import type { BuildAdmitter, BuildRoute } from "../build/build-admission.ts";
 import { BUILD_READ_ACTIONS } from "../build/tracker.ts";
 import type { BuildReadAction } from "../build/tracker.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
+import type { QueuedLanding, SubmissionConflict } from "../landing/submission-probe.ts";
 
 export function createRunnerHandler(input: {
   log: OperationLog;
@@ -22,6 +23,11 @@ export function createRunnerHandler(input: {
   readArtifact?(operationId: string, runId: string, reference: Extract<CommandArtifact, { status: "retained" }>, offset: number, limit: number): Promise<ArtifactChunk>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
+  /**
+   * Dry-run rebase of a landing onto the integration head and the landings queued ahead of it, before it queues;
+   * absent, or failing, the submission queues unchecked.
+   */
+  probeSubmission?(request: SubmitRequest, ahead: QueuedLanding[]): Promise<SubmissionConflict | null>;
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
   retainSubmission?(operationId: string, request: SubmitRequest): Promise<Extract<import("./runner-contract.ts").OperationEvent, { type: "source_retained" }>>;
   kill(operationId?: string): KillOutcome;
@@ -65,6 +71,17 @@ export function createRunnerHandler(input: {
     const result = await resolveAdmission(operationId);
     if (!result.resolved) return unresolved(result.reason, input.log.operation(operationId));
     return json({ operation: result.operation, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
+  }
+  /** Whether the candidate would conflict with what will land before it; a probe that cannot answer lets it queue. */
+  async function probe(repo: string, body: SubmitRequest): Promise<SubmissionConflict | null> {
+    if (!input.probeSubmission) return null;
+    // Every open landing of the repository runs before a new submission; one awaiting Build admission holds no place yet.
+    const ahead = input.log.openOperations(repo).flatMap((operation) => {
+      if (operation.kind !== "landing" || operation.changeId === body.changeId || operation.admission === "pending") return [];
+      const retained = input.log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event;
+      return retained?.type === "source_retained" ? [{ operationId: operation.id, changeId: operation.changeId, commitId: operation.commitId, retained }] : [];
+    });
+    return input.probeSubmission(body, ahead).catch(() => null);
   }
   const awaitingAdmission = (operation: Operation | null | undefined) => operation?.kind === "landing" && operation.admission === "pending" && !operation.result;
   // A client, or a landing check holding its operation's token, reads Build only through here, so the Build credential never leaves the runner.
@@ -228,6 +245,8 @@ export function createRunnerHandler(input: {
           const previous = await resolveAdmission(existing.id);
           if (!previous.resolved) return unresolved(`the earlier candidate's admission is unresolved: ${previous.reason}`, existing);
         }
+        const conflict = await probe(repo, body);
+        if (conflict) return json({ error: conflictMessage(conflict), code: "conflicts_ahead", ...conflict }, 422);
         const id = newOperationId();
         let retained: Awaited<ReturnType<NonNullable<typeof input.retainSubmission>>> | undefined;
         try { retained = await input.retainSubmission?.(id, body); }
@@ -671,4 +690,11 @@ function globalEventStream(log: OperationLog, since: number, signal: AbortSignal
     cancel() { cleanup(); },
   }, { highWaterMark: 1000 });
   return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
+}
+
+function conflictMessage({ paths, conflictsWith }: SubmissionConflict): string {
+  const listed = paths.join(", ");
+  return conflictsWith
+    ? `Candidate conflicts with queued landing ${conflictsWith.operationId} (change ${conflictsWith.changeId}) in: ${listed}. It was not queued; rebase once that change lands, resolve, and land again`
+    : `Candidate conflicts with the integration head in: ${listed}. It was not queued; fetch, rebase onto the integration branch, resolve, and land again`;
 }
