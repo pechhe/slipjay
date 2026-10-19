@@ -8,6 +8,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { builtinModules } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAst } from "vite/rolldown/parseAst";
+import { Visitor } from "vite/rolldown/utils";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const RUNTIME_PACKAGES = new Set(["effect", "proper-lockfile"]);
@@ -23,102 +25,27 @@ export function importSpecifiers(code: string): string[] {
   return transpiler.scanImports(code.replace(/^#!.*/, "")).map((entry) => entry.path);
 }
 
-type Token = { kind: "word" | "string" | "punct"; text: string };
-
-const WORD = /[\p{ID_Continue}$]/u;
-// A `/` after one of these tokens divides; after anything else it opens a regular expression.
-const DIVIDES_AFTER = /^(?:[\p{ID_Continue}$)\]}]|\d)/u;
-const KEYWORDS_BEFORE_REGEX = new Set(["return", "typeof", "case", "do", "else", "in", "of", "void", "yield", "await", "throw", "delete", "new"]);
-
-/** Whether the tokens end in a postfix \`++\` or \`--\`, after which \`/\` divides. */
-const postfix = (tokens: Token[]) => {
-  const [last, before] = [tokens.at(-1), tokens.at(-2)];
-  return last?.kind === "punct" && (last.text === "+" || last.text === "-") && before?.text === last.text;
-};
-
-/** Code tokens of a module: comments dropped, string/template/regex bodies skipped, string literals kept. */
-function tokenize(code: string): Token[] {
-  const tokens: Token[] = [];
-  const braces: ("code" | "template")[] = [];
-  let i = 0;
-  const quoted = (quote: string) => {
-    let text = "";
-    for (i++; i < code.length && code[i] !== quote; i++) {
-      if (code[i] === "\\") i++;
-      text += code[i] ?? "";
-    }
-    i++;
-    return text;
-  };
-  const template = () => {
-    // Positioned after the opening backtick or a closing `}`: skip text up to the next `${` or closing backtick.
-    for (; i < code.length; i++) {
-      if (code[i] === "\\") i++;
-      else if (code[i] === "`") { i++; return; }
-      else if (code[i] === "$" && code[i + 1] === "{") { i += 2; braces.push("template"); return; }
-    }
-  };
-  while (i < code.length) {
-    const c = code[i]!;
-    const prev = tokens.at(-1);
-    if (/\s/.test(c)) i++;
-    else if (c === "/" && code[i + 1] === "/") while (i < code.length && code[i] !== "\n") i++;
-    else if (c === "/" && code[i + 1] === "*") { const end = code.indexOf("*/", i + 2); i = end < 0 ? code.length : end + 2; }
-    else if (c === '"' || c === "'") tokens.push({ kind: "string", text: quoted(c) });
-    else if (c === "`") { i++; template(); tokens.push({ kind: "string", text: "" }); }
-    else if (c === "/" && !(prev && (prev.kind === "string" || postfix(tokens) || (DIVIDES_AFTER.test(prev.text.at(-1)!) && !(prev.kind === "word" && KEYWORDS_BEFORE_REGEX.has(prev.text)))))) {
-      for (i++; i < code.length && code[i] !== "/"; i++) {
-        if (code[i] === "\\") i++;
-        else if (code[i] === "[") while (i < code.length && code[i] !== "]") { if (code[i] === "\\") i++; i++; }
-      }
-      i++;
-      tokens.push({ kind: "string", text: "" });
-    } else if (WORD.test(c)) {
-      const start = i;
-      while (i < code.length && WORD.test(code[i]!)) i++;
-      tokens.push({ kind: "word", text: code.slice(start, i) });
-    } else if (c === "{") { braces.push("code"); tokens.push({ kind: "punct", text: c }); i++; }
-    else if (c === "}") {
-      i++;
-      if (braces.pop() === "template") { template(); tokens.push({ kind: "string", text: "" }); }
-      else tokens.push({ kind: "punct", text: "}" });
-    } else { tokens.push({ kind: "punct", text: c }); i++; }
-  }
-  return tokens;
-}
-
 /**
- * Every module specifier a source mentions in import syntax, type-only forms included:
- * static imports, re-exports, literal dynamic imports and `import("x")` type queries.
- * Comments and ordinary strings are not imports.
+ * Every literal module specifier, including erased imports, re-exports and type
+ * queries. Use the installed toolchain's TypeScript parser: regex/division and
+ * quoted bindings need grammatical context, not a preceding-token heuristic.
+ * Parsing errors throw rather than silently accepting an incomplete dependency set.
  */
-export function declaredSpecifiers(code: string): string[] {
-  const tokens = tokenize(code.replace(/^#!.*/, ""));
+export function declaredSpecifiers(code: string, filename = "architecture.ts"): string[] {
+  const program = parseAst(code, { lang: "ts" }, filename);
   const found: string[] = [];
-  const word = (index: number, text: string) => tokens[index]?.kind === "word" && tokens[index]!.text === text;
-  for (let i = 0; i < tokens.length; i++) {
-    const token = tokens[i]!;
-    if (token.kind !== "word" || (token.text !== "import" && token.text !== "export")) continue;
-    if (tokens[i - 1]?.text === ".") continue;
-    if (tokens[i + 1]?.text === "(" && tokens[i + 2]?.kind === "string" && tokens[i + 3]?.text === ")") {
-      found.push(tokens[i + 2]!.text);
-      continue;
-    }
-    if (token.text === "import" && tokens[i + 1]?.kind === "string") {
-      found.push(tokens[i + 1]!.text);
-      continue;
-    }
-    // `import|export [type] <bindings> from "x"`: the bindings hold only words, `,`, `*` and one braced list.
-    let depth = 0;
-    for (let j = i + 1; j < tokens.length; j++) {
-      const next = tokens[j]!;
-      if (next.kind === "string") { if (depth === 0 && word(j - 1, "from")) found.push(next.text); break; }
-      if (next.text === "{") depth++;
-      else if (next.text === "}") depth--;
-      else if (next.kind === "punct" && next.text !== "," && next.text !== "*") break;
-      else if (next.kind === "word" && depth === 0 && !word(j - 1, "from") && ["const", "let", "var", "function", "class", "async", "interface", "enum", "default", "declare", "namespace", "abstract"].includes(next.text) && j === i + 1) break;
-    }
-  }
+  new Visitor({
+    ImportDeclaration(node) { found.push(node.source.value); },
+    ExportNamedDeclaration(node) { if (node.source) found.push(node.source.value); },
+    ExportAllDeclaration(node) { found.push(node.source.value); },
+    ImportExpression(node) {
+      if (node.source.type === "Literal" && typeof node.source.value === "string") found.push(node.source.value);
+    },
+    TSImportType(node) { found.push(node.source.value); },
+    TSImportEqualsDeclaration(node) {
+      if (node.moduleReference.type === "TSExternalModuleReference") found.push(node.moduleReference.expression.value);
+    },
+  }).visit(program);
   return found;
 }
 
@@ -169,7 +96,7 @@ export function architectureViolations(root = ROOT): string[] {
     edges.set(file, new Set());
     const code = readFileSync(path.join(root, file), "utf8");
     const runtime = new Set(importSpecifiers(code));
-    for (const specifier of new Set([...runtime, ...declaredSpecifiers(code)])) {
+    for (const specifier of new Set([...runtime, ...declaredSpecifiers(code, file)])) {
       if (specifier.startsWith(".")) {
         const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
         if (!known.has(target)) violations.push(`external-import|${file}|${specifier}`);

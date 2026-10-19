@@ -127,3 +127,131 @@ test("rejects type-only closure escapes and undeclared packages but not type-onl
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+const expressionPrefixes = [
+  'if (true) /./.test("x");',
+  'if (false) {} /./.test("x");',
+  'while (false) /./.test("x");',
+  'for (; false;) /./.test("x");',
+  'const f = () => { return /[\\/]/; };',
+  'const object = { n: 4 }; object.n / 2;',
+  'let n = 4; n++ / 2; n-- / 2; ++n / 2; --n / 2;',
+  'const n = (4 + 2) / 2 / 3;',
+  'const n = (() => 4)() / 2;',
+];
+
+test("expressions before declarations cannot hide type-only ownership or closure violations", () => {
+  for (const prefix of ["", ...expressionPrefixes]) {
+    const root = fixture({
+      "src/launcher/command.ts": 'export type Options = { n: number };',
+      "src/lib/example.ts": `${prefix}\nimport type { Options } from "../launcher/command.ts";\nexport type Copy = Options;`,
+      "src/lib/escape.ts": `${prefix}\nimport type { Outside } from "../../outside.ts";\nexport type Copy = Outside;`,
+    });
+    try {
+      assert.deepEqual(architectureViolations(root).sort(), [
+        "external-import|src/lib/escape.ts|../../outside.ts",
+        "library-imports-executable|src/lib/example.ts|src/launcher/command.ts",
+      ], prefix);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("finds real imports and type queries after control-flow regex and division expressions", () => {
+  for (const prefix of expressionPrefixes) {
+    assert.deepEqual(declaredSpecifiers(`${prefix}
+      import type { T } from "./types.ts";
+      export type { U } from "./export.ts";
+      export * from "./star.ts";
+      type V = import("./query.ts").V;
+      const load = import("./dynamic.ts", { with: { type: "json" } });
+      const template = \`text \${import("./interpolation.ts")}\`;
+    `).sort(), ["./dynamic.ts", "./export.ts", "./interpolation.ts", "./query.ts", "./star.ts", "./types.ts"], prefix);
+  }
+});
+
+test("regex bodies and non-import text never create dependencies", () => {
+  const code = String.raw`
+    if (false) {} /import("not-an-import")/.test("x");
+    if (true) /export type { X } from "fake-export"/.test("x");
+    while (false) /[/'"]import("fake-class")/.test("x");
+    const f = () => /import("fake-arrow")/;
+    // import type { T } from "fake-comment";
+    /* export * from "fake-block"; */
+    const text = 'import("fake-string")';
+    const template = \`import("fake-template")\`;
+    const object = { import(name: string) { return name; } };
+    object.import("fake-method");
+    export const ok = 1;
+  `.replaceAll('\\`', '`');
+  assert.deepEqual(declaredSpecifiers(code), []);
+  const root = fixture({ "src/lib/example.ts": code });
+  try {
+    assert.deepEqual(architectureViolations(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("quoted type bindings keep their actual module dependency", () => {
+  const declarations = [
+    'import type { "Options" as Copy } from "../launcher/command.ts"; export type T = Copy;',
+    'import { type "Options" as Copy } from "../launcher/command.ts"; export type T = Copy;',
+    'export type { "Options" as Copy } from "../launcher/command.ts";',
+    'export { type "Options" as "Copy" } from "../launcher/command.ts";',
+  ];
+  for (const code of declarations) {
+    assert.deepEqual(declaredSpecifiers(code), ["../launcher/command.ts"]);
+    const root = fixture({
+      "src/launcher/command.ts": 'export type Options = { n: number };',
+      "src/lib/example.ts": code,
+    });
+    try {
+      assert.deepEqual(architectureViolations(root), ["library-imports-executable|src/lib/example.ts|src/launcher/command.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  assert.deepEqual(declaredSpecifiers(String.raw`import type { T } from "./\u0074ypes.ts";`), ["./types.ts"]);
+});
+
+test("accepts in-closure type composition after regex and rejects incomplete syntax", () => {
+  const root = fixture({
+    "src/lib/a.ts": 'if (true) /./.test("x"); import type { "B" as B } from "./b.ts"; export type A = B;',
+    "src/lib/b.ts": 'if (false) {} /import("fake")/.test("x"); export type { A as B } from "./a.ts";',
+  });
+  try {
+    assert.deepEqual(architectureViolations(root), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(declaredSpecifiers('const load = (name: string) => import(name); const url = import.meta.url;'), []);
+  assert.throws(() => declaredSpecifiers('import type { T } from "./types.ts"; const broken = '), /Parse failed/);
+});
+
+test("import-equals module references obey boundaries while namespace aliases add no dependency", () => {
+  const root = fixture({
+    "src/launcher/command.ts": 'export type Options = { n: number };',
+    "src/lib/example.ts": 'import type X = require("../launcher/command.ts"); export type T = X.Options;',
+    "src/lib/escape.ts": 'import type X = require("../../outside.ts"); export type T = X.Options;',
+  });
+  try {
+    assert.deepEqual(architectureViolations(root).sort(), [
+      "external-import|src/lib/escape.ts|../../outside.ts",
+      "library-imports-executable|src/lib/example.ts|src/launcher/command.ts",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(declaredSpecifiers('export import X = require("./x.ts"); import Y = NS.Member;'), ["./x.ts"]);
+  assert.deepEqual(declaredSpecifiers('#!/usr/bin/env bun\nimport type { X } from "./x.ts";'), ["./x.ts"]);
+});
+
+test("parse failure identifies the source module", () => {
+  assert.throws(() => declaredSpecifiers('const broken = ', "src/lib/broken.ts"), (error: unknown) => {
+    assert.equal((error as { id: string }).id, "src/lib/broken.ts");
+    assert.match((error as Error).message, /Parse failed/);
+    return true;
+  });
+});

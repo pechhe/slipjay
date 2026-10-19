@@ -36,4 +36,6 @@ External consumers import only the two package names. Adding a public export mea
 - a module outside `src/launcher` imports a module inside it, by static import, re-export, literal dynamic import or type-only form (`library-imports-executable`);
 - the runtime module graph has a cycle (`cycle`). Type-only imports are not runtime edges, so erased type cycles pass.
 
+The declaration scan uses the installed Vite toolchain’s TypeScript parser, including import-equals declarations. Invalid syntax fails the check with a parse error naming the source file; it never silently accepts a partial dependency set. Bun’s separate runtime scan supplies cycle edges.
+
 It does not forbid cross-capability imports, does not follow non-literal dynamic imports or spawn paths, and does not check other repositories' imports of the package. Whether the packed package works from another directory is covered by `tests/integration/installed-package.test.ts`, whose fixture (`tests/support/installed-package.ts`) installs the packed tarball outside the checkout; reuse it for any change that depends on file locations.
