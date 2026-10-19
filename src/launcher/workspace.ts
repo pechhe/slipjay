@@ -14,6 +14,7 @@ import {
   attachWorkspaceIssue,
   cleanupLandedWorkspace,
   createWorkspace,
+  unusedWorkspaceStartRefusal,
   resolveStartBase,
   inspectWorkspaces,
   landingPreview,
@@ -551,6 +552,8 @@ try {
     } else if (options.json && options.resultFd === undefined) {
       process.exitCode = await startForJson(rest);
     } else {
+      const refusal = options.integration && options.issueNumber ? await unusedWorkspaceStartRefusal(process.cwd(), options.issueNumber) : null;
+      if (refusal) throw new Error(refusal);
       // The base names a revision of the caller's checkout, so it resolves there before moving to the integration root.
       const base = options.base ? await resolveStartBase(process.cwd(), options.base) : undefined;
       const root = options.integration ? await integrationRoot(process.cwd()) : process.cwd();

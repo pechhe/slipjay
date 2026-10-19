@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext } from "../infra/workspace-jj.ts";
+import { legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { metadataHome, startFetchHome, workspaceHome } from "./workspace-paths.ts";
 import {
   assertIssueAvailable,
@@ -177,6 +177,27 @@ export async function findIssueWorkspace(cwd: string, issueNumber: number, hooks
   }
   if (healthy.length > 1) throw new Error(`Issue #${issueNumber} is associated with multiple JJ workspaces; reconcile them explicitly`);
   return healthy[0] ?? null;
+}
+
+/**
+ * Why `start --integration --issue <n>` run from `cwd` must not allocate, or null. A host such as
+ * T3 Code gives each session its workspace when the session starts, so a caller standing in its own
+ * isolated workspace that has no Issue and holds no work attaches the Issue there
+ * (`slipjay attach-issue`) instead of taking a second checkout. Resuming the Issue's existing
+ * or recovering workspace (registered, or a surviving checkout at its path), and any start from a
+ * spare, an Issue's workspace or one with work, proceeds.
+ */
+export async function unusedWorkspaceStartRefusal(cwd: string, issueNumber: number): Promise<string | null> {
+  const context = await workspaceContext(cwd);
+  if (!context || context.current.name === "default") return null;
+  const metadata = await workspaceMetadata(context.current.name);
+  if (metadata?.spare || metadata?.issueNumber) return null;
+  // Only looks: the start itself resumes or recovers the Issue's checkout under the allocation lock.
+  const issueName = await newWorkspaceName(cwd, context.integration.root, issueNumber, "");
+  if (exists(join(workspaceHome(), issueName))) return null;
+  if ((await listWorkspaces(cwd, { readOnly: true })).some((entry) => entry.metadata?.issueNumber === issueNumber)) return null;
+  if (await workspaceHasUnintegratedWork(context.current.root, context.integrationBranch)) return null;
+  return `jj:${context.current.name} is this session's workspace and holds no work: run \`slipjay attach-issue ${issueNumber}\` in it instead of starting another`;
 }
 
 /** The repository context from its default workspace record, for a cwd JJ no longer lists. */
