@@ -18,7 +18,7 @@ capture distinguishes an executed retry from observing external publication.
 Capture the source tests into a scratch directory with:
 
 ```sh
-SLIPJAY_CAPTURE_PIPELINE_FIXTURES="$PWD/artifacts/pipeline-capture" bunx vp test run tests/runner-queue.test.ts tests/runner-api.test.ts -t 'queued candidates land|rebase conflict in the policy|gate failure preserves|owner.s kill stops a running gate|failed publication holds|unknown repositories|submissions create|migration-bearing change lands|cancel closes|cancelling queued'
+SLIPJAY_CAPTURE_PIPELINE_FIXTURES="$PWD/artifacts/pipeline-capture" bunx vp test run tests/runner/runner-queue.test.ts tests/runner/runner-api.test.ts -t 'queued candidates land|rebase conflict in the policy|gate failure preserves|owner.s kill stops a running gate|failed publication holds|unknown repositories|submissions create|migration-bearing change lands|cancel closes|cancelling queued'
 ```
 
 Keep captured logs as historical fixtures; a new runner behaviour adds a new

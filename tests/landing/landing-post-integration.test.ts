@@ -10,7 +10,7 @@ import { finalizePostIntegration } from "../../src/lib/release/post-integration-
 import { postIntegrationPolicyDigest } from "../../src/lib/policy/post-integration-policy.ts";
 import { readPostIntegrationPolicy } from "../../src/lib/release/post-integration-source.ts";
 
-// Finalization and its retry run on the runner (tests/runner-queue.test.ts); these
+// Finalization and its retry run on the runner (tests/runner/runner-queue.test.ts); these
 // cases cover the policy path and descendant recovery.
 
 /** A development-only step that appends to `ledger`. */
