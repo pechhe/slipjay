@@ -4,7 +4,8 @@ import { classifyFailure } from "./failure-classification.ts";
 import { deliveryState } from "../build/build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { admissionLane, awaitingReplacement, recoveryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { admissionLane, admits, awaitingReplacement, recoveryKey, repositoryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { BUDGET_MIN_SAMPLES, BUDGET_WINDOW_MS, pipelineMetrics } from "./pipeline-metrics.ts";
 import type { AuditOperation, DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState, VerificationOperation } from "./runner-contract.ts";
 
 export function newOperationId(): string {
@@ -13,11 +14,17 @@ export function newOperationId(): string {
 
 type EventRow = { seq: number; operation_id: string; at: string; data: string };
 
-/**
- * `workers` and `lane` are the queue's (runner config `workers`, `repositoryLane`), so a queued
- * operation names what it really waits for.
- */
-export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, lane = (repo: string) => repo }: { workers?: number; lane?: (repo: string) => string } = {}): OperationLog {
+/** How long a repository's short-landing class stands before the sliding budget window is read again. */
+const SHORT_CLASS_REFRESH_MS = 600_000;
+
+/** What the queue admits by, so a queued operation names what it really waits for: `runnerLogOptions` derives it from the runner config. */
+export type OperationLogOptions = {
+  workers?: number; lane?: (repo: string) => string; depth?: (repo: string) => 1 | 2;
+  /** The verify-stage p90 at or below which a repository's landings are short; absent, there is no short place. */
+  shortLandingP90Ms?: number;
+};
+
+export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, lane = (repo: string) => repo, depth = () => 1, shortLandingP90Ms }: OperationLogOptions = {}): OperationLog {
   const db = new DatabaseSync(path);
   if (path !== ":memory:")
     db.exec("PRAGMA journal_mode = WAL");
@@ -104,15 +111,40 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       first.kind === "release" ? operation.kind === "reset"
         : operation.kind === "release" && (first.kind === "reset" || operation.stage === "publishing" || operation.stage === "finalizing"))) : undefined;
     const lanes = [...new Set(serial.map(admittedTo))].map((key) => serial.filter((operation) => admittedTo(operation) === key));
+    const shortPlace = shortLandingP90Ms !== undefined;
+    const places = busy.map((operation) => ({ short: Boolean(operation.shortLanding) }));
+    /** The queued operations the rule finds no place for. */
+    const placeless = new Set<Operation>();
+    // The places that keep `operation` from starting, by the queue's rule; none when it has one.
+    const capacity = (operation: Operation, successor: boolean): string | undefined => {
+      const short = shortPlace && operation.kind === "landing" && !successor && shortRepository(operation.repo);
+      if (admits(short, places, workers, shortPlace)) return undefined;
+      const long = busy.filter((entry) => !entry.shortLanding);
+      return !short && long.length >= workers ? `a worker (${long.map(label).join(", ")})` : `every place (${busy.map(label).join(", ")})`;
+    };
     for (const entries of [...lanes, open.filter((operation) => operation.kind === "deploy")]) {
       const running = entries.find((operation) => operation.status === "running") ?? holding(entries[0]);
       entries.forEach((operation, index) => {
         operation.position = index + 1;
         if (operation.status !== "queued") return;
         if (held) operation.stage = "paused";
-        if (running) operation.waitingFor = label(running);
-        else if (index === 0 && operation.kind !== "deploy" && busy.length >= workers) operation.waitingFor = `a worker (${busy.map(label).join(", ")})`;
+        // A depth-two landing verifies beside the one landing its repository runs, when a place is free.
+        const successor = index === 1 && running !== undefined && entries[0] === running && running.kind === "landing" && operation.kind === "landing" && depth(operation.repo) === 2;
+        if (running && !successor) operation.waitingFor = label(running);
+        else if (operation.kind !== "deploy" && (index === 0 || successor)) {
+          const places = capacity(operation, successor);
+          if (places) placeless.add(operation);
+          operation.waitingFor = places ?? (running ? label(running) : undefined);
+        }
       });
+    }
+    // Nothing passes older work of its repository lane that waits for a place, as the queue admits.
+    const waitingForPlace = new Map<string, Operation>();
+    for (const operation of serial) {
+      if (operation.status !== "queued" || operation.kind === "verification") continue;
+      const older = waitingForPlace.get(lane(operation.repo));
+      if (older && (operation.waitingFor === undefined || placeless.has(operation))) operation.waitingFor = label(older);
+      else if (placeless.has(operation)) waitingForPlace.set(lane(operation.repo), operation);
     }
     // A pre-verification waits behind any other work of its repository lane, then for staging to catch up.
     for (const operation of serial) if (operation.kind === "verification" && operation.status === "queued") {
@@ -126,6 +158,21 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const row = landed.get(repo) as { at: string; data: string } | undefined;
     const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
     return row && event?.type === "landed" ? { commitId: event.commitId, at: row.at } : null;
+  }
+  const eventsSince = db.prepare("SELECT seq, operation_id, at, data FROM events WHERE at >= ? ORDER BY seq");
+  let shortClasses: { at: number; short: Set<string> } | undefined;
+  function shortRepository(repo: string): boolean {
+    if (shortLandingP90Ms === undefined) return false;
+    const now = Date.now();
+    if (!shortClasses || now - shortClasses.at > SHORT_CLASS_REFRESH_MS) {
+      // The window counts landings submitted in it, so no earlier event bears on it.
+      const recent = (eventsSince.all(new Date(now - BUDGET_WINDOW_MS).toISOString()) as EventRow[]).map((row) => ({
+        seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
+      const verify = pipelineMetrics(recent, new Date(now).toISOString(), { now }).repositories;
+      shortClasses = { at: now, short: new Set(verify.filter((entry) => entry.verify && entry.verify.samples >= BUDGET_MIN_SAMPLES
+        && entry.verify.p90Ms <= shortLandingP90Ms).map((entry) => repositoryKey(entry.repo))) };
+    }
+    return shortClasses.short.has(repositoryKey(repo));
   }
   function stagingDue(repo: string): boolean {
     const latest = lastLanded(repo);
@@ -213,6 +260,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       const data = JSON.stringify(event);
       const result = insert.run(operationId, at, event.type, data);
       const stored = { seq: Number(result.lastInsertRowid), operationId, at, event: JSON.parse(data) as OperationEvent };
+      // A finished operation may be a new verify sample.
+      if ((TERMINAL_EVENT_TYPES as readonly string[]).includes(event.type)) shortClasses = undefined;
       for (const listener of [...listeners]) listener(stored);
       if (event.type === "submitted") {
         const current = operation(operationId)!;
@@ -269,6 +318,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     audits: (repo) => ofKind(repo, "audit"),
     landings: publishedLandings,
     lastLanded,
+    shortRepository,
     stagingDue,
     paused,
     held,
@@ -322,6 +372,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     switch (event.type) {
       case "stage":
         operation.stage = event.stage;
+        if (event.shortLanding) operation.shortLanding = true;
         if (event.stage !== "queued") operation.startedAt ??= stored.at;
         if (event.stage !== "queued" && !operation.result)
           operation.status = "running";

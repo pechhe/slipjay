@@ -187,7 +187,9 @@ export type OperationEvent =
   | { type: "audited"; commit: string; commands: string[]; passed: string[]; skipped: string[]; reused: string[] }
   /** Someone recorded why this failing audit failed, for its whole open failure; the newest record stands. */
   | { type: "audit_cause"; cause: AuditCause; by: string; note?: string }
-  | { type: "stage"; stage: RunnerStage; health?: RunnerHealth }
+  | { type: "stage"; stage: RunnerStage; health?: RunnerHealth;
+    /** On a landing's first stage when it was admitted as short: it counts toward `workers + 1`, not toward `workers`. */
+    shortLanding?: true }
   /** One line of landing progress, as the local landing printed it. */
   | { type: "progress"; line: string }
   /** An executor began a command; `host` is where it ran. */
@@ -257,6 +259,8 @@ type OperationFields = {
   submittedAt: string; finishedAt?: string;
   /** When it left the queue for its first stage; set once, so a yield back to the queue keeps it. */
   startedAt?: string;
+  /** Admitted as a short landing (see `runnerLogOptions`). */
+  shortLanding?: true;
   runs: RunRecord[];
   /** The terminal event, when closed. */
   result?: Extract<OperationEvent, { type: (typeof TERMINAL_EVENT_TYPES)[number] }>;
@@ -368,6 +372,11 @@ export interface OperationLog {
   stagingDue(repo: string): boolean;
   /** The latest landing a repository published, if any. */
   lastLanded(repo: string): { commitId: string; at: string } | null;
+  /**
+   * Whether a repository's landings are short: its verify-stage p90 over the budget window, from at least the minimum
+   * samples (`pipelineMetrics`), is at or below the log's `shortLandingP90Ms`. Never without that option.
+   */
+  shortRepository(repo: string): boolean;
   /** The owner's pause, while it holds. */
   paused(): { by: string; at: string } | null;
   /** Integrations kept locally but not yet published, by repository. */
@@ -491,6 +500,15 @@ export type KillOutcome =
 
 /** How many landings, releases and resets of different repositories run at once, unless the config sets `workers`. */
 export const RUNNER_DEFAULT_WORKERS = 2;
+/**
+ * The admission rule: at most `workers` operations other than short landings run at once, and with the short place
+ * (enforced combined limits) at most `workers + 1` in all, so a short landing may start while long operations hold
+ * every worker. Whether an operation, short or not, may start beside `running`, each marked short or not.
+ */
+export const admits = (short: boolean, running: readonly { short: boolean }[], workers: number, shortPlace: boolean): boolean =>
+  running.length < workers + (shortPlace ? 1 : 0) && (short || running.filter((entry) => !entry.short).length < workers);
+/** The verify-stage p90 at or below which a repository's landings are short, unless the config sets `shortLandingP90Seconds`. */
+export const RUNNER_DEFAULT_SHORT_LANDING_SECONDS = 180;
 /** The systemd slice every run's scope joins, so one set of limits covers every gate, deploy and their children. */
 export const RUNNER_SLICE = "slipjay.slice";
 /**
@@ -525,6 +543,12 @@ export type RunnerConfig = {
    * still runs one landing, release or reset at a time. 1 is the single serial lane.
    */
   workers?: number;
+  /**
+   * A repository whose landings' verify-stage p90 over the budget window (`pipeline-metrics.ts`) is at or below this
+   * many seconds is short (RUNNER_DEFAULT_SHORT_LANDING_SECONDS): its landings may start while other operations hold
+   * every worker, at most `workers + 1` running in all. Only with enforced combined limits.
+   */
+  shortLandingP90Seconds?: number;
   /** Combined limits of every run on a systemd host (RUNNER_DEFAULT_LIMITS), deploys included. */
   limits?: RunnerLimits;
   /** HQ's origin for Build admission and receipts; with BUILD_TOKEN_ENV, required to accept Build-bound submissions. */
@@ -539,6 +563,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   const missing = ["user.name", "user.email"].filter((key) => !config.jj?.[key]?.trim());
   if (missing.length) return `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity`;
   if (config.workers !== undefined && !(Number.isSafeInteger(config.workers) && config.workers >= 1)) return `The runner config's "workers" must be a whole number of at least 1`;
+  if (config.shortLandingP90Seconds !== undefined && !(typeof config.shortLandingP90Seconds === "number" && Number.isFinite(config.shortLandingP90Seconds) && config.shortLandingP90Seconds > 0))
+    return `The runner config's "shortLandingP90Seconds" must be a number of seconds above 0`;
   const limits = Object.entries(config.limits ?? {});
   if (limits.some(([key, value]) => !(key in RUNNER_DEFAULT_LIMITS) || (key === "tasksMax" ? !(Number.isSafeInteger(value) && Number(value) >= 1) : typeof value !== "string" || !/^[0-9]+(?:\.[0-9]+)?[KMGT%]?$/.test(value))))
     return `The runner config's "limits" takes memoryHigh and memoryMax (such as "40G"), cpuQuota (such as "1400%") and tasksMax (a whole number)`;

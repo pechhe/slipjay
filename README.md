@@ -367,6 +367,19 @@ the runner's `limits` bound concurrent runs together.
   while no other operation waits for it: it yields the worker, and goes back to the
   queue, when an operation that could otherwise start needs it. The exception is when a
   release of the same commit is waiting to reuse its pass.
+- **Short landings.** With a combined budget, a landing of a short repository may start
+  while other operations hold every worker: at most `workers` operations other than
+  short landings run at once, and at most `workers + 1` in all. A repository is short
+  when its landings' verify-stage p90 over the last 7 days, from at least 10 landings
+  (the `slipjay metrics` budget projection), is at or below `shortLandingP90Seconds` in
+  the runner config (default 180); with fewer landings it is not. The class only
+  decides admission: a short landing that overruns runs to its outcome under the usual
+  deadlines. Releases, resets, audits, pre-verifications, recoveries and depth-two
+  successors always count as long. Places go to operations that can start, oldest
+  first. A short landing waiting because all `workers + 1` places are full names them
+  (`every place (landing …)`); a long one names the long operations holding the
+  workers. The ledger marks a landing admitted as short (`shortLanding` on its first
+  stage).
 - **Limits.** On a systemd host every run, deploys included, joins `slipjay.slice`, so
   the workers' gates and everything they start share one cap: `limits` in the runner
   config sets `memoryHigh` (throttled above, default `40G`), `memoryMax` (the hard
@@ -387,7 +400,12 @@ directories, without shared database writes or other mutable external targets.
 This is an explicit configuration assertion about the gate, not an inference from
 its repository name. A configured shared `lane` cannot use depth two. The executor
 must enforce combined resource limits; an uncapped executor refuses this setting.
-Each admitted operation holds one worker until its terminal outcome.
+Each admitted operation holds one place until its terminal outcome: the head of a
+short repository may take the short place, and its successor always counts as long, so
+it waits for a worker (`a worker (…)`) even when its own queue could take it. Of the
+repositories SlipJay itself lands, only T3 Code's gates qualify: YardSmith's share the
+Development database, SlipJay's real-systemd tests are not yet shown safe in parallel,
+and agent-config's and splay's landings are too short to gain from it.
 
 For integration D and submissions A then B, the queue prepares immutable CA on D
 and CB on that exact CA, in two independent warm verifier repositories. B can

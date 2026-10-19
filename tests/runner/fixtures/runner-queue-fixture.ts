@@ -5,9 +5,9 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, TERMINAL_EVENT_TYPES } from "../../../src/lib/runner/runner-contract.ts";
-import type { Executor, StoredEvent, SubmitRequest } from "../../../src/lib/runner/runner-contract.ts";
+import type { Executor, RunnerConfig, StoredEvent, SubmitRequest } from "../../../src/lib/runner/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../../../src/lib/runner/runner-log.ts";
-import { createRunnerQueue } from "../../../src/lib/runner/runner-queue.ts";
+import { createRunnerQueue, runnerLogOptions } from "../../../src/lib/runner/runner-queue.ts";
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
 import { directExecutor, testExecutor } from "../../support/executor.ts";
 
@@ -89,11 +89,12 @@ export const test = serialTest.concurrent;
 export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 // `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
+// `extra` adds more such repositories by name, each with an author in `authors`.
 /** Projects deploy and check side by side, so their log lines arrive in any order. */
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
+  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, shortLandingP90Seconds, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean; shortLandingP90Seconds?: number; scopes?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -154,22 +155,29 @@ export async function fixture(migrations = false, release = false, deployments?:
   jj(root, ["git", "clone", origin, author]);
   const otherOrigin = join(root, "other.git");
   const otherAuthor = join(root, "other-author");
-  if (other) {
-    const otherSeed = join(root, "other-seed");
-    await mkdir(otherSeed);
-    git(["init", "--bare", "-b", "main", otherOrigin]);
-    jj(otherSeed, ["git", "init"]);
-    await writeFile(join(otherSeed, "slipjay.json"), await readFile(join(seed, "slipjay.json"), "utf8"));
-    jj(otherSeed, ["describe", "-m", "Seed policy"]);
-    jj(otherSeed, ["git", "remote", "add", "origin", otherOrigin]);
-    jj(otherSeed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
-    jj(root, ["git", "clone", otherOrigin, otherAuthor]);
+  async function seedRepository(name: string, repositoryOrigin: string, repositoryAuthor: string) {
+    const repositorySeed = join(root, `${name}-seed`);
+    await mkdir(repositorySeed);
+    git(["init", "--bare", "-b", "main", repositoryOrigin]);
+    jj(repositorySeed, ["git", "init"]);
+    await writeFile(join(repositorySeed, "slipjay.json"), await readFile(join(seed, "slipjay.json"), "utf8"));
+    jj(repositorySeed, ["describe", "-m", "Seed policy"]);
+    jj(repositorySeed, ["git", "remote", "add", "origin", repositoryOrigin]);
+    jj(repositorySeed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
+    jj(root, ["git", "clone", repositoryOrigin, repositoryAuthor]);
+  }
+  if (other) await seedRepository("other", otherOrigin, otherAuthor);
+  const authors: Record<string, string> = {};
+  const extraRepos: RunnerConfig["repos"] = {};
+  for (const [index, name] of extra.entries()) {
+    authors[name] = join(root, `extra-${index}-author`);
+    extraRepos[name] = { url: join(root, `extra-${index}.git`), ...lane ? { lane } : {} };
+    await seedRepository(`extra-${index}`, extraRepos[name].url, authors[name]);
   }
   // While `reject-push` exists the remote refuses every push, as an outage would.
   await writeFile(join(origin, "hooks", "pre-receive"), `#!/bin/sh\nif [ -e ${JSON.stringify(join(root, "reject-push"))} ]; then echo "remote unavailable" >&2; exit 1; fi\n`);
   await chmod(join(origin, "hooks", "pre-receive"), 0o755);
   const logPath = durable ? join(root, "events.sqlite") : ":memory:";
-  const log = openOperationLog(logPath, { ...workers === undefined ? {} : { workers }, ...lane ? { lane: () => lane } : {} });
   const published: StoredEvent[] = [];
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
@@ -184,16 +192,17 @@ export async function fixture(migrations = false, release = false, deployments?:
       ...(request.env?.SLIPJAY_MIGRATION_CONTEXT ? { migrationContext: request.env.SLIPJAY_MIGRATION_CONTEXT } : {}) });
     return run(request);
   } };
+  const config: RunnerConfig = { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {}, ...extraRepos },
+    ...workers === undefined ? {} : { workers }, ...shortLandingP90Seconds === undefined ? {} : { shortLandingP90Seconds },
+    jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } };
+  const log = openOperationLog(logPath, runnerLogOptions(config, executor));
   const unsubscribe = log.subscribe((event) => {
     if (event.event.type !== "submitted") published.push(event);
     const operation = log.operation(event.operationId);
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
   });
-  const queue = createRunnerQueue({ log, executor, home, config: { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {} },
-    ...workers === undefined ? {} : { workers },
-    jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } },
-    ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs },
+  const queue = createRunnerQueue({ log, executor, home, config, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
@@ -240,7 +249,7 @@ export async function fixture(migrations = false, release = false, deployments?:
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
   const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
-  return { root, logPath, requestedTimeouts, candidateAtVerdict, development, land, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
+  return { root, logPath, authors, requestedTimeouts, candidateAtVerdict, development, land, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;

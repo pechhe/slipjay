@@ -12,12 +12,12 @@ import { BUILD_TOKEN_ENV, buildAdmitter, buildReader, buildRoute } from "../buil
 import { createBuildCheckAccess } from "../build/build-check-access.ts";
 import { createPipelineRelay, localPipelineReader } from "../build/build-pipeline-relay.ts";
 import { createReceiptDrain } from "../build/build-receipts.ts";
-import { RUNNER_DEFAULT_PORT, RUNNER_JJ_DEFAULTS, RUNNER_TOKEN_ENV, repositoryLane, runnerConfigProblem } from "./runner-contract.ts";
+import { RUNNER_DEFAULT_PORT, RUNNER_JJ_DEFAULTS, RUNNER_TOKEN_ENV, runnerConfigProblem } from "./runner-contract.ts";
 import type { Executor, RunnerConfig } from "./runner-contract.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
 import { localExecutor } from "./local-executor.ts";
-import { createRunnerQueue, runnerWorkers } from "./runner-queue.ts";
+import { createRunnerQueue, runnerLogOptions } from "./runner-queue.ts";
 
 /** How long a submission's conflict probe may hold admission before the submission queues unchecked. */
 const PROBE_BUDGET_MS = 30_000;
@@ -41,7 +41,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   mkdirSync(home, { recursive: true });
   // Tests whose subject is not containment run commands directly (tests/support/executor.ts).
   const executor = options.executor ?? localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
-  const log = openOperationLog(join(home, "operations.sqlite"), { workers: runnerWorkers(config, executor), lane: (repo) => repositoryLane(config, repo) });
+  const log = openOperationLog(join(home, "operations.sqlite"), runnerLogOptions(config, executor));
   const buildToken = env[BUILD_TOKEN_ENV]?.trim();
   const build = config.build && buildToken ? buildRoute({ origin: config.build.origin, token: buildToken }) : undefined;
   // Landing checks read Build through this runner, each operation with its own short-lived token.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **A short landing gets past busy workers (Build #3010):** with a systemd budget, a landing of a repository
+  whose verify-stage p90 over the last 7 days is at most `shortLandingP90Seconds` (runner config, default
+  180) may start while long operations hold every worker: at most `workers` long operations and `workers + 1`
+  in all. On 18 Oct an agent-config landing that verifies in seconds waited 75 minutes for workers held by T3
+  Code and YardSmith; over 16–19 Oct agent-config, splay and T3 Code waited about 6 hours in total that way.
+  Releases, resets, audits, pre-verifications, recoveries and depth-two successors still count as long, and
+  a waiting operation names the places that hold it (`every place (…)` for a full short place).
+
 ## v3.37.2
 
 - **A held integration a person discarded is released, and a failed recovery is retried (#3360):** the recovery turn

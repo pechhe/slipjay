@@ -25,8 +25,9 @@ import { readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import { readPolicyTextAtCommit } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
-import { admissionLane, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { label, newOperationId } from "./runner-log.ts";
+import type { OperationLogOptions } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
 import { commandEvidence } from "./command-evidence.ts";
 import { retainCommandArtifact } from "./command-artifact.ts";
@@ -85,6 +86,13 @@ export function runnerWorkers(config: Pick<RunnerConfig, "workers">, executor: P
   return 1;
 }
 
+/** What the log projects waits by: the queue's workers, lanes, depths and short-landing threshold, from the same config. */
+export function runnerLogOptions(config: RunnerConfig, executor: Pick<Executor, "combinedLimits">): OperationLogOptions {
+  return { workers: runnerWorkers(config, executor), lane: (repo) => repositoryLane(config, repo),
+    depth: (repo) => configuredRepository(config, repo)?.verificationDepth ?? 1,
+    ...executor.combinedLimits ? { shortLandingP90Ms: (config.shortLandingP90Seconds ?? RUNNER_DEFAULT_SHORT_LANDING_SECONDS) * 1000 } : {} };
+}
+
 /**
  * Each repository has one serial lane that owns its warm checkout and every transition
  * of its integration and release branches: its landings, resets of the target landings
@@ -93,8 +101,8 @@ export function runnerWorkers(config: Pick<RunnerConfig, "workers">, executor: P
  * its own, beside the repository's landings (but never beside its reset, nor in a shared
  * lane: see `admissionLane`), and joins the repository lane only to publish. Different repositories share no checkout, branch, target or environment, so
  * their lanes run at once. At most `workers` operations run at once, a release counting
- * as one until it has published; an operation waiting for a worker is admitted oldest
- * first. Deploys take turns in a separate lane that only reads the warm store, so a
+ * as one until it has published, besides one more short landing (`admits`); operations
+ * that can start are admitted oldest first. Deploys take turns in a separate lane that only reads the warm store, so a
  * deploy that waits minutes on its build never holds a landing.
  *
  * A green staging deploy of a promoting repository queues a pre-verification of its
@@ -144,6 +152,12 @@ export function createRunnerQueue(input: {
   const laneOf = (repo: string) => repositoryLane(config, repo);
   /** Worker reservations, including operations whose lane callback has not started yet. */
   const admitted = new Map<string, Operation>();
+  /** The admitted landings that were short when admitted: they count toward `workers + 1` only, until they finish. */
+  const shortAdmitted = new Set<string>();
+  const shortPlace = Boolean(executor.combinedLimits);
+  const places = () => [...admitted.keys()].map((id) => ({ short: shortAdmitted.has(id) }));
+  /** Whether `operation`, not a depth-two successor, would be admitted as a short landing. */
+  const isShort = (operation: Operation) => shortPlace && operation.kind === "landing" && log.shortRepository(operation.repo);
   // Queue-owned runtime attempts; their immutable evidence lives in the existing log.
   type PreparedPrefix = { artifact: LandingArtifact; checkout: string; overlap: boolean };
   const deferred = <T>() => {
@@ -438,43 +452,43 @@ export function createRunnerQueue(input: {
     return id;
   }
   /**
-   * Admit queued landings, releases and resets, oldest first, while a worker is free: each
-   * to its lane once that lane is idle, so a lane's operations keep their order. A pause
-   * admits nothing new; running operations finish.
+   * Admit queued landings, releases and resets, oldest first, while the rule (`admits`) has
+   * a place for them: each to its lane once that lane is idle, so a lane's operations keep
+   * their order, and a short landing never passes an older operation of its repository lane
+   * that waits for a place. A pause admits nothing new; running operations finish.
    */
   function wakeMain(): void {
     if (recovering || draining || log.paused()) return;
     const open = log.openOperations();
+    // Repository lanes whose oldest startable operation found no place: nothing later in them may pass it.
+    const behind = new Set<string>();
     for (const operation of open) {
-      if (admitted.size >= workers) break;
-      if (operation.kind === "deploy" || operation.kind === "verification" || !runnable(operation, open)) continue;
-      const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
-      const active = prefixes.get(operation.repo) ?? [];
-      const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
-      if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && executor.combinedLimits) {
-        if (active.length >= 2 || lanes.has(lane) || resetConflict(operation)) continue;
-        // A queued reset/release is an arrival-order fence, even while no lane is held.
-        const before = log.openOperations(operation.repo).slice(0, log.openOperations(operation.repo).findIndex((entry) => entry.id === operation.id));
-        if (before.some((entry) => entry.kind !== "landing" && entry.kind !== "deploy" && entry.kind !== "verification")) continue;
-        const turn: PrefixTurn = { operation, attempt: 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
-          prepared: deferred(), completed: deferred(), invalidation: new AbortController(), predecessor: active.at(-1) };
-        prefixes.set(operation.repo, [...active, turn]);
-        admitted.set(operation.id, operation);
-        const pending = processOperation(operation, turn).finally(() => {
-          turn.prepared.resolve(null);
-          turn.completed.resolve(log.operation(operation.id)?.status === "landed");
-          prefixes.set(operation.repo, (prefixes.get(operation.repo) ?? []).filter((entry) => entry !== turn));
-          admitted.delete(operation.id); attempts.delete(pending); wakeMain();
-        });
-        attempts.add(pending);
+      if (!admits(true, places(), workers, shortPlace)) break;
+      if (operation.kind === "deploy" || operation.kind === "verification" || behind.has(laneOf(operation.repo))) continue;
+      const start = startable(operation, open);
+      if (!start) continue;
+      if (!admits(start.short, places(), workers, shortPlace)) { behind.add(laneOf(operation.repo)); continue; }
+      if (!start.prefix || operation.kind !== "landing") {
+        admit(admissionLane(laneOf(operation.repo), operation.repo, operation.kind), operation, start.short);
         continue;
       }
-      if (active.length || lanes.has(lane) || resetConflict(operation)) continue;
-      admit(lane, operation);
+      const active = prefixes.get(operation.repo) ?? [];
+      const turn: PrefixTurn = { operation, attempt: 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
+        prepared: deferred(), completed: deferred(), invalidation: new AbortController(), predecessor: active.at(-1) };
+      prefixes.set(operation.repo, [...active, turn]);
+      admitted.set(operation.id, operation);
+      if (start.short) shortAdmitted.add(operation.id);
+      const pending = processOperation(operation, turn).finally(() => {
+        turn.prepared.resolve(null);
+        turn.completed.resolve(log.operation(operation.id)?.status === "landed");
+        prefixes.set(operation.repo, (prefixes.get(operation.repo) ?? []).filter((entry) => entry !== turn));
+        admitted.delete(operation.id); shortAdmitted.delete(operation.id); attempts.delete(pending); wakeMain();
+      });
+      attempts.add(pending);
     }
     // Pre-verifications take only what landings, resets and releases leave.
     for (const operation of open) {
-      if (admitted.size >= workers) break;
+      if (!admits(false, places(), workers, shortPlace)) break;
       if (operation.kind !== "verification" || operation.status !== "queued" || open.some((other) => holdsBack(other, operation, open)) || log.stagingDue(operation.repo)) continue;
       const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
       if (!lanes.has(lane)) admit(lane, operation);
@@ -484,23 +498,46 @@ export function createRunnerQueue(input: {
       if (verification.kind !== "verification" || yielding.has(verification.id)) continue;
       // A release of the same commit waits to reuse it, and would otherwise verify beside the landings anyway.
       if (open.some((other) => other.kind === "release" && other.commitId === verification.commitId && repositoryKey(other.repo) === repositoryKey(verification.repo))) continue;
-      // It yields to its repository lane's work, and to work that waits for nothing but the worker it holds.
+      // It yields to its repository lane's work, and to work that waits for nothing but the place it holds.
       const waiting = open.find((other) => other.status === "queued" && holdsBack(other, verification, open)
-        || admitted.size >= workers && waitsOnlyForWorker(other, open));
+        || waitsOnlyForPlace(other, open));
       if (!waiting) continue;
       yielding.set(verification.id, label(waiting));
       entry.controller.abort();
     }
   }
-  function admit(lane: string, operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation): void {
+  function admit(lane: string, operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, short = false): void {
     admitted.set(operation.id, operation);
+    if (short) shortAdmitted.add(operation.id);
     void inLane(lane, () => processOperation(operation))
-      .finally(() => { admitted.delete(operation.id); wakeMain(); });
+      .finally(() => { admitted.delete(operation.id); shortAdmitted.delete(operation.id); wakeMain(); });
   }
-  /** Whether queued `operation` would be admitted now but for a free worker. */
-  const waitsOnlyForWorker = (operation: Operation, open: readonly Operation[]): boolean =>
-    operation.kind !== "deploy" && operation.kind !== "verification" && runnable(operation, open) && !resetConflict(operation)
-      && !lanes.has(admissionLane(laneOf(operation.repo), operation.repo, operation.kind)) && !prefixes.get(operation.repo)?.length;
+  /**
+   * How queued `operation` would be admitted now, places aside: as a short or long place, and
+   * as a turn in its repository's depth-two chain or in its lane. Undefined while anything else
+   * keeps it waiting. A successor always counts as long; a head is short when its repository is.
+   */
+  function startable(operation: Operation, open: readonly Operation[]): { short: boolean; prefix: boolean } | undefined {
+    // `open` is a snapshot: what this wake already admitted still reads as queued there.
+    if (operation.kind === "deploy" || operation.kind === "verification" || admitted.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
+    if (lanes.has(admissionLane(laneOf(operation.repo), operation.repo, operation.kind))) return undefined;
+    const active = prefixes.get(operation.repo) ?? [];
+    const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
+    if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && executor.combinedLimits) {
+      if (active.length >= 2) return undefined;
+      // A queued reset/release is an arrival-order fence, even while no lane is held.
+      const repository = log.openOperations(operation.repo);
+      if (repository.slice(0, repository.findIndex((entry) => entry.id === operation.id))
+        .some((entry) => entry.kind !== "landing" && entry.kind !== "deploy" && entry.kind !== "verification")) return undefined;
+      return { short: !active.length && isShort(operation), prefix: true };
+    }
+    return active.length ? undefined : { short: isShort(operation), prefix: false };
+  }
+  /** Whether queued `operation` waits for nothing but a free place. */
+  const waitsOnlyForPlace = (operation: Operation, open: readonly Operation[]): boolean => {
+    const start = startable(operation, open);
+    return start !== undefined && !admits(start.short, places(), workers, shortPlace);
+  };
   /** Whether `operation` is queued and free to start, as far as Build admission goes. */
   const runnable = (operation: Operation, open: readonly Operation[]): boolean => operation.status === "queued"
     && !(operation.kind === "landing" && operation.admission === "pending") && !awaitingReplacement(operation, open);
@@ -632,11 +669,12 @@ export function createRunnerQueue(input: {
       // A kill that landed between runs stops the operation before it moves a branch.
       if (controller.signal.aborted) throw new OwnerKill();
       if (prefix?.invalidation.signal.aborted) throw new Error("Prepared prefix invalidated by its predecessor");
-      if (stage !== "queued") append(operation.id, stageDetail());
+      const first = stage === "queued";
+      if (!first) append(operation.id, stageDetail());
       stageStarted = Date.now();
       stage = next;
       running.set(operation.id, { operation, stage, controller });
-      append(operation.id, { type: "stage", stage, health: health() });
+      append(operation.id, { type: "stage", stage, health: health(), ...first && shortAdmitted.has(operation.id) ? { shortLanding: true as const } : {} });
     };
     try {
       if (prefix?.predecessor) {
