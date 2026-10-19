@@ -302,7 +302,7 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   const spec = item({ number: 10, kind: "spec", status: "in_progress" });
   const other = item({ number: 20, kind: "spec", status: "in_progress" });
   const { read } = build([spec, other, item({ number: 11, parentId: spec.id }), item({ number: 12, parentId: spec.id }), item({ number: 21, parentId: other.id }),
-    item({ number: 30, kind: "decision", status: "proposed" })]);
+    item({ number: 30, kind: "decision", status: "proposed" }), item({ number: 40, kind: "spec", status: "inbox" })]);
   const binds: Record<string, { generation: number; endedAt: string | null }[]> = { [spec.id]: [{ generation: 1, endedAt: null }] };
   const reader: BuildReader = (action, input) => action === "binds" ? Promise.resolve(binds[input.specId as string] ?? []) : read(action, input);
   const request = (fields: Partial<Parameters<typeof buildLandingHandoff>[0]>) =>
@@ -317,6 +317,8 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   await assert.rejects(request({ sessionId: undefined }), /hq_build_start_session.*--session <id>.*HQ_BUILD_SESSION_ID/);
   await assert.rejects(request({ sessionId: "not-a-session" }), /not a session id/);
   await assert.rejects(request({ issueNumber: 21 }), /Spec #20 has no current lead: bind it with hq_build_bind/);
+  await assert.rejects(request({ issueNumber: 40 }), /Spec #40 shaped and bound, but it is in inbox: set it to ready with hq_build_set_status/, "an unshaped Spec names shaping first, with or without a session");
+  await assert.rejects(request({ issueNumber: 40, sessionId: undefined }), /it is in inbox/);
   await assert.rejects(request({ tickets: [21] }), /#21 is not a Ticket of Spec #10/);
   await assert.rejects(request({ issueNumber: 30 }), /is a decision, not a Spec or a Spec's Ticket/);
   await assert.rejects(request({ issueNumber: 99 }), /Build has no item #99/);

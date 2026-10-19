@@ -51,6 +51,9 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
     if (ticket.kind !== "ticket" || ticket.parentId !== spec.id) throw new Error(`Build #${number} is not a Ticket of Spec #${spec.number}`);
     if (!ticketIds.includes(ticket.id)) ticketIds.push(ticket.id);
   }
+  // Build binds only a shaped Spec, so an Inbox or Shaping one needs shaping before any lead session.
+  if (spec.status === "inbox" || spec.status === "shaping")
+    throw new Error(`Landing Build #${issueNumber} needs Spec #${spec.number} shaped and bound, but it is in ${spec.status}: set it to ready with hq_build_set_status (inbox → shaping → ready), bind it with hq_build_bind, start a session with hq_build_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
   const sessionId = request.sessionId?.trim();
   if (!sessionId)
     throw new Error(`Landing Build #${issueNumber} needs your lead session for Spec #${spec.number}: start one with hq_build_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);

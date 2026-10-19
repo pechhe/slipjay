@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **A landing for an unshaped Build Spec names the way through (Build #3359):** `slipjay land` for a
+  workspace whose Spec is still in Inbox or Shaping now says to set it to ready, bind it and start a
+  session, instead of asking only for a session that Build would refuse to create (`bind_status_invalid`).
+
 ## v3.37.0
 
 - **An unused empty workspace is swept after 10 minutes, not an hour:** the idle wait and the separate
