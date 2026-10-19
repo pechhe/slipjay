@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.37.0
 
 - **An unused empty workspace is swept after 10 minutes, not an hour:** the idle wait and the separate
   grace for a closed Issue's checkout are one 10-minute period. T3 Code now gives a thread whose
