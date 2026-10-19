@@ -96,6 +96,9 @@ const test = serialTest.concurrent;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 
 // `other` adds a second repository, Fixture/Other, with the same policy: its own origin, author and warm checkout.
+/** Projects deploy and check side by side, so their log lines arrive in any order. */
+const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
+
 async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
   { workers, other = false, lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true }: { workers?: number; other?: boolean; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
@@ -1507,7 +1510,7 @@ test("a landing deploys staging from an exact view of the landed commit and reco
     assert.equal(firstRecord.previous, null);
     assert.deepEqual(firstRecord.changes.map((change) => change.subject), ["Add a.txt"]);
     assert.deepEqual(firstRecord.projects, ["app", "hq"].map((name) => ({ name, ok: true, url: `https://${name}-${f.main().slice(0, 7)}.example` })));
-    assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)), ["app", "hq"].map((project) =>
+    assert.deepEqual(byProject((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line))), ["app", "hq"].map((project) =>
       ({ project, environment: "staging", commit: f.main(), key: "from-runner", head: f.main() })), "each project ran in the exact commit with the declared key");
     assert.deepEqual(first.runs.map((run) => run.exitCode), [0, 0]);
     const deployCommands = new Set(["app", "hq"].map((name) => ["node", "-e", deployStep(f.root, name)].join(" ")));
@@ -1583,10 +1586,10 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.ok(production?.result?.type === "deployed", JSON.stringify(production?.result));
     assert.equal(production.result.record.commitId, green, "production deploys the staging-verified commit, not the release merge");
     assert.deepEqual(production.result.record.projects.map((project) => project.name), ["app", "hq", "www"]);
-    assert.deepEqual((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)).filter((entry) => entry.environment === "production"),
+    assert.deepEqual(byProject((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line)).filter((entry) => entry.environment === "production")),
       ["app", "hq", "www"].map((project) => ({ project, environment: "production", commit: green, key: "from-runner", head: green })));
     const urls = ["app", "hq", "www"].map((project) => ({ project, url: `https://${project}-${green.slice(0, 7)}.example` }));
-    assert.deepEqual((await f.lines("health.jsonl")).map((line) => JSON.parse(line)), urls, "each deployment is checked");
+    assert.deepEqual(byProject((await f.lines("health.jsonl")).map((line) => JSON.parse(line))), urls, "each deployment is checked");
     assert.deepEqual((await f.lines("activate.jsonl")).map((line) => JSON.parse(line)), urls, "then activated");
     assert.ok(production.result.record.projects.every((project) => project.activated === true));
 
@@ -1932,7 +1935,17 @@ test("a promotion migrates production after every project is healthy and before 
     assert.ok(outcome?.type === "released" && outcome.deploy, JSON.stringify(outcome));
     return f.log.operation(outcome.deploy)!;
   };
-  const order = async () => { const steps = await f.lines("order.log"); await rm(join(f.root, "order.log"), { force: true }); return steps; };
+  // Health checks run side by side, so each unbroken run of them is compared in sorted order.
+  const order = async () => {
+    const steps = await f.lines("order.log");
+    await rm(join(f.root, "order.log"), { force: true });
+    return steps.reduce<string[][]>((runs, step) => {
+      const last = runs.at(-1);
+      if (step.startsWith("health ") && last?.[0]?.startsWith("health ")) last.push(step);
+      else runs.push([step]);
+      return runs;
+    }, []).flatMap((run) => run.sort());
+  };
   try {
     // Non-additive, so only a deploy that changed nothing in the schema (a refused first verify, or one that never reached the migrations) is rolled back automatically.
     await f.land(f.submit(await f.candidate("schema/drop")));

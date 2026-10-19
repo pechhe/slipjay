@@ -71,7 +71,7 @@ export const schemaMayHaveChanged = (declared: boolean, migrations: DeployMigrat
 
 /**
  * Deploy every project of one environment from an exact source view of `commitId`,
- * one after another, health-check each, and return the record. A failing project does
+ * side by side, health-check each, and return the record. A failing project does
  * not stop the rest: the record says which projects serve the new commit. Where the
  * environment activates, traffic moves only once every project passed and its
  * declared migrations brought the database to the commit, and an activation that
@@ -104,27 +104,30 @@ export async function runDeploy(input: {
     Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
     const step = (command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}) => input.run({ executable: command.executable, args: command.args,
       cwd: path.join(root, command.cwd), env: { ...env, ...url ? { SLIPJAY_DEPLOY_URL: url } : {}, ...extra }, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
-    const outcomes: DeployProjectOutcome[] = [];
-    for (const project of policy.projects) {
+    // Projects deploy side by side: none takes traffic from another's deploy, and where the
+    // environment activates, nothing moves until every one has passed. A command that throws
+    // fails the deploy only once the others have stopped, since they share this source view.
+    const settled = await Promise.allSettled(policy.projects.map(async (project): Promise<DeployProjectOutcome> => {
       input.onProgress(`[deploy ${project.name}] deploying ${commitId.slice(0, 12)} to ${environment}`);
       const result = await step(project.command);
       const url = result.stdout.split("\n").map((line) => line.trim()).findLast((line) => URL_LINE.test(line));
       const failed = failure(result, policy.timeoutMs);
       if (failed) {
-        outcomes.push({ name: project.name, ok: false, reason: failed });
         input.onProgress(`[deploy ${project.name}] failed: ${failed}`);
-        continue;
+        return { name: project.name, ok: false, reason: failed };
       }
       input.onProgress(`[deploy ${project.name}] deployed${url ? ` ${url}` : ""}`);
       const unhealthy = project.healthCheck ? url ? failure(await step(project.healthCheck, url), policy.timeoutMs) : "printed no deployment URL to check" : null;
       if (unhealthy) {
-        outcomes.push({ name: project.name, ok: false, ...(url ? { url } : {}), reason: `health check failed: ${unhealthy}` });
         input.onProgress(`[deploy ${project.name}] health check failed: ${unhealthy}`);
-        continue;
+        return { name: project.name, ok: false, ...(url ? { url } : {}), reason: `health check failed: ${unhealthy}` };
       }
       if (project.healthCheck) input.onProgress(`[deploy ${project.name}] healthy`);
-      outcomes.push({ name: project.name, ok: true, ...(url ? { url } : {}) });
-    }
+      return { name: project.name, ok: true, ...(url ? { url } : {}) };
+    }));
+    const thrown = settled.find((result) => result.status === "rejected");
+    if (thrown) throw thrown.reason;
+    const outcomes = settled.map((result) => (result as PromiseFulfilledResult<DeployProjectOutcome>).value);
     if (!policy.projects.some((project) => project.activate)) return outcomes;
     for (const outcome of outcomes) outcome.activated = false;
     const holdBack = () => input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);

@@ -550,7 +550,7 @@ integration branch; `production` deploys only through a promotion (see
   prevents scheduled retries of that commit. Scheduling is rebuilt from the log
   at startup.
 - **Where.** Deploys take turns in their own lane, so a deploy waiting minutes on its
-  build never holds a landing. Each project's command runs, one after another, in an
+  build never holds a landing. Each project's command runs, all side by side, in an
   exact source view of the commit (a detached git checkout that borrows the warm
   checkout's objects). It gets the declared `environmentKeys`,
   `SLIPJAY_DEPLOY_ENVIRONMENT` and `SLIPJAY_DEPLOY_COMMIT`, and must finish within

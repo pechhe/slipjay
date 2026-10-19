@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **An environment's projects deploy side by side:** each project's deploy command and health check
+  now run at the same time instead of one after another, and the record keeps the declared order.
+  Where the environment activates, traffic still moves only once every project has passed. A
+  YardSmith release that builds its three sites on the runner takes as long as its slowest site
+  instead of all three added together.
+
 ## v3.31.0
 
 - **The runner pushes its metrics export to HQ Build (#99):** a runner configured with `build.origin`
