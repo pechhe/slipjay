@@ -38,19 +38,23 @@ async function runner() {
   /** A candidate on the current main, pushed under its bookmark and submitted. */
   const submit = async (file: string, text: string, parents = ["main@origin"]) => {
     jj(f.repo, ["new", ...parents]);
+    return revise(file, text);
+  };
+  /** A new revision of the candidate last submitted, pushed and submitted to replace it. */
+  const revise = async (file: string, text: string) => {
     await writeFile(join(f.repo, file), text);
     jj(f.repo, ["describe", "-m", `Change ${file}`]);
     const at = (template: string) => jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", template]);
     const changeId = at("change_id");
     const commitId = at("commit_id");
     const bookmark = candidateBookmark(changeId);
-    execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "-q", f.remote, `${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
+    execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "-q", f.remote, `+${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
     const body: SubmitRequest = { repo: "owner/repo", changeId, commitId, bookmark, submittedBy: "fixture" };
     const response = await fetch(`${server.url}${RUNNER_API}/operations`, { method: "POST", body: JSON.stringify(body),
       headers: { authorization: "Bearer test-token" }, signal: AbortSignal.timeout(60_000) });
     return { changeId, status: response.status, body: await response.json() as Record<string, unknown> & { operation?: { id: string } } };
   };
-  return { ...f, log, publish, submit, dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
+  return { ...f, log, publish, submit, revise, dispose: async () => { await server.close(); log.close(); await f.dispose(); } };
 }
 
 test("a submission that conflicts with a landing queued ahead is refused before it queues, naming the paths and that change", async () => {
@@ -141,3 +145,40 @@ test("a probe over budget, or behind its repository's running probe, lets the su
     silent.close();
   } finally { await f.dispose(); }
 }, 30_000);
+
+test("a refused replacement names its change's earlier candidate, which stays queued", async () => {
+  const f = await runner();
+  try {
+    const ahead = await f.submit("README.md", "queued ahead\n");
+    const earlier = await f.submit("other.txt", "unrelated\n");
+    assert.equal(earlier.status, 200, JSON.stringify(earlier.body));
+    const earlierId = earlier.body.operation!.id;
+    const replacement = await f.revise("README.md", "candidate\n");
+    assert.equal(replacement.status, 422, JSON.stringify(replacement.body));
+    assert.equal(replacement.body.stillQueued, earlierId);
+    assert.match(String(replacement.body.error), new RegExp(`slipjay cancel ${earlierId}`));
+    assert.deepEqual(f.log.openOperations().map((operation) => operation.id), [ahead.body.operation!.id, earlierId]);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a probe still running for one repository does not hold another repository's submission", async () => {
+  let unblock!: () => void;
+  const blocked = new Promise<null>((resolve) => { unblock = () => resolve(null); });
+  const log = openOperationLog(":memory:");
+  const handler = createRunnerHandler({
+    log, token: "test-token", runnerName: "test-runner",
+    readLog: async () => null, onSubmitted: () => {}, kill: () => ({ status: "idle" }), subscribe: () => () => {},
+    probeSubmission: (request) => request.repo === "owner/slow" ? blocked : Promise.resolve(null),
+  });
+  const server = await serveRunner(handler, { host: "127.0.0.1", port: 0 });
+  try {
+    const post = (repo: string, changeId: string) => fetch(`${server.url}${RUNNER_API}/operations`, { method: "POST",
+      headers: { authorization: "Bearer test-token" }, signal: AbortSignal.timeout(30_000),
+      body: JSON.stringify({ repo, changeId, commitId: "a".repeat(40), bookmark: candidateBookmark(changeId), submittedBy: "fixture" } satisfies SubmitRequest) });
+    const slow = post("owner/slow", "k".repeat(32));
+    // Queued while the slow repository's probe still runs.
+    assert.equal((await post("owner/fast", "z".repeat(32))).status, 200);
+    unblock();
+    assert.equal((await slow).status, 200);
+  } finally { await server.close(); log.close(); }
+}, 60_000);

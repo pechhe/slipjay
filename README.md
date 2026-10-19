@@ -335,7 +335,10 @@ order, with no verification. A candidate that would conflict is refused before i
 naming the conflicting paths and the queued landing (operation and change id) it clashes
 with, or the integration head. A landing ahead that conflicts on its own is left out of
 the stack. A probe that fails, runs past 30 seconds, or would start while the repository's
-previous probe still runs lets the candidate queue unchecked, and the runner logs why. Resets take turns in the
+previous probe still runs lets the candidate queue unchecked, and the runner logs why. The probe
+runs before admission, so a slow one never delays another repository's submissions. A refused
+candidate that would have replaced an earlier one of the same change leaves that one queued, and
+the refusal names it so it can be cancelled. Resets take turns in the
 same repository's queue. A confirmed release verifies in a release queue and a
 checkout of its own, beside the repository's landings, and takes a turn in the
 repository's queue only to publish (see [Release](#release)). A release and a reset

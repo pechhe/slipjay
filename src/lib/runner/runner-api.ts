@@ -25,7 +25,7 @@ export function createRunnerHandler(input: {
   onSubmitted(): void;
   /**
    * Dry-run rebase of a landing onto the integration head and the landings queued ahead of it, before it queues;
-   * absent, or answering null, the submission queues unchecked. Admission waits on it, so it bounds itself.
+   * absent, or answering null, the submission queues unchecked. It runs before admission and bounds itself.
    */
   probeSubmission?(request: SubmitRequest, ahead: QueuedLanding[]): Promise<SubmissionConflict | null>;
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
@@ -90,11 +90,17 @@ export function createRunnerHandler(input: {
    * in its custody until the publication is confirmed, so a reland follows the hold's recovery instead of asking Build again.
    */
   function heldRecovery(repo: string, body: SubmitRequest): Operation | null {
-    const hold = input.log.held().find((entry) => entry.repo === repo);
-    const stranded = hold !== undefined && input.log.operationsForChange(repo, body.changeId).some((op) => op.commitId === body.commitId && op.result !== undefined
-      && input.log.events({ operationId: op.id }).some((row) => row.event.type === "integrated" && row.event.commitId === hold.commitId));
-    return stranded ? input.recoverHeld?.(repo) ?? null : null;
+    return stranded(repo, body) ? input.recoverHeld?.(repo) ?? null : null;
   }
+  function stranded(repo: string, body: SubmitRequest): boolean {
+    const hold = input.log.held().find((entry) => entry.repo === repo);
+    return hold !== undefined && input.log.operationsForChange(repo, body.changeId).some((op) => op.commitId === body.commitId && op.result !== undefined
+      && input.log.events({ operationId: op.id }).some((row) => row.event.type === "integrated" && row.event.commitId === hold.commitId));
+  }
+  /** A submission that reattaches, meets a running attempt of its change, or follows a held recovery is answered without a probe. */
+  const probeNeeded = (body: SubmitRequest) => !(body.requestId && input.log.submission(repositoryKey(body.repo), body.requestId))
+    && !input.log.operationsForChange(repositoryKey(body.repo), body.changeId).some((op) => op.status === "running" || (op.status === "queued" && op.commitId === body.commitId))
+    && !stranded(repositoryKey(body.repo), body);
   const awaitingAdmission = (operation: Operation | null | undefined) => operation?.kind === "landing" && operation.admission === "pending" && !operation.result;
   // A client, or a landing check holding its operation's token, reads Build only through here, so the Build credential never leaves the runner.
   async function readBuild(request: Request): Promise<Response> {
@@ -222,6 +228,12 @@ export function createRunnerHandler(input: {
       // A chore is reported through the same Build route, so it needs the same configuration.
       if (body.handoff?.build && !input.admitBuild)
         return json({ error: `This runner cannot admit Build-bound submissions: set "build.origin" in its config and ${BUILD_TOKEN_ENV} in its environment` }, 400);
+      // Before admission, so a slow probe never holds another submission.
+      const conflict = probeNeeded(body) ? await probe(repositoryKey(body.repo), body) : null;
+      if (conflict) {
+        const stillQueued = input.log.operationsForChange(repositoryKey(body.repo), body.changeId).find((op) => op.status === "queued")?.id;
+        return json({ error: conflictMessage(conflict, stillQueued), code: "conflicts_ahead", ...conflict, ...stillQueued ? { stillQueued } : {} }, 422);
+      }
       // Retention adds an await: serialize admission through the append, including deduplication.
       const preceding = landingAdmission;
       let release!: () => void;
@@ -260,8 +272,6 @@ export function createRunnerHandler(input: {
           const previous = await resolveAdmission(existing.id);
           if (!previous.resolved) return unresolved(`the earlier candidate's admission is unresolved: ${previous.reason}`, existing);
         }
-        const conflict = await probe(repo, body);
-        if (conflict) return json({ error: conflictMessage(conflict), code: "conflicts_ahead", ...conflict }, 422);
         const id = newOperationId();
         let retained: Awaited<ReturnType<NonNullable<typeof input.retainSubmission>>> | undefined;
         try { retained = await input.retainSubmission?.(id, body); }
@@ -707,9 +717,13 @@ function globalEventStream(log: OperationLog, since: number, signal: AbortSignal
   return new Response(stream, { headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } });
 }
 
-function conflictMessage({ paths, conflictsWith }: SubmissionConflict): string {
+/** Why a candidate was refused; a refused replacement leaves its change's earlier candidate queued, so it says so. */
+function conflictMessage({ paths, conflictsWith }: SubmissionConflict, stillQueued: string | undefined): string {
   const listed = paths.join(", ");
-  return conflictsWith
+  const refused = conflictsWith
     ? `Candidate conflicts with queued landing ${conflictsWith.operationId} (change ${conflictsWith.changeId}) in: ${listed}. It was not queued; rebase once that change lands, resolve, and land again`
     : `Candidate conflicts with the integration head in: ${listed}. It was not queued; fetch, rebase onto the integration branch, resolve, and land again`;
+  return stillQueued
+    ? `${refused}. This change's earlier candidate ${stillQueued} is still queued and will land unless you run \`slipjay cancel ${stillQueued}\``
+    : refused;
 }

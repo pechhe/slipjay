@@ -7,7 +7,9 @@
   it in its repository, the same duplicate-and-rebase it does at `rebasing`, with no verification.
   A conflict fails `slipjay land` there, naming the conflicting paths and the queued landing it
   clashes with. On 2026-10-19 YardSmith #2991 waited 7 minutes behind #2973 before failing at
-  `rebasing` over an import list and a README paragraph that this check finds in seconds.
+  `rebasing` over an import list and a README paragraph that this check finds in seconds. The check
+  runs before admission and gives up after 30 seconds, so it never delays other submissions, and a
+  refused replacement names the change's earlier candidate that is still queued.
 - **A session's unused workspace takes its Issue instead of a second checkout:** `slipjay start
   --integration --issue <n>` run from the caller's own workspace, when it has no Issue and no work, is
   refused and names `slipjay attach-issue <n>`. T3 Code allocates a workspace for each thread when it

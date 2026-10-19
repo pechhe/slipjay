@@ -22,8 +22,8 @@ export type SubmissionConflict = { paths: string[]; conflictsWith: { operationId
  * on its own, so it is left out of the stack. The candidate is tried after each step, so the first
  * conflict names the change that causes it.
  *
- * It runs in a checkout of its own, never one a lane holds; the caller serializes submissions
- * (see `submissionProbe`).
+ * It runs in a checkout of its own, never one a lane holds; `submissionProbe` runs one per
+ * repository at a time.
  */
 export async function probeSubmission(input: { home: string; url: string; jjConfig: Readonly<Record<string, string>>; request: SubmitRequest; ahead: readonly QueuedLanding[] }): Promise<SubmissionConflict | null> {
   const { home, request } = input;
@@ -76,7 +76,7 @@ export const probeCheckout = (home: string, repo: string): string =>
   join(home, "probes", createHash("sha256").update(repositoryKey(repo)).digest("hex").slice(0, 16));
 
 /**
- * The runner's probe: every submission waits on it inside admission, so it never holds admission
+ * The runner's probe: a submission waits on it before admission, so it never holds a submission
  * past `budgetMs`, and never starts while that repository's last probe still runs. Either way, and on
  * failure (reported to `onSkipped`), the submission queues unchecked. An over-budget probe finishes
  * in the background, so a slow first clone still readies the checkout for the next submission.
