@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Unused empty workspaces are swept after an hour, not a day:** a workspace allocated for a thread
+  that never edits anything (as T3 does for most threads) used to keep its whole checkout and
+  `node_modules` for 24 hours. On the Mac on 2026-10-19 that was 58 of 143 workspaces. One holding a
+  live process, or any work, is still kept.
+
 - **Removing a workspace no longer waits for its files to be deleted (#123):** cleanup, `slipjay remove`
   and every sweep move the checkout into `~/.slipjay/trash`, which is a rename, and a detached process at
   `nice -n 19` deletes it. Before this, deleting one t3code checkout took 239 s inside the removal and its

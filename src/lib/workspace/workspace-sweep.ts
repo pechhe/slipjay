@@ -28,7 +28,7 @@ import { findOrphanedCheckouts, retireOrphanedCheckouts } from "./workspace-orph
  * machine-local state left by workspaces that no longer exist.
  */
 /** Minimum assignment age before an unused empty workspace is swept. */
-export const EMPTY_IDLE_MS: number = 24 * 60 * 60 * 1000;
+export const EMPTY_IDLE_MS: number = 60 * 60 * 1000;
 
 /** Minimum assignment age before a closed Issue's empty workspace is swept (never longer than `emptyIdleMs`). */
 export const ASSIGNMENT_GRACE_MS: number = 60 * 60 * 1000;
