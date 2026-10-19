@@ -275,6 +275,34 @@ export async function workingCopyCommit(workspaceRoot: string): Promise<string> 
   return jj(workspaceRoot, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
 }
 
+/** JJ's refusal to read a working copy whose commit another workspace's operation rewrote. */
+export const STALE_WORKING_COPY: RegExp = /working copy is stale/i;
+
+/**
+ * Bring a stale working copy up to its commit (`jj workspace update-stale`) and say whether it
+ * held edits of its own. JJ first snapshots files edited since the last snapshot as a new,
+ * divergent commit of the same change, on the commit they were made on; a plain update makes no
+ * commit (whether it records an operation differs between hosts, so that proves nothing). Those
+ * edits are then made the checkout's own again (`jj edit`), on disk and at `@`, so they keep
+ * protecting it from every later sweep, and the rebased twin they diverged from is abandoned
+ * when it is empty.
+ */
+export async function updateStaleWorkingCopy(workspaceRoot: string): Promise<{ recordedEdits: boolean }> {
+  const read = (args: string[]) => jj(workspaceRoot, ["--ignore-working-copy", ...args]);
+  const changeId = await read(["log", "-r", "@", "--no-graph", "-T", "change_id"]);
+  const commits = async () => new Set((await read(["log", "-r", `change_id(${changeId})`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n").filter(Boolean));
+  const before = await commits();
+  await jj(workspaceRoot, ["workspace", "update-stale"]);
+  const recovered = [...await commits()].filter((commit) => !before.has(commit));
+  if (!recovered.length) return { recordedEdits: false };
+  const [twin, empty] = (await read(["log", "-r", "@", "--no-graph", "-T", 'commit_id ++ "\\t" ++ empty'])).split("\t");
+  if (recovered.length === 1 && recovered[0] !== twin) {
+    await jj(workspaceRoot, ["edit", recovered[0]!]);
+    if (empty === "true") await jj(workspaceRoot, ["abandon", twin!]);
+  }
+  return { recordedEdits: true };
+}
+
 /** The working-copy description `start` gives a new workspace: `wip: <task> (#<issue>)`. */
 export function wipDescription(task: string | null | undefined, issueNumber?: number | null): string {
   const line = String(task ?? "").split("\n")[0]!.replace(/\s+/g, " ").trim().slice(0, 100);

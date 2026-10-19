@@ -1,12 +1,12 @@
 import type { WorkspaceEntry, WorkspaceMetadata } from "../infra/workspace-jj.ts";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
-import { run, workspaceContext } from "../infra/workspace-jj.ts";
+import { run, STALE_WORKING_COPY, updateStaleWorkingCopy, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { trackerOf, workItemClosed } from "../build/tracker.ts";
 import type { BuildReader } from "../build/tracker.ts";
 import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState } from "./workspace-state.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
-import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
+import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, STALE_EDITS, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
 import { artifactPublished } from "../landing/landing-steps.ts";
 import { describeHolders, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
 import { pruneWorkspaceState } from "./workspace-state-prune.ts";
@@ -136,6 +136,20 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
     return issueStates.get(issueNumber)!;
   };
   const keep = (reason: string, report = true): SweepDecision => ({ remove: false, reason, report });
+  /**
+   * A stale checkout no live process uses, updated so it can be judged like any other, or why it
+   * is kept: one whose stale files held edits keeps them as a divergent commit to reconcile.
+   */
+  const updateStale = async (workspace: InspectedWorkspace): Promise<InspectedWorkspace | SweepDecision> => {
+    const running = await processes();
+    if (!running) return keep("process working directories unavailable");
+    if (guarded.some((root) => within(root, workspace.root))) return keep("protected", false);
+    const holders = await workspaceHolders(workspace.root, { processes: running });
+    if (holders!.length) return keep(`in use by a live process: ${describeHolders(holders!)}`);
+    if (await lockOwnerAlive(workspace.name)) return keep("in use by a live process");
+    if ((await updateStaleWorkingCopy(workspace.root)).recordedEdits) return keep(STALE_EDITS);
+    return { ...workspace, unreadable: undefined, hasWork: await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch) };
+  };
   const decide = async (workspace: InspectedWorkspace): Promise<SweepDecision> => {
     if (workspace.name === "default") return keep("integration checkout", false);
     // Without its metadata, whether it is a spare, an Issue's or owes the runner facts is unknown.
@@ -144,6 +158,12 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
       // Forgetting a checkout already gone loses nothing once it owes nothing and its revision holds no unlanded work.
       const refusal = await missingCheckoutRefusal(context.integration.root, workspace);
       return refusal ? keep(`checkout missing on disk; it ${refusal}`) : { remove: true, issueBound: false, missing: true };
+    }
+    // Read-only inspection never snapshots, so only the sweep finds a working copy stale.
+    if (workspace.unreadable && STALE_WORKING_COPY.test(workspace.unreadable)) {
+      const updated = await updateStale(workspace);
+      if ("remove" in updated) return updated;
+      workspace = updated;
     }
     if (workspace.unreadable) {
       return keep(`working copy unreadable (${workspace.unreadable}): run \`jj workspace update-stale\` in it; if JJ cannot recover it, copy out anything needed, `

@@ -6,7 +6,7 @@ import { copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rename, 
 import { dirname, join, resolve, sep } from "node:path";
 import { artifactPublished, finishLandedWorkspace } from "../landing/landing-steps.ts";
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "../infra/workspace-jj.ts";
-import { revisionExists, revisionFacts, run, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
+import { revisionExists, revisionFacts, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { evidenceHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockOwnerAlive, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import type { LandingState } from "./workspace-state.ts";
@@ -62,6 +62,9 @@ export async function retainedWorkspaceMaterial(root: string, integrationRoot: s
 export async function unsnapshottedEdits(root: string, integrationRoot: string, limit: number = 5): Promise<string[]> {
   return editedSinceSnapshot(root, await disposablePaths(integrationRoot), integrationRoot, limit);
 }
+
+/** Why a checkout whose stale working copy held edits is kept (see `updateStaleWorkingCopy`). */
+export const STALE_EDITS = "its stale working copy held edits, now restored as its working-copy change on the commit they were made on";
 
 /** One human explanation of why cleanup kept a landed workspace. */
 export function describeRetention(result: { reason?: string; paths?: string[]; archivedAs?: string } | null | undefined): string {
@@ -268,7 +271,12 @@ async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { 
   const generated = await disposablePaths(context.integration.root);
   const commit = readOnly
     ? await jj(context.current.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"])
-    : await workingCopyCommit(context.current.root);
+    : await workingCopyCommit(context.current.root).catch(async (error: unknown) => {
+      // A stale checkout is updated first; one whose stale files held edits keeps them.
+      if (!STALE_WORKING_COPY.test(String(error))) throw error;
+      return (await updateStaleWorkingCopy(context.current.root)).recordedEdits ? null : workingCopyCommit(context.current.root);
+    });
+  if (commit === null) return { commit: "", retained: { cleaned: false, reason: STALE_EDITS } };
   if (readOnly) {
     const edited = await editedSinceSnapshot(context.current.root, generated, context.integration.root);
     if (edited.length) return { commit, retained: { cleaned: false, reason: "unsnapshotted-edits", paths: edited } };
