@@ -14,6 +14,13 @@
   starts; agents that then started another for their Build item left the first one abandoned (two in
   t3code on 2026-10-19).
 
+- **A runner restart no longer strands a verified landing (#3360):** the runner publishes an integration it still
+  holds at start, as a `recovery` operation in its lane, instead of waiting for a later landing that Build refuses
+  (`delivery_pending`) while that delivery is held. Relanding the held commit follows that recovery. Stopping the
+  runner (an upgrade's restart) waits for an operation that is integrating, finalizing, publishing or recovering,
+  bounded by the unit's `TimeoutStopSec` (15 minutes), and the unit's `ExecStop` signals only the runner so the `jj` and `git`
+  commands it started are not cut off; both come from `scripts/setup-runner.sh`, which an existing runner host runs again.
+
 ## v3.35.0
 
 - **A retiring workspace's dependencies become the next spare (#124):** when the pool is short, a

@@ -174,6 +174,8 @@ export type OperationEvent =
   | { type: "submitted"; kind: "verification"; repo: string; commitId: string; submittedBy: string }
   /** A reset of the repository's declared target; `commitId` is its last landed commit at submission, for reading only. */
   | { type: "submitted"; kind: "reset"; repo: string; commitId: string; submittedBy: string }
+  /** The recovery of a held integration, `commitId`: see `RecoveryOperation`. */
+  | { type: "submitted"; kind: "recovery"; repo: string; commitId: string; submittedBy: string }
   /**
    * A nightly audit for the wall-clock `slot` (an ISO instant). `commitId` is the integration head last known at
    * submission, for reading only: the audited head is the one `audit_head` records when the run resolves it.
@@ -306,6 +308,13 @@ export type DeployOperation = OperationFields & { kind: "deploy"; environment: s
 export type ResetOperation = OperationFields & { kind: "reset" };
 
 /**
+ * Publishes the integration a repository holds, so no later landing has to. It takes its repository's lane like a
+ * landing, finishes and publishes `commitId` (the held commit when it was queued), and is `landed` once the
+ * remote has it. A restart mid-recovery queues it again.
+ */
+export type RecoveryOperation = OperationFields & { kind: "recovery" };
+
+/**
  * The nightly audit: the complete suite on the exact integration head, at a wall-clock time. It takes its
  * repository's lane like a landing (see `audit-scheduler.ts`). `slot` is the scheduled instant it covers; `head` the
  * commit it resolved and audited (absent until it resolves one); `cause` the newest cause recorded on it.
@@ -313,11 +322,11 @@ export type ResetOperation = OperationFields & { kind: "reset" };
 export type AuditOperation = OperationFields & { kind: "audit"; slot: string; head?: string; cause?: { cause: AuditCause; by: string; at: string; note?: string } };
 
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
-export type Operation = LandingOperation | ReleaseOperation | VerificationOperation | DeployOperation | ResetOperation | AuditOperation;
+export type Operation = LandingOperation | ReleaseOperation | VerificationOperation | DeployOperation | ResetOperation | RecoveryOperation | AuditOperation;
 
-/** A landing that published, as the audit ledger reads it: the integration commit it made, on `base`. */
+/** A landing that published, as the audit ledger reads it: the integration commit it made, on `base`. A recovery that published a held commit has no change. */
 export type PublishedLanding = {
-  operationId: string; changeId: string; commitId: string; base: string; at: string;
+  operationId: string; changeId: string | null; commitId: string; base: string; at: string;
   /** `green`: the published commit passed the landing checks. `skipped`: a settings landing, whose checks did not run. */
   gate: "green" | "skipped" | "none";
 };

@@ -41,6 +41,12 @@ ExecStart=$(command -v bws) run -- $(command -v slipjay) runner serve
 Restart=always
 RestartSec=5
 KillMode=control-group
+# A stop first tells only the runner (never the jj and git commands it started) to finish an integration in
+# flight, and waits for the service to exit; systemd's signal to the whole group follows, up to this long.
+# The [s] keeps the pattern from matching this command's own line. bws does not forward signals, so the main
+# process is left alone.
+ExecStop=/bin/sh -c "for p in \$(pgrep -f 'runner [s]erve' | grep -vx \${MAINPID}); do kill -TERM \$p; done; while kill -0 \${MAINPID} 2>/dev/null; do sleep 1; done"
+TimeoutStopSec=900
 
 [Install]
 WantedBy=default.target

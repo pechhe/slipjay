@@ -30,7 +30,7 @@ export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");
  * loopback and process the queue. The token comes from the environment (the
  * systemd unit runs this under `bws run`).
  */
-export async function startRunner(options: { home?: string; env?: NodeJS.ProcessEnv; port?: number } = {}): Promise<{ url: string; close(): Promise<void> }> {
+export async function startRunner(options: { home?: string; env?: NodeJS.ProcessEnv; port?: number } = {}): Promise<{ url: string; close(): Promise<void>; drain(): Promise<void> }> {
   const home = options.home ?? runnerHome();
   const env = options.env ?? process.env;
   const token = env[RUNNER_TOKEN_ENV];
@@ -60,7 +60,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     return repository.url;
   };
   const server = await serveRunner(createRunnerHandler({
-    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled,
+    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled, recoverHeld: queue.recoverHeld,
     subscribe: log.subscribe,
     // Without both, Build-bound submissions are refused, never queued unadmitted.
     ...build ? { admitBuild: buildAdmitter(build), onAdmissionUnresolved: () => receipts?.wake(), readBuild: build, buildChecks } : {},
@@ -96,5 +96,5 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   prune();
   const retention = setInterval(prune, 6 * 60 * 60 * 1000);
   retention.unref();
-  return { url: server.url, close: async () => { clearInterval(retention); await pruning; relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
+  return { url: server.url, drain: queue.drain, close: async () => { clearInterval(retention); await pruning; relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
 }

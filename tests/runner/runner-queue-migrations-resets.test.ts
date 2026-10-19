@@ -94,9 +94,11 @@ test("a failed publication holds the finalized integration; relanding publishes 
     f.log.append(RUNNER_CONTROL_ID, { type: "integration_recovered", repo: hold.repo, commitId: hold.commitId });
     assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
     await f.queue.recover();
+    await f.queue.idle();
     const [rediscovered] = f.log.snapshot(f.executor.host).held;
     assert.equal(rediscovered?.commitId, hold.commitId);
-    assert.equal(rediscovered?.retries, 0);
+    // The recovery it queued tried the outage once, and only the hold is left.
+    assert.equal(rediscovered?.retries, 1);
     // Another change cannot land past the held integration, and does not discard it.
     const blocked = f.submit(other);
     const refusal = await f.land(blocked);
@@ -105,7 +107,7 @@ test("a failed publication holds the finalized integration; relanding publishes 
     const [retried] = f.log.snapshot(f.executor.host).held;
     assert.equal(retried?.since, rediscovered!.since);
     assert.equal(retried?.commitId, hold.commitId);
-    assert.equal(retried?.retries, 1);
+    assert.equal(retried?.retries, 2);
     await rm(join(f.root, "reject-push"));
     const reland = f.submit(request);
     const landed = await f.land(reland);

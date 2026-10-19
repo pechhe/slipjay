@@ -23,11 +23,13 @@ async function fixture(logPath = ":memory:", retainSubmission?: Parameters<typeo
   let submissions = 0;
   let onSubscribe: (() => void) | undefined;
   let killOutcome: ReturnType<Parameters<typeof createRunnerHandler>[0]["kill"]> = { status: "idle" };
+  let recoverHeld: Parameters<typeof createRunnerHandler>[0]["recoverHeld"];
   const handler = createRunnerHandler({
     log, token, runnerName: "test-runner", retainSubmission,
     readLog: (id) => Promise.resolve(id === "missing-log" ? null : "command output\n"),
     onSubmitted: () => { submissions++; },
     kill: () => killOutcome,
+    recoverHeld: (repo) => recoverHeld?.(repo) ?? null,
     subscribe(listener) {
       listeners.add(listener);
       onSubscribe?.();
@@ -50,6 +52,7 @@ async function fixture(logPath = ":memory:", retainSubmission?: Parameters<typeo
     get submissions() { return submissions; },
     set onSubscribe(callback: (() => void) | undefined) { onSubscribe = callback; },
     set killOutcome(outcome: typeof killOutcome) { killOutcome = outcome; },
+    set recoverHeld(recover: typeof recoverHeld) { recoverHeld = recover; },
     async close() {
       await server.close();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
@@ -599,6 +602,35 @@ test("request replay preserves cancellation, supersession, publication and held 
   } finally { await f.close(); }
 });
 
+test("relanding a commit whose integration is held follows the hold's recovery instead of submitting again", async () => {
+  const f = await fixture();
+  try {
+    const body = { ...submission("a".repeat(40)), requestId: randomUUID() };
+    const first = await submitted(await f.submit(body));
+    f.append(first.operation.id, { type: "stage", stage: "publishing" });
+    f.append(first.operation.id, { type: "integrated", base: "base", commitId: "held" });
+    f.append(first.operation.id, { type: "integration_held", repo: "owner/repo", commitId: "held", reason: "remote unavailable" });
+    f.append(first.operation.id, { type: "failed", stage: "publishing", reason: "remote unavailable" });
+    const recovery = f.log.append("recovery-op", { type: "submitted", kind: "recovery", repo: "owner/repo", commitId: "held", submittedBy: "runner:recovery" });
+    assert.equal(recovery.operationId, "recovery-op");
+    let asked = 0;
+    f.recoverHeld = () => { asked++; return f.log.operation("recovery-op"); };
+    // A later request identity for the same commit gets the recovery, not a second landing for Build to refuse.
+    const again = await submitted(await f.submit({ ...body, requestId: randomUUID() }));
+    assert.equal(again.operation.id, "recovery-op");
+    assert.equal(again.reattached, true);
+    assert.equal(asked, 1);
+    // The original request identity, retried after its response was lost, follows the recovery rather than the failure it already got.
+    const retried = await submitted(await f.submit(body));
+    assert.equal(retried.operation.id, "recovery-op");
+    assert.equal(asked, 2);
+    assert.equal(f.log.operationsForChange("owner/repo", changeId).length, 1);
+    // Another commit of the change is not the held one.
+    f.recoverHeld = () => { throw new Error("must not recover for another commit"); };
+    const other = await submitted(await f.submit({ ...submission("b".repeat(40)), requestId: randomUUID() }));
+    assert.notEqual(other.operation.id, "recovery-op");
+  } finally { await f.close(); }
+});
 
 test("submission acknowledgement waits for retained source and retention failure never supersedes queued work", async () => {
   let started!: () => void;

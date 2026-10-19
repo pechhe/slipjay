@@ -265,6 +265,9 @@ bun remove -g @pechhe/slipjay && bun add -g github:pechhe/slipjay#<tag>
 slipjay --version
 ```
 
+On a runner host, restart the unit afterwards (`systemctl --user restart slipjay-runner`): it finishes any integration
+in flight first (see [Runner](#runner)), so once the runner runs a release with the #3360 fix, installing needs no idle check.
+
 Never clear Bun's package cache (`bun pm cache rm`) to upgrade: projects that set
 `globalStore = true` link every checkout's packages into it, so clearing it breaks
 their dependencies. When a workspace's dependencies are damaged that way, `slipjay start`
@@ -455,7 +458,14 @@ and held state through the existing recovery path.
   integration branch instead of dropping it, and the failure says so. Every later
   turn first retries finalizing and publishing it (with the same artifact key, so
   the migration is never regenerated), and nothing else lands until that succeeds.
-  Relanding the same commit reports it landed once it is published. A deterministic
+  Relanding the same commit reports it landed once it is published. A restart does not wait
+  for a landing: at start the runner queues one recovery turn per repository that still holds
+  an integration (a `recovery` operation in its lane, ahead of everything queued after it), which
+  finishes and publishes it, so a hold nothing else will touch is cleared without a person.
+  Build keeps a held delivery in its custody until the publication is confirmed and refuses a
+  new admission of the Spec meanwhile (`delivery_pending`), so relanding the commit whose
+  integration is held follows that recovery turn instead: it ends `landed`, and Build's
+  `published` receipt for the original landing follows from the confirmation. A deterministic
   failure needs a person: reconcile the target, then on the runner host move the
   checkout's integration bookmark back to the remote
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
@@ -506,6 +516,16 @@ and held state through the existing recovery path.
   - `repos/<owner>/<name>`: the warm checkouts; `releases/<owner>/<name>`: each repository's release checkout.
   - Finalization receipts and target outcomes stay in
     `~/.slipjay/state/post-integration`. Held-integration retries rely on them; move them with the runner.
+
+  Stopping the runner (`systemctl --user restart slipjay-runner`) first stops admitting work
+  and waits for every operation that is integrating, finalizing, publishing or recovering a held integration, and for a
+  deploy that is running. The unit's `ExecStop` signals only the runner process (`bws` does not forward signals, and
+  systemd would otherwise signal the `jj` and `git` commands it started along with it), so those commands finish; the
+  unit's `TimeoutStopSec` (15 minutes) bounds the wait, and a second SIGTERM to the runner stops it at once. Both are set by
+  `scripts/setup-runner.sh`, which an existing runner host runs again to take them. Work before integration is not waited
+  for: it is recorded as below. So an upgrade's restart does not interrupt a publication, but only a runner that already
+  runs this behaviour under that unit waits: the first restart onto it still stops the old process at once, so wait until
+  `slipjay watch --json` shows nothing running.
 
   On restart, queued operations resume. A landing that was running is recorded as
   landed if its commit already reached the remote, and as failed ("land again")

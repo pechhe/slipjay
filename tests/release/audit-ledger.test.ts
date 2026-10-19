@@ -375,3 +375,21 @@ test("the metrics export's stored events give every repository the same summary 
     assert.equal(auditSummariesFromEvents([], now).size, 0);
   } finally { l.log.close(); }
 });
+
+test("a commit a recovery published stays in the audit ancestry, in the log's projections and the metrics export alike", () => {
+  const l = ledger();
+  try {
+    l.landing("r1");
+    l.audit("green", sha("r1"));
+    // r2 integrated, was held when publication failed, and a recovery published it.
+    l.log.append("landing-held", { type: "submitted", repo: REPO, changeId: "changer2", commitId: sha("srcr2"), bookmark: "slipjay/changes/r2", submittedBy: "test" });
+    l.log.append("landing-held", { type: "integrated", base: sha("r1"), commitId: sha("r2") });
+    l.log.append("landing-held", { type: "failed", stage: "publishing", reason: "remote unavailable" });
+    l.log.append("recovery-r2", { type: "submitted", kind: "recovery", repo: REPO, commitId: sha("r2"), submittedBy: "runner:recovery" });
+    l.log.append("recovery-r2", { type: "landed", base: sha("r1"), commitId: sha("r2"), branch: "main", remote: "origin" });
+    l.audit("failed", sha("r2"));
+    const now = new Date();
+    assert.deepEqual(l.summary(now).openFailure?.suspects, [sha("r2")]);
+    assert.deepEqual(auditSummariesFromEvents(l.log.events(), now).get(REPO), l.summary(now));
+  } finally { l.log.close(); }
+});

@@ -174,13 +174,14 @@ export function resolveCulprits(references: readonly string[], landings: readonl
 export function auditSummariesFromEvents(events: readonly StoredEvent[], now: Date): Map<string, AuditSummary> {
   const terminal: readonly string[] = TERMINAL_EVENT_TYPES;
   const audits = new Map<string, { repo: string; record: { -readonly [K in keyof AuditRecord]: AuditRecord[K] } }>();
-  const submissions = new Map<string, { repo: string; changeId: string }>();
+  const submissions = new Map<string, { repo: string; changeId: string | null }>();
   const published: { operationId: string; at: string; event: Extract<StoredEvent["event"], { type: "landed" }> }[] = [];
   const passed = new Set<string>(), skipped = new Set<string>();
   for (const { operationId, at, event } of [...events].sort((a, b) => a.seq - b.seq)) {
     if (event.type === "submitted") {
       if (event.kind === "audit") audits.set(operationId, { repo: repositoryKey(event.repo), record: { id: operationId, submittedAt: at } });
       else if (event.kind === undefined || event.kind === "landing") submissions.set(operationId, { repo: repositoryKey(event.repo), changeId: event.changeId });
+      else if (event.kind === "recovery") submissions.set(operationId, { repo: repositoryKey(event.repo), changeId: null });
       continue;
     }
     const audit = audits.get(operationId)?.record;

@@ -31,6 +31,8 @@ export function createRunnerHandler(input: {
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
   retainSubmission?(operationId: string, request: SubmitRequest): Promise<Extract<import("./runner-contract.ts").OperationEvent, { type: "source_retained" }>>;
   kill(operationId?: string): KillOutcome;
+  /** Queues the publication of the repository's held integration unless one is queued or running; null when none is held. */
+  recoverHeld?(repo: string): Operation | null;
   /** A queued operation was cancelled: a landing's candidate bookmark is the queue's to delete, and an audit's slot is due again. */
   onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
@@ -82,6 +84,16 @@ export function createRunnerHandler(input: {
       return retained?.type === "source_retained" ? [{ operationId: operation.id, changeId: operation.changeId, commitId: operation.commitId, retained }] : [];
     });
     return input.probeSubmission(body, ahead).catch(() => null);
+  }
+  /**
+   * An earlier attempt of this exact commit integrated it and ended with its publication still held. Build keeps that delivery
+   * in its custody until the publication is confirmed, so a reland follows the hold's recovery instead of asking Build again.
+   */
+  function heldRecovery(repo: string, body: SubmitRequest): Operation | null {
+    const hold = input.log.held().find((entry) => entry.repo === repo);
+    const stranded = hold !== undefined && input.log.operationsForChange(repo, body.changeId).some((op) => op.commitId === body.commitId && op.result !== undefined
+      && input.log.events({ operationId: op.id }).some((row) => row.event.type === "integrated" && row.event.commitId === hold.commitId));
+    return stranded ? input.recoverHeld?.(repo) ?? null : null;
   }
   const awaitingAdmission = (operation: Operation | null | undefined) => operation?.kind === "landing" && operation.admission === "pending" && !operation.result;
   // A client, or a landing check holding its operation's token, reads Build only through here, so the Build credential never leaves the runner.
@@ -225,8 +237,11 @@ export function createRunnerHandler(input: {
           if ((["changeId", "commitId", "bookmark", "submittedBy", "handoffSha256", "repairClaimId"] as const).some((key) => prior.request[key] !== requestFact![key]))
             return json({ error: "Submission request identity is already bound to another candidate" }, 409);
           if (awaitingAdmission(prior.operation)) return await admit(prior.operation.id, body);
-          return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
         }
+        // A retry of the request that stranded the hold follows the hold's recovery too, not the failure it already got.
+        const recovery = heldRecovery(repo, body);
+        if (recovery) return json({ operation: recovery, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
+        if (prior) return json({ operation: prior.operation, reattached: true, requestId: body.requestId });
         const existing = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
         if (existing?.commitId === body.commitId) {
           const original = input.log.events({ operationId: existing.id }).find((row) => row.event.type === "submitted")?.event;

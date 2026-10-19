@@ -312,6 +312,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     : submitted.event.kind === "deploy"
       ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
       : submitted.event.kind === "reset" ? { ...fields, kind: "reset" }
+      : submitted.event.kind === "recovery" ? { ...fields, kind: "recovery" }
       : submitted.event.kind === "verification" ? { ...fields, kind: "verification" }
       : submitted.event.kind === "audit" ? { ...fields, kind: "audit", slot: submitted.event.slot }
       : { ...fields, kind: "landing", changeId: submitted.event.changeId, bookmark: submitted.event.bookmark, ...submitted.event.admission ? { admission: "pending" } : {} };

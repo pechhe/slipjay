@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../../src/lib/runner/runner-contract.ts";
+import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES, recoveryKey } from "../../src/lib/runner/runner-contract.ts";
 import { importSubmissionSource, retainSubmissionSource } from "../../src/lib/landing/submission-source.ts";
 import { TEST_SLICE } from "../support/executor.ts";
 import { test, jj, fixture, until, exactPrefixGate } from "./fixtures/runner-queue-fixture.ts";
@@ -70,6 +70,8 @@ test("recovery recognizes an integrated commit published before the runner stopp
     jj(checkout, ["git", "remote", "set-url", "origin", join(f.root, "unavailable-origin.git")]);
     try {
       await f.queue.recover();
+      // The unreachable remote ends the recovery it queued at the fetch, before it touches the hold.
+      await f.queue.idle();
       assert.deepEqual(f.result(interrupted), { type: "failed", stage: "publishing", reason: "runner restarted during publishing; land again" });
       const [hold] = f.log.snapshot(f.executor.host).held;
       assert.ok(hold);
@@ -78,6 +80,7 @@ test("recovery recognizes an integrated commit published before the runner stopp
       assert.match(hold.reason, /unconfirmed/);
       assert.equal(f.log.openOperations().length, 0);
       await f.queue.recover();
+      await f.queue.idle();
       assert.deepEqual(f.log.snapshot(f.executor.host).held, [hold]);
     } finally {
       jj(checkout, ["git", "remote", "set-url", "origin", f.origin]);
@@ -94,6 +97,78 @@ test("recovery recognizes an integrated commit published before the runner stopp
     f.log.append(unpublished, { type: "integrated", base: landed.base, commitId: "f".repeat(40) });
     await f.queue.recover();
     assert.deepEqual(f.result(unpublished), { type: "failed", stage: "publishing", reason: "runner restarted during publishing; land again" });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+const recoveriesOf = (f: Awaited<ReturnType<typeof fixture>>) =>
+  f.log.events().filter((row) => row.event.type === "submitted" && row.event.kind === "recovery").map((row) => f.log.operation(row.operationId)!);
+
+test("a restart publishes the integration a landing left held, with no further submission", async () => {
+  const f = await fixture();
+  try {
+    const before = f.main();
+    const request = await f.candidate("stranded.txt");
+    await writeFile(join(f.root, "reject-push"), "");
+    const stranded = f.submit(request);
+    const failure = await f.land(stranded);
+    assert.equal(failure?.type === "failed" && failure.stage, "publishing", JSON.stringify(failure));
+    const [hold] = f.log.snapshot(f.executor.host).held;
+    assert.ok(hold);
+    assert.equal(f.main(), before);
+    // Nothing is queued and the remote is back: the restart alone has to publish it.
+    await rm(join(f.root, "reject-push"));
+    assert.equal(f.log.openOperations().length, 0);
+    await f.queue.recover();
+    await f.queue.idle();
+    assert.equal(f.main(), hold.commitId);
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
+    const [recovery, ...rest] = recoveriesOf(f);
+    assert.deepEqual(rest, []);
+    assert.equal(recovery?.result?.type, "landed", JSON.stringify(recovery));
+    assert.equal(recovery?.result?.type === "landed" && recovery.result.commitId, hold.commitId);
+    // The failed landing keeps its verdict; Build learns the publication from the confirmation recorded after it.
+    assert.equal(f.result(stranded)?.type, "failed");
+    const confirmations = f.log.publicationRecoveries().get(recoveryKey("fixture/repo", hold.commitId)) ?? [];
+    const failedAt = f.log.events({ operationId: stranded }).find((row) => row.event.type === "failed")!.seq;
+    assert.ok(confirmations.some((row) => row.seq > failedAt));
+    // A second restart finds nothing held.
+    await f.queue.recover();
+    await f.queue.idle();
+    assert.equal(recoveriesOf(f).length, 1);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a recovery interrupted by a restart queues again, and ends cancelled when nothing is held", async () => {
+  const f = await fixture();
+  try {
+    const recovery = "recovery-interrupted";
+    f.log.append(recovery, { type: "submitted", kind: "recovery", repo: "fixture/repo", commitId: "f".repeat(40), submittedBy: `${f.executor.host}:recovery` });
+    f.log.append(recovery, { type: "stage", stage: "finalizing" });
+    assert.equal(f.log.operation(recovery)!.status, "running");
+    await f.queue.recover();
+    await f.queue.idle();
+    assert.equal(f.log.operation(recovery)!.result?.type, "cancelled", JSON.stringify(f.log.operation(recovery)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("draining waits for a landing that is finalizing and admits nothing new", async () => {
+  const f = await fixture(true);
+  try {
+    await writeFile(join(f.root, "hold-finalize"), "");
+    const first = f.submit(await f.candidate("schema/draining.ts"));
+    f.queue.wake();
+    await until(() => f.log.operation(first)!.stage === "finalizing" || undefined);
+    let drained = false;
+    const draining = f.queue.drain().then(() => { drained = true; });
+    const behind = f.submit(await f.candidate("behind.txt"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(drained, false);
+    await rm(join(f.root, "hold-finalize"));
+    await draining;
+    assert.equal(f.result(first)?.type, "landed", JSON.stringify(f.result(first)));
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(behind)!.status, "queued");
   } finally { await f.dispose(); }
 }, 120_000);
 

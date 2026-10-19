@@ -33,7 +33,7 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerHealth, RunnerStage, ReleaseOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-contract.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-contract.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -110,6 +110,15 @@ export function createRunnerQueue(input: {
   buildChecks?: BuildCheckAccess;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
+  /**
+   * Queue the recovery of `repo`'s held integration, unless one is queued or running: that operation, or null when nothing is held.
+   */
+  recoverHeld(repo: string): Operation | null;
+  /**
+   * Stop admitting work and resolve once no operation is integrating, finalizing, publishing, deploying or recovering a held
+   * integration. Work before integration is not waited for: a restart records it failed ("land again") with nothing published.
+   */
+  drain(): Promise<void>;
   /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
   cancelled(operation: Operation): void;
   /** Stop scheduling deploys and resets: clears timers that are waiting for an interval. */
@@ -149,6 +158,8 @@ export function createRunnerQueue(input: {
   const yielding = new Map<string, string>();
   /** Recovery holds every lane: nothing is admitted until it finishes. */
   let recovering: Promise<void> | undefined;
+  /** Set once the process was told to stop: nothing new is admitted, and the runner exits when no operation is past the point a kill may stop it. */
+  let draining = false;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
   function append(id: string, event: OperationEvent): void {
     log.append(id, event);
@@ -276,7 +287,7 @@ export function createRunnerQueue(input: {
   }
   async function deployLoop(): Promise<void> {
     for (;;) {
-      if (log.paused()) return;
+      if (log.paused() || draining) return;
       const operation = log.openOperations().find((entry): entry is DeployOperation => entry.kind === "deploy" && entry.status === "queued");
       if (!operation) return;
       await processDeploy(operation);
@@ -427,7 +438,7 @@ export function createRunnerQueue(input: {
    * admits nothing new; running operations finish.
    */
   function wakeMain(): void {
-    if (recovering || log.paused()) return;
+    if (recovering || draining || log.paused()) return;
     const open = log.openOperations();
     for (const operation of open) {
       if (admitted.size >= workers) break;
@@ -476,7 +487,7 @@ export function createRunnerQueue(input: {
       entry.controller.abort();
     }
   }
-  function admit(lane: string, operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation | AuditOperation): void {
+  function admit(lane: string, operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation): void {
     admitted.set(operation.id, operation);
     void inLane(lane, () => processOperation(operation))
       .finally(() => { admitted.delete(operation.id); wakeMain(); });
@@ -508,7 +519,7 @@ export function createRunnerQueue(input: {
     return operation.kind === "release"
       && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
   }
-  async function processOperation(operation: LandingOperation | ReleaseOperation | ResetOperation | VerificationOperation | AuditOperation, prefix?: PrefixTurn): Promise<void> {
+  async function processOperation(operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, prefix?: PrefixTurn): Promise<void> {
     let stage: RunnerStage = "queued";
     let stageStarted = Date.now();
     let installSource: "fresh" | "existing" | undefined;
@@ -677,6 +688,7 @@ export function createRunnerQueue(input: {
         return;
       }
       const recordedHold = log.held().find((entry) => entry.repo === operation.repo);
+      let settled = operation.commitId;
       if (!prefix && recordedHold && await revisionExists(checkout, `${recordedHold.commitId} & ::${branch}@${remote}`))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: recordedHold.commitId });
       // A commit integrated by an earlier turn but never published (a failed push, or
@@ -688,7 +700,18 @@ export function createRunnerQueue(input: {
           append(operation.id, { type: "integration_held", repo: operation.repo, commitId: held, reason: "An earlier integration is not yet published" });
         progress(`Finishing ${held.slice(0, 12)}, integrated by an earlier landing but not yet published`);
         await finishIntegration(context, held);
+        settled = held;
         setStage("fetching");
+      }
+      if (operation.kind === "recovery") {
+        // Nothing is held now, by this turn or by whoever published it first: the remote either has the commit or the hold is gone.
+        if (!await revisionExists(checkout, `${settled} & ::${branch}@${remote}`)) {
+          verdict = { type: "cancelled", reason: `${settled.slice(0, 12)} is neither held nor on ${branch}@${remote}; nothing to recover` };
+          return;
+        }
+        const [base = ""] = (await jj(checkout, ["log", "-r", `${settled}-`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split("\n");
+        verdict = { type: "landed", base, commitId: settled, branch, remote };
+        return;
       }
       await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
       let predecessor: PreparedPrefix | null = null;
@@ -1076,8 +1099,9 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "cancelled", reason: AUDIT_INTERRUPTED_REASON });
         continue;
       }
-      if (operation.kind === "verification") {
-        // It publishes nothing: it queues again, behind whatever arrived meanwhile.
+      if (operation.kind === "verification" || operation.kind === "recovery") {
+        // A verification publishes nothing, and a recovery finishes whatever is held however far it got:
+        // either queues again, behind whatever arrived meanwhile.
         append(operation.id, { type: "yielded", to: "a runner restart" });
         continue;
       }
@@ -1171,6 +1195,18 @@ export function createRunnerQueue(input: {
       } catch { /* An unavailable checkout cannot prove recovery; retain recorded holds. */ }
     }
   }
+  function recoverHeld(repo: string): Operation | null {
+    if (!log.held().some((entry) => entry.repo === repo)) return null;
+    const open = log.openOperations(repo).find((entry) => entry.kind === "recovery");
+    if (open) return open;
+    const id = newOperationId();
+    append(id, { type: "submitted", kind: "recovery", repo, commitId: log.held().find((entry) => entry.repo === repo)!.commitId, submittedBy: `${executor.host}:recovery` });
+    wakeMain();
+    return log.operation(id);
+  }
+  /** Whether `operation` is past the stages an owner's kill may stop, or is finishing a held integration. Its verdict ends it. */
+  const inTail = (operation: Operation) => operation.status === "running"
+    && (operation.kind === "recovery" || operation.stage === "integrating" || operation.stage === "finalizing" || operation.stage === "publishing" || operation.stage === "deploying");
   /** Run `work` in `lane`, after whatever holds it. A failure of earlier work does not stop it. */
   function inLane(lane: string, work: () => Promise<void>): Promise<void> {
     const previous = lanes.get(lane) ?? Promise.resolve();
@@ -1192,6 +1228,8 @@ export function createRunnerQueue(input: {
         .finally(() => { recovering = undefined; });
       await recovering;
       for (const repo of Object.keys(config.repos).map(repositoryKey)) {
+        // A hold nothing else will publish: the landing that held it ended, and Build refuses a reland while it is held.
+        recoverHeld(repo);
         await reconcileVerification(repo);
         await scheduleLatest(repo);
       }
@@ -1209,6 +1247,14 @@ export function createRunnerQueue(input: {
         const context = await workspaceContext(checkout).catch(() => null);
         if (context) await cleanup(operation, checkout, context.configuration.remote ?? "origin");
       }).finally(wakeMain);
+    },
+    recoverHeld,
+    async drain() {
+      draining = true;
+      await deploying;
+      while (log.openOperations().some(inTail)) {
+        await new Promise<void>((resolve) => { const stop = log.subscribe(() => { stop(); resolve(); }); });
+      }
     },
     async idle() {
       for (;;) {
