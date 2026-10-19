@@ -2,7 +2,28 @@
 
 ## Unreleased
 
+## v3.34.0
+
+- **A landing reports its verdict before its housekeeping (#110):** once the runner publishes or
+  refuses a landing, `slipjay land` prints the verdict and returns. Releasing the landed workspace and
+  sweeping the others run in a detached process, which writes its output to `pool-refill.log`.
+  Before this, t3code landings waited 174–355 s for housekeeping after publishing.
+- **Housekeeping inspects at most four workspaces at once (#110):** the sweep used to start one jj
+  process per workspace at the same time. With 101 t3code workspaces on the Mac, that was about 100
+  concurrent working-copy snapshots, which pushed the load average past 300 and stalled T3 Code.
+
 ## v3.33.0
+
+- **Housekeeping updates a stale working copy before judging it (#110):** a workspace whose working
+  copy went stale after another workspace rewrote its commit is now updated (`jj workspace
+  update-stale`) and judged, instead of being skipped as unreadable. Any edits jj recovers are restored
+  into the working copy, and the workspace is kept.
+- **Spare refills refresh one spare, in place, only when install inputs change (#110):** a refill
+  refreshes at most one spare, and only when no ready spare already has the integration head's install
+  inputs. It installs in place instead of replacing `node_modules`, and a claim takes the newest spare.
+- **`slipjay start` records where its time goes (#110):** `--json` and the `workspace_start` and
+  `pool_claim` metrics carry `steps`, the exclusive milliseconds of `fetch`, `claim`, `jjNew`,
+  `fingerprint`, `install` and `describe`.
 
 - **A nightly audit runs the complete suite and records suspects (#115, #116):** a repository declares
   `audit` in `slipjay.json` (its own commands, and a wall-clock `timeOfDay` and `timeZone`, default 02:00
