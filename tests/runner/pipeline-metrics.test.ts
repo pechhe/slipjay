@@ -194,13 +194,13 @@ test("keeps held observations with the same commit separate by repository", () =
 });
 
 test("reports workspace claim timings and pool hit rate by repository and machine", () => {
-  const claim = (seq: number, id: string, ms: number, hit: boolean, spareCount: number, durationMs: number): StoredEvent =>
-    row(seq, id, ms, { type: "client", id: `fact-${seq}`, fact: { kind: "pool_claim", workspace: `ws-${seq}`, hit, spareCount, durationMs } });
+  const claim = (seq: number, id: string, ms: number, hit: boolean, spareCount: number, durationMs: number, steps?: Record<string, number>): StoredEvent =>
+    row(seq, id, ms, { type: "client", id: `fact-${seq}`, fact: { kind: "pool_claim", workspace: `ws-${seq}`, hit, spareCount, durationMs, ...steps ? { steps } : {} } });
   const events: StoredEvent[] = [
     row(1, "mac-1", 1_000, { type: "client_operation", repo: "acme/app", workspace: "a", machine: "mac" }),
-    claim(2, "mac-1", 1_001, true, 8, 2_000),
+    claim(2, "mac-1", 1_001, true, 8, 2_000, { fetch: 1_000, jjNew: 400, install: 0 }),
     row(3, "mac-2", 2_000, { type: "client_operation", repo: "acme/app", workspace: "b", machine: "mac" }),
-    claim(4, "mac-2", 2_001, false, 0, 9_000),
+    claim(4, "mac-2", 2_001, false, 0, 9_000, { fetch: 2_000, install: 6_000 }),
     row(5, "vps-1", 3_000, { type: "client_operation", repo: "acme/app", workspace: "c", machine: "vps" }),
     claim(6, "vps-1", 3_001, true, 6, 1_000),
     row(7, "old", 10, { type: "client_operation", repo: "acme/app", workspace: "d", machine: "mac" }),
@@ -212,5 +212,9 @@ test("reports workspace claim timings and pool hit rate by repository and machin
     { machine: "vps", starts: 1, poolHits: 1, medianSpares: 6 },
   ]);
   assert.deepEqual(starts[0]!.claim, { samples: 2, medianMs: 5_500, p90Ms: 9_000 });
-  assert.match(formatPipelineMetrics(pipelineMetrics(events, at(500))), /acme\/app on mac 2 starts, 1 from the pool, claim median 5500ms, p90 9000ms, median 4 spares at start/);
+  assert.deepEqual(starts[0]!.steps, { fetch: 1_500, jjNew: 400, install: 3_000 }, "each step's median over the starts that recorded it");
+  assert.deepEqual(starts[1]!.steps, {}, "a start from before step timing records none");
+  const report = formatPipelineMetrics(pipelineMetrics(events, at(500)));
+  assert.match(report, /acme\/app on mac 2 starts, 1 from the pool, claim median 5500ms, p90 9000ms, median 4 spares at start \(step medians: fetch 1500ms, jjNew 400ms, install 3000ms\)/);
+  assert.match(report, /on vps 1 starts, 1 from the pool, claim median 1000ms, p90 1000ms, median 6 spares at start(;|$)/m);
 });

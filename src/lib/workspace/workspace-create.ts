@@ -19,6 +19,8 @@ import { forgetMissingCheckout, missingCheckoutRefusal } from "./workspace-lifec
 import { startHousekeeping } from "./workspace-housekeeping.ts";
 import { beginAttempt, updateAttempt } from "./workspace-attempts.ts";
 import { claimSpare, refreshDependencies } from "./workspace-pool.ts";
+import { timed } from "./start-steps.ts";
+import type { StartSteps } from "./start-steps.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 
@@ -38,11 +40,13 @@ export type CreatedWorkspace<Readiness = unknown> = WorkspaceContext & {
   pooled: boolean;
   workspacePath: string;
   readiness: Readiness;
+  /** Where this start spent its time (see start-steps.ts). */
+  steps: StartSteps;
 };
 
 /** `base` is the commit a new workspace starts from instead of the integration head (see `resolveStartBase`). */
 /** `attemptId` makes the start durable and recoverable as that allocation attempt (see workspace-attempts). */
-type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; attemptId?: string; hooks?: WorkspaceCreationHooks<Readiness> };
+type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; attemptId?: string; hooks?: WorkspaceCreationHooks<Readiness>; steps?: StartSteps };
 type RecoveryIdentity = { changeId?: string; commitId?: string };
 type AssignmentOptions = {
   issueNumber?: number;
@@ -53,6 +57,7 @@ type AssignmentOptions = {
   created: boolean;
   reused: boolean;
   pooled?: boolean;
+  steps?: StartSteps;
 };
 type AssignedWorkspace = {
   hooks: WorkspaceCreationHooks;
@@ -60,7 +65,8 @@ type AssignedWorkspace = {
   issueNumber: number | undefined;
   prepared: unknown;
   installInputs: string | null | undefined;
-  workspace: Omit<CreatedWorkspace, "readiness">;
+  workspace: Omit<CreatedWorkspace, "readiness" | "steps">;
+  steps: StartSteps;
 };
 
 /**
@@ -90,9 +96,9 @@ async function addWorkspace(hooks: WorkspaceCreationHooks, integrationRoot: stri
 
 // Default preparation records the install inputs it made ready, so this checkout can seed others (see
 // refreshDependencies); a claimed spare's stale dependencies are installed over in place.
-const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, installInputs?: string | null) => hooks.prepare
+const prepare = (hooks: WorkspaceCreationHooks, integrationRoot: string, workspacePath: string, installInputs?: string | null, steps?: StartSteps) => hooks.prepare
   ? hooks.prepare(integrationRoot, workspacePath)
-  : refreshDependencies(integrationRoot, workspacePath, { installInputs });
+  : refreshDependencies(integrationRoot, workspacePath, { installInputs, steps });
 
 function acquired(hooks: WorkspaceCreationHooks, context: WorkspaceContext, issueNumber: number | undefined) {
   hooks.onAcquired?.({ workspaceName: context.current.name, projectRoot: context.integration.root, issueNumber: issueNumber ?? null });
@@ -331,9 +337,10 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
   // Before the allocation lock, so concurrent starts never queue behind each other's fetch.
   const { attemptId } = options;
   if (attemptId) await beginAttempt(attemptId, context.integration.root, options.issueNumber ?? null);
+  const steps: StartSteps = {};
   try {
-    if (await mayStartFromIntegrationHead(cwd, context, options)) await refreshIntegration(context);
-    const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, () => createWorkspaceUnlocked(task, cwd, options));
+    if (await mayStartFromIntegrationHead(cwd, context, options)) await timed(steps, "fetch", () => refreshIntegration(context));
+    const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, () => createWorkspaceUnlocked(task, cwd, { ...options, steps }));
     if (attemptId) await updateAttempt(attemptId, { status: "preparing" });
     // Concurrent starts that resolve to one checkout (the same Issue, or a bind) prepare it in turn.
     const created = await withWorkspaceTransaction(`prepare:${allocation.context.current.root}`, () => ready(allocation)) as CreatedWorkspace<Readiness>;
@@ -354,12 +361,12 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
  * of reinstalling; otherwise `installInputs` is its fingerprint, which the install reuses. Resumed and bound workspaces always reinstall: commands run in
  * them may have changed `node_modules` without changing the install inputs.
  */
-async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext, task: string, { issueNumber, attach = true, workspacePath = context.current.root, prepared, installInputs, ...result }: AssignmentOptions): Promise<AssignedWorkspace> {
+async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext, task: string, { issueNumber, attach = true, workspacePath = context.current.root, prepared, installInputs, steps = {}, ...result }: AssignmentOptions): Promise<AssignedWorkspace> {
   await writeWorkspaceTaskMetadata(context, task);
   if (issueNumber && attach) await attachWorkspaceIssue(context.current.root, issueNumber);
-  await describeAssignedWorkspace(context, task, issueNumber);
+  await timed(steps, "describe", () => describeAssignedWorkspace(context, task, issueNumber));
   if (context.current.name !== "default") await linkSharedPaths(context.integration.root, context.current.root);
-  return { hooks, context, issueNumber, prepared, installInputs, workspace: { ...context, context, pooled: false, ...result, workspacePath } };
+  return { hooks, context, issueNumber, prepared, installInputs, steps, workspace: { ...context, context, pooled: false, ...result, workspacePath } };
 }
 
 /**
@@ -384,15 +391,15 @@ async function describeAssignedWorkspace(context: WorkspaceContext, task: string
 }
 
 /** Make an allocated workspace's checkout ready and report its acquisition. */
-async function ready({ hooks, context, issueNumber, prepared, installInputs: claimedInputs, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
+async function ready({ hooks, context, issueNumber, prepared, installInputs: claimedInputs, steps, workspace }: AssignedWorkspace): Promise<CreatedWorkspace> {
   if (prepared) console.error(`[deps] ${basename(context.current.root)}: install inputs unchanged since the spare was prepared; reusing its dependencies`);
-  const readiness = prepared ?? await prepare(hooks, context.integration.root, context.current.root, claimedInputs);
+  const readiness = prepared ?? await timed(steps, "install", () => prepare(hooks, context.integration.root, context.current.root, claimedInputs, steps));
   const { state, packageManager, installInputs } = (hooks.prepare ? {} : readiness) as { state?: string; packageManager?: string | null; installInputs?: string | null };
   if (installInputs) {
     await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs } });
   }
   acquired(hooks, context, issueNumber);
-  return { ...workspace, readiness };
+  return { ...workspace, readiness, steps };
 }
 
 const START_FETCH_TIMEOUT_MS = 30_000;
@@ -460,7 +467,7 @@ async function newWorkspaceName(cwd: string, root: string, issueNumber: number |
 }
 
 async function createWorkspaceUnlocked(task: string, cwd: string, options: WorkspaceCreationOptions): Promise<AssignedWorkspace> {
-  const { issueNumber, base, hooks = {} } = options;
+  const { issueNumber, base, hooks = {}, steps } = options;
   const context = await workspaceContext(cwd);
   if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
   // A base only shapes a new workspace: binding the current one or resuming an Issue's would ignore it.
@@ -470,7 +477,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   if (context.current.name !== "default") {
     await assertWorkspaceMutationAllowed(context);
     await assignAttempt(options.attemptId, context.current.name, context.current.root, false);
-    return assigned(hooks, context, task, { issueNumber, created: false, reused: false });
+    return assigned(hooks, context, task, { steps,  issueNumber, created: false, reused: false });
   }
   if (issueNumber) {
     const existing = await findIssueWorkspace(cwd, issueNumber, hooks);
@@ -479,7 +486,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
       if (!resumed) throw new Error(`Issue #${issueNumber} workspace disappeared during resume`);
       await assertWorkspaceMutationAllowed(resumed);
       await assignAttempt(options.attemptId, resumed.current.name, existing.root, false);
-      return assigned(hooks, resumed, task, { issueNumber, attach: false, created: false, reused: true, workspacePath: existing.root });
+      return assigned(hooks, resumed, task, { steps,  issueNumber, attach: false, created: false, reused: true, workspacePath: existing.root });
     }
   }
   let name = await newWorkspaceName(cwd, context.integration.root, issueNumber, task);
@@ -488,14 +495,14 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   const survivor = Boolean(issueNumber) && exists(join(workspaceHome(), name));
   // Named before the checkout is claimed or added, so an interrupted start can still be traced to it.
   if (!survivor && options.attemptId) await updateAttempt(options.attemptId, { workspaceName: name, owned: true });
-  const spare = survivor ? null : await claimSpare(context, name, base);
+  const spare = survivor ? null : await timed(steps, "claim", () => claimSpare(context, name, base, steps));
   if (spare) name = spare.name;
   const workspacePath = spare?.root ?? join(workspaceHome(), name);
   await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });
   if (survivor) {
     const recovered = await recoverExistingIssueWorkspace(cwd, workspacePath, name, issueNumber!);
     await assignAttempt(options.attemptId, recovered.current.name, workspacePath, false);
-    return assigned(hooks, recovered, task, { issueNumber, created: false, reused: true, workspacePath });
+    return assigned(hooks, recovered, task, { steps,  issueNumber, created: false, reused: true, workspacePath });
   }
   if (!spare) {
     const baseSha = base ?? await jj(cwd, ["log", "-r", context.integrationBranch, "--no-graph", "-T", "commit_id"]);
@@ -509,7 +516,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   if (!created || created.current.name !== name) throw new Error("Created workspace could not be verified");
   // A host with its own readiness authority (Peach's `prepare` hook) always decides itself.
   const prepared = hooks.prepare ? undefined : spare?.dependencies ?? undefined;
-  const assignment = await assigned(hooks, created, task, { issueNumber, created: true, reused: false, pooled: Boolean(spare), workspacePath, prepared, installInputs: spare?.installInputs });
+  const assignment = await assigned(hooks, created, task, { steps, issueNumber, created: true, reused: false, pooled: Boolean(spare), workspacePath, prepared, installInputs: spare?.installInputs });
   // After the new generation's metadata: until then an interrupted attempt still owns the unmarked checkout.
   await assignAttempt(options.attemptId, name, workspacePath, true);
   return assignment;

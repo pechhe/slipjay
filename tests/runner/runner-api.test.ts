@@ -159,14 +159,19 @@ test("client events are idempotent and reject unknown facts, extra fields and ov
     assert.deepEqual(await duplicate.json(), await first.clone().json());
     assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "client" && row.event.id === "fact-1").length, 1);
 
+    const claim = { kind: "pool_claim", workspace: "w", hit: true, spareCount: 2, durationMs: 900 };
+    assert.equal((await post({ id: "claim-steps", fact: { ...claim, steps: { fetch: 100, claim: 20, jjNew: 300, fingerprint: 400, describe: 80 } } })).status, 200);
     for (const fact of [
       { kind: "unknown_fact", value: 1 },
       { kind: "land_follow", reattached: true, extra: "refused" },
+      { ...claim, steps: { unpacking: 5 } },
+      { ...claim, steps: { fetch: -1 } },
+      { ...claim, steps: [100] },
     ]) assert.equal((await post({ id: "bad", fact })).status, 400);
     const oversized = JSON.stringify({ id: "too-large", fact: { kind: "ssh_forward_failure", reason: "x".repeat(9_000) } });
     assert.ok(new TextEncoder().encode(oversized).byteLength > 8_192);
     assert.equal((await f.request(`/operations/${id}/events`, { method: "POST", body: oversized })).status, 400);
-    assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "client").length, 1);
+    assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "client").length, 2);
   } finally { await f.close(); }
 });
 

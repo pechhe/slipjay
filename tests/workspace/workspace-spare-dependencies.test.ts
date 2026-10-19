@@ -645,16 +645,20 @@ test("a refill refreshes one spare in place, only when the integration head's in
 
     const claimed = await createWorkspace("task", f.repo);
     assert.equal(claimed.workspacePath, fresh!.root, "the claim takes the refreshed spare");
+    assert.deepEqual(Object.keys(claimed.steps).sort(), ["claim", "describe", "fetch", "fingerprint", "jjNew"], "a claim that reuses dependencies records where its time went, and no install");
+    assert.ok(Object.values(claimed.steps).every((ms) => Number.isInteger(ms) && ms >= 0), JSON.stringify(claimed.steps));
     assert.equal((claimed.readiness as { reused?: boolean }).reused, true, "and reuses its dependencies");
     assert.equal(await f.count(), before + 1, "no install ran on claim");
     assert.deepEqual((await refreshSpares(f.repo)).map((spare) => spare.dependencies), ["installed"], "the next refill reaches one more");
 
-    // The last spare is still on the old inputs: its claim installs over its node_modules, never cloning a replacement.
+    // The last spare is still on the old inputs: its claim installs over its node_modules, never cloning a replacement,
+    // and its timing keeps the fingerprints that install takes apart from the install itself.
     assert.equal((await createWorkspace("next", f.repo)).readiness && (await readySpares(f.repo)).length, 1);
     const stale = await createWorkspace("stale", f.repo);
     assert.equal(stale.pooled, true);
     assert.notEqual((stale.readiness as { reused?: boolean }).reused, true);
     assert.equal((stale.readiness as { seeded?: boolean }).seeded, undefined, "the stale spare's own node_modules were installed over");
+    assert.ok((stale.steps.install ?? 0) > 0 && (stale.steps.fingerprint ?? 0) > 0, JSON.stringify(stale.steps));
   } finally {
     await f.dispose();
   }

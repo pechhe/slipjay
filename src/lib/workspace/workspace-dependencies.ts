@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { migrationCommandFailure } from "../landing/migration-command-evidence.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
+import { timed } from "./start-steps.ts";
+import type { StartSteps } from "./start-steps.ts";
 import { runWorkspaceCommand as run } from "../infra/workspace-command.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 
@@ -137,11 +139,13 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   /** Roots whose `node_modules` may seed this install, given the workspace's install-input fingerprint. */
   seedFrom?: (installInputs: string) => AsyncIterable<string> | Iterable<string>;
   installInputs?: string | null;
+  /** A start's step timing, which records the fingerprints this takes (see start-steps.ts). */
+  steps?: StartSteps;
 } = {}): Promise<{
   state: "ready" | "not_required"; packageManager: string | null; installInputs: string | null; seeded?: true;
 }> {
   const inputs = options.installInputs !== undefined ? options.installInputs
-    : options.recordInputs || options.seedFrom ? await installInputFingerprint(workspacePath) : null;
+    : options.recordInputs || options.seedFrom ? await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath)) : null;
   const dependencyCommand = await workspaceDependencyCommand(workspacePath);
   if (!dependencyCommand) return { state: "not_required", packageManager: null, installInputs: options.recordInputs ? inputs : null };
   if (!options.quiet) console.log(`[deps] ${dependencyCommand.command} install in ${basename(workspacePath)}...`);
@@ -179,6 +183,6 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   }
   // A frozen install can report success over a store it did not repair.
   if (damage) throw new Error(damage);
-  const installed = options.recordInputs && inputs && await installInputFingerprint(workspacePath);
+  const installed = options.recordInputs && inputs && await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath));
   return { state: "ready", packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true } : {}) };
 }

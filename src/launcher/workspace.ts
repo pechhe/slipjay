@@ -531,7 +531,7 @@ try {
       // The runner is told in the background: a slow or unreachable one never delays the workspace.
       await recordClientFactsInBackground(result.workspacePath, [
         { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
-        ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started }] : []),
+        ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started, steps: result.steps }] : []),
       ]);
       // Prepare the next session's spare in the background, so its start can claim it.
       // Every new workspace, claimed or fresh, tops the pool up: a miss on an empty pool fills it for the next start.
@@ -544,6 +544,7 @@ try {
           issueNumber: options.issueNumber ?? null, created: result.created ?? false, reused: result.reused ?? false, pooled: Boolean(result.pooled),
           ...(options.attemptId ? { attemptId: options.attemptId } : {}),
           ...(refill ? { refill } : {}),
+          steps: result.steps,
         })}\n`);
       }
     }

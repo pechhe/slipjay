@@ -1,3 +1,4 @@
+import { START_STEPS, type StartStep } from "../workspace/start-steps.ts";
 import { isLandingSubmission, RUNNER_CONTROL_ID, type CauseClass, type RunnerStage, type StoredEvent } from "./runner-contract.ts";
 
 export type MetricTiming = { samples: number; medianMs: number; p90Ms: number };
@@ -10,7 +11,8 @@ export type FlakeCandidate = {
   failureEvidence: { operationId: string; seq: number; fileSet?: string }[];
   passingEvidence?: { operationId: string; seq: number };
 };
-export type WorkspaceStartMetric = { repo: string; machine: string; starts: number; poolHits: number; claim: MetricTiming; medianSpares: number };
+/** `steps`: the median of each start step, over the starts that recorded it (see start-steps.ts). */
+export type WorkspaceStartMetric = { repo: string; machine: string; starts: number; poolHits: number; claim: MetricTiming; medianSpares: number; steps: Partial<Record<StartStep, number>> };
 export type ChangeAttempts = { repo: string; changeId: string; operationIds: string[]; attempts: number; landed: boolean };
 export type HeldMetric = { repo: string; operationId: string; commitId: string; retries: number; durationMs: number; published: boolean; seq: number };
 
@@ -142,19 +144,24 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
 function workspaceStarts(events: readonly StoredEvent[], since: number): WorkspaceStartMetric[] {
   const origins = new Map<string, { repo: string; machine: string }>();
   for (const row of events) if (row.event.type === "client_operation") origins.set(row.operationId, { repo: row.event.repo, machine: row.event.machine });
-  const groups = new Map<string, { repo: string; machine: string; durations: number[]; spares: number[]; hits: number }>();
+  const groups = new Map<string, { repo: string; machine: string; durations: number[]; spares: number[]; hits: number; steps: Partial<Record<StartStep, number[]>> }>();
   for (const row of events) {
     if (row.event.type !== "client" || row.event.fact.kind !== "pool_claim" || !(eventTime(row) >= since) || !validDuration(row.event.fact.durationMs)) continue;
     const origin = origins.get(row.operationId);
     if (!origin) continue;
     const key = JSON.stringify([origin.repo, origin.machine]);
-    const group = groups.get(key) ?? { ...origin, durations: [], spares: [], hits: 0 };
+    const group = groups.get(key) ?? { ...origin, durations: [], spares: [], hits: 0, steps: {} };
     group.durations.push(row.event.fact.durationMs);
+    for (const step of START_STEPS) {
+      const ms = row.event.fact.steps?.[step];
+      if (ms !== undefined && validDuration(ms)) (group.steps[step] ??= []).push(ms);
+    }
     group.spares.push(row.event.fact.spareCount);
     if (row.event.fact.hit) group.hits++;
     groups.set(key, group);
   }
-  return [...groups.values()].map((group) => ({ repo: group.repo, machine: group.machine, starts: group.durations.length, poolHits: group.hits, claim: timing(group.durations)!, medianSpares: timing(group.spares)!.medianMs }))
+  return [...groups.values()].map((group) => ({ repo: group.repo, machine: group.machine, starts: group.durations.length, poolHits: group.hits, claim: timing(group.durations)!, medianSpares: timing(group.spares)!.medianMs,
+    steps: Object.fromEntries(START_STEPS.flatMap((step) => group.steps[step] ? [[step, timing(group.steps[step])!.medianMs]] : [])) }))
     .sort((a, b) => a.repo.localeCompare(b.repo) || a.machine.localeCompare(b.machine));
 }
 
@@ -275,6 +282,6 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
   lines.push(`Flake candidates: ${metrics.flakes.length ? metrics.flakes.map((candidate) => `${candidate.test} (${candidate.confirmed ? "confirmed" : "candidate"}; ${candidate.changes.length} changes; ${candidate.command}${candidate.fileSet ? `; fileSet ${candidate.fileSet}` : ""})`).join("; ") : "none"}`);
   lines.push(`Attempts: ${metrics.attempts.length ? metrics.attempts.map((attempt) => `${attempt.repo}/${attempt.changeId} ${attempt.attempts}${attempt.landed ? " until landed" : " open"}`).join("; ") : "none"}`);
   lines.push(`Held integrations: ${metrics.held.length ? metrics.held.map((entry) => `${entry.repo}/${entry.commitId} retries ${entry.retries}, ${entry.durationMs}ms, ${entry.published ? "published" : "unpublished"}`).join("; ") : "none"}`);
-  lines.push(`Workspace starts: ${metrics.workspaceStarts.length ? metrics.workspaceStarts.map((entry) => `${entry.repo} on ${entry.machine} ${entry.starts} starts, ${entry.poolHits} from the pool, claim median ${Math.round(entry.claim.medianMs)}ms, p90 ${Math.round(entry.claim.p90Ms)}ms, median ${entry.medianSpares} spares at start`).join("; ") : "none"}`);
+  lines.push(`Workspace starts: ${metrics.workspaceStarts.length ? metrics.workspaceStarts.map((entry) => `${entry.repo} on ${entry.machine} ${entry.starts} starts, ${entry.poolHits} from the pool, claim median ${Math.round(entry.claim.medianMs)}ms, p90 ${Math.round(entry.claim.p90Ms)}ms, median ${entry.medianSpares} spares at start${Object.keys(entry.steps).length ? ` (step medians: ${Object.entries(entry.steps).map(([step, ms]) => `${step} ${Math.round(ms)}ms`).join(", ")})` : ""}`).join("; ") : "none"}`);
   return lines.join("\n");
 }

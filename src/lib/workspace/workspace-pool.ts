@@ -1,3 +1,5 @@
+import { timed } from "./start-steps.ts";
+import type { StartSteps } from "./start-steps.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, realpath, rm } from "node:fs/promises";
@@ -154,7 +156,7 @@ function dependencySeeds(integrationRoot: string, workspacePath: string): (insta
  * refill. `installInputs` is the workspace's fingerprint when the caller has already
  * computed it for this tree.
  */
-export async function refreshDependencies(integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null } = {}): Promise<ReturnType<typeof prepareWorkspaceDependencies> extends Promise<infer R> ? R : never> {
+export async function refreshDependencies(integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; steps?: StartSteps } = {}): Promise<ReturnType<typeof prepareWorkspaceDependencies> extends Promise<infer R> ? R : never> {
   return withWorkspaceTransaction(`install:${resolve(integrationRoot)}`, () => installDependencies(integrationRoot, workspacePath, options), { waitMs: INSTALL_WAIT_MS });
 }
 
@@ -168,9 +170,9 @@ async function refillDependencies(integrationRoot: string, workspacePath: string
   return withWorkspaceTransaction("refill", () => installDependencies(integrationRoot, workspacePath, { ...options, quiet: true }), { waitMs: REFILL_WAIT_MS });
 }
 
-const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null }) =>
+const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; steps?: StartSteps }) =>
   prepareWorkspaceDependencies(workspacePath, {
-    quiet: options.quiet, recordInputs: true, installInputs: options.installInputs,
+    quiet: options.quiet, recordInputs: true, installInputs: options.installInputs, steps: options.steps,
     seedFrom: dependencySeeds(integrationRoot, workspacePath),
   });
 
@@ -368,22 +370,22 @@ function reusableDependencies(root: string, prepared: PreparedDependencies | nul
  * waited for); the caller then provisions synchronously. Never falls back to the
  * primary checkout.
  */
-export async function claimSpare(context: WorkspaceContext, name: string, base?: string): Promise<ClaimedSpare | null> {
+export async function claimSpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
   // The pool is held only briefly (a claim, or a refill registering a name), so a short wait suffices.
-  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base), { waitMs: 3000 })
+  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base, steps), { waitMs: 3000 })
     .catch((error: unknown) => { if ((error as { code?: string } | null | undefined)?.code === "ELOCKED") return null; throw error; });
 }
 
 /** A claimed spare's checkout, its new name and what its dependencies need (see `claimSpare`). */
 type ClaimedSpare = { root: string; name: string; dependencies: ReusedDependencies | null; installInputs: string | null };
 
-async function claimReadySpare(context: WorkspaceContext, name: string, base?: string): Promise<ClaimedSpare | null> {
+async function claimReadySpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
   const workspaces = await listWorkspaces(context.integration.root);
   const [spare] = newestFirst(workspaces.filter(isReadySpare));
   if (!spare) return null;
   const { name: assigned } = await renameListedWorkspace(spare, workspaces, name);
-  await jj(spare.root, ["new", base ?? context.integrationBranch]);
-  const installInputs = await installInputFingerprint(spare.root);
+  await timed(steps, "jjNew", () => jj(spare.root, ["new", base ?? context.integrationBranch]));
+  const installInputs = await timed(steps, "fingerprint", () => installInputFingerprint(spare.root));
   const dependencies = reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | null | undefined, installInputs);
   const { spare: _released, prepared: _prepared, preparedAt: _preparedAt, preparedDependencies: _dependencies, createdAt: _created, ...metadata } =
     (await workspaceMetadata(assigned)) ?? {};

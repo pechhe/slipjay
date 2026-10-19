@@ -3,6 +3,7 @@ import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim,
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { ArtifactChunk, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
 import type { BuildAdmitter, BuildRoute } from "../build/build-admission.ts";
@@ -446,11 +447,13 @@ function validClientFact(value: unknown): value is ClientFact {
   const fact = value as Record<string, unknown>;
   const duration = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 30 * 86400_000;
   const integer = (value: unknown, max: number) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
-  const keys: Record<string, string[]> = { workspace_start: ["kind", "workspace", "machine", "startedAt"], pool_claim: ["kind", "workspace", "hit", "spareCount", "durationMs"], land_follow: ["kind", "reattached"], ssh_forward_failure: ["kind", "reason", "observedAt"], preview_start: ["kind", "workspace", "port"] };
+  const keys: Record<string, string[]> = { workspace_start: ["kind", "workspace", "machine", "startedAt"], pool_claim: ["kind", "workspace", "hit", "spareCount", "durationMs", "steps"], land_follow: ["kind", "reattached"], ssh_forward_failure: ["kind", "reason", "observedAt"], preview_start: ["kind", "workspace", "port"] };
   if (typeof fact.kind !== "string" || !keys[fact.kind] || Object.keys(fact).some((key) => !keys[fact.kind as string]!.includes(key))) return false;
   switch (fact.kind) {
     case "workspace_start": return boundedString(fact.workspace) && boundedString(fact.machine) && typeof fact.startedAt === "string" && /^\d{4}-\d\d-\d\dT/.test(fact.startedAt) && Number.isFinite(Date.parse(fact.startedAt));
-    case "pool_claim": return boundedString(fact.workspace) && typeof fact.hit === "boolean" && integer(fact.spareCount, 8) && duration(fact.durationMs);
+    case "pool_claim": return boundedString(fact.workspace) && typeof fact.hit === "boolean" && integer(fact.spareCount, 8) && duration(fact.durationMs)
+      && (fact.steps === undefined || (Boolean(fact.steps) && typeof fact.steps === "object" && !Array.isArray(fact.steps)
+        && Object.entries(fact.steps as object).every(([step, ms]) => (START_STEPS as readonly string[]).includes(step) && duration(ms))));
     case "land_follow": return typeof fact.reattached === "boolean";
     case "ssh_forward_failure": return boundedString(fact.reason) && typeof fact.observedAt === "string" && /^\d{4}-\d\d-\d\dT/.test(fact.observedAt) && Number.isFinite(Date.parse(fact.observedAt));
     case "preview_start": return boundedString(fact.workspace) && integer(fact.port, 65535) && fact.port !== 0;

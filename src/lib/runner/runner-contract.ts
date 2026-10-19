@@ -1,6 +1,7 @@
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { ReleaseResult } from "../release/release.ts";
 import type { VerificationDeclaration } from "../policy/verification-policy.ts";
+import type { StartSteps } from "../workspace/start-steps.ts";
 
 /**
  * The runner's contract: one long-lived control plane that owns the landing queue
@@ -100,7 +101,7 @@ export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[]; m
 export type CauseClass = "gate" | "conflict" | "infrastructure" | "policy" | "killed" | "paused_out" | "held" | "superseded" | "cancelled";
 export type ClientFact =
   | { kind: "workspace_start"; workspace: string; machine: string; startedAt: string }
-  | { kind: "pool_claim"; workspace: string; hit: boolean; spareCount: number; durationMs: number }
+  | { kind: "pool_claim"; workspace: string; hit: boolean; spareCount: number; durationMs: number; steps?: StartSteps }
   | { kind: "land_follow"; reattached: boolean }
   | { kind: "ssh_forward_failure"; reason: string; observedAt: string }
   | { kind: "preview_start"; workspace: string; port: number };
