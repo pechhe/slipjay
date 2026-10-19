@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.36.0
 
 - **A landing that would conflict is refused at submission (Build #3356):** before a candidate
   queues, the runner dry-runs its rebase onto the integration head and every landing queued ahead of
