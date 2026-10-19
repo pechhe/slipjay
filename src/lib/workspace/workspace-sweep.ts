@@ -4,7 +4,8 @@ import { realpath, stat } from "node:fs/promises";
 import { run, STALE_WORKING_COPY, updateStaleWorkingCopy, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { trackerOf, workItemClosed } from "../build/tracker.ts";
 import type { BuildReader } from "../build/tracker.ts";
-import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState } from "./workspace-state.ts";
+import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState, WORKSPACE_INSPECTION_CONCURRENCY } from "./workspace-state.ts";
+import { mapBounded } from "../infra/bounded-map.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
 import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, STALE_EDITS, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
 import { artifactPublished } from "../landing/landing-steps.ts";
@@ -236,7 +237,7 @@ export async function planDisposableWorkspaces(cwd: string = process.cwd(), opti
   const judge = await sweepJudge(cwd, options, { readOnly: true });
   if (!judge) return [];
   const processes = await judge.processes();
-  const planned = await Promise.all(judge.workspaces.map(async (workspace): Promise<PlannedWorkspace> => {
+  const planned = await mapBounded(judge.workspaces, WORKSPACE_INSPECTION_CONCURRENCY, async (workspace): Promise<PlannedWorkspace> => {
     const decision = await judge.decide(workspace).catch((error: unknown): SweepDecision =>
       ({ remove: false, reason: `unknown: ${error instanceof Error ? error.message : String(error)}`, report: true }));
     const isolated = workspace.name !== "default" && Boolean(workspace.root) && existsSync(workspace.root);
@@ -259,14 +260,14 @@ export async function planDisposableWorkspaces(cwd: string = process.cwd(), opti
       action: decision.remove ? "remove" : "keep",
       reason: decision.remove ? (decision.missing ? "checkout missing on disk; nothing to keep" : workspace.landed ? "landed and published" : "unused and empty") : decision.reason,
     };
-  }));
+  });
   // Orphans in workspace storage that name this repository, or none that still exists.
   const repository = await realpath(judge.context.integration.root).catch(() => judge.context.integration.root);
   const orphans = (await findOrphanedCheckouts({ now: options.now })).filter((orphan) => orphan.kind !== "unregistered" || orphan.repository === repository);
-  return [...planned, ...await Promise.all(orphans.map(async (orphan): Promise<PlannedWorkspace> => ({
+  return [...planned, ...await mapBounded(orphans, WORKSPACE_INSPECTION_CONCURRENCY, async (orphan): Promise<PlannedWorkspace> => ({
     name: orphan.name, root: orphan.root, repository: orphan.repository, state: "orphan", issueNumber: null, task: null, landing: null,
     assignedAt: null, holders: orphan.holders, uniqueFiles: orphan.files, sizeBytes: await diskBytes(orphan.root), action: orphan.action, reason: orphan.reason,
-  })))];
+  }))];
 }
 
 /** A landing's phase and publication as of the last fetch, read without promoting or fetching. */

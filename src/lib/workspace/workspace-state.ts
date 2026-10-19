@@ -7,6 +7,7 @@ import { jj, jjWorkspaceRoot, parseWorkspaceList, revisionExists, revisionFacts,
 import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./workspace-paths.ts";
 import { processAlive } from "./workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { mapBounded } from "../infra/bounded-map.ts";
 
 export type LandingState = Record<string, unknown> & {
   version: number;
@@ -127,12 +128,18 @@ export type InspectedWorkspace = WorkspaceEntry & { hasWork: boolean; landed: bo
  */
 const firstLine = (error: unknown) => (error instanceof Error ? error.message : String(error)).split("\n").map((line) => line.trim()).find(Boolean)?.slice(0, 200) ?? "unreadable";
 
+/**
+ * How many workspaces are inspected at once. Each inspection runs jj, which snapshots
+ * the checkout unless read-only; a repository with a hundred workspaces must not start
+ * a hundred jj processes at once.
+ */
+export const WORKSPACE_INSPECTION_CONCURRENCY = 4;
+
 export async function inspectWorkspaces(cwd: string = process.cwd(), { readOnly = false }: { readOnly?: boolean } = {}): Promise<InspectedWorkspace[]> {
   const context = await workspaceContext(cwd);
   if (!context) return [];
   const workspaces = await listWorkspaces(cwd, { readOnly });
-  return await Promise.all(
-    workspaces.map(async (workspace) => ({
+  return await mapBounded(workspaces, WORKSPACE_INSPECTION_CONCURRENCY, async (workspace) => ({
       ...workspace,
       ...workspace.name === "default"
         ? { hasWork: false }
@@ -140,8 +147,7 @@ export async function inspectWorkspaces(cwd: string = process.cwd(), { readOnly 
           (hasWork) => ({ hasWork }),
           (error: unknown) => ({ hasWork: true, unreadable: firstLine(error) })),
       landed: Boolean(await readLandingState(workspace.name, { readOnly: true })),
-    })),
-  );
+    }));
 }
 
 export async function inspectWorkspace(cwd: string = process.cwd()): Promise<InspectedWorkspace | null> {
