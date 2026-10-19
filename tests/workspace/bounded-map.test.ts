@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { mapBounded } from "../../src/lib/infra/bounded-map.ts";
+import { mapBounded } from "../../src/lib/workspace/bounded-map.ts";
 
 test("a bounded map never runs more than its limit at once and keeps input order", async () => {
   let running = 0;

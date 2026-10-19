@@ -10,8 +10,8 @@ One package, two public entries (`@pechhe/slipjay` and `@pechhe/slipjay/delivery
 |---|---|
 | `workspace` | Workspace creation, state, attempts, spare pool, housekeeping, sweep, lifecycle, teardown, cutover |
 | `landing` | Landing candidates, steps and outcome, submission handoff and source, required verification, migration candidates, repair claims and repair workspaces |
-| `runner` | The runner service, queue, local executor, API, HTTP, log, watch and client; client facts; command evidence and artifacts; pipeline metrics; failure classification |
-| `release` | Release, deploy and reset (with their schedulers) and the post-integration steps they share |
+| `runner` | The runner service, queue, local executor, API, HTTP, log, watch and client; client facts; command evidence and artifacts; pipeline metrics; verification test-report ingestion and per-file timing evidence; failure classification |
+| `release` | Release, deploy and reset (with their schedulers) and the post-integration steps they share; nightly audit scheduling, evidence and failure attribution |
 | `build` | Build integration: admission, receipts, handoff, pipeline relay, the tracker and Issue references |
 | `policy` | Repository policy (`slipjay.json`) and machine configuration: execution, deployment, verification and post-integration policy, `policy` command and settings |
 | `infra` | Primitives with consumers in several capabilities: bounded processes, the `jj` wrapper, workspace transactions (locking), command execution, UTF-8 and verification-output text, checkout resolution |

@@ -5,7 +5,7 @@ import { run, STALE_WORKING_COPY, updateStaleWorkingCopy, workspaceContext, work
 import { trackerOf, workItemClosed } from "../build/tracker.ts";
 import type { BuildReader } from "../build/tracker.ts";
 import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState, WORKSPACE_INSPECTION_CONCURRENCY } from "./workspace-state.ts";
-import { mapBounded } from "../infra/bounded-map.ts";
+import { mapBounded } from "./bounded-map.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
 import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, STALE_EDITS, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
 import { artifactPublished } from "../landing/landing-steps.ts";

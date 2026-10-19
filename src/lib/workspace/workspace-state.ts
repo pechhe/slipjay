@@ -7,7 +7,7 @@ import { jj, jjWorkspaceRoot, parseWorkspaceList, revisionExists, revisionFacts,
 import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./workspace-paths.ts";
 import { processAlive } from "./workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
-import { mapBounded } from "../infra/bounded-map.ts";
+import { mapBounded } from "./bounded-map.ts";
 
 export type LandingState = Record<string, unknown> & {
   version: number;
