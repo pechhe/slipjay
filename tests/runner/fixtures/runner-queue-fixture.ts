@@ -94,7 +94,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, shortLandingP90Seconds, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean; shortLandingP90Seconds?: number; scopes?: boolean } = {}) {
+  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -193,7 +193,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     return run(request);
   } };
   const config: RunnerConfig = { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {}, ...extraRepos },
-    ...workers === undefined ? {} : { workers }, ...shortLandingP90Seconds === undefined ? {} : { shortLandingP90Seconds },
+    ...workers === undefined ? {} : { workers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } };
   const log = openOperationLog(logPath, runnerLogOptions(config, executor));
   const unsubscribe = log.subscribe((event) => {
