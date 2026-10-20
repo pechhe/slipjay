@@ -4,7 +4,8 @@
 
 - **Reconciling a held integration starts with `slipjay runner pause` (#3360):** a recovery that fails every time is
   retried until it publishes or is released, so the README's manual fix now pauses the runner first (a paused runner
-  starts no retry) and resumes it after the commit is landed again.
+  starts no retry or release). After the bookmark is moved back, it resumes the runner, waits for the recovery turn to
+  end `cancelled` and only then lands the commit again.
 
 ## v3.39.0
 
