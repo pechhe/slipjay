@@ -130,6 +130,13 @@ export async function jj(cwd: string, args: string[], options: Record<string, un
 }
 
 /**
+ * jj's own trunk() follows whichever remote's default branch it found (a fork's upstream, or
+ * only main, master or trunk), so it can miss the integration branch: published integration
+ * history would stay mutable, and agents reading trunk() would read another repository's code.
+ */
+export const integrationTrunkConfig = (branch: string, remote: string): Readonly<Record<string, string>> => ({ 'revset-aliases."trunk()"': `${branch}@${remote}` });
+
+/**
  * Set `settings` in a checkout's repository-level jj config, writing only the ones it does
  * not already hold as those strings: one read instead of a write per setting on every use.
  */

@@ -48,7 +48,7 @@ const RECOVERY_RETRY_MAX_MS = 900_000;
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
-import { ensureRepoConfig, jj, run as workspaceRun, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
+import { ensureRepoConfig, integrationTrunkConfig, jj, run as workspaceRun, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 
 /**
  * An integration the runner could not finalize or publish. It stays on the runner's
@@ -711,9 +711,8 @@ export function createRunnerQueue(input: {
       integrationBranch = context.integrationBranch;
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
-      // jj's default trunk() names only main, master or trunk: published integration history on any
-      // other branch would be mutable, and the candidate cleanup below would abandon it.
-      await ensureRepoConfig(checkout, { ...RUNNER_JJ_DEFAULTS, ...config.jj, 'revset-aliases."trunk()"': `${branch}@${remote}` });
+      // Mutable integration history is what the candidate cleanup below would abandon.
+      await ensureRepoConfig(checkout, { ...RUNNER_JJ_DEFAULTS, ...config.jj, ...integrationTrunkConfig(branch, remote) });
       const retained = operation.kind === "landing" ? log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event : undefined;
       const retainedSource = retained?.type === "source_retained" ? retained : undefined;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" && !retainedSource ? ["--branch", operation.bookmark] : []]);

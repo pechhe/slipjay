@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
+import { ensureRepoConfig, integrationTrunkConfig, legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { metadataHome, startFetchHome, workspaceHome } from "./workspace-paths.ts";
 import {
   assertIssueAvailable,
@@ -384,6 +384,8 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
  */
 async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext, task: string, { issueNumber, attach = true, workspacePath = context.current.root, prepared, installInputs, steps = {}, ...result }: AssignmentOptions): Promise<AssignedWorkspace> {
   await writeWorkspaceTaskMetadata(context, task);
+  // Repository-wide, so every workspace's trunk() (and the briefs pinned from it) names this repository's integration.
+  await ensureRepoConfig(context.current.root, integrationTrunkConfig(context.integrationBranch, context.configuration.remote ?? "origin"));
   if (issueNumber && attach) await attachWorkspaceIssue(context.current.root, issueNumber);
   await timed(steps, "describe", () => describeAssignedWorkspace(context, task, issueNumber));
   if (context.current.name !== "default") await linkSharedPaths(context.integration.root, context.current.root);
