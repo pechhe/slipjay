@@ -4,7 +4,8 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { TEST_SLICE } from "../support/executor.ts";
-import { alive, fixture, hanging, systemd, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { alive, fixture, hanging, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
 import { queueFixture, verified } from "./fixtures/short-landings.ts";
 
 // Short landings through depth two, pre-verification yields, unlimited hosts and a runner restart (Build #3010).
@@ -140,7 +141,7 @@ test("a runner killed while a short landing runs beside two long ones ends each 
       assert.ok(!f.log.events({ operationId: id }).some(({ event }) => event.type === "integrated" || event.type === "landed"));
     }
     assert.deepEqual({ repo: f.main(), other: f.otherMain() }, before, "nothing was published");
-    if (systemd) assert.deepEqual(left.map(alive), left.map(() => false), "recovery stopped every command the killed runner left");
+    if (assertSystemdOrSkip()) assert.deepEqual(left.map(alive), left.map(() => false), "recovery stopped every command the killed runner left");
     // The new process starts with every place free.
     const next = [
       f.submit(await f.candidate("a.txt")),

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { decideSystemd, onRunner, systemdTest } from "./systemd-gate.ts";
+import { assertSystemdOrSkip, decideSystemd, onRunner, systemdTest } from "./fixtures/systemd-gate.ts";
 
 test("on the runner without systemd the decision fails and names the missing systemd", () => {
   const decision = decideSystemd({ platform: "linux", runtimeDir: undefined, onRunner: true });
@@ -35,4 +35,11 @@ test("the registrar runs, skips or registers a failing test according to the dec
   systemdTest(base, { platform: "linux", onRunner: true })("c", () => {});
   assert.deepEqual(registered, ["test:a", "skip:b", "test:c"]);
   assert.throws(bodies[1]!, /user systemd unavailable \(XDG_RUNTIME_DIR unset\) on the runner/);
+});
+
+test("the assertion helper runs with systemd, skips off the runner without it, and throws the gate's message on the runner without it", () => {
+  assert.equal(assertSystemdOrSkip({ platform: "linux", runtimeDir: "/run/user/1", onRunner: true }), true);
+  assert.equal(assertSystemdOrSkip({ platform: "darwin", onRunner: false }), false);
+  assert.equal(assertSystemdOrSkip({ platform: "linux", onRunner: false }), false);
+  assert.throws(() => assertSystemdOrSkip({ platform: "linux", onRunner: true }), /user systemd unavailable \(XDG_RUNTIME_DIR unset\) on the runner: systemd containment tests must run here/);
 });

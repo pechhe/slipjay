@@ -1,4 +1,4 @@
-import { TEST_REPORT_DIR_ENV } from "../../src/lib/runner/test-reports.ts";
+import { TEST_REPORT_DIR_ENV } from "../../../src/lib/runner/test-reports.ts";
 
 /** What decides whether a systemd test runs: the platform, the user runtime directory and whether this is a landing on the runner. */
 export type SystemdInputs = { platform: string; runtimeDir?: string; onRunner: boolean };
@@ -19,6 +19,13 @@ export function decideSystemd({ platform, runtimeDir, onRunner }: SystemdInputs)
   if (platform === "linux" && runtimeDir) return { action: "run" };
   if (!onRunner) return { action: "skip" };
   return { action: "fail", message: "user systemd unavailable (XDG_RUNTIME_DIR unset) on the runner: systemd containment tests must run here" };
+}
+
+/** Whether a containment assertion inside a test should run: true with systemd, false (skip it) off the runner without it, and a throw of the gate's message on the runner without it. */
+export function assertSystemdOrSkip(inputs: SystemdInputs = systemdInputs()): boolean {
+  const decision = decideSystemd(inputs);
+  if (decision.action === "fail") throw new Error(decision.message);
+  return decision.action === "run";
 }
 
 type Registrar = ((name: string, body: () => unknown, timeout?: number) => unknown) & { skip: (name: string, body: () => unknown, timeout?: number) => unknown };

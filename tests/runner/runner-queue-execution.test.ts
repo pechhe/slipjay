@@ -9,7 +9,8 @@ import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
 import { runContainment } from "../../src/lib/runner/local-executor.ts";
 import { runnerWorkers } from "../../src/lib/runner/runner-queue.ts";
 import { TEST_SLICE, testExecutor } from "../support/executor.ts";
-import { gateFailureOutput, gate, command, test, fixture, until, alive, systemd, cgroupOf, hanging, started, systemdTest } from "./fixtures/runner-queue-fixture.ts";
+import { gateFailureOutput, gate, command, test, fixture, until, alive, cgroupOf, hanging, started, systemdTest } from "./fixtures/runner-queue-fixture.ts";
+import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
 
 test("gate failure preserves main and verbatim evidence; an amended change can land again", async () => {
   const f = await fixture();
@@ -123,7 +124,7 @@ test("the owner's kill stops a running gate: cancelled, never passed, main uncha
     assert.equal(alive(gatePid), false, "the gate process is gone");
     await until(() => alive(childPid) ? undefined : true, 5_000);
     // A systemd scope reaches the tool's own process group; a bare process group cannot.
-    if (systemd) {
+    if (assertSystemdOrSkip()) {
       assert.equal(alive(toolPid), false, "the gate's detached tool is gone");
       assert.equal(alive(scopedPid!), false, "the tool in the gate's own nested scope is gone");
     } else process.kill(toolPid, "SIGKILL");
