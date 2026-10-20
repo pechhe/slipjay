@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **A depth-two head held by an older release, reset or audit names it (Build #3010):** before, only the
+  successor did, so `runner watch` and `slipjay land` showed the head as about to start while the queue held it.
+
 - **Reconciling a held integration starts with `slipjay runner pause` (#3360):** a recovery that fails every time is
   retried until it publishes or is released, so the README's manual fix now pauses the runner first (a paused runner
   starts no retry or release). After the bookmark is moved back, it resumes the runner and lands the commit, which

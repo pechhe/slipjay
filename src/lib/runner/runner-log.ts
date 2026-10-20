@@ -130,8 +130,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         if (held) operation.stage = "paused";
         // A depth-two landing verifies beside the one landing its repository runs, when a place is free.
         const turn = index === 1 && running !== undefined && entries[0] === running && running.kind === "landing" && operation.kind === "landing" && depth(operation.repo) === 2;
-        // As the queue does, an older reset, release or audit of its repository fences a successor.
-        const fence = turn ? open.slice(0, open.indexOf(operation)).find((other) => repositoryKey(other.repo) === repositoryKey(operation.repo)
+        // As the queue does, an older reset, release or audit of its repository fences a depth-two head and successor.
+        const fence = (turn || index === 0 && operation.kind === "landing" && depth(operation.repo) === 2) ? open.slice(0, open.indexOf(operation)).find((other) => repositoryKey(other.repo) === repositoryKey(operation.repo)
           && other.kind !== "landing" && other.kind !== "deploy" && other.kind !== "verification") : undefined;
         const successor = turn && !fence;
         if (fence) operation.waitingFor = label(fence);

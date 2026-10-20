@@ -94,6 +94,16 @@ test("an older release of its repository holds a depth-two successor back, and t
   log.close();
 });
 
+test("an older release of its repository holds a depth-two head back too, and the head names it", () => {
+  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 });
+  verified(log, "acme/t", 10, 20_000);
+  const release = newOperationId();
+  log.append(release, { type: "submitted", kind: "release", repo: "acme/t", commitId: "e".repeat(40), migrationsReady: false, submittedBy: "test" });
+  const head = landing(log, "acme/t");
+  assert.match(waiting(log, head) ?? "", /^release /, "the queue fences a head on an older release as it does a successor");
+  log.close();
+});
+
 test("a short landing starts beside two long ones, one more waits, and a long one starts when a long one ends", async () => {
   const { f, held, release, status, running, settle } = await queueFixture();
   try {
