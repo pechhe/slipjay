@@ -492,12 +492,13 @@ and held state through the existing recovery path.
   new admission of the Spec meanwhile (`delivery_pending`), so relanding the commit whose
   integration is held follows that recovery turn instead: it ends `landed`, and Build's
   `published` receipt for the original landing follows from the confirmation. A deterministic
-  failure needs a person: reconcile the target, then on the runner host move the
+  failure needs a person: `slipjay runner pause` first, so the retries below stand still while
+  you work, reconcile the target, then on the runner host move the
   checkout's integration bookmark back to the remote
   (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
   The next recovery turn finds the commit neither held nor on the remote, records
   `integration_released` to clear the hold and ends `cancelled`; land the commit again then, as
-  an ordinary submission. A recovery turn that fails (the remote is unreachable, say) is queued
+  an ordinary submission (`slipjay runner resume` then, if you paused). A recovery turn that fails (the remote is unreachable, say) is queued
   again after 30 seconds, doubling per failure up to 15 minutes, until it publishes, releases the hold
   or is stopped. Build accepts only a confirmed publication after an integration whose publication
   was unknown, so it keeps refusing new admissions of that Spec (`delivery_pending`) after a release until

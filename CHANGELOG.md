@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Reconciling a held integration starts with `slipjay runner pause` (#3360):** a recovery that fails every time is
+  retried until it publishes or is released, so the README's manual fix now pauses the runner first (a paused runner
+  starts no retry) and resumes it after the commit is landed again.
+
 ## v3.39.0
 
 - **A landing records what its commit declares:** the `landed` event now carries `repo` and
