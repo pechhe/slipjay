@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.39.2
+
+- **HQ follows the runner within seconds:** the pipeline relay now pushes five seconds after a new ledger event (one
+  pass per burst, and another after a pass an event arrived during), as well as at start and every 30 minutes. Before,
+  it pushed only on the 30-minute timer, so a staging deploy or landing could take half an hour to reach HQ's release
+  line and Build acceptance readiness waited on it.
+
+- **A fork's submission probe uses the integration branch its candidate declares:** the probe resolved the branch from
+  its own checkout, whose working copy sits on the head it last probed, and a fork's remote default (upstream's `main`)
+  carries no policy. T3 Code's probe therefore rebased onto upstream `main`, and every merge candidate's assembled
+  message (about 17,000 upstream descriptions) exceeded Linux's per-argument limit, so `jj new` failed with `E2BIG`
+  and the submission queued without a conflict check.
+
 ## v3.39.1
 
 - **A depth-two head held by an older release, reset or audit names it (Build #3010):** before, only the

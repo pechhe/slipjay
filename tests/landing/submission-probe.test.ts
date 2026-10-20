@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type AddressInfo, type Socket } from "node:net";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
@@ -113,6 +113,41 @@ test("a merge candidate is probed after its first-parent line moves onto the lan
     assert.equal(merge.status, 422, JSON.stringify(merge.body));
     assert.deepEqual(merge.body.paths, ["README.md"]);
     assert.deepEqual(merge.body.conflictsWith, { operationId: ahead.body.operation!.id, changeId: ahead.changeId });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a fork whose remote default carries no policy is probed against the integration branch its candidate declares", async () => {
+  const f = await project();
+  try {
+    const initial = jj(f.repo, ["log", "-r", "main@origin", "--no-graph", "-T", "commit_id"]);
+    // The fork's integration line declares `fork`; the remote's default, `main`, is upstream's and has no policy.
+    jj(f.repo, ["new", initial]);
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8")) as Record<string, unknown>;
+    await writeFile(join(f.repo, "slipjay.json"), JSON.stringify({ ...policy, integrationBranch: "fork" }));
+    jj(f.repo, ["describe", "-m", "Fork policy"]);
+    const forkBase = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    jj(f.repo, ["new"]);
+    await writeFile(join(f.repo, "README.md"), "published on the fork\n");
+    jj(f.repo, ["describe", "-m", "Publish README.md on the fork"]);
+    jj(f.repo, ["bookmark", "set", "fork", "-r", "@"]);
+    jj(f.repo, ["new", initial]);
+    await rm(join(f.repo, "slipjay.json"));
+    jj(f.repo, ["describe", "-m", "Upstream"]);
+    jj(f.repo, ["bookmark", "set", "main", "-r", "@", "--allow-backwards"]);
+    jj(f.repo, ["git", "push", "--remote", "origin", "--bookmark", "fork", "--bookmark", "main"]);
+    // The candidate was written on the fork's older head, so it conflicts with that head and nothing else.
+    jj(f.repo, ["new", forkBase]);
+    await writeFile(join(f.repo, "README.md"), "candidate\n");
+    jj(f.repo, ["describe", "-m", "Change README.md on the fork"]);
+    const changeId = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
+    const commitId = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    const bookmark = candidateBookmark(changeId);
+    execFileSync("git", ["--git-dir", jj(f.repo, ["git", "root"]), "push", "-q", f.remote, `${commitId}:refs/heads/${bookmark}`], { stdio: "pipe" });
+    const request: SubmitRequest = { repo: "owner/repo", changeId, commitId, bookmark, submittedBy: "fixture" };
+    const probe = () => probeSubmission({ home: join(f.root, "runner"), url: f.remote, jjConfig: RUNNER_JJ_DEFAULTS, ahead: [], request });
+    assert.deepEqual(await probe(), { paths: ["README.md"], conflictsWith: null });
+    // Again from the checkout the first probe left behind.
+    assert.deepEqual(await probe(), { paths: ["README.md"], conflictsWith: null });
   } finally { await f.dispose(); }
 }, 120_000);
 

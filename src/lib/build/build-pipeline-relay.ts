@@ -1,5 +1,7 @@
-/** How often the relay pushes; HQ treats pipeline data older than three hours as stale. */
+/** How often the relay pushes with nothing new; HQ treats pipeline data older than three hours as stale. */
 export const PIPELINE_RELAY_INTERVAL_MS = 30 * 60 * 1000;
+/** How long after a new ledger event the relay pushes, so a burst of events goes in one pass. */
+export const PIPELINE_RELAY_WAKE_DELAY_MS = 5_000;
 /** One batch's body stays well under HQ's 4 MiB cap; a larger page is read again with a lower `limit`. */
 export const PIPELINE_RELAY_MAX_BODY_BYTES = 3 * 1024 * 1024;
 /** Each local read and each POST is aborted after this long. */
@@ -31,7 +33,9 @@ export function createPipelineRelay(options: {
   origin: string; token: string;
   /** The local export, `GET /v1/metrics/events?since=&limit=`; throws when it cannot answer within the signal. */
   readPage(since: number, limit: number, signal: AbortSignal): Promise<PipelinePage>;
-  intervalMs?: number; timeoutMs?: number; maxBodyBytes?: number; fetch?: Fetch; log?(message: string): void;
+  /** The ledger's new events; each one schedules a pass shortly after it, so HQ follows the runner within seconds. */
+  subscribe?(listener: () => void): () => void;
+  intervalMs?: number; wakeDelayMs?: number; timeoutMs?: number; maxBodyBytes?: number; fetch?: Fetch; log?(message: string): void;
 }) {
   const origin = options.origin.trim(), token = options.token.trim();
   if (!origin || !token) throw new Error("The pipeline relay needs HQ's origin and YARDSMITH_SLIPJAY_BUILD_TOKEN");
@@ -40,7 +44,8 @@ export function createPipelineRelay(options: {
   const timeoutMs = options.timeoutMs ?? PIPELINE_RELAY_TIMEOUT_MS;
   const maxBytes = options.maxBodyBytes ?? PIPELINE_RELAY_MAX_BODY_BYTES;
   const log = options.log ?? ((message: string) => console.error(`pipeline relay: ${message}`));
-  let timer: ReturnType<typeof setInterval> | undefined, running: Promise<void> | undefined, closed = false;
+  let timer: ReturnType<typeof setInterval> | undefined, wake: ReturnType<typeof setTimeout> | undefined, unsubscribe: (() => void) | undefined;
+  let running: Promise<void> | undefined, again = false, closed = false;
   const stopped = new AbortController();
   const bounded = () => AbortSignal.any([stopped.signal, AbortSignal.timeout(timeoutMs)]);
 
@@ -86,16 +91,31 @@ export function createPipelineRelay(options: {
     }
   }
 
+  /** Runs a pass now; one asked for while a pass runs follows it, since that pass may have read the export too early. */
   function run(): void {
-    if (running || closed) return;
-    running = pass().catch((error) => log(`${(error as Error).message}`)).finally(() => { running = undefined; });
+    if (closed) return;
+    if (running) { again = true; return; }
+    running = pass().catch((error) => log(`${(error as Error).message}`)).finally(() => {
+      running = undefined;
+      if (again) { again = false; run(); }
+    });
+  }
+  function soon(): void {
+    if (closed || wake) return;
+    wake = setTimeout(() => { wake = undefined; run(); }, options.wakeDelayMs ?? PIPELINE_RELAY_WAKE_DELAY_MS);
+    wake.unref?.();
   }
   return {
-    /** Begins the timer and runs a first pass now. */
-    start() { if (closed || timer) return; timer = setInterval(run, options.intervalMs ?? PIPELINE_RELAY_INTERVAL_MS); timer.unref?.(); run(); },
+    /** Begins the timer and the ledger subscription, and runs a first pass now. */
+    start() {
+      if (closed || timer) return;
+      timer = setInterval(run, options.intervalMs ?? PIPELINE_RELAY_INTERVAL_MS); timer.unref?.();
+      unsubscribe = options.subscribe?.(soon);
+      run();
+    },
     /** Resolves when the pass in flight, if any, has ended. */
     async idle() { while (running) await running; },
-    close() { closed = true; stopped.abort(); if (timer) clearInterval(timer); },
+    close() { closed = true; stopped.abort(); unsubscribe?.(); if (timer) clearInterval(timer); if (wake) clearTimeout(wake); },
   };
 }
 

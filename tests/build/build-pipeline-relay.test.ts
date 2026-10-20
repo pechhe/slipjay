@@ -31,6 +31,7 @@ function fakeHq(start = 0, override?: (body: Sent, call: number) => Response | u
   };
   return { state, fetch };
 }
+const waitFor = async (condition: () => boolean) => { while (!condition()) await new Promise((resolve) => setTimeout(resolve, 1)); };
 const relay = (hq: { fetch: (url: string, init: RequestInit) => Promise<Response> }, readPage: ReturnType<typeof exportOf>, extra: Partial<Parameters<typeof createPipelineRelay>[0]> = {}) => {
   const logged: string[] = [];
   const instance = createPipelineRelay({ origin: "https://hq.example", token: "build-token", readPage: (since, limit) => readPage(since, limit), fetch: hq.fetch, log: (m) => logged.push(m), ...extra });
@@ -117,6 +118,48 @@ test("the relay never throws into its caller and does not overlap passes", async
   instance.start();
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(reads, 1);
+  instance.close();
+});
+
+test("new ledger events are pushed shortly after they land, in one pass per burst, without waiting for the timer", async () => {
+  const hq = fakeHq(0);
+  const all = events(2);
+  const listeners = new Set<() => void>();
+  const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
+  const { instance, logged } = relay(hq, exportOf(all), { subscribe, wakeDelayMs: 10 });
+  instance.start(); await instance.idle();
+  assert.equal(hq.state.cursor, 2);
+  const passes = () => hq.state.bodies.filter((body) => body.since === 0 && body.events.length === 0).length;
+  all.push({ seq: 3, pad: "" }, { seq: 4, pad: "" });
+  for (const listener of listeners) { listener(); listener(); }
+  await waitFor(() => hq.state.cursor === 4);
+  await instance.idle();
+  assert.equal(passes(), 2);
+  instance.close();
+  assert.equal(listeners.size, 0);
+  assert.deepEqual(logged, []);
+});
+
+test("an event during a pass is followed by another pass once it ends", async () => {
+  const hq = fakeHq(0);
+  const all = events(1);
+  let notify = () => {};
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const read = exportOf(all);
+  // The first pass reads the export before the second event lands, and is still running when it does.
+  let reads = 0;
+  const { instance } = relay(hq, async (since, limit) => { const page = await read(since, limit); reads++; await gate; return page; },
+    { subscribe: (listener) => { notify = listener; return () => {}; }, wakeDelayMs: 0 });
+  instance.start();
+  await waitFor(() => reads === 1);
+  all.push({ seq: 2, pad: "" });
+  notify();
+  // The wake's zero-delay timer fires before this one.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  release();
+  await waitFor(() => hq.state.cursor === 2);
+  await instance.idle();
   instance.close();
 });
 

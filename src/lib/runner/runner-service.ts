@@ -84,9 +84,10 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     },
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   buildChecks?.serve(server.url);
-  // The metrics export goes to HQ on its own timer, reading this runner's API like any client; it shares nothing with the receipt drain.
+  // The metrics export goes to HQ shortly after each new event and on its own timer, reading this runner's API like any
+  // client; it shares nothing with the receipt drain.
   const relay = config.build && buildToken
-    ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }) }) : undefined;
+    ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }), subscribe: log.subscribe }) : undefined;
   relay?.start();
   // Queued operations from before a restart resume here.
   queue.wake();

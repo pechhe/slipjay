@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rename, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { ensureRepoConfig, jj, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
+import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
 import { repositoryKey } from "../runner/runner-contract.ts";
 import type { SubmitRequest } from "../runner/runner-contract.ts";
 import { duplicateLandingSource } from "./landing-artifact.ts";
@@ -39,9 +40,13 @@ export async function probeSubmission(input: { home: string; url: string; jjConf
   }
   // The runner's jj settings, as in its warm checkouts, so the probe rebases as `rebasing` does.
   await ensureRepoConfig(checkout, input.jjConfig);
-  const context = await workspaceContext(checkout, undefined, { fetchMissingBookmarks: true });
+  // The integration branch is the one the candidate's committed policy declares. The probe's own working copy cannot
+  // say: it sits on the head it last probed, and a fork's remote default (upstream's `main`) carries no policy at all.
+  await jj(checkout, ["git", "fetch", "--remote", "origin", "--branch", request.bookmark], { timeoutMs: 60_000 });
+  const declared = (await readExecutionPolicyAtCommit(checkout, request.commitId)).policy;
+  const context = await workspaceContext(checkout, declared?.integrationBranch, { fetchMissingBookmarks: true });
   if (!context) throw new Error("Probe checkout context is unavailable");
-  const remote = context.configuration.remote ?? "origin";
+  const remote = declared?.remote ?? context.configuration.remote ?? "origin";
   const head = `${context.integrationBranch}@${remote}`;
   await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", context.integrationBranch, "--branch", request.bookmark], { timeoutMs: 60_000 });
   // Each probe starts from the head: the last probe's copies and imported sources are dropped.

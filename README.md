@@ -254,7 +254,7 @@ consumer requires a SlipJay version that implements this environment contract.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.39.1
+bun add -g github:pechhe/slipjay#v3.39.2
 slipjay status
 ```
 
@@ -1340,8 +1340,9 @@ or `slipjay record-preview <port>` after starting a workspace preview. These
 observations never enter the landing queue.
 
 **Pipeline metrics relay.** HQ runs where it cannot reach the runner, so a runner with
-`build.origin` and `YARDSMITH_SLIPJAY_BUILD_TOKEN` pushes its own export: at start and every 30
-minutes it `POST`s pages of `/v1/metrics/events` (`{since, events, nextSeq, hasMore}`) to
+`build.origin` and `YARDSMITH_SLIPJAY_BUILD_TOKEN` pushes its own export: at start, five seconds
+after a new ledger event (a burst goes in one pass, and an event during a pass is followed by
+another), and every 30 minutes regardless, it `POST`s pages of `/v1/metrics/events` (`{since, events, nextSeq, hasMore}`) to
 `{origin}/api/build/runner/pipeline` with the same bearer as Build admission. HQ owns the cursor: a
 pass opens with an empty page to learn it and follows any 409 to the cursor HQ names, so resending
 a stored page is harmless and the relay keeps no state. A page is read again with a lower `limit`
