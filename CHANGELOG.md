@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.38.1
 
 - **A depth-two successor held back by its repository's release names the release (Build #3010):** before,
   it named the workers or its own queue's head, though the queue would not start it until the release
