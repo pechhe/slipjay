@@ -403,7 +403,7 @@ must enforce combined resource limits; an uncapped executor refuses this setting
 Each admitted operation holds one place until its terminal outcome: the head of a
 short repository may take the short place, and its successor always counts as long, so
 it waits for a worker (`a worker (…)`) even when its own queue could take it. An older
-reset, release or audit of its repository holds a successor back, and it names that
+reset, release or audit of its repository holds a depth-two head or successor back, and it names that
 operation. Of the repositories SlipJay itself lands, only T3 Code is a candidate: it
 runs at depth one until its gates are shown safe in independent checkouts on
 `t3peach`, including a controlled pair through its upstream-receipt check.
