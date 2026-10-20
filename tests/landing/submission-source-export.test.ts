@@ -16,6 +16,17 @@ import { submissionSourceResponse, importSourceBundle } from "../../src/lib/land
 import { downloadSubmissionSource } from "../../src/lib/runner/runner-client.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { directExecutor } from "../support/executor.ts";
+import type { Executor } from "../../src/lib/runner/runner-contract.ts";
+
+/** Records the environment of each jj call, which must carry COLUMNS so jj never runs `tput`. */
+function jjRecordingExecutor(): Executor & { jjColumns: (string | undefined)[] } {
+  const inner = directExecutor("test");
+  const jjColumns: (string | undefined)[] = [];
+  return { ...inner, jjColumns, run: (request) => {
+    if (request.executable === "jj") jjColumns.push(request.env?.COLUMNS);
+    return inner.run(request);
+  } };
+}
 
 test("CLI retrieves retained source after author/upstream loss and a cold worker restores using only bundle evidence", async () => {
   const f = await project();
@@ -32,7 +43,8 @@ test("CLI retrieves retained source after author/upstream loss and a cold worker
     const home = join(f.root, "runner"); await mkdir(home);
     const operationId = "op_recovery";
     const request = { repo: "owner/repo", changeId, commitId: source, bookmark, submittedBy: "fixture" };
-    const retained = await retainSubmissionSource({ home, operationId, request, url: f.remote, executor: directExecutor("test") });
+    const executor = jjRecordingExecutor();
+    const retained = await retainSubmissionSource({ home, operationId, request, url: f.remote, executor });
     log.append(operationId, { type: "submitted", ...request }); log.append(operationId, retained);
     log.append(operationId, { type: "failed", stage: "verifying", reason: "synthetic failure" });
     const before = log.events();
@@ -41,7 +53,7 @@ test("CLI retrieves retained source after author/upstream loss and a cold worker
     await rm(f.repo, { recursive: true, force: true });
     server = await serveRunner(createRunnerHandler({ log, token: "fixture-token", runnerName: "recovery", readLog: async () => "",
       onSubmitted: () => { throw new Error("Retrieval must not resubmit"); }, kill: () => ({ status: "idle" }), subscribe: log.subscribe,
-      readSource: (operation, signal) => submissionSourceResponse({ home, operationId: operation.id, repo: operation.repo, retained, executor: directExecutor("test"), signal }),
+      readSource: (operation, signal) => submissionSourceResponse({ home, operationId: operation.id, repo: operation.repo, retained, executor, signal }),
     }), { host: "127.0.0.1", port: 0 });
     const destination = join(f.root, "recovered.bundle");
     const env = { ...process.env, SLIPJAY_RUNNER: server.url, SLIPJAY_RUNNER_TOKEN: "fixture-token" };
@@ -53,6 +65,8 @@ test("CLI retrieves retained source after author/upstream loss and a cold worker
     assert.equal((await fetch(`${server.url}/v1/operations/${operationId}/source`)).status, 401);
     await assert.rejects(downloadSubmissionSource(server.url, operationId, destination, env), /EEXIST/);
     assert.deepEqual(log.events(), before);
+    // Retention and export each read git.executable-path through jj.
+    assert.deepEqual(executor.jjColumns, ["80", "80"]);
     await server.close(); server = undefined;
     // Completion/disconnect cleanup closes the export stream before removal settles.
     const deadline = Date.now() + 5000;

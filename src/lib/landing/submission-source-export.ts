@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 import { readSubmissionManifest, submissionSourceRef, submissionStorePath } from "./submission-source.ts";
 import type { RetainedSubmission } from "./submission-source.ts";
 import { jj } from "../infra/workspace-jj.ts";
-import { landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
+import { jjEnvironment, landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
 import type { Executor } from "../runner/runner-contract.ts";
 
 export const SOURCE_BUNDLE_MAX_BYTES = 128 * 1024 * 1024;
@@ -21,8 +21,9 @@ export async function submissionSourceResponse(input: {
   const path = join(home, "submissions", `${randomUUID()}.bundle.tmp`);
   const remove = () => rm(path, { force: true });
   try {
+    const env = landingCommandEnvironment(input.env);
     const run = async (executable: string, args: string[]) => {
-      const result = await executor.run({ executable, args, cwd: home, env: landingCommandEnvironment(input.env),
+      const result = await executor.run({ executable, args, cwd: home, env: executable === "jj" ? jjEnvironment(env) : env,
         timeoutMs: 120000, maxOutputBytes: 16384, abortSignal: input.signal });
       if (result.exitCode !== 0 || result.signal || result.timedOut || result.cancelled) throw new Error("Source bundle preparation failed");
       return result.stdout.trim();

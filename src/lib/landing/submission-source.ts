@@ -2,7 +2,7 @@ import { sanitizedHandoff, validSubmissionHandoff, handoffDigest } from "./submi
 import { createHash, randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
+import { jjEnvironment, landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
 import { jj } from "../infra/workspace-jj.ts";
 import { repositoryKey } from "../runner/runner-contract.ts";
 import type { Executor, OperationEvent, SubmitRequest } from "../runner/runner-contract.ts";
@@ -23,9 +23,10 @@ export async function retainSubmissionSource(input: {
   const store = submissionStorePath(home, request.repo);
   await mkdir(join(home, "sources"), { recursive: true, mode: 0o700 });
   await mkdir(join(home, "submissions"), { recursive: true, mode: 0o700 });
+  const env = landingCommandEnvironment(input.env);
   const command = async (executable: string, args: string[]) => {
     const result = await executor.run({ executable, args, cwd: home,
-      env: landingCommandEnvironment(input.env), timeoutMs: 120_000, maxOutputBytes: 16_384, maxOutputBytesPerStream: 8192 });
+      env: executable === "jj" ? jjEnvironment(env) : env, timeoutMs: 120_000, maxOutputBytes: 16_384, maxOutputBytesPerStream: 8192 });
     // Remote output/URLs may contain credentials; failure diagnostics never echo them here.
     if (result.exitCode !== 0 || result.signal || result.timedOut || result.cancelled)
       throw new Error("Runner could not retain the exact submitted source; no durable submission was acknowledged");
