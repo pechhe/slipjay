@@ -103,18 +103,6 @@
   `node_modules` for 24 hours. On the Mac on 2026-10-19 that was 58 of 143 workspaces. One holding a
   live process, or any work, is still kept.
 
-- **Promotion proposes accepted staging work while naming what waits (#2973):** when the newest
-  staging-green commit carries held Specs or unclassified work, the Build-tracked promotion plan
-  checks older staging-green integration commits and proposes the newest releasable range. Its
-  additive JSON names the proposed commit and Specs held back above it. The search is bounded at
-  2,000 integration commits and eight Build reads; if it cannot establish a releasable candidate,
-  it proposes nothing and explains why. Confirmation still checks the exact requested candidate.
-
-- **Build acceptance gates production promotion (#2973):** promotion plans classify the whole
-  release range through Build and show accepted, gated, reverted and held Specs, plus unclassified
-  commits. Confirmation refuses held or unclassified work and fails closed when Build cannot answer;
-  release approval cannot override it. `specGateDeclarations` names the candidate's gate source.
-
 - **Removing a workspace no longer waits for its files to be deleted (#123):** cleanup, `slipjay remove`
   and every sweep move the checkout into `~/.slipjay/trash`, which is a rename, and a detached process at
   `nice -n 19` deletes it. Before this, deleting one t3code checkout took 239 s inside the removal and its

@@ -14,7 +14,7 @@ export type Tracker = "github" | "build";
 export const trackerOf = (policy: { tracker?: unknown } | null | undefined): Tracker => policy?.tracker === "build" ? "build" : "github";
 
 /** Build's read-only actions the runner forwards; nothing else crosses that seam. */
-export const BUILD_READ_ACTIONS = ["read", "list", "waits", "binds", "release_plan"] as const;
+export const BUILD_READ_ACTIONS = ["read", "list", "waits", "binds"] as const;
 export type BuildReadAction = (typeof BUILD_READ_ACTIONS)[number];
 /** Reads Build, throwing a `BuildRefusal` when Build refuses and any other error when it gives no answer. */
 export type BuildReader = (action: BuildReadAction, input: Record<string, unknown>) => Promise<unknown>;

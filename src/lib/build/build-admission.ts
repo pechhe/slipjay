@@ -137,8 +137,7 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
       return { kind: "refused", code: body.code.slice(0, 200) };
     // Build answers a read of an item that does not exist with its `unavailable` outcome, which its route sends as 503;
     // the body's code tells it from an outage, which never carries one.
-    if (response.status === 503 && body?.status === "unavailable" && (body.code === BUILD_ITEM_UNAVAILABLE
-      || action === "release_plan" && body.code === "release_plan_spec_unavailable")) return { kind: "refused", code: body.code };
+    if (response.status === 503 && body?.status === "unavailable" && body.code === BUILD_ITEM_UNAVAILABLE) return { kind: "refused", code: BUILD_ITEM_UNAVAILABLE };
     if (response.status === 401 || response.status === 403) return { kind: "unavailable", reason: "Build refused the runner's credential" };
     return { kind: "unavailable", reason: `Build answered HTTP ${response.status}` };
   };

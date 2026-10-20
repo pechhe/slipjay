@@ -193,7 +193,6 @@ async function removeWorkspaceAt(path: string): Promise<number> {
 async function runPromote(args: string[]): Promise<number> {
   const options: { migrationsReady: boolean; confirm?: string } = { migrationsReady: false };
   for (let index = 0; index < args.length; index += 1) {
-    if (args[index] === "--json") continue;
     if (args[index] === "--migrations-ready") options.migrationsReady = true;
     else if (args[index] === "--confirm" && args[index + 1] && !args[index + 1]!.startsWith("-")) options.confirm = args[++index];
     else throw new Error("Usage: slipjay promote [--confirm <commit>] [--migrations-ready]");
@@ -201,7 +200,7 @@ async function runPromote(args: string[]): Promise<number> {
   const location = runnerLocation();
   if (options.confirm === undefined) {
     const plan = await releaseIntegration(process.cwd(),
-      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }), readBuild: readBuildThroughRunner } : {});
+      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }) } : {});
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
   }

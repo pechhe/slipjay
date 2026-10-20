@@ -1011,7 +1011,6 @@ export async function readPromotionState(cwd: string, options: { location: strin
       verifications,
       ...audits ? { auditRefusal: promotionRefusal(audits) } : {},
       stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,
-      stagingGreens: [...new Set(staging.filter((operation) => operation.result?.type === "deployed").map((operation) => operation.commitId))],
       approved: releases.filter((operation) => operation.status !== "cancelled" && operation.status !== "superseded").map((operation) => operation.commitId),
     };
   } finally { connection.close(); }
