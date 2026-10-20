@@ -199,7 +199,13 @@ export type OperationEvent =
   | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string }
-  | { type: "landed"; base: string; commitId: string; branch: string; remote: string }
+  | { type: "landed"; base: string; commitId: string; branch: string; remote: string;
+      /**
+       * The repository and the deployment environments the landed commit's `slipjay.json` declares, so Build can
+       * tell a repository with no staging from one whose deploy has not reached it. Absent when the policy could
+       * not be read, and on landings from before 3.39.0: unknown, never "none".
+       */
+      repo?: string; declaredEnvironments?: string[] }
   /** A release's outcome. A promotion names `deploy`, the production deploy of its candidate, which the deploy lane runs. */
   | { type: "released"; result: CompletedRelease; deploy?: string }
   /** A pre-verification passed: `checks` ran against `candidate`'s tree while the release branch was at `base`. */

@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.39.0
+
+- **A landing records what its commit declares:** the `landed` event now carries `repo` and
+  `declaredEnvironments`, the deployment environments the landed commit's `slipjay.json` declares (`[]` for
+  none). Build reads them to tell a repository with no staging (SlipJay, T3 Code) from one whose staging deploy
+  has not reached it yet, so those repositories' Specs can complete acceptance readiness. When the policy
+  cannot be read the fields are absent, which Build treats as unknown.
+
 ## v3.38.1
 
 - **A depth-two successor held back by its repository's release names the release (Build #3010):** before,

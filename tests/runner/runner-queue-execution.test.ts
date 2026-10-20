@@ -119,6 +119,7 @@ test("the owner's kill stops a running gate: cancelled, never passed, main uncha
     const landed = f.result(next);
     assert.ok(landed?.type === "landed", JSON.stringify(landed));
     assert.equal(landed.base, before, "the killed change never integrated");
+    assert.deepEqual(landed.declaredEnvironments, [], "a repository that declares no deployments says so");
     assert.equal(alive(gatePid), false, "the gate process is gone");
     await until(() => alive(childPid) ? undefined : true, 5_000);
     // A systemd scope reaches the tool's own process group; a bare process group cannot.

@@ -222,6 +222,13 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${message(error)}` });
     }
   }
+  /** What a landing records of the environments its commit declares; nothing when the policy cannot be read. */
+  async function declaredEnvironments(repo: string, commitId: string): Promise<{ repo: string; declaredEnvironments: string[] } | Record<string, never>> {
+    try {
+      const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
+      return configuration ? { repo, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).sort() } : {};
+    } catch { return {}; }
+  }
   /** Ask the schedulers about every environment and the reset the commit declares; they decide whether one is due. */
   async function schedule(repo: string, commitId: string): Promise<void> {
     const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
@@ -992,6 +999,7 @@ export function createRunnerQueue(input: {
           if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
         }
       }
+      if (verdict?.type === "landed") verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId) };
       if (verdict) append(operation.id, verdict);
       if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
       if (verdict?.type === "landed")
@@ -1206,7 +1214,7 @@ export function createRunnerQueue(input: {
             if (fetched.code !== 0) throw new Error(fetched.stderr || fetched.stdout);
             if (await revisionExists(checkout, `${integrated.commitId} & ::${branch}@${remote}`)) {
               append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId: integrated.commitId });
-              verdict = { type: "landed", base: integrated.base, commitId: integrated.commitId, branch, remote };
+              verdict = { type: "landed", base: integrated.base, commitId: integrated.commitId, branch, remote, ...await declaredEnvironments(operation.repo, integrated.commitId) };
             }
           }
         }

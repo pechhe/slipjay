@@ -9,7 +9,8 @@ test("a landing deploys staging from an exact view of the landed commit and reco
   const f = await fixture(false, false, { minIntervalMs: 0 });
   try {
     const a = await f.land(f.submit(await f.candidate("a.txt")));
-    assert.equal(a?.type, "landed");
+    assert.ok(a?.type === "landed");
+    assert.deepEqual([a.repo, a.declaredEnvironments], ["fixture/repo", ["staging"]], "the landing records what its commit declares, for Build");
     await f.queue.idle();
     const [first] = f.log.deployments("fixture/repo", "staging");
     assert.equal(first?.status, "deployed", JSON.stringify(first?.result));

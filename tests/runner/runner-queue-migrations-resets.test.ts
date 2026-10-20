@@ -111,7 +111,8 @@ test("a failed publication holds the finalized integration; relanding publishes 
     await rm(join(f.root, "reject-push"));
     const reland = f.submit(request);
     const landed = await f.land(reland);
-    assert.deepEqual(landed, { type: "landed", base: before, commitId: finalized!.commit, branch: "main", remote: "origin" });
+    assert.deepEqual(landed, { type: "landed", base: before, commitId: finalized!.commit, branch: "main", remote: "origin", ...landed?.type === "landed" && { repo: landed.repo, declaredEnvironments: landed.declaredEnvironments } });
+    assert.equal(landed?.type === "landed" && landed.repo, "fixture/repo");
     assert.equal(f.main(), finalized!.commit);
     assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
     assert.equal(generations(f, [held, blocked, reland]), 1);
