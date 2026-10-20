@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v3.39.1
 
 - **A depth-two head held by an older release, reset or audit names it (Build #3010):** before, only the
   successor did, so `runner watch` and `slipjay land` showed the head as about to start while the queue held it.
