@@ -10,7 +10,7 @@ import { newOperationId, openOperationLog } from "../../../src/lib/runner/runner
 import { createRunnerQueue, runnerLogOptions } from "../../../src/lib/runner/runner-queue.ts";
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
 import { directExecutor, testExecutor } from "../../support/executor.ts";
-import { decideSystemd, systemdInputs, systemdTest as gateSystemdTest } from "./systemd-gate.ts";
+import { systemdTest as gateSystemdTest } from "./systemd-gate.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
 // A committed `hang` file names where to record the pids of the gate, of a child in its
@@ -276,8 +276,6 @@ export async function until<T>(check: () => Promise<T | undefined> | T | undefin
   }
 }
 export const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
-/** Whether runs get systemd slices here: the runner's production executor. */
-export const systemd = decideSystemd(systemdInputs()).action === "run";
 /** `test` where systemd is available, `test.skip` off the runner without it, and a failing test on the runner without it. */
 export const systemdTest = gateSystemdTest(test);
 /** The cgroup path of a live process (Linux). */
