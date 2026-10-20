@@ -9,7 +9,7 @@ import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
 import { runContainment } from "../../src/lib/runner/local-executor.ts";
 import { runnerWorkers } from "../../src/lib/runner/runner-queue.ts";
 import { TEST_SLICE, testExecutor } from "../support/executor.ts";
-import { gateFailureOutput, gate, command, test, fixture, until, alive, systemd, cgroupOf, hanging, started } from "./fixtures/runner-queue-fixture.ts";
+import { gateFailureOutput, gate, command, test, fixture, until, alive, systemd, cgroupOf, hanging, started, systemdTest } from "./fixtures/runner-queue-fixture.ts";
 
 test("gate failure preserves main and verbatim evidence; an amended change can land again", async () => {
   const f = await fixture();
@@ -210,7 +210,7 @@ test("a run whose processes cannot be shown stopped fails, and every later run w
   await assert.rejects(settled(), /run-c/);
 });
 
-(systemd ? test : test.skip)("each run's processes, nested scopes included, stay within the runner's slice and stop with the run", async () => {
+systemdTest("each run's processes, nested scopes included, stay within the runner's slice and stop with the run", async () => {
   const home = await mkdtemp(join(tmpdir(), "runner-slice-"));
   const controller = new AbortController();
   try {
@@ -236,7 +236,7 @@ test("a run whose processes cannot be shown stopped fails, and every later run w
   } finally { controller.abort(); await rm(home, { recursive: true, force: true }); }
 }, 120_000);
 
-(systemd ? test : test.skip)("the owner's slice is stopped once its last run ends, and a run starting during that stop is unaffected", async () => {
+systemdTest("the owner's slice is stopped once its last run ends, and a run starting during that stop is unaffected", async () => {
   const home = await mkdtemp(join(tmpdir(), "runner-owner-"));
   try {
     const executor = testExecutor({ home });
@@ -256,7 +256,7 @@ test("a run whose processes cannot be shown stopped fails, and every later run w
   } finally { await rm(home, { recursive: true, force: true }); }
 }, 60_000);
 
-(systemd ? test : test.skip)("a failed stop of the owner's slice is retried while no run is in progress", async () => {
+systemdTest("a failed stop of the owner's slice is retried while no run is in progress", async () => {
   const home = await mkdtemp(join(tmpdir(), "runner-owner-retry-"));
   const path = process.env.PATH;
   try {
@@ -286,7 +286,7 @@ exec ${JSON.stringify(real)} "$@"
   } finally { process.env.PATH = path; await rm(home, { recursive: true, force: true }); }
 }, 60_000);
 
-(systemd ? test : test.skip)("after the runner is killed outright, the next process stops only the commands it left before reusing their checkout", async () => {
+systemdTest("after the runner is killed outright, the next process stops only the commands it left before reusing their checkout", async () => {
   const f = await fixture(false, false, undefined, false, { durable: true, scopes: true });
   const bystanderHome = await mkdtemp(join(tmpdir(), "runner-bystander-"));
   const bystanderStop = new AbortController();
