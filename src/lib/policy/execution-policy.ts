@@ -44,6 +44,8 @@ export type ExecutionPolicy = {
   deployments?: DeploymentPolicy;
   /** Where the repository's work is tracked (see `tracker.ts`); GitHub Issues when undeclared. */
   tracker?: "github" | "build";
+  /** Repository-relative source containing literal defineSpecGate declarations. */
+  specGateDeclarations?: string;
   /** How long landing verification may take before `slipjay metrics` calls it over budget; undefined when undeclared. */
   budgets?: TimeBudgets;
 };
@@ -309,6 +311,10 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   const audit = auditPolicy(parsed.audit, { checks: gateChecks, fail });
   const deployments = deploymentPolicy(parsed.deployments);
   if (parsed.tracker !== undefined && parsed.tracker !== "github" && parsed.tracker !== "build") fail('declares a tracker other than "github" or "build"');
+  if (parsed.specGateDeclarations !== undefined && (typeof parsed.specGateDeclarations !== "string"
+    || !parsed.specGateDeclarations || parsed.specGateDeclarations.startsWith("/") || parsed.specGateDeclarations.includes("\\")
+    || parsed.specGateDeclarations.split("/").some((part) => !part || part === "." || part === "..")))
+    fail("specGateDeclarations must be a repository-relative file path");
   generatedPathMatchers(parsed.generatedPaths);
   generatedPathMatchers(parsed.evidencePaths, "evidencePaths");
   const sharedPaths = sharedPathList(parsed.sharedPaths);

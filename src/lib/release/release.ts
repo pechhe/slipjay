@@ -17,6 +17,9 @@
  *
  * jj commands ignore working copies, except checking the candidate out.
  */
+import type { BuildReader } from "../build/tracker.ts";
+import { readBuildReleasePlan, releaseMergeCandidate, requireBuildReleasable, releaseSpecLabel } from "./release-build.ts";
+import type { BuildReleasePlan } from "./release-build.ts";
 import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
 import { RequiredVerificationError, runRequiredVerification } from "../landing/required-verification.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
@@ -70,6 +73,8 @@ export type PromotionDelta = {
  * candidates approved before, and its pre-verifications, each newest first.
  */
 export type PromotionState = { stagingGreen: string | null; approved: string[]; verifications: VerificationOperation[];
+  /** Successful staging deployments, including older candidates. Omitted readers prove only `stagingGreen`. */
+  stagingGreens?: string[];
   /** Why the audits refuse a promotion (see `promotionRefusal`), or null; absent from a runner that does not audit. */
   auditRefusal?: string | null };
 
@@ -110,7 +115,17 @@ export type ReleaseSummary = {
 };
 
 /** What a promotion's plan adds: its candidate's pre-verification, and whether an earlier approval covers it. */
-export type PromotionPlan = { verification?: ReleaseVerificationState; approval?: ApprovalCoverage };
+export type PromotionProposal = {
+  proposed: string | null;
+  newestStagingGreen: string;
+  /** Specs with commits withheld above the proposal; accepted work can also wait behind a held Spec. */
+  heldBack: BuildReleasePlan["specs"];
+  heldBackUnclassifiedCommits: string[];
+  proposalReason?: string;
+  proposalSearch: { checked: number; limit: number; exhausted: boolean };
+};
+
+export type PromotionPlan = Partial<PromotionProposal> & { releasable?: boolean; releasePlan?: BuildReleasePlan; specs?: (BuildReleasePlan["specs"][number] & { label: string })[]; unclassifiedCommits?: string[]; verification?: ReleaseVerificationState; approval?: ApprovalCoverage };
 
 export type ReleaseResult =
   | ({ ok: true; status: "up_to_date" } & ReleaseSummary & PromotionPlan)
@@ -126,7 +141,7 @@ export type ReleaseResult =
    * `commits` is 0.
    */
   | ({ ok: true; status: "released_by"; merge: string; releasedBy: string | null } & ReleaseSummary)
-  | { ok: false; status: "refused"; reason: string }
+  | { ok: false; status: "refused"; reason: string; releasable: false; proposed?: null }
   | { ok: false; status: "verification_failed"; reason: string; evidence: RequiredVerificationError["evidence"] };
 
 /** A pre-verification's pass: `checks` ran on `candidate`'s tree while the release branch was at `base`. */
@@ -137,6 +152,8 @@ type VerifyOptions = Pick<ConfirmReleaseOptions, "onProgress" | "onStage" | "run
 export type ConfirmReleaseOptions = {
   /** The full candidate commit id a human approved. */
   candidate: string;
+  /** Runner-owned Build reader: acceptance is re-read before publication. */
+  readBuild?: BuildReader;
   /** Acknowledges that the release's migration artifacts are already applied where it deploys; refused for a promotion, which applies them on the runner. */
   migrationsReady?: boolean;
   onProgress?: (line: string) => void;
@@ -534,6 +551,15 @@ async function shippedBy(plan: ReleasePlan): Promise<{ merge: string; releasedBy
   return { merge, releasedBy: description.match(/^Release-Candidate: ([a-f0-9]+)$/m)?.[1] ?? null };
 }
 
+/** The candidate and base a genuine release merge published, or null when `merge` is not one. */
+async function publishedRange(root: string, merge: string): Promise<{ candidate: string; base: string } | null> {
+  const [parents = "", description = ""] = (await jjOut(root, ["log", "--no-graph", "-r", merge,
+    "-T", 'parents.map(|p| p.commit_id()).join(",") ++ "\\n" ++ description'])).split(/\n([\s\S]*)/);
+  const commit = { commitId: merge, parents: parents.split(",").filter(Boolean), description };
+  const candidate = await releaseMergeCandidate(root, commit);
+  return candidate ? { candidate, base: commit.parents[0]! } : null;
+}
+
 const releaseMessage = (plan: ReleasePlan): string =>
   `Release ${plan.integrationBranch} to ${plan.releaseBranch}\n\n${CANDIDATE_TRAILER}${plan.candidate}\n`;
 const mergeRevset = (plan: ReleasePlan): string =>
@@ -631,33 +657,101 @@ function requireMigrationsReady(plan: ReleasePlan, migrationsReady: boolean): vo
 }
 
 const refusalOf = (error: unknown): ReleaseResult => {
-  if (error instanceof ReleaseRefusal) return { ok: false, status: "refused", reason: error.message };
+  if (error instanceof ReleaseRefusal) return { ok: false, status: "refused", reason: error.message, releasable: false, proposed: null };
   if (error instanceof RequiredVerificationError) return { ok: false, status: "verification_failed", reason: error.message, evidence: error.evidence };
   throw error;
 };
 
+const PROPOSAL_READ_LIMIT = 8;
+const PROPOSAL_HISTORY_LIMIT = 2000;
+
+/** Walk staged integration commits in ancestry order: acceptance is not monotonic across gates and reverts. */
+async function proposeRelease(integration: ReleasePlan, state: PromotionState, readBuild?: BuildReader): Promise<{
+  plan: ReleasePlan; acceptance: BuildReleasePlan | null; proposal: PromotionProposal;
+}> {
+  const { policy } = await readExecutionPolicyAtCommit(integration.root, integration.candidate);
+  let candidates: string[];
+  if (policy?.tracker === "build") {
+    const history = await commitIds(integration.root,
+      `first_ancestors(${integration.candidate}, ${PROPOSAL_HISTORY_LIMIT + 1}) ~ ::${integration.base}`);
+    if (history.length > PROPOSAL_HISTORY_LIMIT) refuse(`Promotion proposal exceeds the ${PROPOSAL_HISTORY_LIMIT}-commit integration history limit; no candidate proposed`);
+    const staged = new Set([state.stagingGreen!, ...(state.stagingGreens ?? [])]);
+    candidates = history.filter((commit) => staged.has(commit));
+    // An already released green commit preserves the existing up-to-date plan.
+    if (!candidates.length && await commitOf(integration.root, `${state.stagingGreen} & ::${integration.base}`)) candidates = [state.stagingGreen!];
+    if (!candidates.length) refuse("No staging-green commit on the integration branch's first-parent history; no candidate proposed");
+  } else candidates = [state.stagingGreen!];
+
+  const newest = candidates[0]!;
+  const latest = newest === integration.candidate ? integration : await planRelease(integration.root, { candidate: newest });
+  if (latest.base !== integration.base) refuse("The release head moved while selecting a candidate; plan again");
+  let acceptance: BuildReleasePlan | null;
+  try { acceptance = await readBuildReleasePlan(latest, readBuild); }
+  catch (error) { refuse(`Could not check Build release acceptance: ${error instanceof Error ? error.message : String(error)}`); }
+  if (policy?.tracker === "build" && !acceptance) refuse("The newest staging-green candidate declares no Build tracker; acceptance cannot be established");
+  const newestAcceptance = acceptance;
+  let checked = acceptance ? 1 : 0;
+  const proposal = (selected: BuildReleasePlan | null, proposed: string | null, proposalReason?: string, exhausted = false): PromotionProposal => {
+    const included = new Set(selected?.commits.map((commit) => commit.commitId) ?? []);
+    const withheld = new Set(newestAcceptance?.commits.filter((commit) => !included.has(commit.commitId)).map((commit) => commit.commitId) ?? []);
+    return { proposed, newestStagingGreen: newest,
+      heldBack: newestAcceptance?.specs.map((spec) => ({ ...spec, commitIds: spec.commitIds.filter((id) => withheld.has(id)) }))
+        .filter((spec) => spec.commitIds.length) ?? [],
+      heldBackUnclassifiedCommits: newestAcceptance?.commits.filter((commit) => commit.kind === "unclassified" && !included.has(commit.commitId)).map((commit) => commit.commitId) ?? [],
+      ...proposalReason ? { proposalReason } : {}, proposalSearch: { checked, limit: PROPOSAL_READ_LIMIT, exhausted } };
+  };
+  if (!latest.commits.length) return { plan: latest, acceptance, proposal: proposal(acceptance, null, "The newest staging-green candidate is already released") };
+  if (!acceptance || acceptance.releasable) return { plan: latest, acceptance, proposal: proposal(acceptance, newest) };
+
+  for (const candidate of candidates.slice(1, PROPOSAL_READ_LIMIT)) {
+    // A historical policy cannot silently remove the current repository's Build gate.
+    checked += 1;
+    try {
+      const older = await planRelease(integration.root, { candidate });
+      if (older.base !== integration.base) refuse("The release head moved while selecting a candidate; plan again");
+      const answer = await readBuildReleasePlan(older, readBuild);
+      if (!answer) return { plan: latest, acceptance, proposal: proposal(null, null, "An older candidate declares no Build tracker; acceptance cannot be established") };
+      if (answer.releasable) return { plan: older, acceptance: answer, proposal: proposal(answer, candidate) };
+    } catch (error) {
+      return { plan: latest, acceptance, proposal: proposal(null, null,
+        `Candidate search stopped without establishing acceptance: ${error instanceof Error ? error.message : String(error)}`) };
+    }
+  }
+  const exhausted = candidates.length > PROPOSAL_READ_LIMIT;
+  return { plan: latest, acceptance, proposal: proposal(null, null, exhausted
+    ? `No releasable candidate found in ${PROPOSAL_READ_LIMIT} Build reads; older staging-green commits remain unchecked`
+    : "No unreleased staging-green candidate has a releasable range", exhausted) };
+}
+
 /**
  * Plan a release; publishes nothing. The candidate is the integration branch on the
- * remote, unless that commit declares a production deployment: then it is the newest
- * commit staging is green on, read through `readPromotion` (the runner), and the plan
+ * remote, unless that commit declares a production deployment: then it proposes the newest
+ * releasable staging-green integration commit within a bounded search, and the plan
  * carries the delta since an earlier approval the candidate has moved past. Any audited
  * repository's plan is refused while its latest audit failed with no recorded cause.
  */
-export async function releaseIntegration(cwd = process.cwd(), { readPromotion }: {
+export async function releaseIntegration(cwd = process.cwd(), { readPromotion, readBuild }: {
   readPromotion?: () => Promise<PromotionState>;
+  readBuild?: BuildReader;
 } = {}): Promise<ReleaseResult> {
   try {
     let plan = await planRelease(cwd);
+    const promotes = plan.promotes;
     let promotion: Pick<ReleaseSummary, "delta"> & PromotionPlan = {};
+    let acceptance: BuildReleasePlan | null = null;
     if (plan.promotes) {
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
-      const { stagingGreen, approved, verifications, auditRefusal } = await readPromotion();
-      if (!stagingGreen) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
-      if (stagingGreen !== plan.candidate) plan = await planRelease(cwd, { candidate: stagingGreen });
+      const state = await readPromotion();
+      const { approved, verifications, auditRefusal } = state;
+      if (!state.stagingGreen) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
+      if (plan.audits && auditRefusal) refuse(auditRefusal);
+      const selected = await proposeRelease(plan, state, readBuild);
+      plan = selected.plan;
+      acceptance = selected.acceptance;
       if (plan.audits && auditRefusal) refuse(auditRefusal);
       const delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
-      promotion = { ...delta ? { delta } : {},
+      promotion = { ...selected.proposal, ...delta ? { delta } : {},
         ...plan.commits.length ? { verification: verificationState(plan, verifications), approval: await approvalCoverage(plan, approved) } : {} };
     } else if (plan.audits) {
       // The audit ledger lives on the runner, so an audited release plans only against it.
@@ -665,10 +759,16 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion }:
       const { auditRefusal } = await readPromotion();
       if (auditRefusal) refuse(auditRefusal);
     }
-    const summary = { ...describePlan(plan), ...promotion };
+    if (!promotes) {
+      try { acceptance = await readBuildReleasePlan(plan, readBuild); }
+      catch (error) { refuse(`Could not check Build release acceptance: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    const summary = { ...describePlan(plan), ...promotion, releasable: acceptance?.releasable ?? true,
+      ...acceptance ? { releasePlan: acceptance, specs: acceptance.specs.map((spec) => ({ ...spec, label: releaseSpecLabel(spec.state) })),
+        unclassifiedCommits: acceptance.commits.filter((commit) => commit.kind === "unclassified").map((commit) => commit.commitId) } : {} };
     if (!plan.commits.length) return { ok: true, status: "up_to_date", ...summary };
     return { ok: true, status: "planned", ...summary, subjects: (promotion.delta?.commits ?? plan.commits).map((commit) => commit.subject),
-      next: (promotion.approval?.covered ? `The approval of ${short(promotion.approval.approvedCandidate!)} covers this candidate: ` : "After explicit human approval: ")
+      next: !summary.releasable ? `${promotion.proposalReason ?? "Build holds this candidate"}. Resolve held Specs and unclassified commits, then plan again; release approval cannot override acceptance.` : (promotion.approval?.covered ? `The approval of ${short(promotion.approval.approvedCandidate!)} covers this candidate: ` : "After explicit human approval: ")
         + `slipjay promote --confirm ${plan.candidate.slice(0, 12)}`
         + (!plan.promotes && plan.migrationArtifacts.length ? " --migrations-ready (once these migrations are applied where the release deploys)" : "")
         + (plan.promotes && plan.migrationArtifacts.length ? `. The runner applies its migrations (${plan.migrationArtifacts.join(", ")}) to production before it activates` : "")
@@ -747,13 +847,24 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
   const { candidate, migrationsReady = false, onProgress = () => {}, onStage = () => {}, exclusively = (publication) => publication(), preverified = () => null, publicationRefusal = () => null } = options;
   try {
     const plan = await planRelease(checkout, { candidate });
+    const requireReleasable = async (range: Pick<ReleasePlan, "candidate" | "base">) => {
+      try { requireBuildReleasable(await readBuildReleasePlan({ ...plan, ...range }, options.readBuild)); }
+      catch (error) { refuse(`Could not release: ${error instanceof Error ? error.message : String(error)}`); }
+    };
     if (!plan.commits.length) {
+      // A retry can still activate production after an earlier publication, so Build
+      // judges again the range the release merge that shipped the candidate published.
       const { merge, releasedBy } = await shippedBy(plan);
+      const published = await publishedRange(plan.root, merge);
+      if (published) await requireReleasable(published);
+      else if ((await readExecutionPolicyAtCommit(plan.root, plan.candidate)).policy?.tracker === "build")
+        refuse(`Could not release: ${short(plan.candidate)} is on ${plan.releaseBranch} without a SlipJay release merge, so Build cannot judge what it published`);
       onProgress(`[release] ${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}`
         + (releasedBy ? `, released by ${releasedBy.slice(0, 12)}` : ""));
       onStage("finalizing");
       return { ok: true, status: "released_by", ...describePlan(plan), merge, releasedBy };
     }
+    await requireReleasable(plan);
     requireMigrationsReady(plan, migrationsReady);
     const summary = describePlan(plan);
     const reused = preverified(plan);
@@ -767,6 +878,7 @@ export async function confirmRelease(checkout: string, options: ConfirmReleaseOp
       if (base !== plan.base) refuse(`${plan.releaseBranch}@${plan.remote} moved during the release; rerun it`);
       const refusal = publicationRefusal();
       if (refusal) refuse(refusal);
+      await requireReleasable(plan);
       const merge = await buildMerge(plan);
       await publish(plan, merge);
       onStage("finalizing");

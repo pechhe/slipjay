@@ -185,7 +185,8 @@ Optional `slipjay.json` fields for the workspace pool and shared output:
 | Field | Meaning |
 | --- | --- |
 | `spares` | Integer 0-8, default 1. How many prepared spare workspaces the pool keeps; 0 disables the pool. A refill tops the pool up one spare at a time, counting spares still being prepared, and holds the pool lock only to count and register a name, never during the dependency install, so a claim always takes any ready spare even while another is installing. Every new workspace `start` makes, a claimed spare or a fresh one after a miss, also starts a background refill, so a burst of starts finds the pool replenished and an empty pool fills itself. An idle spare costs nothing at landing. A machine can lower (never raise) a repository's count: `spares` in `~/.slipjay/config.json` maps integration checkout paths to counts, such as `{ "spares": { "/Users/me/Engineering/yardsmith": 2 } }`, and `0` disables the pool on that machine (the next refill retires spares beyond the count); `slipjay status` and `slipjay config` report the count in force with the declared and machine values and the `source` of the declared one: the integration branch and the commit whose committed `slipjay.json` was read. That is the integration bookmark as of the last fetch (every `start` fetches it before the refill it starts), never the primary checkout's working files, so an unlanded or stale local edit cannot change the allowance, and both hosts reach the same count once each has fetched. A machine limit applies to its checkout by real path, so a symlinked or differently spelled path still matches, and a spare whose record names a checkout path that no longer exists still counts against the allowance while it is one of the repository's workspaces. Retiring assigned workspaces never takes a spare. When the pool is short and no abandoned spare waits, retiring an assigned workspace instead makes the next spare from it: a new workspace, at its own path on the integration head, receives the retiring checkout's `node_modules` trees by rename once retirement's last checks pass (a checkout whose forget then fails gets them back), and the refill this starts installs over them in place, so a spare costs an incremental install rather than a full clone and install. One repository's refills run in turn, and refills of every repository on one machine install one at a time, holding that machine-wide lock only for each install, so repositories take turns between spares; claims never take either lock. Spares are not moved to each new integration head: a claim runs `jj new` on the head itself and keeps the spare's dependencies when the install inputs there are the ones they were installed for. After topping up, a refill refreshes one spare only when no ready spare recorded the head's install inputs (read from the head's commit), so a landing that changes them costs one install per refill, not one per spare: that spare moves to the head and installs over its existing `node_modules` in place, which changes only what changed. The others are refreshed in place when claimed, or one at a time by later refills. A claim takes the most recently prepared spare first. A start's installs into one repository's checkouts run one at a time on a machine, so a second waits for the first and clones its result; a start never waits for a refill's install. |
-| `tracker` | `"github"` (default) or `"build"`: where the repository's work items live. With `"build"`, the numbers `start --issue` and `attach-issue` record are HQ Build numbers: a landing names its item in a `Build: #N` trailer (instead of `Issue: owner/repo#N`), a landing with no description takes the item's title from Build, `prune --empty` and the landing sweep treat a workspace whose item is closed (landed, accepted, dropped, achieved, superseded or imported_closed, or any `legacy` item) as delivered, and `land` writes the landing's Build handoff itself (see `land`). Build is read only through the runner (see [Build reads](#build-reads)); when it cannot be read, the title falls back to the task, a workspace is kept, and promotion says it could not check. |
+| `tracker` | `"github"` (default) or `"build"`: where the repository's work items live. With `"build"`, the numbers `start --issue` and `attach-issue` record are HQ Build numbers: a landing names its item in a `Build: #N` trailer (instead of `Issue: owner/repo#N`), a landing with no description takes the item's title from Build, `prune --empty` and the landing sweep treat a workspace whose item is closed (landed, accepted, dropped, achieved, superseded or imported_closed, or any `legacy` item) as delivered, and `land` writes the landing's Build handoff itself (see `land`). Build is read only through the runner (see [Build reads](#build-reads)); when it cannot be read, the title falls back to the task, a workspace is kept, and promotion refuses. |
+| `specGateDeclarations` | Optional repository-relative TypeScript file declaring production gates with literal `defineSpecGate(2973)` calls. Promotion reads it at the candidate revision; without the key it declares no gates. See [Release](#release). |
 | `sharedPaths` | Array of repository-relative directories (at most 20; literal paths, no globs, none inside another, none in `.jj`/`.git`). Each workspace gets a symlink at that path to the same path in the primary (integration) checkout, which is created when missing. The link is made when a workspace is started, resumed or claimed and when a spare is provisioned. An existing real directory is replaced only when empty; with content it is left alone with a warning. Cleanup ignores a link into the primary checkout, so git-ignored output such as `artifacts/` no longer keeps a landed workspace. List the path in `.gitignore`, or jj snapshots the link as source (slipjay warns). |
 
 When a new workspace has no spare to claim, or a spare is provisioned, and it has
@@ -775,9 +776,59 @@ to release without checks. The policy that applies is the one committed in the
 candidate. The retired `slipjay release` command refuses with a pointer to
 `slipjay promote`; it performs no promotion.
 
+For a Build-tracked repository, the plan reads Build's `release_plan` through the
+runner for every candidate ancestor absent from the current release head. SlipJay's
+own earlier release merges are excluded; ordinary merges still need classification.
+Git revert trailers supply the full reverted commit id when it can be resolved.
+Ranges over 2,000 commits refuse; the range is never truncated.
+
+Build classifies recorded publications, and the plan lists every Spec as **Accepted**,
+**Hidden in production** (gated), **Reverted**, or **Held back** with its reason. Its
+JSON includes `releasePlan`, the labelled `specs`, `unclassifiedCommits` and a top-level
+`releasable`. This is the whole release range, even when `delta` shows a smaller approval
+request. `--json` is also accepted; promotion always prints JSON.
+
+Only accepted or fully gated work can ship. Declare a gate source with, for example,
+`"specGateDeclarations": "packages/product-actions/src/spec-gate-declarations.ts"`.
+SlipJay reads literal `defineSpecGate(<number>)` calls from that file at the exact
+candidate, ignoring comments and quoted examples. A missing key sends no declared
+gates; an unreadable file refuses. A declaration is evidence for Build to evaluate,
+not an acceptance override. The file can declare at most 500 gates.
+
+Confirmation reads acceptance again for the exact candidate and current release head,
+then rechecks before publishing. A held Spec, unclassified commit, unavailable Build
+or refused read prevents publication. Human release approval and migration flags
+cannot override this check. Upgrade the client and runner before relying on this
+gate: SlipJay 3.34.0 tolerates the new config key but does not enforce acceptance.
+
 A candidate that declares a `production` deployment is a promotion. The plan reads
-the runner: its candidate is the newest commit staging deployed (not the integration
-tip), and it lists the paths the release touches. When the owner approved an earlier
+the runner's successful staging history. In a Build-tracked repository it proposes
+the newest staging-green commit on the integration branch's first-parent history
+whose whole release range is releasable. A held Spec or an unclassified commit at
+the newest staging-green commit makes it try the next older staging-green commit;
+an ancestor without a successful staging deployment is never proposed. Each range
+is read separately from Build with that candidate's own gate declarations: acceptance
+can change in either direction across a gate declaration or a revert.
+
+The search examines at most 2,000 recent unreleased integration commits and makes
+at most eight Build reads, newest candidate first. It stops at the first releasable
+range. If none is found within those bounds, or Build cannot establish acceptance,
+it proposes nothing and says why; it never assumes an unchecked candidate is safe.
+Readers that supply only the latest staging success can propose only that commit.
+
+The plan JSON adds `proposed` (the full commit id, or `null`), `newestStagingGreen`,
+`heldBack` (Specs with their numbers, titles, states, held reasons and withheld commit
+ids), `heldBackUnclassifiedCommits`, and `proposalSearch` (candidates checked, read
+limit and whether that budget ran out with older candidates unchecked). `proposalReason` explains a missing
+proposal. `heldBack` covers the commits above the proposal up to the newest
+staging-green commit; it can include accepted work waiting behind a held Spec. With
+no proposal it lists all the Specs in the newest checked release range. The existing
+`candidate`, release summary, verification and approval fields describe the proposal
+when one exists; without one, `candidate` retains the newest checked commit for
+diagnosis and is not a release recommendation. Confirmation always checks the exact
+candidate requested; it never substitutes an older one.
+
+The plan lists the paths the proposed release touches. When the owner approved an earlier
 candidate that did not ship (its verification failed and a fix landed), the plan's
 `delta` and `subjects` show only the commits, paths and migration artifacts since
 that approval. The runner refuses to release a commit staging did not deploy. Once
@@ -1068,7 +1119,7 @@ newer candidate`), and if Build refuses the newer one, the queued one keeps its 
 
 <a id="build-reads"></a>**Build reads.** A runner with a Build connection also answers clients' reads of Build at
 `POST /v1/build/read` (`{ "action", "input" }`, with the runner token), forwarding only Build's read-only
-`read`, `list`, `waits` and `binds` actions to its runner route; any other action is refused (400) before Build is
+`read`, `list`, `waits`, `binds` and `release_plan` actions to its runner route; any other action is refused (400) before Build is
 asked. The answer is `{ "value" }`, Build's refusal is 409 with its `code`, and no answer is 503. So a
 client of a Build-tracked repository needs only the runner token: the Build credential never leaves
 the runner. A runner without a Build connection refuses the read (400).
@@ -1086,7 +1137,7 @@ can see Build:
 - Every landing, bound or not, gives them `SLIPJAY_BUILD_READ_URL` and `SLIPJAY_BUILD_READ_TOKEN`. A check POSTs
   `{ "action", "input" }` to the URL with `Authorization: Bearer <token>` and gets the answers of
   [Build reads](#build-reads): `200 { "value" }`, `409 { "code" }` for Build's refusal (`build_item_unavailable`
-  for an unknown item), anything else meaning Build gave no answer. Only `read`, `list`, `waits` and `binds` are
+  for an unknown item), anything else meaning Build gave no answer. Only `read`, `list`, `waits`, `binds` and `release_plan` are
   allowed. The token is random, reaches no other runner route, is good only while this operation runs and
   never outlives a runner restart; it is neither the runner token nor the Build token, and it is redacted
   from the runner's logs and stored evidence.

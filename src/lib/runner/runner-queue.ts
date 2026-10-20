@@ -1098,7 +1098,7 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "failed", stage, reason: `Staging is not green on ${operation.commitId.slice(0, 12)}: production promotes only a commit staging deployed` });
         return;
       }
-      const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
+      const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady, readBuild,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
         preverified: (plan) => passedVerification(plan, log.verifications(operation.repo))?.id ?? null,
         publicationRefusal: unexplainedAudit,

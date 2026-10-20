@@ -14,7 +14,7 @@ test("a promotion plan reads no pre-verifications from a runner older than them,
       ? Response.json({ error: "not found" }, { status }) : Response.json({ operations: [] }), { host: "127.0.0.1", port: 0 });
     const missing = await older(404);
     try {
-      assert.deepEqual(await readPromotionState(f.cwd, { location: missing.url, env: f.options.env }), { stagingGreen: null, approved: [], verifications: [] });
+      assert.deepEqual(await readPromotionState(f.cwd, { location: missing.url, env: f.options.env }), { stagingGreen: null, stagingGreens: [], approved: [], verifications: [] });
     } finally { await missing.close(); }
     const broken = await older(500);
     try {
