@@ -1099,7 +1099,7 @@ export function createRunnerQueue(input: {
         return;
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
-        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}),
+        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal,
         preverified: (plan) => passedVerification(plan, log.verifications(operation.repo))?.id ?? null,
         publicationRefusal: unexplainedAudit,
         exclusively: (publication) => {
@@ -1122,7 +1122,7 @@ export function createRunnerQueue(input: {
     }
     /** Pre-verify the candidate as a confirm would, recording what passed against which release base. */
     async function verify(): Promise<OperationEvent> {
-      const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}) });
+      const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal });
       // A yield or kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks };

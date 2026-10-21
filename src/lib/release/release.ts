@@ -132,7 +132,7 @@ export type ReleaseResult =
 /** A pre-verification's pass: `checks` ran on `candidate`'s tree while the release branch was at `base`. */
 export type VerifiedRelease = { ok: true; status: "verified"; base: string; candidate: string; checks: VerificationDeclaration[] };
 
-type VerifyOptions = Pick<ConfirmReleaseOptions, "onProgress" | "onStage" | "run" | "environment">;
+type VerifyOptions = Pick<ConfirmReleaseOptions, "onProgress" | "onStage" | "run" | "environment" | "abortSignal">;
 
 export type ConfirmReleaseOptions = {
   /** The full candidate commit id a human approved. */
@@ -144,6 +144,8 @@ export type ConfirmReleaseOptions = {
   /** Where each verification command runs (the runner's executor). */
   run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   environment?: () => NodeJS.ProcessEnv;
+  /** Once it fires, no later release check is scheduled: an owner kill stops verification at the check it reaches. */
+  abortSignal?: AbortSignal;
   /**
    * Runs publication, which moves the release branch, once nothing else may move it (the
    * runner's repository lane). Its own recheck that the release branch is still the
@@ -708,14 +710,14 @@ async function requireCandidateTree(checkout: string, candidate: string): Promis
  * Check `plan`'s candidate out in `checkout`, prepare its dependencies and run its
  * release checks; refuse if they changed its source.
  */
-async function verifyCandidate(checkout: string, plan: ReleasePlan, { onProgress = () => {}, onStage = () => {}, run: runCommand, environment }: VerifyOptions): Promise<unknown> {
+async function verifyCandidate(checkout: string, plan: ReleasePlan, { onProgress = () => {}, onStage = () => {}, run: runCommand, environment, abortSignal }: VerifyOptions): Promise<unknown> {
   onStage("installing");
   await jj(checkout, ["new", plan.candidate]);
   await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand, ...(environment ? { env: environment() } : {}) });
   onStage("verifying");
   const verification = plan.checks.length
     ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,
-      ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}) })
+      ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}), ...(abortSignal ? { abortSignal } : {}) })
     : { passed: [], gaps: [] };
   await requireCandidateTree(checkout, plan.candidate);
   return verification;

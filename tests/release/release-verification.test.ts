@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "vite-plus/test";
 import { confirmRelease, verifyRelease } from "../../src/lib/release/release.ts";
 import type { OperationEvent, VerificationOperation } from "../../src/lib/runner/runner-contract.ts";
+import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { promotingProject, verificationOf } from "./fixtures/release-fixture.ts";
 
 test("a promotion plan reports its candidate's pre-verification, passed only against the plan's base and checks", async () => {
@@ -52,5 +53,30 @@ test("a pre-verification runs the release checks and publishes nothing; a confir
 
     const shipped = await verifyRelease(f.repo, { candidate });
     assert.ok(!shipped.ok && /already on release/.test(shipped.reason), JSON.stringify(shipped));
+  } finally { await f.dispose(); }
+});
+
+test("an owner kill during release verification schedules no check after the one it stops", async () => {
+  const f = await releaseProject({ checks: () => [{ executable: "node", args: ["one"] }, { executable: "node", args: ["two"] }, { executable: "node", args: ["three"] }] });
+  try {
+    const candidate = await landFile(f, "feature.txt");
+    const controller = new AbortController();
+    const started: string[] = [];
+    const outcome = (over: Partial<BoundedProcessResult>): BoundedProcessResult => ({ stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false,
+      exitCode: 0, signal: null, timedOut: false, cancelled: false, outputSha256: "fixture", finishedAt: new Date().toISOString(), ...over });
+    const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+      const name = request.args[0]!;
+      started.push(name);
+      if (name === "one") return outcome({ exitCode: 1, stderr: "one failed\n" });
+      if (name === "two") {
+        controller.abort();
+        return outcome({ exitCode: null, signal: "SIGKILL" });
+      }
+      return outcome({});
+    };
+    const verified = await verifyRelease(f.repo, { candidate, run, abortSignal: controller.signal });
+    assert.ok(!verified.ok && verified.status === "verification_failed", JSON.stringify(verified));
+    assert.deepEqual(started, ["one", "two"], "check three is never started");
+    assert.deepEqual(verified.evidence.checks.map((check) => check.outcome), ["failed", "failed", "not_run"]);
   } finally { await f.dispose(); }
 });
