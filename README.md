@@ -513,9 +513,11 @@ and held state through the existing recovery path.
   turn, which releases the hold and ends `cancelled`. Land the commit once more then, as
   an ordinary submission. A recovery turn that fails (the remote is unreachable, say) is queued
   again after 30 seconds, doubling per failure up to 15 minutes, until it publishes, releases the hold
-  or is stopped. Build accepts only a confirmed publication after an integration whose publication
-  was unknown, so it keeps refusing new admissions of that Spec (`delivery_pending`) after a release until
-  the delivery is closed in HQ.
+  or is stopped. Once the hold is released, the runner tells Build that the landing whose integration it
+  was failed unpublished (`failed`, recovering by `code_repair`), which ends Build's custody: that Spec is
+  admitted again with no step in HQ. A landing that fails while retrying an earlier landing's hold never
+  integrated its own candidate, so Build records its failure as ended (`infrastructure_retry`) and admits
+  its Spec again at once; land it again once the hold is cleared.
 - **Owner controls.** From any machine with the location, `slipjay runner kill <operation>` stops
   that running landing, release or pre-verification while it is still fetching, rebasing, installing or
   verifying (a killed pre-verification is not queued again until staging next deploys that commit
@@ -1119,11 +1121,14 @@ that needs Build should refuse by name rather than pass. Dependency installs, fi
 **Build receipts.** For each admitted landing the runner owes Build a receipt for each
 fact it reports, named by the operation and that fact's ledger sequence: its admission
 delivers `submitted`, and an admission Build never answered is owed like any receipt; its first held integration is reported `held`; its outcome is
-`published`, or `failed` with how it recovers (`publication_unknown` when it failed at or
-after integration, `cancelled` for an owner cancel or kill, `superseded`,
-`policy_refusal`, `infrastructure_retry`, otherwise `code_repair`); and an integration
-whose publication was unknown is reported `published` once any later reconciliation
-confirms it. Each command it ran is reported through `recordAttemptRun` as a named run
+`published`, or `failed` with how it recovers (`publication_unknown` when it failed while
+integrating or after integrating its own candidate, `cancelled` for an owner cancel or kill,
+`superseded`, `policy_refusal`, `infrastructure_retry` for an infrastructure failure or one
+retrying an earlier landing's hold, otherwise `code_repair`); and an integration whose
+publication was unknown is reported `published` once any later reconciliation confirms it,
+or `failed` with how it recovers once the runner releases it (`integration_released`). That
+release also ends any attempt that failed retrying the released hold, should Build still
+hold it open; Build answering that it already ended counts as delivered. Each command it ran is reported through `recordAttemptRun` as a named run
 (`passed`, `failed`, `incomplete` or `cancelled`, with its failing test names), attached to
 the outcome fact and sent only after it; a pass with no recorded verified candidate is
 reported `incomplete` with that gap. A settings landing that skipped its checks reports no

@@ -125,7 +125,7 @@ test("a restart publishes the integration a landing left held, with no further s
     assert.equal(recovery?.result?.type === "landed" && recovery.result.commitId, hold.commitId);
     // The failed landing keeps its verdict; Build learns the publication from the confirmation recorded after it.
     assert.equal(f.result(stranded)?.type, "failed");
-    const confirmations = f.log.publicationRecoveries().get(recoveryKey("fixture/repo", hold.commitId)) ?? [];
+    const confirmations = (f.log.integrationSettlements().get(recoveryKey("fixture/repo", hold.commitId)) ?? []).filter((row) => row.event.type === "integration_recovered");
     const failedAt = f.log.events({ operationId: stranded }).find((row) => row.event.type === "failed")!.seq;
     assert.ok(confirmations.some((row) => row.seq > failedAt));
     // A second restart finds nothing held.

@@ -396,8 +396,8 @@ export interface OperationLog {
   held(): HeldIntegrationState[];
   /** Every Build-bound landing (offered for admission, or declared a chore), with its own events: what receipt delivery reads. */
   buildBound(): { operation: LandingOperation; history: StoredEvent[] }[];
-  /** Every event confirming an integrated commit published, in ledger order, keyed by `recoveryKey(repo, commitId)`. */
-  publicationRecoveries(): Map<string, StoredEvent[]>;
+  /** Every event settling a held integration (confirmed published, or released unpublished), in ledger order, keyed by `recoveryKey(repo, commitId)`. */
+  integrationSettlements(): Map<string, StoredEvent[]>;
   close(): void;
 }
 

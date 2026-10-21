@@ -1,7 +1,7 @@
 import { admissionSettled, buildAdmitter, settleAdmission } from "./build-admission.ts";
 import type { BuildAdmissionRecord, BuildRoute } from "./build-admission.ts";
 import { recoveryKey, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent, OperationLog, RunnerStage, StoredEvent } from "../runner/runner-contract.ts";
+import type { LandingOperation, OperationEvent, OperationLog, StoredEvent } from "../runner/runner-contract.ts";
 
 /** Build's `failed` bundle (pechhe/slipjay#57), bounded: references to retained logs, never their content. */
 type AttemptFailure = {
@@ -34,8 +34,9 @@ export type BuildChoreInput = {
 /**
  * One receipt an operation owes Build. `key` is the ledger sequence of the runner fact it reports, which names its
  * delivery; a run waits for the attempt fact it attaches to (`after`), since Build reads its source from that fact.
+ * A `reconciliation` only ends an attempt Build may still hold open: one it already ended needs nothing more.
  */
-export type BuildReceipt = { operationId: string; key: number; occurredAt: string; after?: number } & (
+export type BuildReceipt = { operationId: string; key: number; occurredAt: string; after?: number; reconciliation?: true } & (
   | { action: "recordAttempt"; input: BuildReceiptInput }
   | { action: "recordAttemptRun"; input: BuildRunInput }
   | { action: "recordChoreLanding"; input: BuildChoreInput });
@@ -62,36 +63,61 @@ function fit(input: BuildReceiptInput): BuildReceiptInput {
   }
   return { ...input, failure: { ...failure, excerpt: null, truncated: true, command: null, cause: failure.cause.slice(0, 200), checks: { passed: [], failed: [], skipped: [], incomplete: [] }, artifacts: failure.artifacts.slice(0, 1) } };
 }
-const UNCERTAIN_STAGES: RunnerStage[] = ["integrating", "finalizing", "publishing"];
 type Run = LandingOperation["runs"][number];
 const runOutcome = (run: Run): RunOutcome => run.killed ? "cancelled" : !run.finishedAt || run.exitCode == null && !run.signal && !run.timedOut ? "incomplete"
   : run.exitCode === 0 && !run.signal && !run.timedOut ? "passed" : "failed";
 
-/** Where each repository's integration was later confirmed published: on its own record, another operation's, or the runner's. */
-export type PublicationRecoveries = ReadonlyMap<string, readonly StoredEvent[]>;
+/**
+ * How each repository's held integration was later settled, on any record: confirmed published (`integration_recovered`)
+ * or released unpublished (`integration_released`), in ledger order, keyed by `recoveryKey(repo, commitId)`.
+ */
+export type IntegrationSettlements = ReadonlyMap<string, readonly StoredEvent[]>;
+const settledAfter = (settlements: IntegrationSettlements, repo: string, commitId: string, after: number, type: "integration_recovered" | "integration_released") =>
+  settlements.get(recoveryKey(repo, commitId))?.find((row) => row.seq > after && row.event.type === type);
+
+/**
+ * The commit this operation itself integrated, or was about to publish, before `before`. Only its publication can be in
+ * doubt: an earlier landing's held integration this turn retried first is that landing's, and stays held by the runner.
+ */
+const ownIntegration = (events: readonly StoredEvent[], before: number) => events.findLast((row) => row.seq < before
+  && (row.event.type === "integrated" || row.event.type === "publication_intent"))?.event as Extract<OperationEvent, { type: "integrated" | "publication_intent" }> | undefined;
+const integratedCommit = (event: Extract<OperationEvent, { type: "integrated" | "publication_intent" }>) => event.type === "integrated" ? event.commitId : event.candidate;
 
 /** The integration a failed operation left unknown, once a later event in its repository confirms it published. */
-function confirmedLate(operation: LandingOperation, events: readonly StoredEvent[], terminal: StoredEvent, recoveries: PublicationRecoveries) {
+function confirmedLate(operation: LandingOperation, events: readonly StoredEvent[], terminal: StoredEvent, settlements: IntegrationSettlements) {
   const integrated = events.findLast((row) => row.event.type === "integrated")?.event;
   if (integrated?.type !== "integrated") return undefined;
-  const confirmed = recoveries.get(recoveryKey(operation.repo, integrated.commitId))?.find((row) => row.seq > terminal.seq);
+  const confirmed = settledAfter(settlements, operation.repo, integrated.commitId, terminal.seq, "integration_recovered");
   return confirmed && { confirmed, base: integrated.base, commitId: integrated.commitId };
+}
+
+/**
+ * The release, after a failed operation ended, of the integration its failure concerned: its own, or else a held one it
+ * was retrying first. Released, that commit is known never to have published, so the failure's publication is settled.
+ */
+function releasedLate(operation: LandingOperation, events: readonly StoredEvent[], terminal: StoredEvent, settlements: IntegrationSettlements) {
+  const own = ownIntegration(events, terminal.seq);
+  const commits = own ? [integratedCommit(own)]
+    : events.flatMap((row) => row.seq < terminal.seq && row.event.type === "integration_held" ? [row.event.commitId] : []);
+  return commits.map((commitId) => settledAfter(settlements, operation.repo, commitId, terminal.seq, "integration_released"))
+    .filter((row) => row !== undefined).sort((a, b) => a.seq - b.seq)[0];
 }
 
 /**
  * The receipts an operation owes Build, from the ledger. An admitted operation reports `held` once its integration is
  * held, its terminal fact (`published`, or `failed` with how it recovers), a `published` confirmed after an unknown or
- * held publication, and each command it ran; its `submitted` fact was delivered by admission itself. A declared chore
- * reports its publication only, whether it landed or was confirmed published later. Nothing else owes anything.
+ * held publication, or else a settled `failed` once the integration its failure concerned is released, and each command
+ * it ran; its `submitted` fact was delivered by admission itself. A declared chore reports its publication only, whether
+ * it landed or was confirmed published later. Nothing else owes anything.
  */
-export function owedReceipts(operation: LandingOperation, history: readonly StoredEvent[], recoveries: PublicationRecoveries = new Map()): BuildReceipt[] {
+export function owedReceipts(operation: LandingOperation, history: readonly StoredEvent[], settlements: IntegrationSettlements = new Map()): BuildReceipt[] {
   const events = history.filter((row) => row.operationId === operation.id);
   const submitted = events.find((row) => row.event.type === "submitted")?.event;
   if (submitted?.type !== "submitted" || submitted.kind !== undefined && submitted.kind !== "landing") return [];
   const terminal = events.find((row) => ["landed", "failed", "cancelled", "superseded", "declined"].includes(row.event.type));
   if (submitted.chore) {
     if (!terminal) return [];
-    const late = terminal.event.type === "landed" ? undefined : confirmedLate(operation, events, terminal, recoveries);
+    const late = terminal.event.type === "landed" ? undefined : confirmedLate(operation, events, terminal, settlements);
     const publication = terminal.event.type === "landed" ? { row: terminal, base: terminal.event.base, commitId: terminal.event.commitId }
       : late && { row: late.confirmed, base: late.base, commitId: late.commitId };
     if (!publication) return [];
@@ -116,11 +142,19 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
   if (terminal?.event.type === "landed")
     receipts.push(attempt(terminal, { event: "published", baseRevision: terminal.event.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: terminal.event.commitId, failure: null }));
   else if (terminal) {
-    receipts.push(attempt(terminal, { event: "failed", baseRevision: verification(events, terminal.seq)?.base ?? null,
-      verifiedRevision: skippedVerification(events, terminal.seq) ? null : verification(events, terminal.seq)?.candidate ?? null, publishedRevision: null, failure: failureOf(operation, events, terminal) }));
-    // An integration whose publication was unknown when this failed is reported published once it is confirmed.
-    const late = confirmedLate(operation, events, terminal, recoveries);
+    const revisions = { baseRevision: verification(events, terminal.seq)?.base ?? null,
+      verifiedRevision: skippedVerification(events, terminal.seq) ? null : verification(events, terminal.seq)?.candidate ?? null };
+    receipts.push(attempt(terminal, { event: "failed", ...revisions, publishedRevision: null, failure: failureOf(operation, events, terminal) }));
+    // An integration whose publication was unknown when this failed is reported published once it is confirmed,
+    // or, once released unpublished, failed with how it recovers: either ends Build's custody of the attempt.
+    const late = confirmedLate(operation, events, terminal, settlements);
+    const released = late || terminal.event.type !== "failed" ? undefined : releasedLate(operation, events, terminal, settlements);
     if (late) receipts.push(attempt(late.confirmed, { event: "published", baseRevision: late.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: late.commitId, failure: null }));
+    else if (released?.event.type === "integration_released") {
+      const failure = failureOf(operation, events, terminal, true);
+      receipts.push({ ...attempt(released, { event: "failed", ...revisions, publishedRevision: null,
+        failure: { ...failure, cause: `Released unpublished: ${released.event.reason}. ${failure.cause}`.slice(0, 2000) } }), reconciliation: true });
+    }
   }
   // Runs attach to the terminal fact, so Build reads their source from it; runs of an invalidated attempt say so.
   const invalidated = new Set(events.flatMap((row) => row.event.type === "attempt_invalidated" ? [row.event.attempt] : []));
@@ -172,17 +206,21 @@ const integratedBase = (events: readonly StoredEvent[], commitId: string): strin
   return row?.type === "integrated" ? row.base : null;
 };
 
-function failureOf(operation: LandingOperation, events: readonly StoredEvent[], row: StoredEvent): AttemptFailure {
+/** The failure bundle of terminal `row`; `settled` once the publication its failure left in doubt is known not to have happened. */
+function failureOf(operation: LandingOperation, events: readonly StoredEvent[], row: StoredEvent, settled = false): AttemptFailure {
   const event = row.event as Extract<OperationEvent, { type: "failed" | "cancelled" | "superseded" | "declined" }>;
   const failed = event.type === "failed" ? event : undefined;
   const run = operation.runs.findLast((entry) => failed?.command !== undefined && entry.command === failed.command) ?? operation.runs.at(-1);
   const classification = events.findLast((entry) => entry.seq <= row.seq && entry.event.type === "classified")?.event;
   const cause = classification?.type === "classified" ? classification.cause : undefined;
-  // Publication may have happened when the failure came at or after integration: Build keeps custody until it is known.
-  const uncertain = failed !== undefined && (UNCERTAIN_STAGES.includes(failed.stage) || events.some((entry) => entry.seq < row.seq && (entry.event.type === "integrated" || entry.event.type === "integration_held")));
+  // Publication of this operation's own integration may have happened when it failed while integrating or after it
+  // integrated: Build keeps custody until it is known. Failing to finish an earlier landing's hold leaves its own
+  // candidate unintegrated, so it lands again once the runner clears that hold.
+  const own = ownIntegration(events, row.seq);
+  const uncertain = !settled && failed !== undefined && (failed.stage === "integrating" || own !== undefined);
   const recovery: AttemptFailure["recovery"] = uncertain ? "publication_unknown" : event.type === "superseded" ? "superseded"
     : event.type === "declined" ? "policy_refusal" : event.type === "cancelled" || cause === "killed" ? "cancelled"
-      : cause === "infrastructure" || cause === "paused_out" ? "infrastructure_retry" : "code_repair";
+      : cause === "infrastructure" || cause === "paused_out" || cause === "held" && !own ? "infrastructure_retry" : "code_repair";
   const output = failed?.output ?? null;
   const named = (outcome: RunOutcome) => bounded(operation.runs.filter((entry) => runOutcome(entry) === outcome).map((entry) => entry.command), 500, 500);
   return {
@@ -207,8 +245,8 @@ export const receiptSettlement = (history: readonly StoredEvent[], receipt: Pick
   history.findLast((row) => row.operationId === receipt.operationId && row.event.type === "build_receipt" && row.event.sequence === receipt.key)?.event as
     Extract<OperationEvent, { type: "build_receipt" }> | undefined;
 /** Receipts still to send, in ledger order: unsettled, and not waiting for the fact they attach to. */
-export function sendable(operation: LandingOperation, history: readonly StoredEvent[], recoveries: PublicationRecoveries): BuildReceipt[] {
-  return owedReceipts(operation, history, recoveries).filter((receipt) => !receiptSettlement(history, receipt)
+export function sendable(operation: LandingOperation, history: readonly StoredEvent[], settlements: IntegrationSettlements): BuildReceipt[] {
+  return owedReceipts(operation, history, settlements).filter((receipt) => !receiptSettlement(history, receipt)
     && (receipt.after === undefined || receiptSettlement(history, { operationId: receipt.operationId, key: receipt.after })?.state === "delivered"));
 }
 
@@ -217,13 +255,13 @@ export function deliveryState(log: OperationLog): BuildDeliveryState | null {
   const bound = log.buildBound();
   const control = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "build_delivery");
   if (!bound.length && !control) return null;
-  const recoveries = log.publicationRecoveries();
+  const settlements = log.integrationSettlements();
   let pending = 0, parked = 0, oldest: string | null = null;
   for (const { history } of bound) {
     const admission = owedAdmission(history);
     if (admission) { pending++; if (oldest === null || admission.at < oldest) oldest = admission.at; }
   }
-  for (const { operation, history } of bound) for (const receipt of owedReceipts(operation, history, recoveries)) {
+  for (const { operation, history } of bound) for (const receipt of owedReceipts(operation, history, settlements)) {
     const settled = receiptSettlement(history, receipt);
     // A run attached to a parked fact can never be sent; the parked fact already says why.
     const orphaned = receipt.after !== undefined && receiptSettlement(history, { operationId: receipt.operationId, key: receipt.after })?.state === "parked";
@@ -271,15 +309,17 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
     // A delivered attempt fact makes its runs sendable, so pass again until nothing more is.
     for (let delivered = true; delivered && !closed;) {
       delivered = false;
-      const recoveries = log.publicationRecoveries();
-      const owed = log.buildBound().flatMap(({ operation, history }) => sendable(operation, history, recoveries)).sort((a, b) => a.key - b.key);
+      const settlements = log.integrationSettlements();
+      const owed = log.buildBound().flatMap(({ operation, history }) => sendable(operation, history, settlements)).sort((a, b) => a.key - b.key);
       for (const receipt of owed) {
         if (closed) return;
         const answer = await route(receipt.action, receipt.input);
         if (answer.kind === "unavailable") return unavailable(answer.reason);
-        log.append(receipt.operationId, answer.kind === "accepted" ? { type: "build_receipt", sequence: receipt.key, state: "delivered" }
-          : { type: "build_receipt", sequence: receipt.key, state: "parked", code: answer.code });
-        delivered ||= answer.kind === "accepted";
+        // Build ended the attempt already (its failure was never in doubt): the reconciliation has nothing left to do.
+        const settled = answer.kind === "accepted" || receipt.reconciliation === true && answer.code === "attempt_already_ended";
+        log.append(receipt.operationId, answer.kind === "refused" && !settled ? { type: "build_receipt", sequence: receipt.key, state: "parked", code: answer.code }
+          : { type: "build_receipt", sequence: receipt.key, state: "delivered" });
+        delivered ||= settled;
       }
     }
     backoff = initial;
@@ -297,7 +337,7 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
     if (timer) return;
     running = pass().catch(() => schedule(backoff)).finally(() => { running = undefined; if (again) { again = false; wake(); } });
   }
-  const unsubscribe = log.subscribe((row) => { if (["build_admitted", "integration_held", "integration_recovered", ...TERMINAL_EVENT_TYPES].includes(row.event.type)) wake(); });
+  const unsubscribe = log.subscribe((row) => { if (["build_admitted", "integration_held", "integration_recovered", "integration_released", ...TERMINAL_EVENT_TYPES].includes(row.event.type)) wake(); });
   return {
     wake,
     async idle() { while (running) await running; },

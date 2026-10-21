@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.39.5
+
+- **A landing caught retrying someone else's held integration no longer locks its Spec out of Build (Build #4336, SJ-47):**
+  a landing that failed while the runner first retried an earlier landing's held integration was reported to Build as
+  `publication_unknown`, though it never integrated its own candidate, so Build refused every new admission of its Spec
+  (`delivery_pending`) with no way out. Only a failure while integrating, or after integrating its own candidate, is
+  `publication_unknown` now; failing to finish another landing's hold is `infrastructure_retry`. When the runner releases a
+  held integration (`integration_released`), it now reports a settled `failed` for each attempt that hold left unknown, so
+  their Specs are admitted again with no step in HQ. This needs a Build that accepts a settled failure after an unknown
+  publication (YardSmith Build #4336): upgrade a runner host only once that Build is in Production, or the new receipts park.
+
 ## v3.39.4
 
 - **Additive migrations shipped with Drizzle metadata go before the health checks too (Build #4408, SJ-55):** v3.39.3

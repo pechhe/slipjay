@@ -22,7 +22,7 @@ function operation(log: OperationLog, submitted: { admission?: BuildAdmissionRec
   for (const event of events) log.append(id, event);
   return id;
 }
-const owed = (log: OperationLog, id: string): BuildReceipt[] => owedReceipts(log.operation(id) as LandingOperation, log.events({ operationId: id }), log.publicationRecoveries());
+const owed = (log: OperationLog, id: string): BuildReceipt[] => owedReceipts(log.operation(id) as LandingOperation, log.events({ operationId: id }), log.integrationSettlements());
 const attempts = (receipts: BuildReceipt[]) => receipts.flatMap((receipt) => receipt.action === "recordAttempt" ? [receipt.input] : []);
 const runs = (receipts: BuildReceipt[]) => receipts.flatMap((receipt) => receipt.action === "recordAttemptRun" ? [receipt.input] : []);
 const run = (runId: string, command: string, finish: Partial<Extract<OperationEvent, { type: "run_finished" }>> | null): OperationEvent[] => [

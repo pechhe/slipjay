@@ -340,15 +340,15 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL) ORDER BY seq`).all() as { operation_id: string }[])
       .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history);
         return operation?.kind === "landing" ? [{ operation, history }] : []; }),
-    publicationRecoveries: () => {
-      const recoveries = new Map<string, StoredEvent[]>();
-      for (const row of db.prepare("SELECT seq, operation_id, at, data FROM events WHERE type = 'integration_recovered' ORDER BY seq").all() as EventRow[]) {
+    integrationSettlements: () => {
+      const settlements = new Map<string, StoredEvent[]>();
+      for (const row of db.prepare("SELECT seq, operation_id, at, data FROM events WHERE type IN ('integration_recovered', 'integration_released') ORDER BY seq").all() as EventRow[]) {
         const event = JSON.parse(row.data) as OperationEvent;
-        if (event.type !== "integration_recovered") continue;
+        if (event.type !== "integration_recovered" && event.type !== "integration_released") continue;
         const key = recoveryKey(event.repo, event.commitId);
-        recoveries.set(key, [...recoveries.get(key) ?? [], { seq: row.seq, operationId: row.operation_id, at: row.at, event }]);
+        settlements.set(key, [...settlements.get(key) ?? [], { seq: row.seq, operationId: row.operation_id, at: row.at, event }]);
       }
-      return recoveries;
+      return settlements;
     },
     close: () => { listeners.clear(); db.close(); },
   };
