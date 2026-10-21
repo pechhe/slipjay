@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.39.7
+
+- **Runners install with the repository's pinned pnpm (Build #4447, SJ-63):** a runner ran its global pnpm, which on
+  a newer `packageManager` pin switched to that version itself and recorded `@pnpm/exe` in `pnpm-lock.yaml`, so the
+  frozen install changed tracked source and the landing failed at `installing`. `scripts/setup-runner.sh` now puts
+  corepack's pnpm shim first on the unit's PATH (and sets `COREPACK_ENABLE_DOWNLOAD_PROMPT=0`), so the exact pinned
+  version runs with no switch. It needs `corepack` on the host; re-run the script on each runner host to apply it.
+
 ## v3.39.6
 
 - **pnpm 12 repositories install on runners without reflinks (Build #4441, SJ-62):** workspace installs ran

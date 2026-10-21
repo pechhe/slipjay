@@ -254,7 +254,7 @@ consumer requires a SlipJay version that implements this environment contract.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.39.6
+bun add -g github:pechhe/slipjay#v3.39.7
 slipjay status
 ```
 
@@ -603,13 +603,15 @@ and held state through the existing recovery path.
   point each machine's location at it (`"runner": "ssh://<new host>"`, or
   `http://127.0.0.1:7787` on the host itself), and `slipjay runner resume`: the pause
   moved with the log.
-- **Setup.** On the runner host, with `slipjay`, `jj` and `bws` installed and the
+- **Setup.** On the runner host, with `slipjay`, `jj`, `bws` and `corepack` installed and the
   Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved:
   `scripts/setup-runner.sh pechhe/YardSmith=git@github.com:pechhe/YardSmith.git`.
   The commit identity comes from `SLIPJAY_RUNNER_USER_NAME` and `SLIPJAY_RUNNER_USER_EMAIL`,
   else git's global user. It writes the config and a systemd user unit that runs `bws run -- slipjay runner
   serve` with `Restart=always`, and enables lingering so the unit survives logout and
-  reboot. Logs: `journalctl --user -u slipjay-runner`.
+  reboot. Logs: `journalctl --user -u slipjay-runner`. The unit's PATH starts with corepack shims
+  for pnpm, so each repository installs with the pnpm its `packageManager` pins, whatever pnpm
+  is installed globally; re-run the script to add them to an existing unit.
 - **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
   releases (submit), deploys (submit, list) and changes by jj change ID.
 

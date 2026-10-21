@@ -3,12 +3,12 @@
 #
 #   scripts/setup-runner.sh <owner/name>=<git url> [<owner/name>=<git url> ...]
 #
-# Needs `slipjay` (bun global install), `jj` and `bws` on PATH, and the Bitwarden
-# secret SLIPJAY_RUNNER_TOKEN. Re-running rewrites the config and unit and restarts.
+# Needs `slipjay` (bun global install), `jj`, `bws` and `corepack` (bundled with Node 20/22; Node 25+
+# needs `npm i -g corepack`) on PATH, and the Bitwarden secret SLIPJAY_RUNNER_TOKEN. Re-running rewrites the config and unit and restarts.
 set -euo pipefail
 
 [ $# -ge 1 ] || { echo "usage: $0 <owner/name>=<git url> ..." >&2; exit 2; }
-for tool in slipjay jj bws bun loginctl systemctl; do
+for tool in slipjay jj bws bun corepack loginctl systemctl; do
   command -v "$tool" >/dev/null || { echo "missing $tool on PATH" >&2; exit 1; }
 done
 
@@ -47,6 +47,13 @@ while runner "$1" | grep -q .; do sleep 1; done
 STOP
 chmod 755 "$home/stop-runner.sh"
 
+# Corepack shims for pnpm, so installs run the exact version a repository's `packageManager` pins. A global
+# pnpm that finds a newer pin switches to it itself and rewrites pnpm-lock.yaml, which fails the landing.
+# The shims sit first on the unit's PATH, ahead of any global pnpm.
+shims="$home/corepack-bin"
+mkdir -p "$shims"
+corepack enable --install-directory "$shims" pnpm
+
 # PATH as this login shell sees it, so gate commands find bun, jj and node.
 cat > "$HOME/.config/systemd/user/slipjay-runner.service" <<UNIT
 [Unit]
@@ -54,7 +61,8 @@ Description=SlipJay runner
 After=network-online.target
 
 [Service]
-Environment=PATH=$PATH
+Environment=PATH=$shims:$PATH
+Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 ExecStart=$(command -v bws) run -- $(command -v slipjay) runner serve
 Restart=always
 RestartSec=5
