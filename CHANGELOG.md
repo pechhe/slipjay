@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.42.1
+
+- **Landing keeps the whole commit description (Build #4431, SJ-61):** a Build-attached landing publishes a commit's body and
+  trailers (Co-Authored-By included) unchanged and adds `Build: #N` only when the full description lacks it; a commit that
+  already carries it is not re-described, so a handoff pinned to it still matches. A body written under the generated `wip:`
+  subject is kept too: only that placeholder subject is replaced with the item title.
+
 ## v3.42.0
 
 - **`process: "development"` promotes by itself (YS-254):** a repository can set `process` to `development` (`slipjay

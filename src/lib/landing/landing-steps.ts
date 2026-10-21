@@ -141,7 +141,11 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   }
   // `revisionFacts` carries only the first line; the trailer and body are part of what is compared and rewritten.
   const fullDescription = (await jj(cwd, ["--ignore-working-copy", "log", "-r", target.commitId, "--no-graph", "-T", "description"])).trim();
-  let description = generated && target.description.trim() === generated ? "" : fullDescription;
+  // A body written under the generated subject is kept; only that subject is replaced.
+  const [subject = "", ...bodyLines] = fullDescription.split("\n");
+  const placeholder = Boolean(generated) && subject.trim() === generated;
+  const body = placeholder ? bodyLines.join("\n").trim() : "";
+  let description = placeholder ? "" : fullDescription;
   if (!description) {
     const issueDescription = issueNumber
       ? await workItemTitle(context.integration.root, trackerOf(context.configuration), issueNumber, readBuild)
@@ -151,6 +155,7 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
     if (!description)
       throw new Error(`Landing needs a description of the change: run \`jj describe -r ${target.changeId} -m "<what this change does>"\` and land again`);
   }
+  if (body) description = `${description}\n\n${body}`;
   // The landed commit names its Issue itself, so attribution survives machine-local state.
   const remotes = issueNumber ? await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]).catch(() => "") : "";
   const described = withIssueTrailer(description, issueNumber, githubRepository(remotes, context.configuration.remote), trackerOf(context.configuration));

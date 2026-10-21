@@ -36,6 +36,10 @@ test("a Build-tracked landing names its item in a Build trailer, which promotion
   assert.equal(withIssueTrailer("Implement #41", 41, "o/r", "build"), "Implement #41\n\nBuild: #41");
   assert.equal(withIssueTrailer("Fix o/r#41", 41, "o/r", "build"), "Fix o/r#41\n\nBuild: #41");
   assert.equal(withIssueTrailer("Do it\n\nBuild: #41", 41, "o/r", "build"), "Do it\n\nBuild: #41");
+  // A full description keeps its body and trailers verbatim; Build joins the trailer block, or is not added twice.
+  const body = "Do it\n\nFirst.\n\nSecond.\n\nCo-Authored-By: A <a@b.c>";
+  assert.equal(withIssueTrailer(body, 41, "o/r", "build"), `${body}\nBuild: #41`);
+  assert.equal(withIssueTrailer(`${body}\nBuild: #41`, 41, "o/r", "build"), `${body}\nBuild: #41`);
   assert.equal(commitIssue("Do it\n\nBuild: #41", "o/r", "build"), 41);
   // Only the Build trailer names a Build item: GitHub references from before the switch name none.
   for (const description of ["Fix workspace (#48)", "Fixes #48", "Do it\n\nIssue: o/r#48"]) assert.equal(commitIssue(description, "o/r", "build"), null, description);
