@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync, statSync } from "node:fs";
-import { mkdir, writeFile, rename } from "node:fs/promises";
+import { appendFile, mkdir, writeFile, rename } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,4 +56,12 @@ export async function spawnDetached(command: string[], cwd: string): Promise<{ s
   } finally {
     closeSync(log);
   }
+}
+
+/** Append one outcome line (timestamp, then JSON) to the pool-refill log, in the format the refill child writes. Never throws: a log failure must not fail the work it records. */
+export async function appendPoolRefillLog(outcome: object): Promise<void> {
+  try {
+    await mkdir(stateHome(), { recursive: true, mode: 0o700 });
+    await appendFile(poolRefillLogPath(), `${new Date().toISOString()} ${JSON.stringify(outcome)}\n`, { mode: 0o600 });
+  } catch { /* the log is diagnostic */ }
 }

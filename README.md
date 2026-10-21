@@ -200,6 +200,18 @@ install repeated from scratch. Existing `node_modules`, however stale, are insta
 over in place and never replaced by a clone: in a large repository, deleting and
 cloning the tree takes minutes, while an incremental install changes only what changed.
 
+Each spare a background refill provisions is one line in `pool-refill.log` (in the state home), so the log alone
+shows how often spares come from handovers rather than clones, and what each cost, per repository:
+`{"provisioned":true,"workspacePath","name","project","integrationRoot","dependencySource","dependencyMs"}`, with
+`cloneMs` when the source is `clone`. `dependencySource` is `handover` (a retiring checkout's `node_modules` were
+moved in, then verified by an install over them), `clone`, `install`, or `none` (no dependencies needed);
+`dependencyMs` is the whole dependency step, verifying install included, timed once the machine's refill lock is held, so a
+wait behind another repository's refill is not counted. A foreground `slipjay pool refill` prints the same lines to stdout
+instead. The log starts afresh when background work starts with it over 1 MiB, so its counts cover the time since then. When a retiring checkout's trees move to a
+new spare, that move is its own line, `{"handover":true,"project","integrationRoot","from","workspacePath","name","trees","moveMs"}`,
+before the spare's provisioning line. A claim that keeps its spare's dependencies because the install inputs are
+unchanged provisions nothing, so it logs nothing here.
+
 The install-input fingerprint covers what a frozen install reads: lockfiles,
 package-manager configuration, patches, the files install lifecycle scripts reach,
 and each installed `package.json` less its metadata and publishing fields

@@ -160,7 +160,7 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   /** A start's step timing, which records the fingerprints this takes (see start-steps.ts). */
   steps?: StartSteps;
 } = {}): Promise<{
-  state: "ready" | "not_required"; packageManager: string | null; installInputs: string | null; seeded?: true;
+  state: "ready" | "not_required"; packageManager: string | null; installInputs: string | null; seeded?: true; cloneMs?: number;
 }> {
   const inputs = options.installInputs !== undefined ? options.installInputs
     : options.recordInputs || options.seedFrom ? await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath)) : null;
@@ -168,10 +168,13 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   if (!dependencyCommand) return { state: "not_required", packageManager: null, installInputs: options.recordInputs ? inputs : null };
   if (!options.quiet) console.log(`[deps] ${dependencyCommand.command} install in ${basename(workspacePath)}...`);
   let seeded: string[] | null = null;
+  let cloneMs: number | undefined;
   if (inputs && options.seedFrom && !existsSync(join(workspacePath, "node_modules"))) {
     try {
       for await (const source of options.seedFrom(inputs)) {
+        const cloneStarted = performance.now();
         seeded = await cloneNodeModules(source, workspacePath).catch(() => null);
+        if (seeded) cloneMs = Math.round(performance.now() - cloneStarted);
         if (seeded) { console.error(`[deps] ${basename(workspacePath)}: seeded node_modules from ${source}`); break; }
       }
     } catch {
@@ -202,5 +205,5 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   // A frozen install can report success over a store it did not repair.
   if (damage) throw new Error(damage);
   const installed = options.recordInputs && inputs && await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath));
-  return { state: "ready", packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true } : {}) };
+  return { state: "ready", packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true, cloneMs: cloneMs! } : {}) };
 }

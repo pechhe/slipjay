@@ -117,7 +117,12 @@ export async function refreshDependencies(integrationRoot: string, workspacePath
  * so a start's install beside it never clones a partial tree.
  */
 async function refillDependencies(integrationRoot: string, workspacePath: string, options: { installInputs?: string | null } = {}) {
-  return withWorkspaceTransaction("refill", () => installDependencies(integrationRoot, workspacePath, { ...options, quiet: true }), { waitMs: REFILL_WAIT_MS });
+  return withWorkspaceTransaction("refill", async () => {
+    // Timed inside the lock: waiting for another repository's refill is not this spare's cost.
+    const started = performance.now();
+    const prepared = await installDependencies(integrationRoot, workspacePath, { ...options, quiet: true });
+    return { ...prepared, dependencyMs: Math.round(performance.now() - started) };
+  }, { waitMs: REFILL_WAIT_MS });
 }
 
 const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; steps?: StartSteps }) =>
@@ -130,13 +135,31 @@ const installDependencies = (integrationRoot: string, workspacePath: string, opt
 const INSTALL_WAIT_MS = 30 * 60_000;
 
 /**
+ * Where a provisioned spare's dependencies came from: `handover` (a retiring checkout's trees were
+ * moved in, then verified by an install over them), `clone` (copied from another checkout), `install`
+ * (installed, over existing or absent trees), or `none` (the repository needs no dependencies).
+ */
+export type DependencySource = "handover" | "clone" | "install" | "none";
+
+/**
+ * A refill's outcome, one `pool-refill.log` line. A provisioned spare names its `project` and
+ * `integrationRoot` (so a log of many repositories can be split), its dependency `dependencySource`,
+ * and `dependencyMs`, the milliseconds its dependency step took (the install, including the one that
+ * verifies a clone or handover); `cloneMs` is the clone alone, when the source is `clone`.
+ */
+export interface ProvisionOutcome {
+  provisioned: boolean; reason?: string; workspacePath?: string; name?: string;
+  project?: string; integrationRoot?: string; dependencySource?: DependencySource; dependencyMs?: number; cloneMs?: number;
+}
+
+/**
  * Add one spare to the pool, up to this machine's `spareAllowance`, without ever blocking a
  * claim: the pool transaction is held only to count the spares and register this
  * one's name (unprepared, marked with this process), not while the workspace is
  * added and its dependencies installed, so claims can take any other ready spare
  * meanwhile. A spare whose preparer died is adopted and finished.
  */
-export async function provisionSpare(cwd: string = process.cwd()): Promise<{ provisioned: boolean; reason?: string; workspacePath?: string; name?: string }> {
+export async function provisionSpare(cwd: string = process.cwd()): Promise<ProvisionOutcome> {
   const context = await workspaceContext(cwd);
   if (!context) return { provisioned: false, reason: "not-jj" };
   const root = context.integration.root;
@@ -168,10 +191,15 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<{ pro
       await jj(root, ["workspace", "add", "--name", name, "--revision", context.integrationBranch, workspacePath]);
     }
     await linkSharedPaths(root, workspacePath);
-    const { state, packageManager, installInputs } = await refillDependencies(root, workspacePath);
-    const { preparingPid: _done, ...metadata } = (await workspaceMetadata(name)) ?? {};
+    const handedOver = Boolean((await workspaceMetadata(name))?.dependencyHandover);
+    const { state, packageManager, installInputs, seeded, cloneMs, dependencyMs } = await refillDependencies(root, workspacePath);
+    const dependencySource: DependencySource = state === "not_required" ? "none" : seeded ? "clone" : handedOver ? "handover" : "install";
+    const { preparingPid: _done, dependencyHandover: _handover, ...metadata } = (await workspaceMetadata(name)) ?? {};
     await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: { state, packageManager, installInputs } });
-    return { provisioned: true, workspacePath, name };
+    return {
+      provisioned: true, workspacePath, name, project: await repositoryProjectCode(root), integrationRoot: root,
+      dependencySource, dependencyMs, ...(dependencySource === "clone" ? { cloneMs } : {}),
+    };
   } catch (error) {
     // Hand the name back so another refill can adopt and finish it.
     const metadata = await workspaceMetadata(name);

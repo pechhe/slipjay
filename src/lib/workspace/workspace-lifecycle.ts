@@ -6,7 +6,7 @@ import { copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rename, 
 import { dirname, join, resolve, sep } from "node:path";
 import { artifactPublished, finishLandedWorkspace } from "../landing/landing-steps.ts";
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "../infra/workspace-jj.ts";
-import { revisionExists, revisionFacts, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workingCopyCommit, workspaceContext } from "../infra/workspace-jj.ts";
+import { repositoryProjectCode, revisionExists, revisionFacts, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workingCopyCommit, workspaceContext } from "../infra/workspace-jj.ts";
 import { evidenceHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockOwnerAlive, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import type { LandingState } from "./workspace-state.ts";
@@ -16,7 +16,8 @@ import { callerPids, describeHolders, processAlive, workspaceHolders } from "./w
 import { archiveIntegratedWorkspaceEvidence, conflictingArchive } from "./workspace-finalization.ts";
 import { runWorkspaceTeardown } from "./workspace-teardown.ts";
 import { jjEnvironment } from "../infra/workspace-command.ts";
-import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
+import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { appendPoolRefillLog } from "./workspace-background.ts";
 import { discardCheckout } from "./workspace-trash.ts";
 import { releaseSpareHandover, reserveSpareForHandover } from "./workspace-spares.ts";
 import { moveNodeModules } from "./workspace-dependencies.ts";
@@ -656,9 +657,19 @@ export async function retireWorkspace(integrationRoot: string, workspace: { name
       if (preserved) await rm(preserved.directory, { recursive: true, force: true });
       throw error;
     }
+    const moveStarted = performance.now();
     const moved = handover ? await moveNodeModules(workspace.root, handover.path, handover.manifests) : [];
+    const moveMs = Math.round(performance.now() - moveStarted);
     try {
       await forgetWorkspace(integrationRoot, workspace.name, workspace.root, hooks);
+      // Recorded once the checkout is gone, before the refill that adopts the spare starts: it names
+      // the spare's source `handover`, and the log shows the move itself.
+      if (handover && moved.length) {
+        const metadata = await workspaceMetadata(handover.name);
+        if (metadata) await writeWorkspaceJson(metadataPath(handover.name), { ...metadata, dependencyHandover: { from: workspace.name, trees: moved.length } }).catch(() => undefined);
+        await appendPoolRefillLog({ handover: true, project: await repositoryProjectCode(integrationRoot), integrationRoot, from: workspace.name,
+          workspacePath: handover.path, name: handover.name, trees: moved.length, moveMs });
+      }
     } catch (error) {
       // A checkout that stays keeps its dependencies.
       if (handover) await moveNodeModules(handover.path, workspace.root, moved);

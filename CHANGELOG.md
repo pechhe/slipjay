@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.43.0
+
+- **`pool-refill.log` shows where each spare's dependencies came from (Build #3401, SJ-26):** a provisioning line now adds
+  `project` and `integrationRoot` (so a log shared by several repositories can be split), `dependencySource` (`handover`: a
+  retiring checkout's `node_modules` were moved in; `clone`: copied from another checkout; `install`: installed;
+  `none`: the repository needs no dependencies), `dependencyMs` (the dependency step, including the install that
+  verifies a clone or handover, timed once the machine's refill lock is held so a wait behind another repository is
+  not counted) and, for a clone, `cloneMs`. A retiring checkout whose `node_modules` move to a new
+  spare also logs `{"handover":true,"project","integrationRoot","from","workspacePath","name","trees","moveMs"}`. Existing
+  fields are unchanged.
+
 ## v3.42.1
 
 - **Landing keeps the whole commit description (Build #4431, SJ-61):** a Build-attached landing publishes a commit's body and
