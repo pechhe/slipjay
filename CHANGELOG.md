@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.40.1
+
+- **Rerunning a landing and its cleanup work once the candidate bookmark has made the candidate immutable (Build #4510, SJ-65):**
+  after `slipjay land` pushes `slipjay/changes/<changeId>`, a fetch of every bookmark imports it untracked and jj treats the
+  candidate as immutable. A rerun of `slipjay land` that reattaches to the running operation now compares the candidate's
+  full description, trailer included, instead of its first line, so an already-described candidate is no longer rewritten
+  (it failed with "Commit … is immutable"). The cleanup after a later landing forgets only SlipJay's own
+  `slipjay/changes/*` bookmarks for the earlier submitted candidates before abandoning them; a tag, another bookmark or
+  configuration that also holds a candidate still keeps it, with the existing "Could not abandon" message.
+
 ## v3.40.0
 
 - **The runner's queue names the Spec each landing delivers:** `slipjay land` now records the Build item or Issue its

@@ -999,6 +999,7 @@ export async function dropSupersededCandidate(cwd: string, root: string, candida
   // these roots, not the entire branch (which could include a preserved helper base).
   const continuations = onTop ? (await jj(cwd, ["log", "-r", `roots(${candidate.commitId}..@)`, "--no-graph", "-T", 'change_id ++ "\\n"'])).split("\n").filter(Boolean) : [];
   try {
+    await forgetOwnCandidateBookmarks(cwd, stack);
     await jj(cwd, ["abandon", stack]);
     if (onTop) await jj(cwd, continuations.length
       ? ["rebase", ...continuations.flatMap((revision) => ["-s", revision]), "-d", landedCommitId]
@@ -1010,6 +1011,22 @@ export async function dropSupersededCandidate(cwd: string, root: string, candida
     if (await revisionExists(cwd, `${candidate.commitId} & ::@`) && !await revisionExists(cwd, `(${candidate.commitId}..@) & ~empty()`))
       await jj(cwd, ["new", landedCommitId]);
   }
+}
+
+/**
+ * A full fetch re-imports `slipjay/changes/<changeId>` untracked, which makes its candidate immutable. Forget
+ * only SlipJay's own bookmarks for the commits in `stack`, so they are mutable in the ordinary way; anything
+ * else holding a commit (a tag, another bookmark, configuration) still protects it from the abandon.
+ */
+async function forgetOwnCandidateBookmarks(cwd: string, stack: string): Promise<void> {
+  const listing = await jj(cwd, ["--ignore-working-copy", "log", "-r", stack, "--no-graph", "-T",
+    'change_id ++ "\\t" ++ local_bookmarks.map(|b| b.name()).join(" ") ++ " " ++ remote_bookmarks.map(|b| b.name()).join(" ") ++ "\\n"']);
+  const own = new Set<string>();
+  for (const line of listing.split("\n")) {
+    const [changeId = "", names = ""] = line.split("\t");
+    if (changeId && names.split(" ").includes(candidateBookmark(changeId))) own.add(candidateBookmark(changeId));
+  }
+  if (own.size) await jj(cwd, ["bookmark", "forget", "--include-remotes", ...[...own].map((name) => `exact:${name}`)]);
 }
 
 /**

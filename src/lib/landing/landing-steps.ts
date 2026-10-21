@@ -139,7 +139,9 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
     const stale = stack.split("\n").map((line) => line.split("\t")).find(([, line]) => line?.trim() === generated);
     if (stale) throw new Error(`Landing needs a real description for commit ${stale[0]}: it still has the generated placeholder "${generated}". Run \`jj describe -r ${stale[0]} -m "<what this change does>"\` and land again`);
   }
-  let description = generated && target.description.trim() === generated ? "" : target.description.trim();
+  // `revisionFacts` carries only the first line; the trailer and body are part of what is compared and rewritten.
+  const fullDescription = (await jj(cwd, ["--ignore-working-copy", "log", "-r", target.commitId, "--no-graph", "-T", "description"])).trim();
+  let description = generated && target.description.trim() === generated ? "" : fullDescription;
   if (!description) {
     const issueDescription = issueNumber
       ? await workItemTitle(context.integration.root, trackerOf(context.configuration), issueNumber, readBuild)
@@ -152,7 +154,7 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   // The landed commit names its Issue itself, so attribution survives machine-local state.
   const remotes = issueNumber ? await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]).catch(() => "") : "";
   const described = withIssueTrailer(description, issueNumber, githubRepository(remotes, context.configuration.remote), trackerOf(context.configuration));
-  if (described === target.description.trim() && target.description.trim()) return target;
+  if (described === fullDescription && fullDescription) return target;
   await jj(cwd, ["describe", "-r", target.changeId, "-m", described]);
   return revisionFacts(cwd, target.changeId);
 }

@@ -72,7 +72,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     const lines: string[] = [];
     const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
       onLine: (line: string) => { lines.push(line); } };
-    return { ...f, cwd, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
+    return { ...f, cwd, workspaceName: workspace.current.name, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
       setKill: (outcome: KillOutcome) => { killed = outcome; },
       killRequests, requestIds,
       dispose: async () => {

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
 import { test } from "vite-plus/test";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
+import { metadataPath } from "../../src/lib/workspace/workspace-state.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { fixture, released, waitFor } from "./fixtures/runner-client-fixture.ts";
 
@@ -86,5 +88,32 @@ test("an older commit's running operation is followed without moving its candida
     assert.equal(result.operation.id, "op_older");
     assert.ok(f.lines.some((line) => line.includes("land again")));
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+  } finally { await f.dispose(); }
+});
+
+test("rerunning while the first landing is still running reattaches to its immutable, already-described candidate", async () => {
+  const f = await fixture();
+  try {
+    // The first landing submits a candidate that already carries its issue trailer.
+    const metadata = metadataPath(f.workspaceName);
+    const recorded = JSON.parse(await readFile(metadata, "utf8"));
+    await writeFile(metadata, JSON.stringify({ ...recorded, issueNumber: 4510 }));
+    const first = landThroughRunner(f.cwd, f.options);
+    void first.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    // A fetch of every bookmark imports the pushed candidate untracked, which makes it immutable.
+    jj(f.repo, ["git", "fetch"]);
+    const submitted = jj(f.cwd, ["log", "-r", f.change, "--no-graph", "-T", "commit_id"]);
+    assert.match(jj(f.cwd, ["log", "-r", f.change, "--no-graph", "-T", "description"]), /4510/);
+    assert.equal(jj(f.cwd, ["log", "-r", submitted, "--no-graph", "-T", "immutable"]), "true");
+    const again = landThroughRunner(f.cwd, f.options);
+    void again.catch(() => {});
+    await waitFor(() => f.log.events().some((stored) => stored.event.type === "client" && stored.event.fact.kind === "land_follow" && stored.event.fact.reattached));
+    f.append(op.id, { type: "failed", stage: "verifying", reason: "fixture failure" });
+    const [, result] = await Promise.all([first.catch(() => undefined), again]);
+    assert.equal(result.operation.id, op.id);
+    assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
+    assert.equal(jj(f.cwd, ["log", "-r", f.change, "--no-graph", "-T", "commit_id"]), submitted);
   } finally { await f.dispose(); }
 });
