@@ -4,20 +4,77 @@
   "integrationBranch": "main",
   "remote": "origin",
   "requiredLandingVerification": [
-    { "executable": "bun", "args": ["install", "--frozen-lockfile"] },
-    { "executable": "bun", "args": ["run", "check"], "concurrent": true },
-    { "executable": "bun", "args": ["run", "typecheck"], "concurrent": true },
-    { "executable": "bun", "args": ["run", "test:landing"], "concurrent": true }
+    {
+      "executable": "bun",
+      "args": [
+        "install",
+        "--frozen-lockfile"
+      ]
+    },
+    {
+      "executable": "bun",
+      "args": [
+        "run",
+        "check"
+      ],
+      "concurrent": true
+    },
+    {
+      "executable": "bun",
+      "args": [
+        "run",
+        "typecheck"
+      ],
+      "concurrent": true
+    },
+    {
+      "executable": "bun",
+      "args": [
+        "run",
+        "test:landing"
+      ],
+      "concurrent": true
+    }
   ],
-  "spares": 8,
-  "budgets": { "verifyP50Seconds": 90, "verifyP90Seconds": 180, "testFileSeconds": 30 },
-  "generatedPaths": [".build"],
+  "spares": 4,
+  "budgets": {
+    "verifyP50Seconds": 90,
+    "verifyP90Seconds": 180,
+    "testFileSeconds": 30
+  },
+  "generatedPaths": [
+    ".build"
+  ],
   "audit": {
     "commands": [
-      { "executable": "bun", "args": ["install", "--frozen-lockfile"] },
-      { "executable": "bun", "args": ["run", "check"] },
-      { "executable": "bun", "args": ["run", "typecheck"] },
-      { "executable": "bun", "args": ["run", "test:audit"] }
+      {
+        "executable": "bun",
+        "args": [
+          "install",
+          "--frozen-lockfile"
+        ]
+      },
+      {
+        "executable": "bun",
+        "args": [
+          "run",
+          "check"
+        ]
+      },
+      {
+        "executable": "bun",
+        "args": [
+          "run",
+          "typecheck"
+        ]
+      },
+      {
+        "executable": "bun",
+        "args": [
+          "run",
+          "test:audit"
+        ]
+      }
     ],
     "timeOfDay": "02:00",
     "timeZone": "Europe/London"
