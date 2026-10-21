@@ -617,6 +617,8 @@ export const repositoryKey = (name: string): string => name.toLowerCase();
 export type HeldIntegrationState = { repo: string; commitId: string; since: string; reason: string; retries: number };
 export type WatchOperation = Operation & {
   stageStartedAt?: string;
+  /** The Spec its submitter named: the Build item or Issue the submitting workspace was started for, or a `Spec:` trailer. */
+  spec?: number;
   timing: { state: "unknown" | "normal" | "amber" | "red"; medianMs: number | null; amberAfterMs: number | null; samples: number; commandDeadlineAt: string | null };
   kill: { allowed: boolean; reason: string | null };
 };

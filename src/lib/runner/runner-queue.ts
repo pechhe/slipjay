@@ -815,7 +815,7 @@ export function createRunnerQueue(input: {
       const description = await jj(checkout, ["log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
       const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
       const identity = log.events({ operationId: operation.id }).findLast((row) => row.event.type === "identity")?.event;
-      append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") });
+      append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") ?? (identity?.type === "identity" ? identity.spec : undefined) });
       await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
       const candidateOptions = {

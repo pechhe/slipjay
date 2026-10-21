@@ -25,3 +25,17 @@ test("stage median and current command timeout use recorded evidence", () => {
     assert.equal(projectWatchOperation(operation, [], new Date(7000)).timing.amberAfterMs, null);
   } finally { log.close(); }
 });
+
+test("an operation shows the Spec its submitter named", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    const submit = { type: "submitted" as const, repo: "a", changeId: "c", commitId: "x", bookmark: "b", submittedBy: "author" };
+    const identity = { type: "identity" as const, submitterKind: "agent" as const, submitterId: "h:w", workspace: "w", machine: "h" };
+    log.append("named", submit); log.append("named", { ...identity, spec: 189 });
+    log.append("other", submit); log.append("other", { ...identity, spec: 7 });
+    log.append("unnamed", submit); log.append("unnamed", identity);
+    const now = new Date(0);
+    assert.equal(projectWatchOperation(log.operation("named")!, log.events(), now).spec, 189);
+    assert.equal(projectWatchOperation(log.operation("unnamed")!, log.events(), now).spec, undefined);
+  } finally { log.close(); }
+});

@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.40.0
+
+- **The runner's queue names the Spec each landing delivers:** `slipjay land` now records the Build item or Issue its
+  workspace was started for in the submission's identity, and the watch snapshot carries it on each operation as
+  `spec`, so a queue view such as T3 Code's can name a landing by its Spec from the moment it is queued, from any
+  machine. A `Spec:` trailer still wins once the runner reads the candidate. Older runners accept the new field.
+
 ## v3.39.7
 
 - **Runners install with the repository's pinned pnpm (Build #4447, SJ-63):** a runner ran its global pnpm, which on

@@ -7,8 +7,10 @@ export function projectWatchOperation(operation: Operation, events: readonly Sto
   const stages = new Map<string, { stage: string; at: string }>();
   const samples: number[] = [];
   let stageStartedAt: string | undefined;
+  let spec: number | undefined;
   for (const stored of events) {
     const event = stored.event;
+    if (event.type === "identity" && stored.operationId === operation.id) spec = event.spec;
     if (event.type === "submitted") kinds.set(stored.operationId, event.kind ?? "landing");
     if (event.type === "stage" || (TERMINAL_EVENT_TYPES as readonly string[]).includes(event.type)) {
       const previous = stages.get(stored.operationId);
@@ -31,7 +33,7 @@ export function projectWatchOperation(operation: Operation, events: readonly Sto
   const state = !running ? "unknown" : deadline !== null && now.getTime() > deadline ? "red"
     : amberAfterMs === null || !stageStartedAt ? "unknown" : now.getTime() - Date.parse(stageStartedAt) > amberAfterMs ? "amber" : "normal";
   const allowed = running && operation.kind !== "deploy" && KILLABLE_STAGES.includes(operation.stage);
-  return { ...operation, ...(stageStartedAt ? { stageStartedAt } : {}),
+  return { ...operation, ...(stageStartedAt ? { stageStartedAt } : {}), ...(spec === undefined ? {} : { spec }),
     timing: { state, medianMs, amberAfterMs, samples: samples.length, commandDeadlineAt: deadline === null ? null : new Date(deadline).toISOString() },
     kill: { allowed, reason: allowed ? null : !running ? "Operation is not running" : operation.kind === "deploy" ? "Deploy operations cannot be killed" : `${operation.stage} is past verification and cannot be killed` } };
 }

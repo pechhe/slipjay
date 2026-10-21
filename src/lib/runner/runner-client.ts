@@ -735,6 +735,8 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
           tickets: options.tickets ?? [], sessionId: options.session ?? env[BUILD_SESSION_ENV], read: (action, input) => readBuildThroughRunner(action, input, env) })));
       }
       requestId = await landingRequestIdentity(context, location, repo, target.commitId);
+      // Named on the submission so a queue view can say which Spec a landing delivers before the runner reads its trailers.
+      const workspaceIssue = (await workspaceMetadata(context.current.name))?.issueNumber;
       const bookmark = candidateBookmark(target.changeId);
       try { await jj(cwd, ["git", "fetch", "--remote", remote, "--branch", bookmark]); }
       catch (error) { if (!/nothing|no matching|does not exist|not found/i.test(String(error))) throw error; }
@@ -762,6 +764,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
           submittedBy: `${hostname()}:${context.current.name}`, identity: {
             type: "identity", submitterKind: env.CODEX_THREAD_ID || env.CLAUDE_SESSION_ID ? "agent" : "unknown",
             submitterId: `${hostname()}:${context.current.name}`, workspace: context.current.name, machine: hostname(),
+            ...(typeof workspaceIssue === "number" ? { spec: workspaceIssue } : {}),
             ...(env.CODEX_THREAD_ID ? { harness: "codex", sessionId: env.CODEX_THREAD_ID } : env.CLAUDE_SESSION_ID ? { harness: "claude", sessionId: env.CLAUDE_SESSION_ID } : {}),
           } }) });
       } catch (error) {
