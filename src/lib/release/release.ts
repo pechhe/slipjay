@@ -130,7 +130,7 @@ export type ReleaseResult =
   | { ok: false; status: "verification_failed"; reason: string; evidence: RequiredVerificationError["evidence"] };
 
 /** A pre-verification's pass: `checks` ran on `candidate`'s tree while the release branch was at `base`. */
-export type VerifiedRelease = { ok: true; status: "verified"; base: string; candidate: string; checks: VerificationDeclaration[] };
+export type VerifiedRelease = { ok: true; status: "verified"; base: string; candidate: string; checks: VerificationDeclaration[]; nonAdditiveMigrations: string[] };
 
 type VerifyOptions = Pick<ConfirmReleaseOptions, "onProgress" | "onStage" | "run" | "environment" | "abortSignal">;
 
@@ -739,7 +739,7 @@ export async function verifyRelease(checkout: string, options: VerifyOptions & {
     const plan = await planRelease(checkout, { candidate: options.candidate });
     if (!plan.commits.length) refuse(`${short(plan.candidate)} is already on ${plan.releaseBranch}`);
     await verifyCandidate(checkout, plan, options);
-    return { ok: true, status: "verified", base: plan.base, candidate: plan.candidate, checks: plan.checks };
+    return { ok: true, status: "verified", base: plan.base, candidate: plan.candidate, checks: plan.checks, nonAdditiveMigrations: plan.nonAdditiveMigrations };
   } catch (error) {
     return refusalOf(error) as Extract<ReleaseResult, { ok: false }>;
   }

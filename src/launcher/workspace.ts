@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { readAudits, recordAuditCause, cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/runner/pipeline-metrics.ts";
+import type { AutomaticPromotion, Operation } from "../lib/runner/runner-contract.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
@@ -232,11 +233,11 @@ async function runPromote(args: string[]): Promise<number> {
   const deployed = deploy?.result?.type === "deployed" ? deploy.result.record : deploy?.result?.type === "failed" ? deploy.result.deployment : undefined;
   let printed: Record<string, unknown>;
   if (outcome?.type === "released") {
-    printed = { ...outcome.result, log: logUrl };
+    printed = { ...outcome.result, ...automaticOf(operation) ? { automatic: automaticOf(operation) } : {}, log: logUrl };
     if (deploy) {
       // The promotion's verdict is its production deploy's: `deployed`, or `deploy failed: <project> (<reason>)`, with any rollback.
       if (deploy.result?.type === "failed") console.error(`[runner] production ${deploy.result.reason}`);
-      printed.production = { status: deploy.status, ...deploy.result?.type === "failed" ? { reason: deploy.result.reason } : {},
+      printed.production = { status: deploy.status, ...automaticOf(operation) ? { automatic: automaticOf(operation) } : {}, ...deploy.result?.type === "failed" ? { reason: deploy.result.reason } : {},
         ...deployed ? { record: deployed } : {}, log: runLogCommand(deploy.id) };
     }
   }
@@ -249,6 +250,10 @@ async function runPromote(args: string[]): Promise<number> {
   console.log(JSON.stringify(printed, null, 2));
   return outcome?.type !== "released" || (deploy && deploy.status !== "deployed") ? 1 : 0;
 }
+
+/** How a deploy line says the runner promoted it by itself, and why. */
+const automaticOf = (operation: Operation): AutomaticPromotion | undefined => operation.kind === "release" ? operation.automatic : undefined;
+const automaticNote = (automatic: AutomaticPromotion | undefined): string => automatic ? `  (automatic: ${automatic.setting} "${automatic.value}")` : "";
 
 /** `deploy <environment>`: deploy the integration branch's latest commit now, through the runner, and follow it. */
 async function runDeploy(args: string[]): Promise<number> {
@@ -327,6 +332,7 @@ async function runDeploys(args: string[]): Promise<number> {
   if (asJson) {
     console.log(JSON.stringify(deploys.map((operation) => ({ id: operation.id, environment: operation.environment, commitId: operation.commitId,
       status: operation.status, submittedBy: operation.submittedBy, submittedAt: operation.submittedAt, finishedAt: operation.finishedAt,
+      ...operation.promotion?.automatic ? { automatic: operation.promotion.automatic } : {},
       ...operation.result?.type === "deployed" ? { record: operation.result.record } : {},
       ...operation.result?.type === "failed" ? { reason: operation.result.reason, ...operation.result.deployment ? { record: operation.result.deployment } : {} } : {},
     })), null, 2));
@@ -334,7 +340,7 @@ async function runDeploys(args: string[]): Promise<number> {
   }
   for (const operation of deploys) {
     const record = operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
-    console.log(`${operation.submittedAt}  ${operation.environment}  ${operation.commitId.slice(0, 12)}  ${operation.status}${operation.result?.type === "failed" ? `: ${operation.result.reason}` : ""}`);
+    console.log(`${operation.submittedAt}  ${operation.environment}  ${operation.commitId.slice(0, 12)}  ${operation.status}${operation.result?.type === "failed" ? `: ${operation.result.reason}` : ""}${automaticNote(operation.promotion?.automatic)}`);
     for (const project of record?.projects ?? []) console.log(`  ${project.name}: ${project.ok ? project.url ?? "deployed" : `failed: ${project.reason}`}`);
     if (record) {
       console.log(`  ${record.changes.length} change${record.changes.length === 1 ? "" : "s"} since ${record.previous?.slice(0, 12) ?? "the first deploy"}`);
@@ -413,7 +419,7 @@ async function runConfig(args: string[]): Promise<number> {
 
 const ATTEMPT_USAGE = "Usage: slipjay attempt show <id> | attempt release <id>";
 
-const POLICY_USAGE = "Usage: slipjay policy show [--json] | policy set --base <revision> [--patch <json>] [--spares <0-8|default>] [--process <standard|light|default>] [--landing-verification <json list|default>] [--json-lines]";
+const POLICY_USAGE = "Usage: slipjay policy show [--json] | policy set --base <revision> [--patch <json>] [--spares <0-8|default>] [--process <standard|light|development|default>] [--landing-verification <json list|default>] [--json-lines]";
 
 /** `policy`: read the integration branch's policy, or land a change to its settings fields. */
 async function runPolicy(args: string[]): Promise<number> {

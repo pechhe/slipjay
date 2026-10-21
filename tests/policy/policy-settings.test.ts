@@ -17,7 +17,9 @@ const base = JSON.stringify({ version: 1, integrationBranch: "main", spares: 2, 
 test("process round-trips, defaults to standard when absent, and refuses anything else", () => {
   assert.equal(parseExecutionPolicy(JSON.stringify({ version: 1, process: "light" })).process, "light");
   assert.equal(parseExecutionPolicy(JSON.stringify({ version: 1 })).process, undefined);
-  assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, process: "minimal" })), /process must be "standard" or "light"/);
+  assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, process: "minimal" })), /process must be "standard", "light" or "development"/);
+  assert.equal(parseExecutionPolicy(JSON.stringify({ version: 1, process: "development" })).process, "development");
+  assert.equal(parseExecutionPolicy(applyPolicyPatch(base, { process: "development" }).text).process, "development");
   const { text } = applyPolicyPatch(base, { process: "light" });
   assert.equal(parseExecutionPolicy(text).process, "light");
   assert.equal(parseExecutionPolicy(applyPolicyPatch(text, { process: null }).text).process, undefined);

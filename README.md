@@ -59,10 +59,11 @@ Three `slipjay.json` fields are settings: `spares` (see [Workspace options](#wor
 `process` and `requiredLandingVerification` (the gate). Change them with `slipjay policy set`
 rather than by hand, and this machine's own settings with `slipjay config`.
 
-- **`process`.** `"standard"` (the default when absent) or `"light"`: how much process agents
-  apply to the repository's work. SlipJay validates and reports it but changes no behaviour;
-  agents read it through `slipjay policy show`. Any other value is refused, and an unreadable
-  policy is an error, never `light`.
+- **`process`.** `"standard"` (the default when absent), `"light"` or `"development"`: how much
+  process agents apply to the repository's work. Agents read it through `slipjay policy show`;
+  `development` implies everything `light` does. Only `development` changes SlipJay: the runner
+  then promotes by itself (see [Release](#release)). Any other value is refused, and an unreadable
+  policy is an error, never `light` or `development`.
 - **Retired fields.** `parallelExecution` and `unattendedMergeToIntegration` drive nothing. A
   policy that still declares them loads; `land` and `policy show` print a one-line warning to
   stderr (other commands stay quiet), `policy show --json` lists them as `retired`, and
@@ -72,7 +73,7 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   `digest`, the file as `declared`, the `settings` in force with defaults filled in, and any
   `retired` fields. It reads the local integration bookmark, so fetch first to see another
   machine's change.
-- **`slipjay policy set --base <revision> [--spares <n|default>] [--process <level|default>] [--landing-verification <json|default>] [--patch <json>] [--json-lines]`.**
+- **`slipjay policy set --base <revision> [--spares <n|default>] [--process <standard|light|development|default>] [--landing-verification <json|default>] [--patch <json>] [--json-lines]`.**
   Applies a patch of those three fields (`default`, or `null` in `--patch`, removes one) to the
   policy at `--base`, the `revision` from `policy show`. Any other field is refused. If the
   integration branch's policy has changed since that revision, the patch is refused as stale, so
@@ -860,6 +861,22 @@ approval covers the candidate:
   matters. Whether to act on it is the approver's policy.
 
 Both fields appear on promotion plans that have commits to release.
+
+**Automatic promotion (`process: "development"`).** When the policy committed on the release
+branch, at the base the pre-verification ran against (never the candidate's policy), has
+`process: "development"`, the runner queues a release of the newest green candidate by itself
+once its pre-verification passed. It is the release `slipjay promote --confirm` submits, in the
+same release queue, so landings, resets and releases keep their order, and it reuses the passed
+pre-verification. The release, its production deploy and the `slipjay promote --confirm` and
+`slipjay deploys` output carry `automatic: { "setting": "process", "value": "development" }`, and
+the runner log says `promoting <commit> automatically`. The safeguards stay: nothing is promoted
+automatically when the candidate has `nonAdditiveMigrations`, when its verification failed or is
+missing, or when the audits refuse a promotion; a failed production health check rolls back as
+above. Such a candidate stays unpromoted, with the reason (`Not promoting <commit> automatically:
+…`) on its pre-verification's log, and the next green candidate is tried. A candidate with a
+release, or a production deploy, on record, or any release or production deploy in flight, is
+never released again; a newer green candidate replaces a queued automatic release of an older
+one. Under `standard` and `light` nothing promotes without a human `--confirm`.
 
 When recovery can be proven, a failed production promotion is rolled back
 automatically: production

@@ -101,7 +101,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
+  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false }: { process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -119,6 +119,8 @@ export async function fixture(migrations = false, release = false, deployments?:
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
     requiredLandingVerification: (gates?.(root) ?? [prefixGate?.(root) ?? gate]).map((script) => ({ executable: "node", args: ["-e", script] })),
     unattendedMergeToIntegration: true,
+    ...(processLevel ? { process: processLevel } : {}),
+    ...(failingAudit ? { audit: { commands: [{ executable: "node", args: ["-e", "process.exit(1)"] }] } } : {}),
     ...(migrations ? {
       migrationFinalization: {
         mode: "late_bound_serialized", triggerPaths: ["schema"], artifactPaths: ["migrations"],

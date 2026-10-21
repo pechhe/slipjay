@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.41.0
+
+- **`process: "development"` promotes by itself (YS-254):** a repository can set `process` to `development` (`slipjay
+  policy set --process development`; `standard` stays the default). When a commit's staging deploy is green and its
+  pre-verification passed against the release branch, and the policy committed on the release branch (never the
+  candidate's) says `development`, the runner queues the same release `slipjay promote --confirm` would, in the same
+  release queue. The release, its production deploy, `slipjay promote --confirm` output and `slipjay deploys` record
+  `automatic: { setting: "process", value: "development" }`. Non-additive migrations, a failed or missing
+  verification and an audit refusal still stop it: the candidate stays unpromoted, with the reason on its
+  pre-verification's log, and the next green candidate is tried. A health-check failure rolls back as before.
+  `standard` and `light` promote nothing without a human `--confirm`. `development` implies everything `light` does
+  for agents.
+
 ## v3.40.0
 
 - **The runner's queue names the Spec each landing delivers:** `slipjay land` now records the Build item or Issue its

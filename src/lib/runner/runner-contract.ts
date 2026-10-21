@@ -98,7 +98,10 @@ export type DeployMigrations = { artifacts: string[]; status: "current" | "appli
  * migrations that make undoing it manual, and the migration files it carries
  * (absent from deploys recorded before the runner applied them).
  */
-export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[]; migrationArtifacts?: string[] };
+export type PromotionFacts = { merge: string; nonAdditiveMigrations: string[]; migrationArtifacts?: string[]; automatic?: AutomaticPromotion };
+
+/** A promotion the runner submitted by itself, and the policy setting that allowed it: `process: "development"`. */
+export type AutomaticPromotion = { setting: "process"; value: "development" };
 
 /** One fact appended to the log. Nothing is updated or deleted. */
 export type CauseClass = "gate" | "conflict" | "infrastructure" | "policy" | "killed" | "paused_out" | "held" | "superseded" | "cancelled";
@@ -171,7 +174,7 @@ export type OperationEvent =
   /** Runner-wide, under RUNNER_CONTROL_ID: Build stopped (or resumed) answering receipt delivery. */
   | { type: "build_delivery"; state: "available" | "unavailable"; reason?: string }
   /** A release of `commitId`, the integration commit a human approved. */
-  | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string }
+  | { type: "submitted"; kind: "release"; repo: string; commitId: string; migrationsReady: boolean; submittedBy: string; automatic?: AutomaticPromotion }
   /** A deploy of `commitId`, already on the integration branch, to a declared environment. */
   | { type: "submitted"; kind: "deploy"; repo: string; environment: string; commitId: string; submittedBy: string; promotion?: PromotionFacts }
   /** Release verification of `commitId`, which staging deployed, before anyone approves it: see `VerificationOperation`. */
@@ -213,7 +216,7 @@ export type OperationEvent =
   /** A release's outcome. A promotion names `deploy`, the production deploy of its candidate, which the deploy lane runs. */
   | { type: "released"; result: CompletedRelease; deploy?: string }
   /** A pre-verification passed: `checks` ran against `candidate`'s tree while the release branch was at `base`. */
-  | { type: "verified"; base: string; candidate: string; checks: VerificationDeclaration[] }
+  | { type: "verified"; base: string; candidate: string; checks: VerificationDeclaration[]; nonAdditiveMigrations?: string[] }
   /** A running pre-verification stopped for `to` (a landing, reset, release or restart) and is queued again; its runs so far stay on record. */
   | { type: "yielded"; to: string }
   /** Every project of the environment deployed. */
@@ -306,7 +309,7 @@ export type LandingOutcome = {
   build?: { admission: "pending" | "admitted" | "refused" | "unassociated"; receipts: "none" | "pending" | "delivered" | "parked" };
 };
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
-export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean };
+export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean; automatic?: AutomaticPromotion };
 
 /**
  * Release verification of a commit staging deployed, run before the owner approves it so a

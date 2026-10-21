@@ -33,7 +33,7 @@ export type ExecutionPolicy = {
   sharedPaths?: string[];
   /** How many prepared spare workspaces the pool keeps; 1 when undeclared. */
   spares?: number;
-  /** How much process agents apply to the repository's work; `standard` when undeclared. SlipJay only reports it. */
+  /** How much process agents apply to the repository's work; `standard` when undeclared. Only `development` changes SlipJay: the runner then promotes by itself. */
   process?: ProcessLevel;
   postIntegration?: unknown;
   /** The target the runner resets on a schedule and on demand; undefined when undeclared. */
@@ -48,7 +48,7 @@ export type ExecutionPolicy = {
   budgets?: TimeBudgets;
 };
 
-export type ProcessLevel = "standard" | "light";
+export type ProcessLevel = "standard" | "light" | "development";
 
 /** Landing time budgets, in seconds: the verifying stage's p50 and p90, and any one test file. */
 export type TimeBudgets = { verifyP50Seconds?: number; verifyP90Seconds?: number; testFileSeconds?: number };
@@ -225,10 +225,10 @@ export function spareCount(declared: unknown): number {
   return declared as number;
 }
 
-/** `process`: `standard` (the default) or `light`. */
+/** `process`: `standard` (the default), `light` or `development`. */
 export function processLevel(declared: unknown): ProcessLevel {
   if (declared === undefined) return "standard";
-  if (declared !== "standard" && declared !== "light") fail('process must be "standard" or "light"');
+  if (declared !== "standard" && declared !== "light" && declared !== "development") fail('process must be "standard", "light" or "development"');
   return declared;
 }
 
