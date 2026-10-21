@@ -6,6 +6,8 @@ import { startRunner } from "../../src/lib/runner/runner-service.ts";
 import { poolRefillLogPath } from "../../src/lib/workspace/workspace-paths.ts";
 import { directExecutor } from "./executor.ts";
 import { configureLocalGithubTransport } from "./workspace-project.ts";
+import { drainFixtureWorkers, waitForExit } from "./fixture-workers.ts";
+export { waitForExit } from "./fixture-workers.ts";
 
 // Kept apart from workspace-project.ts so a test that only needs a project does not import the runner.
 
@@ -27,7 +29,11 @@ export async function withTestRunner<T>(f: { root: string; repo: string; remote:
       env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token", ...options.build ? { YARDSMITH_SLIPJAY_BUILD_TOKEN: options.build.token } : {} } });
     try {
       return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });
-    } finally { await runner.close(); }
+    } finally {
+      // Housekeeping may still need this runner's Build API. Join it and all
+      // workers it spawned before closing the service or removing the fixture.
+      try { await drainFixtureWorkers(f.root); } finally { await runner.close(); }
+    }
   } finally {
     transport.restore();
   }
@@ -56,17 +62,12 @@ export function landThroughTestRunner(f: { root: string; repo: string; remote: s
       await options.before?.();
       return { ...result, lines };
     } finally {
-      holder?.kill();
+      if (holder && holder.exitCode === null && holder.signalCode === null) {
+        const exited = new Promise<void>((resolve) => holder.once("close", () => resolve()));
+        holder.kill();
+        await exited;
+      }
     }
   }, options.build ? { build: options.build } : {});
 }
 
-/** Wait until process `pid` has exited. */
-async function waitForExit(pid: number, timeoutMs = 120_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  const alive = () => { try { process.kill(pid, 0); return true; } catch { return false; } };
-  while (alive()) {
-    if (Date.now() > deadline) throw new Error(`process ${pid} still running after ${timeoutMs}ms`);
-    await new Promise((settle) => setTimeout(settle, 50));
-  }
-}

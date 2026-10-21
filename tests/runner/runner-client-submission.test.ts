@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import { LandingNotSubmitted, landThroughRunner } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { jj } from "../support/workspace-project.ts";
 import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
+import * as workspaceJj from "../../src/lib/infra/workspace-jj.ts";
+import { workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
 
 test("following a server-side submission race records reattachment", async () => {
   const f = await fixture(false, true);
@@ -54,18 +56,58 @@ test("a wrong token is refused clearly before publishing or submitting", async (
 
 
 test("an explicit submission refusal is not described as an unknown transport outcome", async () => {
-  for (const status of [400, 401] as const) {
+  for (const status of [400, 401, 409, 503] as const) {
     const f = await fixture(false, false, status);
     try {
       await assert.rejects(landThroughRunner(f.cwd, f.options), (error: unknown) => {
-        assert.ok(error instanceof Error);
+        assert.ok(error instanceof LandingNotSubmitted);
         assert.doesNotMatch(error.message, /unknown/);
         assert.match(error.message, /refus/);
         return true;
       });
       assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 0);
+      const context = (await workspaceJj.workspaceContext(f.cwd))!;
+      assert.deepEqual((await workspaceMetadata(context.current.name))!.pendingLandingRequests, {});
     } finally { await f.dispose(); }
   }
+});
+
+test("a running older candidate racing the POST does not leave a pending request for the refused source", async () => {
+  const f = await fixture();
+  const fetch = globalThis.fetch;
+  const racing = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    if (String(input) === `${f.server.url}/v1/operations` && init?.method === "POST") {
+      f.append("op_older", { type: "submitted", repo: "fixture/project", changeId: f.change, commitId: "0".repeat(40), bookmark: candidateBookmark(f.change), submittedBy: "earlier" });
+      f.append("op_older", { type: "stage", stage: "verifying" });
+    }
+    return fetch(input, init);
+  });
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("verifying")));
+    const context = (await workspaceJj.workspaceContext(f.cwd))!;
+    assert.deepEqual((await workspaceMetadata(context.current.name))!.pendingLandingRequests, {});
+    f.append("op_older", { type: "failed", stage: "verifying", reason: "fixture failure" });
+    assert.equal((await running).operation.id, "op_older");
+  } finally { racing.mockRestore(); await f.dispose(); }
+});
+
+test("a failed candidate push releases its frozen pending request before a different source can land", async () => {
+  const f = await fixture();
+  const original = workspaceJj.jj;
+  const pushing = vi.spyOn(workspaceJj, "jj").mockImplementation(async (cwd, args, options) => {
+    if (args[0] === "git" && args[1] === "push") throw new Error("fixture push failed");
+    return original(cwd, args, options);
+  });
+  try {
+    await assert.rejects(landThroughRunner(f.cwd, f.options), (error) => error instanceof LandingNotSubmitted && /fixture push failed/.test(error.message));
+    const context = (await workspaceJj.workspaceContext(f.cwd))!;
+    const metadata = (await workspaceMetadata(context.current.name))!;
+    assert.deepEqual(metadata.pendingLandingRequests, {});
+    assert.equal(Object.keys(metadata.landingAdoptions as object).length, 1, "freeze happened before the push failed");
+    assert.equal(f.log.openOperations().length, 0);
+  } finally { pushing.mockRestore(); await f.dispose(); }
 });
 
 test("a landing the runner finds would conflict is reported as not submitted, with the runner's explanation", async () => {

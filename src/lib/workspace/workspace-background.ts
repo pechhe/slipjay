@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { closeSync, openSync, statSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile, rename } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { workspaceContext } from "../infra/workspace-jj.ts";
 import { poolRefillLogPath, stateHome } from "./workspace-paths.ts";
@@ -40,6 +42,15 @@ export async function spawnDetached(command: string[], cwd: string): Promise<{ s
       child.once("error", (error) => resolveSpawn(error));
     });
     if (spawned) return { started: false, reason: spawned.message, logPath };
+    // A fixture/host that must join detached work supplies its own registry.
+    // Inherited by children, so housekeeping's trash/refill workers register too.
+    const registry = process.env.SLIPJAY_BACKGROUND_WORKERS;
+    if (registry) {
+      await mkdir(registry, { recursive: true });
+      const record = join(registry, randomUUID());
+      await writeFile(record + ".tmp", JSON.stringify({ pid: child.pid, command, cwd }), { mode: 0o600 });
+      await rename(record + ".tmp", record + ".json");
+    }
     child.unref();
     return { started: true, pid: child.pid, logPath };
   } finally {

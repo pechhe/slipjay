@@ -4,6 +4,9 @@ import { mkdir, readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { landedHome } from "./workspace-paths.ts";
 import { writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { frozenAdoptions } from "./workspace-coverage.ts";
+import { workspaceMetadata } from "./workspace-state.ts";
+import { revisionExists, workspaceContext } from "../infra/workspace-jj.ts";
 
 /** Landing identity retained outside the disposable checkout. */
 export type LandingArchiveInput = {
@@ -18,6 +21,9 @@ export type LandingArchiveInput = {
   artifactChangeId?: string;
   /** Issue identity compared when an archive already exists. */
   issueNumber?: number;
+  operationId?: string;
+  /** Names this workspace had before a rename; an archive written under one is still its own. */
+  previousWorkspaceNames?: string[];
 };
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -34,7 +40,8 @@ export async function conflictingArchive(gitDirectory: string, state: LandingArc
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return null;
     throw error;
   }
-  const same = previous.workspaceName === state.workspaceName && previous.integrationRoot === state.integrationRoot
+  const sameWorkspace = previous.workspaceName === state.workspaceName || !!state.previousWorkspaceNames?.includes(previous.workspaceName);
+  const same = sameWorkspace && previous.integrationRoot === state.integrationRoot
     && previous.artifactCommitId === state.artifactCommitId && previous.artifactChangeId === state.artifactChangeId
     && previous.integrationBranch === state.integrationBranch && previous.issueNumber === state.issueNumber;
   return same ? null : previous;
@@ -44,7 +51,18 @@ export async function conflictingArchive(gitDirectory: string, state: LandingArc
 export async function archiveIntegratedWorkspaceEvidence(gitDirectory: string, state: LandingArchiveInput): Promise<void> {
   if (await conflictingArchive(gitDirectory, state)) throw new Error("Archived integrated delivery identity changed");
   const file = await archivePath(gitDirectory, state.artifactCommitId);
-  if (existsSync(file)) return;
+  const metadata = await workspaceMetadata(state.workspaceName);
+  const frozen = state.operationId ? Object.values(frozenAdoptions(metadata?.landingAdoptions)).find((item) => item.operationId === state.operationId) : undefined;
+  const context = state.integrationRoot ? await workspaceContext(state.integrationRoot) : null;
+  const remote = context?.configuration.remote;
+  const published = context && await revisionExists(context.integration.root,
+    `${state.artifactCommitId} & ::${state.integrationBranch}${remote ? `@${remote}` : ""}`);
+  const provenance = frozen && published && metadata?.integrationRoot === state.integrationRoot ? {
+    coverageRepository: await realpath(gitDirectory), publishedSource: frozen.source,
+    adoptionCoverage: frozen.adoptions.map(({ workspaceName, base, revisions }) => ({ workspaceName, base, revisions })),
+  } : undefined;
+  if (existsSync(file) && !provenance) return;
+  const previous = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) as Record<string, unknown> : {};
   await mkdir(landedHome(), { recursive: true, mode: 0o700 });
-  await writeWorkspaceJson(file, { ...state, phase: "landed" });
+  await writeWorkspaceJson(file, { ...previous, ...state, phase: "landed", ...provenance });
 }

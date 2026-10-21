@@ -10,7 +10,7 @@ import { openOperationLog } from "../../../src/lib/runner/runner-log.ts";
 import type { BuildAdmitter } from "../../../src/lib/build/build-admission.ts";
 import { configureLocalGithubTransport, jj, project } from "../../support/workspace-project.ts";
 
-export async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 | 422 = false, admitBuild?: BuildAdmitter) {
+export async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 | 409 | 422 | 503 = false, admitBuild?: BuildAdmitter) {
   const f = await project();
   const transport = await configureLocalGithubTransport(f);
   try {

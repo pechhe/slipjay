@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { test } from "vite-plus/test";
-import { landThroughRunner, operationRunnerLocation } from "../../src/lib/runner/runner-client.ts";
+import { test, vi } from "vite-plus/test";
+import { LandingNotSubmitted, landThroughRunner, operationRunnerLocation } from "../../src/lib/runner/runner-client.ts";
+import { workspaceContext } from "../../src/lib/infra/workspace-jj.ts";
+import { workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
+import { frozenAdoptions } from "../../src/lib/workspace/workspace-coverage.ts";
+import * as workspaceJj from "../../src/lib/infra/workspace-jj.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import type { BuildAdmission } from "../../src/lib/build/build-admission.ts";
 import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
@@ -13,6 +17,19 @@ test("a fresh landing invocation reconciles a lost terminal response with the pe
     const submittedEvents = f.log.events().filter((row) => row.event.type === "submitted");
     assert.equal(submittedEvents.length, 1);
     const id = submittedEvents[0]!.operationId;
+    // A failure before the retry's POST cannot disprove the earlier acceptance.
+    const context = (await workspaceContext(f.cwd))!;
+    const original = workspaceJj.jj;
+    const pushing = vi.spyOn(workspaceJj, "jj").mockImplementation(async (cwd, args, options) => {
+      if (args[0] === "git" && args[1] === "push") throw new Error("retry push failed");
+      return original(cwd, args, options);
+    });
+    try {
+      await assert.rejects(landThroughRunner(f.cwd, f.options), (error) => error instanceof Error && !(error instanceof LandingNotSubmitted) && /retry push failed/.test(error.message));
+      const kept = (await workspaceMetadata(context.current.name))!;
+      assert.equal(Object.keys(kept.pendingLandingRequests as object).length, 1);
+      assert.equal(Object.keys(kept.landingRunners as object).length, 1, "the earlier submission's runner pin survives a failure before the retry's POST");
+    } finally { pushing.mockRestore(); }
     const recovered = await landThroughRunner(f.cwd, f.options);
     assert.equal(recovered.operation.id, id);
     assert.equal(recovered.operation.status, "failed");
@@ -41,12 +58,17 @@ test("a Build admission that did not complete is reported as retryable, and land
       build: { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: null, bindGeneration: 1, sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" } };
     await assert.rejects(landThroughRunner(f.cwd, { ...f.options, handoff }), (error: unknown) => {
       assert.ok(error instanceof Error);
+      assert.equal(error instanceof LandingNotSubmitted, false, "a retained operation awaiting admission is accepted source");
       assert.match(error.message, /did not answer in time.*slipjay land again/);
       assert.doesNotMatch(error.message, /unknown/);
       return true;
     });
     const pending = f.log.operation(f.log.events().find((row) => row.event.type === "submitted")!.operationId);
     assert.ok(pending?.kind === "landing" && pending.admission === "pending");
+    const context = (await workspaceContext(f.cwd))!;
+    const metadata = (await workspaceMetadata(context.current.name))!;
+    assert.equal(Object.keys(metadata.pendingLandingRequests as object).length, 1);
+    assert.equal(Object.values(frozenAdoptions(metadata.landingAdoptions))[0]!.operationId, pending.id);
     // Not followed as if queued: the client resubmits, which retries the admission of that same operation.
     const retry = landThroughRunner(f.cwd, { ...f.options, handoff });
     await waitFor(() => f.log.operation(pending.id)?.kind === "landing" && (f.log.operation(pending.id) as { admission?: string }).admission === "admitted");

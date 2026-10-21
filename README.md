@@ -313,8 +313,9 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `reset` | Have the runner reset the repository's declared `reset` target now (or follow its open reset) and print the verdict as JSON; exits 0 once it is `reset` (see [Reset](#reset)). |
 | `audit [status]` | The repository's nightly audits and what they say: the last green audit, the latest verdict, whether the last green one is overdue, the open failure with its suspects and recorded cause, and the escapes counted (see [Audit](#audit)). |
 | `audit cause <landing...\|--flake\|--infrastructure\|--unresolved> [--audit <id>] [--note <text>]` | Record why the repository's failing audit failed: one or more culprit landings (a landing's operation id, or its published commit in full or by 12 or more hex digits), or exactly one of `--flake`, `--infrastructure`, `--unresolved`. It covers the whole open failure, or the failing audit `--audit` names, and lifts the promotion refusal. |
-| `cleanup [path]` | Remove the current (or given) workspace once it has landed. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
-| `remove <path>` | Remove the workspace at `path` if it has landed or is untouched (a landing record naming an artifact already archived as another workspace's landing counts as no landing) and it holds no file that no history holds; otherwise keep it and exit 1. |
+| `cleanup [path]` | Remove the current (or given) workspace once it has landed or all its unintegrated work has archived published adoption coverage. The working copy is snapshotted once and judged; just before the workspace is forgotten it is snapshotted again, and if it changed in between, the workspace is kept (`working-copy-changed`) rather than orphaning the new commit. |
+| `adopt <helper-path> [--json]` | From the lead workspace, duplicate the helper's non-empty commits after its recorded start base onto the lead and squash them into the lead's working copy, keeping its description. Records `{ workspaceName, base, revisions }` in lead metadata (printed with `--json`). Refuses unsnapshotted helper edits, merge commits, a base outside the lead's ancestry, changing helper revisions, conflicts (with paths and rollback), or more than 32 adopted revisions per landing. A live helper process does not block adoption. |
+| `remove [--discard] <path>` | Remove a delivered or untouched workspace with no unique files; otherwise keep it and exit 1. Published adoption coverage also counts as delivery, including for an Issue-bound helper. `--discard` explicitly confirms deletion of uncovered unlanded work and Issue attachment, including new work after a previous landing. It never overrides pending runner facts, live processes or unique files. A landing record naming another workspace's archived artifact counts as no landing. |
 | `guard` | Claude Code PreToolUse landing guard (reads the tool call on stdin). It denies moving or pushing the integration branch outside `land`, and a declared release branch outside `promote`. In a SlipJay workspace it also denies `jj new`, `jj edit`, `jj checkout`, `jj next`/`prev` and `jj workspace forget` (of the current or any named workspace) while the workspace left or forgotten has a non-empty, unintegrated `@` with no description (or only the generated one), telling the agent to `jj describe`, `jj abandon` or land it; that check runs one jj query in each workspace it would leave, inside that workspace's checkout so its unsnapshotted edits count (by its last snapshot when that checkout is missing or unreadable), and allows the command if jj cannot be queried. Each command is judged by the repository it targets (`git -C`, `jj -R`, else the working directory). |
 | `cutover [--check]` | Move historical state from `~/.slipway` to `~/.slipjay` once (see [State and cutover](#state-and-cutover)). |
 | `runner <serve\|log <operation>\|kill [<operation>]\|pause\|resume>` | Run the landing runner on this host, print one operation's run log, or use the owner's controls (see [Runner](#runner)). |
@@ -1053,6 +1054,50 @@ Helpers have `revision`, `base` and `scope`; checks have `revision`, `command`,
 `reference`, `result` (`complete`, `incomplete`) and `detail`. These are author
 reports, never runner verification, independent-review approval or repair authority.
 Empty evidence arrays do not establish that a check or review was unnecessary.
+
+`adopt` records are merged into `helpers` when the first submission is frozen,
+one entry per original revision with its helper base and changed paths as `scope`;
+explicit handoff helpers merge by revision too. Retries replay that evidence.
+After publication, adoption coverage (workspace name, base, revisions) is retained
+in the repository-scoped artifact archive, independently of the lead's checkout
+and metadata. Only that archived coverage authorises helper retirement; historical
+or hand-supplied `helpers` never do, and helpers receive no landing record of their
+own. Remove, cleanup, prune and sweeps share this judgement: every non-empty commit
+outside integration must be covered. Any later helper commit keeps it protected.
+The archive retains the lead's original published source. Its ancestry counts as
+delivered even when publication flattens it under new commit IDs, so a review or
+verify workspace based on the candidate can retire too. Helper branches still
+require exact recorded adoption coverage. Source-only coverage preserves Issue
+guards: an open Issue still protects its review workspace from removal and sweeps.
+Post-publication cleanup preserves
+ancestry held by other workspaces so those pinned helper revisions remain unchanged.
+At freeze, an adoption must remain in the candidate's JJ evolution and at least
+one of its changed paths must remain changed relative to the lead's start base.
+Dropped adoptions are removed with a warning. Pending adoptions are consumed by
+freeze; the operation-bound frozen copy survives retries and is archived by the
+client, cleanup or state pruning. A new submission carries forward an earlier
+frozen adoption only when runner facts prove that landing was declined, cancelled,
+superseded or failed before integration, or when it has neither an operation nor a pending
+submission request. Before replacing a queued candidate, the new freeze also copies
+its adoptions before posting to the runner, keeping the original until supersession
+is confirmed. A crash or lost response cannot lose either landing's provenance.
+Future freezes defer copies while their original submission is unresolved, and
+omit copies of already archived adoption coverage.
+Other queued, running and unknown-outcome submissions, including
+failures during integration or publication, keep their adoptions until resolved.
+Transferred adoptions leave the old record; published submissions keep their
+evidence without resending it. A failed push or definite submission refusal clears
+the pending request so a changed candidate can reclaim that freeze. Lost responses
+and retained operations still awaiting Build admission keep their request identities.
+Each adoption run keeps its own evolution anchor, so undoing a later adoption does
+not drop earlier helper revisions. Conflicting adoption duplicates are abandoned
+before any squash, preserving other workspaces' operations.
+Frozen handoffs and adoption records keep the
+same newest 32 acknowledged submissions and all unresolved submissions. Large
+helper scopes collapse to enclosing directories (or `.`) to fit the evidence bound.
+Before publication is known as of the last fetch, `prune --plan` reports
+`adopted, landing not published`; another guard (runner facts, processes or unique
+files) may take precedence. Unadopted contributions remain `unlanded work`.
 
 An optional `build` object carries the author's Build binding for the Spec work:
 `specId` and the lead execution `sessionId` (UUIDs), `ticketIds` (up to 200 distinct

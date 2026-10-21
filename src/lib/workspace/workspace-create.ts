@@ -541,6 +541,10 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   // A host with its own readiness authority (Peach's `prepare` hook) always decides itself.
   const prepared = hooks.prepare ? undefined : spare?.dependencies ?? undefined;
   const assignment = await assigned(hooks, created, task, { steps, issueNumber, created: true, reused: false, pooled: Boolean(spare), workspacePath, prepared, installInputs: spare?.installInputs });
+  await writeWorkspaceJson(metadataPath(name), {
+    ...await workspaceMetadata(name),
+    adoptionBase: await jj(workspacePath, ["--ignore-working-copy", "log", "-r", "@-", "--no-graph", "-T", "commit_id"]),
+  });
   // After the new generation's metadata: until then an interrupted attempt still owns the unmarked checkout.
   await assignAttempt(options.attemptId, name, workspacePath, true);
   return assignment;

@@ -34,6 +34,9 @@ if (process.platform === "linux" && existsSync(SHM) && executable(SHM)) {
 
 const home = realpathSync(mkdtempSync(join(tmpdir(), "peach-test-home-")));
 process.env.HOME = home;
+// Every detached worker (including workers spawned by a worker) can be joined
+// before a fixture closes its runner or deletes a repository it still uses.
+process.env.SLIPJAY_BACKGROUND_WORKERS = join(home, "background-workers");
 delete process.env.XDG_CONFIG_HOME;
 delete process.env.XDG_STATE_HOME;
 delete process.env.XDG_DATA_HOME;

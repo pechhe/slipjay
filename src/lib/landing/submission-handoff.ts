@@ -1,5 +1,16 @@
 import { createHash } from "node:crypto";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
+import { posix } from "node:path";
+
+/** Bound helper scope without omitting paths: replace files with enclosing directories as needed. */
+export function helperScope(paths: string[]): string {
+  let scope = [...new Set(paths)];
+  while (scope.join("\n").length > 2000) {
+    scope = [...new Set(scope.map((path) => posix.dirname(path)))];
+    if (scope.includes(".")) return ".";
+  }
+  return scope.join("\n") || ".";
+}
 
 /**
  * The author's Build binding, retained as supplied. `bodyRevision` is the numeric HQ Docs revision and is

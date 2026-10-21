@@ -15,6 +15,7 @@ export {
   listWorkspaces, readLandedRecord, readLandingState, readWorkspaceMode, renameWorkspace, workspaceContinuationState, writeWorkspaceMode,
 } from "./workspace/workspace-state.ts";
 export { createWorkspace, findIssueWorkspace, recoverIssueWorkspace, resolveStartBase, unusedWorkspaceStartRefusal } from "./workspace/workspace-create.ts";
+export { adoptWorkspace } from "./workspace/workspace-adopt.ts";
 export { readAttempt, releaseAttempt } from "./workspace/workspace-attempts.ts";
 export type { AllocationAttempt, AttemptRelease } from "./workspace/workspace-attempts.ts";
 export {

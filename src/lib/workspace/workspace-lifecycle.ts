@@ -6,7 +6,7 @@ import { copyFile, lstat, mkdir, readdir, readFile, readlink, realpath, rename, 
 import { dirname, join, resolve, sep } from "node:path";
 import { artifactPublished, finishLandedWorkspace } from "../landing/landing-steps.ts";
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "../infra/workspace-jj.ts";
-import { revisionExists, revisionFacts, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workingCopyCommit, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
+import { revisionExists, revisionFacts, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workingCopyCommit, workspaceContext } from "../infra/workspace-jj.ts";
 import { evidenceHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
 import { landingStatePaths, listWorkspaces, lockOwnerAlive, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import type { LandingState } from "./workspace-state.ts";
@@ -20,6 +20,7 @@ import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 import { discardCheckout } from "./workspace-trash.ts";
 import { releaseSpareHandover, reserveSpareForHandover } from "./workspace-spares.ts";
 import { moveNodeModules } from "./workspace-dependencies.ts";
+import { workspaceCoverage } from "./workspace-coverage.ts";
 
 /** Host seams for retiring a checkout: its guarded forget and lifecycle event. */
 export interface RetirementHooks {
@@ -286,8 +287,9 @@ async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { 
     if (edited.length) return { commit, retained: { cleaned: false, reason: "unsnapshotted-edits", paths: edited } };
   }
   // Follow-up work on top of the landed artifact is never deleted.
-  if (await workspaceHasUnintegratedWork(context.current.root, context.integrationBranch, { ignoreWorkingCopy: true })) {
-    return { commit, retained: { cleaned: false, reason: "new-unlanded-work" } };
+  const coverage = await workspaceCoverage(context, context.current.name);
+  if (coverage === "pending" || coverage === "uncovered") {
+    return { commit, retained: { cleaned: false, reason: coverage === "pending" ? "adopted, landing not published" : "new-unlanded-work" } };
   }
   const unique = await uniqueUntrackedMaterial(context.current.root, 5, generated, context.integration.root);
   return { commit, retained: unique.length ? { cleaned: false, reason: "unique-files", paths: unique } : null };
@@ -295,7 +297,7 @@ async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { 
 
 type LandedChecks =
   | { ready: false; result: CleanupResult }
-  | { ready: true; context: WorkspaceContext; state: LandingState; commit: string; gitDirectory: string };
+  | { ready: true; context: WorkspaceContext; state: LandingState | null; commit: string; gitDirectory: string };
 
 /**
  * Every check cleanup makes before it retires a landed checkout, in its order.
@@ -316,9 +318,28 @@ export async function landedCleanupChecks(cwd: string, { readOnly = false }: { r
     if (!integrated) return keep("landing-queued");
     state = { ...state, phase: "landed" };
   }
-  if (!state) return keep("not-landed");
+  if (!state) {
+    const coverage = await workspaceCoverage(context, context.current.name);
+    if (coverage === "pending") return keep("adopted, landing not published");
+    const metadata = await workspaceMetadata(context.current.name);
+    if (coverage !== "covered" && (coverage !== "source-covered" || metadata?.issueNumber)) return keep("not-landed");
+    const refusal = await removalRefusal(context.current, metadata);
+    if (refusal) return keep(refusal);
+    const holders = await workspaceHolders(context.current.root, { ignore: await callerPids() });
+    if (!holders) return keep("process working directories unavailable");
+    if (holders.length || await lockOwnerAlive(context.current.name)) return keep("in use by a live process");
+    const judged = await judgeCheckout(context, { readOnly });
+    if (judged.retained) return { ready: false, result: judged.retained };
+    return { ready: true, context, state: null, commit: judged.commit, gitDirectory: "" };
+  }
   if (resolve(state.workspacePath) !== resolve(context.current.root) || state.workspaceName !== context.current.name) {
     throw new Error("Landing state does not match the current workspace");
+  }
+  // Recover frozen provenance before judging a shared source's old commit IDs.
+  // The archiver independently requires publication before adding coverage.
+  if (!readOnly && await revisionExists(context.integration.root, `${state.artifactCommitId} & ::${state.integrationBranch}`)) {
+    const directory = await jj(context.integration.root, ["--ignore-working-copy", "git", "root"]);
+    if (!await conflictingArchive(directory, state)) await archiveIntegratedWorkspaceEvidence(directory, state);
   }
   let judged = await judgeCheckout(context, { readOnly });
   if (judged.retained) return { ready: false, result: judged.retained };
@@ -349,7 +370,7 @@ async function cleanupLandedWorkspaceUnlocked(cwd: string, hooks: RetirementHook
   const checks = await landedCleanupChecks(cwd);
   if (!checks.ready) return checks.result;
   const { context, state, commit, gitDirectory } = checks;
-  await archiveIntegratedWorkspaceEvidence(gitDirectory, state);
+  if (state) await archiveIntegratedWorkspaceEvidence(gitDirectory, state);
   await hooks.afterChecks?.();
   try {
     await retireWorkspace(context.integration.root, context.current, hooks, { expectedCommitId: commit, retainMaterial: true });
@@ -376,23 +397,27 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
     if (refusal) throw new Error(refusal);
     // Snapshot once; retirement then refuses a working copy that moved since.
     const judged = await workingCopyCommit(target.root).catch(() => null);
-    const hasWork = judged === null || await workspaceHasUnintegratedWork(target.root, context.integrationBranch, { ignoreWorkingCopy: true }).catch(
-      () => true,
-    );
+    const coverage = judged === null ? "uncovered" : await workspaceCoverage(context, workspaceName, judged, target.root).catch(() => "uncovered" as const);
+    const hasWork = coverage === "uncovered" || coverage === "pending";
+    if (coverage === "pending") {
+      const unique = await retainedWorkspaceMaterial(target.root, context.integration.root);
+      throw new Error(unique.length ? describeRetention({ reason: "unique-files", paths: unique }) : "adopted, landing not published");
+    }
     if (hasWork && options.allowWork !== true)
       throw new Error(
         `jj:${workspaceName} contains unlanded work; explicit deletion confirmation is required`,
       );
-    if (metadata?.issueNumber && options.allowIssue !== true)
+    if (metadata?.issueNumber && options.allowIssue !== true && coverage !== "covered")
       throw new Error(
         `jj:${workspaceName} is attached to Issue #${metadata.issueNumber}; explicit deletion confirmation is required`,
       );
-    if (options.retainMaterial) {
+    const retainMaterial = options.retainMaterial;
+    if (retainMaterial) {
       const unique = await retainedWorkspaceMaterial(target.root, context.integration.root);
       if (unique.length) throw new Error(describeRetention({ reason: "unique-files", paths: unique }));
     }
     await retireWorkspace(context.integration.root, { name: workspaceName, root: target.root }, {},
-      { ...judged === null ? {} : { expectedCommitId: judged }, retainMaterial: options.retainMaterial });
+      { ...judged === null ? {} : { expectedCommitId: judged }, retainMaterial });
     return { workspaceName, hasWork, issueNumber: metadata?.issueNumber ?? null };
   });
 }
@@ -420,14 +445,16 @@ export async function missingCheckoutRefusal(cwd: string, workspace: WorkspaceEn
   // The obligations retirement keeps for a present checkout hold for a missing one too.
   const metadata = workspace.metadata ?? await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) return "has pending runner facts; reconnect from that workspace to deliver them before removal";
-  if (processAlive(metadata?.preparingPid)) return "is being prepared by a live process";
+  if (metadata?.preparingPid !== process.pid && processAlive(metadata?.preparingPid)) return "is being prepared by a live process";
   if (await lockOwnerAlive(workspace.name)) return "is owned by a live process";
   const facts = await revisionFacts(cwd, workspace.commitId, { ignoreWorkingCopy: true }).catch(() => null);
   if (!facts) return "points at an unreadable JJ revision; preserve it for explicit recovery";
   if (facts.conflict) return "has conflicted JJ state; preserve it for explicit recovery";
   const unintegrated = await run("jj", ["--color=never", "--ignore-working-copy", "log", "-r", `(${context.integrationBranch}..${workspace.commitId}) & ~empty()`, "--no-graph", "-T", 'commit_id.short() ++ "\\n"'], { cwd });
   if (unintegrated.code !== 0) return "points at an unreadable JJ revision; preserve it for explicit recovery";
-  if (unintegrated.stdout.trim()) return "is missing on disk but still contains unintegrated work; preserve it for explicit recovery";
+  const coverage = await workspaceCoverage(context, workspace.name, workspace.commitId, cwd);
+  if (coverage === "pending") return "adopted, landing not published";
+  if (unintegrated.stdout.trim() && coverage !== "covered" && coverage !== "source-covered") return "is missing on disk but still contains unintegrated work; preserve it for explicit recovery";
   const landed = await readLandingState(workspace.name, { readOnly: true });
   if (landed && !await revisionExists(cwd, `${landed.artifactCommitId} & ::${landed.integrationBranch}`)) {
     return "has landing evidence that is not integrated; preserve it for explicit recovery";

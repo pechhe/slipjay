@@ -12,6 +12,7 @@ import { artifactPublished } from "../landing/landing-steps.ts";
 import { describeHolders, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
 import { pruneWorkspaceState } from "./workspace-state-prune.ts";
 import { findOrphanedCheckouts, retireOrphanedCheckouts } from "./workspace-orphans.ts";
+import { workspaceCoverage } from "./workspace-coverage.ts";
 
 /**
  * Disposable-workspace housekeeping shared by every surface that lands or
@@ -168,34 +169,39 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
         + `run \`jj workspace forget ${workspace.name}\` in the integration checkout and delete the directory`);
     }
     if (workspace.metadata?.spare) return keep("prepared spare", false);
-    if (workspace.hasWork) return keep("unlanded work", false);
+    const coverage = await workspaceCoverage(context, workspace.name, "@", workspace.root);
+    const refusal = await removalRefusal(workspace, workspace.metadata);
+    if (refusal) return keep(refusal);
+    if (workspace.hasWork && coverage === "uncovered") return keep("unlanded work", false);
     // An Issue's checkout that has not landed qualifies only when its Issue is closed, after the idle
     // wait; a live process or owner still protects it below.
     const issueBound = !workspace.landed && Boolean(workspace.metadata?.issueNumber);
     const running = await processes();
     if (!running) return keep("process working directories unavailable", !issueBound);
     if (guarded.some((root) => within(root, workspace.root))) return keep("protected", false);
-    if (issueBound) {
+    if (issueBound && coverage !== "covered" && coverage !== "pending") {
       const closed = await issueState(workspace.metadata!.issueNumber!);
       if (closed !== true) return keep(closed === false ? `issue #${workspace.metadata!.issueNumber} open` : `issue #${workspace.metadata!.issueNumber} state unknown`, false);
     }
     const holders = await workspaceHolders(workspace.root, { processes: running });
     if (holders!.length) return keep(`in use by a live process: ${describeHolders(holders!)}`);
     if (await lockOwnerAlive(workspace.name)) return keep("in use by a live process");
+    if (coverage === "pending") {
+      const unique = await retainedWorkspaceMaterial(workspace.root, context.integration.root);
+      return keep(unique.length ? `holds unique files: ${unique.join(", ")}` : "adopted, landing not published");
+    }
     if (workspace.landed) {
       if (!readOnly) return { remove: true, issueBound: false };
       const checks = await landedCleanupChecks(workspace.root, { readOnly: true });
       return checks.ready ? { remove: true, issueBound: false } : keep(describeRetention(checks.result));
     }
-    if (emptyIdleMs > 0 && now - await assignedAt(workspace) < emptyIdleMs) return keep("assigned within the idle period", false);
+    if (coverage !== "covered" && coverage !== "source-covered" && emptyIdleMs > 0 && now - await assignedAt(workspace) < emptyIdleMs) return keep("assigned within the idle period", false);
     if (readOnly) {
       const edited = await unsnapshottedEdits(workspace.root, context.integration.root);
       if (edited.length) return keep(`edited since its last snapshot: ${edited.join(", ")}`);
     }
     const unique = await retainedWorkspaceMaterial(workspace.root, context.integration.root);
     if (unique.length) return keep(`holds unique files: ${unique.join(", ")}`);
-    const refusal = await removalRefusal(workspace, workspace.metadata);
-    if (refusal) return keep(refusal);
     return { remove: true, issueBound };
   };
   return { context, workspaces, decide, processes };

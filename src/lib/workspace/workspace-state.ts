@@ -82,6 +82,14 @@ export async function workspaceMetadata(workspaceName: string): Promise<Workspac
   return await readJsonOptional<WorkspaceMetadata>(metadataPath(workspaceName));
 }
 
+/** The immutable start base, including workspaces created before it was stored directly. */
+export async function recordedWorkspaceBase(root: string, metadata: WorkspaceMetadata | null): Promise<string | null> {
+  if (typeof metadata?.adoptionBase === "string" && /^[a-f0-9]{40}$/.test(metadata.adoptionBase)) return metadata.adoptionBase;
+  const creation = metadata?.workspaceCreationOperationId;
+  return typeof creation === "string" && /^[a-f0-9]+$/.test(creation)
+    ? jj(root, ["--ignore-working-copy", "--at-operation", creation, "log", "-r", "@-", "--no-graph", "-T", "commit_id"]).catch(() => null) : null;
+}
+
 /**
  * Every JJ workspace of the repository with its metadata. Metadata whose recorded
  * name or path no longer matches JJ (after a rename or move) is corrected unless

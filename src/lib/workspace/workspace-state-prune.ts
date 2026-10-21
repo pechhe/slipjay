@@ -88,6 +88,8 @@ export async function pruneWorkspaceState(): Promise<string[]> {
     // A lock records no repository; borrow the one a metadata or landing record of the same name names.
     const rootOf = (record: PruneRecord) => record.data?.integrationRoot
       ?? records.find((other) => other.name === record.name && other.kind !== "lock" && other.data?.integrationRoot)?.data!.integrationRoot;
+    // Archive while the vanished lead's frozen operation provenance still exists.
+    records.sort((a, b) => Number(b.kind === "landing") - Number(a.kind === "landing"));
     for (const record of records) {
       try {
         const { data, name, path } = record;

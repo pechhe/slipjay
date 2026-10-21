@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
+import { drainFixtureWorkers } from "./fixture-workers.ts";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
 // HOME they leak into ~/.pi and race live sessions, so a runner that skipped the
@@ -69,7 +70,7 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   jj(repo, ["config", "set", "--repo", "user.email", "fixture@example.com"]);
   jj(repo, ["bookmark", "track", "main", "--remote", "origin"]);
   const remoteFile = (path: string) => execFileSync("git", ["--git-dir", remote, "show", `main:${path}`], { encoding: "utf8" });
-  return { root, repo, remote, verified, remoteFile, dispose: async () => { await stopFixtureProcesses(root); await rm(root, { recursive: true, force: true }); } };
+  return { root, repo, remote, verified, remoteFile, dispose: async () => { await drainFixtureWorkers(root); await stopFixtureProcesses(root); await rm(root, { recursive: true, force: true }); } };
 }
 
 /**

@@ -9,6 +9,8 @@ import { open } from "node:fs/promises";
 import { hostname } from "node:os";
 import { confirmableCandidate } from "../lib/release/release.ts";
 import { startRunner } from "../lib/runner/runner-service.ts";
+import { adoptWorkspace } from "../lib/workspace/workspace-adopt.ts";
+import { callerPids, workspaceHolders } from "../lib/workspace/workspace-holders.ts";
 
 import {
   attachWorkspaceIssue,
@@ -157,23 +159,28 @@ async function startForJson(args: string[]): Promise<number> {
  * work stays in place and reports failure, so a caller (such as Claude Code's
  * WorktreeRemove hook) never treats a kept workspace as removed.
  */
-async function removeWorkspaceAt(path: string): Promise<number> {
+async function removeWorkspaceAt(path: string, discard = false): Promise<number> {
   const context = await workspaceContext(path).catch(() => null);
   if (!context || context.current.name === "default") {
     console.log(`No isolated workspace at ${path}; nothing to remove.`);
     return 0;
   }
   const name = context.current.name;
+  const holders = await workspaceHolders(context.current.root, { ignore: await callerPids() });
+  if (!holders || holders.length) {
+    console.error(`Kept jj:${name}: ${holders ? "in use by a live process" : "process working directories unavailable"}`);
+    return 1;
+  }
   const result = await cleanupLandedWorkspace(path);
   if (result.cleaned) {
     console.log(`Removed landed workspace jj:${name}`);
     return 0;
   }
   // A landing record another delivery's archive disowns proves nothing: judge the checkout as never landed.
-  if (result.reason === "not-landed" || result.reason === "archived-elsewhere") {
+  if (result.reason === "not-landed" || result.reason === "archived-elsewhere" || discard && result.reason === "new-unlanded-work") {
     try {
       // Removing never deletes a file no history holds, one already there or one teardown writes.
-      await removeWorkspace(context.integration.root, name, { retainMaterial: true });
+      await removeWorkspace(context.integration.root, name, { retainMaterial: true, ...discard ? { allowWork: true, allowIssue: true } : {} });
       console.log(`Removed untouched workspace jj:${name}`);
       return 0;
     } catch (error) {
@@ -782,11 +789,17 @@ try {
     if (rest.length > 1 || rest[0]?.startsWith("-")) throw new Error("Usage: slipjay cleanup [path]");
     const result = await cleanupLandedWorkspace(rest[0] ? resolve(rest[0]) : process.cwd());
     console.log(result.cleaned ? "Workspace removed." : `Workspace retained: ${describeRetention(result)}.`);
+  } else if (command === "adopt") {
+    const paths = rest.filter((arg) => arg !== "--json");
+    if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay adopt <path> [--json]");
+    const result = await adoptWorkspace(process.cwd(), resolve(paths[0]!));
+    console.log(rest.includes("--json") ? JSON.stringify(result) : `Adopted ${result.revisions.length} revision(s) from jj:${result.workspaceName}`);
   } else if (command === "remove") {
-    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay remove <path>");
-    process.exitCode = await removeWorkspaceAt(resolve(rest[0]!));
+    const paths = rest.filter((arg) => arg !== "--discard");
+    if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
+    process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|cleanup [path]|remove <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

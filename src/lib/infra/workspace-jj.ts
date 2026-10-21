@@ -272,6 +272,8 @@ export async function projectPrefix(cwd: string = process.cwd()): Promise<string
   return repositoryProjectCode(context.integration.root);
 }
 
+export const workspaceUnintegratedRevset = (integrationBranch: string, tip = "@"): string => `(${integrationBranch}..${tip}) & ~empty()`;
+
 /**
  * Whether the workspace holds non-empty commits the integration branch lacks.
  * Snapshots the working copy first unless `ignoreWorkingCopy`, for a caller that
@@ -286,7 +288,7 @@ export async function workspaceHasUnintegratedWork(
     ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []),
     "log",
     "-r",
-    `(${integrationBranch}..@) & ~empty()`,
+    workspaceUnintegratedRevset(integrationBranch),
     "--no-graph",
     "-T",
     'commit_id.short() ++ "\\n"',
