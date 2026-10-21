@@ -15,7 +15,8 @@ if (!command) {
 const home = realpathSync(mkdtempSync(join(tmpdir(), "peach-test-home-")));
 const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
 for (const key of Object.keys(env)) {
-  if (/^(CMUX_|SLIPJAY_COMMAND_|XDG_(CONFIG|STATE|DATA)_HOME$)/.test(key) || key === "PI_CODING_AGENT_DIR") delete env[key];
+  // JJ_CONFIG and GIT_CONFIG_* would still name the developer's real configuration under the disposable HOME.
+  if (/^(CMUX_|SLIPJAY_COMMAND_|XDG_(CONFIG|STATE|DATA)_HOME$|JJ_CONFIG$|GIT_CONFIG_(GLOBAL|SYSTEM)$)/.test(key) || key === "PI_CODING_AGENT_DIR") delete env[key];
 }
 try {
   const result = spawnSync(command, args, { stdio: "inherit", env });

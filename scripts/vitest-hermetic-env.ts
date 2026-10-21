@@ -40,6 +40,9 @@ process.env.SLIPJAY_BACKGROUND_WORKERS = join(home, "background-workers");
 delete process.env.XDG_CONFIG_HOME;
 delete process.env.XDG_STATE_HOME;
 delete process.env.XDG_DATA_HOME;
+// A config path set by the developer's shell would still reach their real jj or git
+// configuration under the disposable HOME.
+for (const key of ["JJ_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"]) delete process.env[key];
 // A runtime that resolves homedir() once at startup (Bun) ignores the new HOME;
 // fail the file rather than let it write the real ~/.slipway.
 assertHermeticHome();

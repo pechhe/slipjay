@@ -11,6 +11,7 @@ import { createRunnerQueue, runnerLogOptions } from "../../../src/lib/runner/run
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
 import { directExecutor, testExecutor } from "../../support/executor.ts";
 import { systemdTest as gateSystemdTest } from "./systemd-gate.ts";
+import { fixtureJjConfig } from "../../support/jj-user-config.ts";
 
 // Shells are forbidden by the landing policy; preserve the requested gate's behaviour.
 // A committed `hang` file names where to record the pids of the gate, of a child in its
@@ -110,9 +111,8 @@ export async function fixture(migrations = false, release = false, deployments?:
   await mkdir(seed);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
   git(["init", "--bare", "-b", branch, origin]);
-  // Both clone and later bounded jj commands use this file's disposable HOME.
-  jj(root, ["config", "set", "--user", "user.name", "Fixture"]);
-  jj(root, ["config", "set", "--user", "user.email", "fixture@example.com"]);
+  // Both clone and later bounded jj commands read the private fixture identity, never the developer's jj config.
+  fixtureJjConfig();
   jj(seed, ["git", "init"]);
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: branch,

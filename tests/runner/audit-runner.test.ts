@@ -10,6 +10,7 @@ import type { AuditOperation, SubmitRequest } from "../../src/lib/runner/runner-
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue } from "../../src/lib/runner/runner-queue.ts";
 import { directExecutor } from "../support/executor.ts";
+import { fixtureJjConfig } from "../support/jj-user-config.ts";
 
 // Every test builds its own origin, checkouts and queue under a fresh root, so they run together.
 const test = serialTest.concurrent;
@@ -31,8 +32,7 @@ async function fixture({ audit = true }: { audit?: boolean } = {}) {
   const origin = join(root, "origin.git"), seed = join(root, "seed"), author = join(root, "author"), home = join(root, "runner");
   await mkdir(seed);
   execFileSync("git", ["init", "--bare", "-b", "main", origin], { cwd: root, stdio: "pipe" });
-  jj(root, ["config", "set", "--user", "user.name", "Fixture"]);
-  jj(root, ["config", "set", "--user", "user.email", "fixture@example.com"]);
+  fixtureJjConfig();
   jj(seed, ["git", "init"]);
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: "main",

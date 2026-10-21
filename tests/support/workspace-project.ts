@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { drainFixtureWorkers } from "./fixture-workers.ts";
+import { setFixtureJjSetting } from "./jj-user-config.ts";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
 // HOME they leak into ~/.pi and race live sessions, so a runner that skipped the
@@ -110,11 +111,11 @@ exec git -c ${quote(`url.${f.remote}.insteadOf=${github}`)} "$@"
 `);
   await chmod(gitWrapper, 0o755);
   // Source and runner clones share this test file's guarded disposable HOME.
-  jj(f.repo, ["config", "set", "--user", "git.executable-path", gitWrapper]);
+  setFixtureJjSetting("git.executable-path", gitWrapper);
   const setOrigin = (url: string) => execFileSync("git", ["-C", f.repo, "remote", "set-url", "origin", url]);
   const restore = () => {
     try { setOrigin(previousOrigin); }
-    finally { jj(f.repo, ["config", "set", "--user", "git.executable-path", previousGit]); }
+    finally { setFixtureJjSetting("git.executable-path", previousGit); }
   };
   try { setOrigin(github); }
   catch (error) { restore(); throw error; }
