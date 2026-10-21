@@ -206,6 +206,16 @@ async function bitwardenRunnerToken(env: NodeJS.ProcessEnv): Promise<string> {
   throw new Error(`Could not read SLIPJAY_RUNNER_TOKEN from Bitwarden after ${TOKEN_LOOKUP_ATTEMPTS} attempts (${failure}). ${MISSING_TOKEN}`);
 }
 
+/** Deletes the remote copy of a candidate bookmark, as the runner does when an operation closes; a copy already gone needs nothing. */
+async function deleteRemoteCandidate(root: string, remote: string, bookmark: string): Promise<void> {
+  try {
+    await jj(root, ["--ignore-working-copy", "git", "fetch", "--remote", remote, "--branch", bookmark]);
+    await jj(root, ["--ignore-working-copy", "bookmark", "track", `${bookmark}@${remote}`]);
+    await jj(root, ["--ignore-working-copy", "bookmark", "delete", bookmark]);
+    await jj(root, ["--ignore-working-copy", "git", "push", "--remote", remote, "--bookmark", bookmark]);
+  } catch { /* Not on the remote, or not deletable now: the next landing of this change tries again. */ }
+}
+
 /** An explicit runner refusal; deferred admission may name an already retained operation. */
 export class RunnerRequestRefused extends Error {
   readonly status: number;
@@ -687,6 +697,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     { signal: options.signal })).json() as { operations: Operation[] }).operations;
   let requestId: string | undefined;
   let pinned = false;
+  let pushedCandidate = false;
   let reconciling = false;
   try {
     let operation: Operation | undefined;
@@ -771,11 +782,16 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
         try { await jj(cwd, ["git", "push", "--remote", remote, "--named", `${bookmark}=${target.commitId}`]); }
         catch { throw pushError; }
       }
+      pushedCandidate = true;
       // Keeping the untracked remote ref would make the candidate immutable, so the next jj
       // command would stack a new working-copy commit on it and a reland would carry both.
       // Forgotten through the colocated integration checkout, which also drops the Git ref:
       // forgotten from a secondary workspace, the next command there would re-import it.
       await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", bookmark]);
+      // The candidate stays referenced here, without a remote ref, until the operation has a result: another workspace
+      // that imported the runner's copy would otherwise abandon the candidate, and rebase what is stacked on it, when
+      // the runner deletes that copy after a failure. A local bookmark alone does not make the commit immutable.
+      await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "set", bookmark, "-r", target.commitId, "--allow-backwards"]);
       if (staleCandidate.length) await jj(context.integration.root, ["--ignore-working-copy", "abandon", ...staleCandidate]).catch(() => {});
       // Pinned only once the runner may hold the submission, so a lost response is followed where it went;
       // a known refusal submitted nothing and releases the pin, so a retry goes to the current location.
@@ -850,8 +866,12 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     // A fetch of every bookmark while the candidate was on the remote imports it untracked,
     // which makes the submitted commit immutable: the author could neither fix a failure
     // nor abandon a landed commit, and the landed rewrite would show as divergent.
-    if (operation.result)
+    if (operation.result) {
+      // A rerun that reattached to an operation closed long ago pushed the candidate again, and the runner's cleanup
+      // ran when that operation closed: delete the copy here, or the next full fetch makes the candidate immutable.
+      if (pushedCandidate && reattached) await deleteRemoteCandidate(context.integration.root, remote!, candidateBookmark(target.changeId));
       await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", candidateBookmark(target.changeId)]).catch(() => {});
+    }
     // The forward and its port end with this call, so the log is named by a command, not a URL.
     const logUrl = runLogCommand(operation.id);
     const result = operation.result;

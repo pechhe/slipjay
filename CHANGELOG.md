@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.43.2
+
+- **A failed landing's candidate survives another workspace's import (Build #3009, SJ-1):** the client keeps a local
+  `slipjay/changes/<changeId>` bookmark (no remote ref, so the commit is not immutable) on the candidate until the operation has
+  a result. Before, a workspace that had imported the runner's copy abandoned the candidate when the runner deleted it after a
+  failure, rebased what was stacked on it onto its parent and left the source workspace stale.
+  A rerun that reattaches to an operation closed long ago, which pushes the candidate again with no runner cleanup to follow, deletes
+  that remote copy once the result is known, so a full fetch cannot make the failed candidate immutable.
+
 ## v3.43.1
 
 - **The runner token lookup survives a transient Bitwarden failure (Build #3355, SJ-15):** `slipjay land` and the other runner

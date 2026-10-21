@@ -490,7 +490,12 @@ and held state through the existing recovery path.
   progress line.
 - **Transport.** The client publishes the change as the bookmark
   `slipjay/changes/<changeId>` and submits it by jj change ID. The runner fetches it
-  on its turn and deletes it when the operation closes.
+  on its turn and deletes it when the operation closes. Until the operation has a result
+  (a failed or unknown submission included), the client keeps a local bookmark of that name,
+  without a remote ref, on the candidate: another workspace that imported the runner's copy
+  would otherwise abandon the candidate, and rebase what is stacked on it, when the runner
+  deletes the copy. A rerun reaches the original submission's outcome, which retires it, and deletes the
+  remote copy it pushed again when the operation had already closed.
 - **Commit descriptions.** A candidate published as a stack keeps its commits and
   descriptions. When the runner folds a multi-commit candidate into one
   landing artifact, its title comes from the first commit on the submitted

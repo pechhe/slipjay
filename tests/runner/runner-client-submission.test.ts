@@ -33,7 +33,10 @@ test("interrupting and reattaching submits once and publishes the exact candidat
     abort.abort();
     await stopped;
     assert.equal(execFileSync("git", ["--git-dir", f.remote, "rev-parse", `refs/heads/${candidateBookmark(f.change)}`], { encoding: "utf8" }).trim(), f.commit);
-    assert.equal(jj(f.cwd, ["bookmark", "list", candidateBookmark(f.change)]), "");
+    // Kept locally, with no ref of the remote's, until the operation has a result.
+    const kept = jj(f.cwd, ["bookmark", "list", "--all-remotes", candidateBookmark(f.change), "-T", 'name ++ "@" ++ remote ++ "\\n"']);
+    assert.match(kept, new RegExp(`^${candidateBookmark(f.change)}@$`, "m"));
+    assert.doesNotMatch(kept, /@origin/);
     f.lines.length = 0;
     const second = landThroughRunner(f.cwd, f.options);
     await waitFor(() => f.lines.some((line) => line.includes("queued")));
@@ -42,6 +45,7 @@ test("interrupting and reattaching submits once and publishes the exact candidat
     assert.equal(result.operation.id, operation.id);
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
     assert.equal(result.ok, false);
+    assert.equal(jj(f.cwd, ["bookmark", "list", "--all-remotes", candidateBookmark(f.change)]), "", "retired with the result");
   } finally { await f.dispose(); }
 });
 
