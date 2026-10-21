@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.44.0
+
+- **A pre-verification is never starved or stopped by landings:** it is admitted like a release, in arrival order, beside its
+  repository's landings (its own release checkout) and never beside its reset. It no longer waits for every landing, reset and
+  release of its repository to clear before starting, and no longer yields (stops and requeues) when a landing, or another
+  repository's landing that waits only for a place, arrives. Under a steady stream of landings a release verification
+  now completes, and with it an automatic promotion in `development` mode. The workers still bound concurrency, so the
+  load never exceeds what the runner admits; only a runner restart returns a running pre-verification to the queue.
+  Older logs' `yielded` events still read.
+
 ## v3.43.2
 
 - **A failed landing's candidate survives another workspace's import (Build #3009, SJ-1):** the client keeps a local

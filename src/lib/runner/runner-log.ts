@@ -108,8 +108,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const busy = serial.filter((operation) => operation.status === "running");
     const admittedTo = (operation: Operation) => admissionLane(lane(operation.repo), operation.repo, operation.kind);
     const holding = (first: Operation | undefined) => first && first.kind !== "deploy" ? busy.find((operation) => lane(operation.repo) === lane(first.repo) && (
-      first.kind === "release" ? operation.kind === "reset"
-        : operation.kind === "release" && (first.kind === "reset" || operation.stage === "publishing" || operation.stage === "finalizing"))) : undefined;
+      first.kind === "release" || first.kind === "verification" ? operation.kind === "reset"
+        : (operation.kind === "release" || operation.kind === "verification") && (first.kind === "reset" || operation.stage === "publishing" || operation.stage === "finalizing"))) : undefined;
     const lanes = [...new Set(serial.map(admittedTo))].map((key) => serial.filter((operation) => admittedTo(operation) === key));
     const shortPlace = shortLandingP90Ms !== undefined;
     const places = busy.map((operation) => ({ short: Boolean(operation.shortLanding) }));
@@ -151,12 +151,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       if (older && (operation.waitingFor === undefined || placeless.has(operation))) operation.waitingFor = label(older);
       else if (placeless.has(operation)) waitingForPlace.set(lane(operation.repo), operation);
     }
-    // A pre-verification waits behind any other work of its repository lane, then for staging to catch up.
-    for (const operation of serial) if (operation.kind === "verification" && operation.status === "queued") {
-      const ahead = serial.find((other) => other.kind !== "verification" && lane(other.repo) === lane(operation.repo));
-      if (ahead) operation.waitingFor = label(ahead);
-      else if (stagingDue(operation.repo)) operation.waitingFor = "a staging deploy of the latest landing";
-    }
+    // A pre-verification waits for staging to catch up with the latest landing, then for a place like any other operation.
+    for (const operation of serial) if (operation.kind === "verification" && operation.status === "queued" && stagingDue(operation.repo))
+      operation.waitingFor = "a staging deploy of the latest landing";
     return open;
   }
   function lastLanded(repo: string): { commitId: string; at: string } | null {

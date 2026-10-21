@@ -359,9 +359,8 @@ checkout of its own, beside the repository's landings, and takes a turn in the
 repository's queue only to publish (see [Release](#release)). A release and a reset
 of one repository never overlap, and a repository in a shared `lane` verifies its
 releases in that lane, since its gates share external state. A pre-verification of a
-promotion candidate takes the release queue's turn only when nothing else of its
-repository is waiting, and yields to a landing, reset or release that arrives (see
-[Release](#release)).
+promotion candidate runs in the release queue like a release (see [Release](#release)):
+beside the repository's landings, never beside its reset, and never stopped by either.
 
 Each gate command gets a temporary directory (`TMPDIR`) of its checkout's own, emptied
 at each turn, so a lock or file a gate keeps there never makes another operation wait:
@@ -378,10 +377,10 @@ the runner's `limits` bound concurrent runs together.
   rule below leaves no place for it, the next operation of an idle queue waits, oldest
   first, and names what holds the places (`a worker (landing …)` or `every place (…)`); one waiting behind its own queue
   names the running operation, or the release or reset holding it. A release holds a
-  worker from verification until it has published. A pre-verification holds one only
-  while no other operation waits for it: it yields the worker, and goes back to the
-  queue, when an operation that could otherwise start needs it. The exception is when a
-  release of the same commit is waiting to reuse its pass.
+  worker from verification until it has published. A pre-verification holds one while
+  it runs and is admitted in arrival order like a release, so a stream of landings can
+  neither delay its start for long nor stop it; the workers bound the total, so it
+  never adds a place beyond them.
 - **Short landings.** With a combined budget, a landing of a short repository may start
   while other operations hold every worker: at most `workers` operations other than
   short landings run at once, and at most `workers + 1` in all. A repository is short
@@ -775,7 +774,7 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
   reads `audit` at the repository's integration head, so a repository audits without any landing
   in the ledger; it is rebuilt at startup and after every landing and every audit.
 - **Where.** An audit takes its repository's lane like a landing and waits its turn behind queued
-  work (unlike a pre-verification, which yields to delivery work). The runner fetches the
+  work. The runner fetches the
   integration branch, resolves the published head, records it (`audit_head`), checks that exact
   commit out and runs the commands in order, with the landing gate's bounds. It leaves the
   integration bookmark alone, so a held integration stays held. `runner kill` stops it while it
@@ -834,15 +833,17 @@ deploys a failed promotion again and reuses one that deployed.
 A promotion is verified before anyone approves it. When staging records a green
 deploy of a commit, the runner queues a **pre-verification** of it. This runs the
 candidate's `requiredReleaseVerification` exactly as a confirm would, in the release
-checkout, and publishes nothing. Pre-verifications come after landings. One starts
-only while none of its repository lane's landings, resets or releases is queued or
-running, staging has finished a deploy of the latest landing (which may be a newer
-candidate), and a worker is free. If one of those arrives while it runs, it yields: its
-commands are stopped, the operation records `yielded` and goes back to the queue.
-A release of the same commit is the exception: it waits for the pre-verification
-and reuses its pass. So at most one pre-verification runs per repository, and
-landings never wait for it. A newer green staging deploy supersedes a queued
-pre-verification; a running one finishes. The runner lists them at `GET
+checkout, and publishes nothing. It is admitted like a release, in arrival order: it
+starts once staging has finished a deploy of the latest landing (which may be a newer
+candidate), no reset of its repository runs and a worker is free, and it neither
+waits for the repository's landings nor is stopped by one. Landings, resets and
+other repositories' work that arrive later wait for a free place instead of
+stopping it, so release verification is never starved by a stream of landings, and the
+workers still bound the total load. A release of the same commit waits for the
+pre-verification and reuses its pass. So at most one pre-verification runs per
+repository. A newer green staging deploy supersedes a queued pre-verification; a
+running one finishes. Only a runner restart returns a running one to the queue
+(`yielded`). The runner lists them at `GET
 /v1/verifications?repo=`.
 
 The plan reports the candidate's pre-verification. It also says whether the earlier

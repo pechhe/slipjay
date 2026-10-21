@@ -6,9 +6,9 @@ import { newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { TEST_SLICE } from "../support/executor.ts";
 import { alive, fixture, hanging, test, until } from "./fixtures/runner-queue-fixture.ts";
 import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
-import { queueFixture, verified } from "./fixtures/short-landings.ts";
+import { holdGate, queueFixture, verified } from "./fixtures/short-landings.ts";
 
-// Short landings through depth two, pre-verification yields, unlimited hosts and a runner restart (Build #3010).
+// Short landings through depth two, pre-verification places, unlimited hosts and a runner restart (Build #3010).
 
 test("a short repository's depth-two head is short, and its successor counts as long", async () => {
   const { f, held, release, status, running, settle } = await queueFixture({ verificationDepth: 2, extra: ["Fixture/E"] });
@@ -55,7 +55,7 @@ test("without enforced combined limits, one operation runs at a time", async () 
   } finally { for (const name of ["a", "c"]) await release(name); await f.dispose(); }
 }, 180_000);
 
-test("a pre-verification keeps its place beside a short head, and yields to a successor that waits only for one", async () => {
+test("a pre-verification keeps its place beside a short head, and a successor that waits only for one waits for it", async () => {
   const { f, held, release, status, running, settle } = await queueFixture({ verificationDepth: 2, extra: ["Fixture/D"] }, true);
   try {
     // Other is short too: its pre-verification still holds a long place.
@@ -86,13 +86,57 @@ test("a pre-verification keeps its place beside a short head, and yields to a su
     assert.deepEqual(yields(), [], "nothing waits for the place it holds");
     const successor = await held("fixture/repo", "s");
     await settle();
+    assert.equal(status(successor), "queued", "both workers are held");
+    assert.match(f.log.operation(successor)!.waitingFor ?? "", /^a worker \(/);
+    assert.equal(status(preverification), "running", "the successor does not stop it");
+    await rm(join(f.root, "hold-release"), { force: true });
     await running(successor);
-    assert.deepEqual(yields(), [`landing ${(f.log.operation(successor) as { changeId: string }).changeId.slice(0, 12)}`], "it yields to the successor, never to the head it already let start");
+    assert.deepEqual(yields(), [], "it ran to its end instead of yielding");
+    assert.equal(f.log.operation(preverification)!.status, "verified");
     for (const name of ["d", "h", "s"]) await release(name);
     await rm(join(f.root, "hold-release"), { force: true });
     await f.queue.idle();
     for (const id of [d, head, successor]) assert.equal(f.result(id)?.type, "landed", JSON.stringify(f.result(id)));
   } finally { for (const name of ["d", "h", "s"]) await release(name); await rm(join(f.root, "hold-release"), { force: true }); await f.dispose(); }
+}, 180_000);
+
+test("a pre-verification starts beside its own repository's running landing, within the workers, and keeps a reset out", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, true, { other: true, prefixGate: holdGate });
+  const hold = async (name: string, repo: string, author: string) => { await writeFile(join(f.root, name), ""); return f.submit(await f.candidate(`hold-${name}`, author, repo)); };
+  const release = (name: string) => rm(join(f.root, name), { force: true });
+  const status = (id: string) => f.log.operation(id)!.status;
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("m.txt"))))?.type, "landed");
+    await f.queue.idle();
+    const m = f.main();
+    const a = await hold("a", "fixture/repo", f.author);
+    f.queue.wake();
+    await until(() => status(a) === "running" || undefined);
+    // Staging deploys m again while a runs: its pre-verification is queued behind nothing but a free place.
+    await rm(join(f.root, "release-started"), { force: true });
+    await writeFile(join(f.root, "hold-release"), "");
+    f.log.append(newOperationId(), { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "staging", commitId: m, submittedBy: "test" });
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
+    const preverification = f.log.verifications("fixture/repo")[0]!;
+    assert.deepEqual([status(a), status(preverification.id)], ["running", "running"], "it did not wait for the landing");
+    const other = await hold("o", "fixture/other", f.otherAuthor);
+    f.queue.wake();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(status(other), "queued", "both workers are held");
+    const reset = newOperationId();
+    f.log.append(reset, { type: "submitted", kind: "reset", repo: "fixture/repo", commitId: f.main(), submittedBy: "test" });
+    f.queue.wake();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(status(reset), "queued", "a reset never overlaps a pre-verification");
+    assert.equal(status(preverification.id), "running", "and does not stop it");
+    await rm(join(f.root, "hold-release"), { force: true });
+    await release("a"); await release("o");
+    await f.queue.idle();
+    assert.equal(status(preverification.id), "verified");
+    assert.ok(!f.log.events({ operationId: preverification.id }).some(({ event }) => event.type === "yielded"));
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+  } finally { for (const name of ["a", "o"]) await release(name); await rm(join(f.root, "hold-release"), { force: true }); await f.dispose(); }
 }, 180_000);
 
 test("a runner killed while a short landing runs beside two long ones ends each once, publishes nothing, and stops their commands", async () => {

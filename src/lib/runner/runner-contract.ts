@@ -217,7 +217,7 @@ export type OperationEvent =
   | { type: "released"; result: CompletedRelease; deploy?: string }
   /** A pre-verification passed: `checks` ran against `candidate`'s tree while the release branch was at `base`. */
   | { type: "verified"; base: string; candidate: string; checks: VerificationDeclaration[]; nonAdditiveMigrations?: string[] }
-  /** A running pre-verification stopped for `to` (a landing, reset, release or restart) and is queued again; its runs so far stay on record. */
+  /** A running pre-verification stopped for `to` (a runner restart, or on older logs a landing, reset or release) and is queued again; its runs so far stay on record. */
   | { type: "yielded"; to: string }
   /** Every project of the environment deployed. */
   | { type: "deployed"; record: DeployRecord }
@@ -314,9 +314,9 @@ export type ReleaseOperation = OperationFields & { kind: "release"; migrationsRe
 /**
  * Release verification of a commit staging deployed, run before the owner approves it so a
  * confirm of the same commit can skip straight to publication. It runs in its repository's
- * release lane, behind landings: it starts only while none of its repository's landings,
- * resets or other releases is queued or running, and yields to one that arrives. It never
- * counts as an approval.
+ * release lane, admitted like a release: beside the repository's landings, never beside its
+ * reset, and never stopped by either. It starts once staging has deployed the latest landing.
+ * It never counts as an approval.
  */
 export type VerificationOperation = OperationFields & { kind: "verification" };
 

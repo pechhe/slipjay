@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { LandingOperation } from "../../src/lib/runner/runner-contract.ts";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { test, byProject, fixture, until, stagesOf, deployStep } from "./fixtures/runner-queue-fixture.ts";
 
@@ -63,7 +62,7 @@ test("a landing deploys staging from an exact view of the landed commit and reco
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("a green staging deploy pre-verifies its commit behind landings, yields to one that arrives, and a confirm of it publishes without verifying again", async () => {
+test("a green staging deploy pre-verifies its commit, a landing that arrives neither stops it nor waits for it, and a confirm of it publishes without verifying again", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });
   try {
     const verifications = () => f.log.verifications("fixture/repo");
@@ -77,24 +76,24 @@ test("a green staging deploy pre-verifies its commit behind landings, yields to 
     assert.equal(await releaseChecks(), 1, "it ran the release checks");
     assert.equal(f.releaseRef(), first.result.base, "and published nothing");
 
-    // b's pre-verification is running when a landing arrives: it yields, and c's green deploy supersedes it.
+    // b's pre-verification is running when a landing arrives: both run, and c's green deploy then queues its own.
     await rm(join(f.root, "release-started"));
     await writeFile(join(f.root, "hold-release"), "");
     f.submit(await f.candidate("b.txt"));
     f.queue.wake();
     await until(async () => await readFile(join(f.root, "release-started")).then(() => true, () => undefined));
-    const yielded = verifications()[0]!;
-    assert.equal(yielded.status, "running");
+    const beside = verifications()[0]!;
+    assert.equal(beside.status, "running");
     const c = f.submit(await f.candidate("c.txt"));
     f.queue.wake();
     await until(() => f.result(c));
     assert.equal(f.result(c)?.type, "landed", "the landing did not wait for the pre-verification");
-    const yields = f.log.events({ operationId: yielded.id }).flatMap((stored) => stored.event.type === "yielded" ? [stored.event.to] : []);
-    assert.deepEqual(yields, [`landing ${(f.log.operation(c) as LandingOperation).changeId.slice(0, 12)}`]);
+    assert.equal(f.log.operation(beside.id)?.status, "running", "and did not stop it");
     await until(() => verifications().length === 3 || undefined);
     await rm(join(f.root, "hold-release"));
     await f.queue.idle();
-    assert.equal(f.log.operation(yielded.id)?.status, "superseded");
+    assert.ok(!f.log.events({ operationId: beside.id }).some((stored) => stored.event.type === "yielded"));
+    assert.equal(f.log.operation(beside.id)?.status, "verified", "it ran to its end");
     const latest = verifications()[0]!;
     assert.ok(latest.result?.type === "verified", JSON.stringify(latest.result));
     assert.equal(latest.commitId, f.main());
@@ -112,7 +111,7 @@ test("a green staging deploy pre-verifies its commit behind landings, yields to 
   } finally { await f.dispose(); }
 }, 180_000);
 
-test("a pre-verification a confirm of its commit waits on does not yield to a landing, and one that passed is verified again when staging redeploys it", async () => {
+test("a confirm of a commit waits for its running pre-verification and reuses its pass, and one that passed is verified again when staging redeploys it", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });
   try {
     await f.land(f.submit(await f.candidate("a.txt")));
@@ -146,7 +145,7 @@ test("a pre-verification a confirm of its commit waits on does not yield to a la
   } finally { await f.dispose(); }
 }, 180_000);
 
-test("a pre-verification yields its worker to another repository's landing that waits only for one", async () => {
+test("a pre-verification holds its worker until it ends, and another repository's landing waits for it instead of stopping it", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, { workers: 1, other: true });
   try {
     await f.land(f.submit(await f.candidate("a.txt")));
@@ -159,14 +158,14 @@ test("a pre-verification yields its worker to another repository's landing that 
     const held = f.log.verifications("fixture/repo")[0]!;
     const other = f.submit(await f.candidate("other.txt", f.otherAuthor, "fixture/other"));
     f.queue.wake();
-    await until(() => f.result(other));
-    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
-    const yields = f.log.events({ operationId: held.id }).flatMap((stored) => stored.event.type === "yielded" ? [stored.event.to] : []);
-    assert.equal(yields.length, 1);
-    assert.match(yields[0]!, /^landing /);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(f.log.operation(other)?.status, "queued", "the one worker is held, so concurrency stays bounded");
+    assert.equal(f.log.operation(held.id)?.status, "running");
     await rm(join(f.root, "hold-release"));
     await f.queue.idle();
-    assert.equal(f.log.operation(held.id)?.status, "verified", "it ran again once the worker was free");
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+    assert.equal(f.log.operation(held.id)?.status, "verified");
+    assert.ok(!f.log.events({ operationId: held.id }).some((stored) => stored.event.type === "yielded"));
   } finally { await f.dispose(); }
 }, 180_000);
 

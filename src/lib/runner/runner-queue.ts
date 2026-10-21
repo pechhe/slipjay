@@ -106,11 +106,10 @@ export function runnerLogOptions(config: RunnerConfig, executor: Pick<Executor, 
  * deploy that waits minutes on its build never holds a landing.
  *
  * A green staging deploy of a promoting repository queues a pre-verification of its
- * commit in the release lane. It takes only what landings leave: it starts once none of
- * its repository lane's landings, resets or releases is queued or running, staging has
- * deployed the latest landing (which may be a newer candidate), and a worker is free; and
- * it yields (stops and requeues) when a landing, reset or release arrives that it would
- * hold up.
+ * commit in the release lane. It is admitted like a release, oldest first, to one of the
+ * same places and never beside a reset, so it neither waits for its repository's landings
+ * nor is stopped by one that arrives; it starts once staging has deployed the latest
+ * landing (which may be a newer candidate).
  */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
@@ -173,8 +172,6 @@ export function createRunnerQueue(input: {
   const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
   const health = (): RunnerHealth => ({ load1: Math.round(loadavg()[0]! * 100) / 100, cpus: availableParallelism(),
     freeMemoryBytes: freemem(), totalMemoryBytes: totalmem(), running: running.size });
-  /** Running pre-verifications told to yield, with what they yield to. */
-  const yielding = new Map<string, string>();
   /** Recovery holds every lane: nothing is admitted until it finishes. */
   let recovering: Promise<void> | undefined;
   /** Set once the process was told to stop: nothing new is admitted, and the runner exits when no operation is past the point a kill may stop it. */
@@ -543,10 +540,11 @@ export function createRunnerQueue(input: {
     const behind = new Set<string>();
     for (const operation of open) {
       if (!admits(true, places(), workers, shortPlace)) break;
-      if (operation.kind === "deploy" || operation.kind === "verification" || behind.has(laneOf(operation.repo))) continue;
+      if (operation.kind === "deploy" || behind.has(laneOf(operation.repo))) continue;
       const start = startable(operation, open);
       if (!start) continue;
-      if (!admits(start.short, places(), workers, shortPlace)) { behind.add(laneOf(operation.repo)); continue; }
+      // A pre-verification waits for its place without holding back the landings behind it.
+      if (!admits(start.short, places(), workers, shortPlace)) { if (operation.kind !== "verification") behind.add(laneOf(operation.repo)); continue; }
       if (!start.prefix || operation.kind !== "landing") {
         admit(admissionLane(laneOf(operation.repo), operation.repo, operation.kind), operation, start.short);
         continue;
@@ -565,25 +563,6 @@ export function createRunnerQueue(input: {
       });
       attempts.add(pending);
     }
-    // Pre-verifications take only what landings, resets and releases leave.
-    for (const operation of open) {
-      if (!admits(false, places(), workers, shortPlace)) break;
-      if (operation.kind !== "verification" || operation.status !== "queued" || open.some((other) => holdsBack(other, operation, open)) || log.stagingDue(operation.repo)) continue;
-      const lane = admissionLane(laneOf(operation.repo), operation.repo, operation.kind);
-      if (!lanes.has(lane)) admit(lane, operation);
-    }
-    for (const entry of running.values()) {
-      const verification = entry.operation;
-      if (verification.kind !== "verification" || yielding.has(verification.id)) continue;
-      // A release of the same commit waits to reuse it, and would otherwise verify beside the landings anyway.
-      if (open.some((other) => other.kind === "release" && other.commitId === verification.commitId && repositoryKey(other.repo) === repositoryKey(verification.repo))) continue;
-      // It yields to its repository lane's work, and to work that waits for nothing but the place it holds.
-      const waiting = open.find((other) => other.status === "queued" && holdsBack(other, verification, open)
-        || waitsOnlyForPlace(other, open));
-      if (!waiting) continue;
-      yielding.set(verification.id, label(waiting));
-      entry.controller.abort();
-    }
   }
   function admit(lane: string, operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, short = false): void {
     admitted.set(operation.id, operation);
@@ -598,8 +577,10 @@ export function createRunnerQueue(input: {
    */
   function startable(operation: Operation, open: readonly Operation[]): { short: boolean; prefix: boolean } | undefined {
     // `open` is a snapshot: what this wake already admitted still reads as queued there.
-    if (operation.kind === "deploy" || operation.kind === "verification" || admitted.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
+    if (operation.kind === "deploy" || admitted.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
     if (lanes.has(admissionLane(laneOf(operation.repo), operation.repo, operation.kind))) return undefined;
+    // A pre-verification verifies a staged commit in its release lane, outside the depth-two chain, once staging has caught up.
+    if (operation.kind === "verification") return log.stagingDue(operation.repo) ? undefined : { short: false, prefix: false };
     const active = prefixes.get(operation.repo) ?? [];
     const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
     if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && executor.combinedLimits) {
@@ -612,32 +593,17 @@ export function createRunnerQueue(input: {
     }
     return active.length ? undefined : { short: isShort(operation), prefix: false };
   }
-  /** Whether queued `operation` waits for nothing but a free place. */
-  const waitsOnlyForPlace = (operation: Operation, open: readonly Operation[]): boolean => {
-    const start = startable(operation, open);
-    return start !== undefined && !admits(start.short, places(), workers, shortPlace);
-  };
   /** Whether `operation` is queued and free to start, as far as Build admission goes. */
   const runnable = (operation: Operation, open: readonly Operation[]): boolean => operation.status === "queued"
     && !(operation.kind === "landing" && operation.admission === "pending") && !awaitingReplacement(operation, open);
   /**
-   * Whether `other`, open in the queue, keeps `verification` from running: any landing, reset or
-   * release of its repository lane, except a release of the same commit, which waits for it
-   * and reuses its pass.
-   */
-  function holdsBack(other: Operation, verification: VerificationOperation, open: readonly Operation[]): boolean {
-    if (other.kind === "deploy" || other.kind === "verification" || laneOf(other.repo) !== laneOf(verification.repo)) return false;
-    if (other.kind === "release" && other.commitId === verification.commitId) return false;
-    return other.status === "running" || runnable(other, open);
-  }
-  /**
-   * A reset rewrites the external state a release may verify against, so a release
-   * verifying beside its repository lane and a reset of that repository never overlap.
+   * A reset rewrites the external state a release may verify against, so a release or
+   * pre-verification beside its repository lane and a reset of that repository never overlap.
    */
   function resetConflict(operation: Operation): boolean {
     if (operation.kind === "reset" && (prefixes.get(operation.repo)?.length ?? 0) > 0) return true;
     if (operation.kind === "reset") return lanes.has(admissionLane(laneOf(operation.repo), operation.repo, "release"));
-    return operation.kind === "release"
+    return (operation.kind === "release" || operation.kind === "verification")
       && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, prefix?: PrefixTurn): Promise<void> {
@@ -1017,7 +983,7 @@ export function createRunnerQueue(input: {
         && (prefix.predecessor ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
-      else if (controller.signal.aborted) verdict = yielding.has(operation.id) ? { type: "yielded", to: yielding.get(operation.id)! } : { type: "cancelled", reason: OWNER_KILL_REASON };
+      else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
       else if (error instanceof HeldIntegration) {
         append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message });
@@ -1057,7 +1023,6 @@ export function createRunnerQueue(input: {
       if (token) buildChecks!.revoke(token);
       if (stage !== "queued") append(operation.id, stageDetail());
       running.delete(operation.id);
-      yielding.delete(operation.id);
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
       if (!retryPrefix && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
@@ -1220,7 +1185,7 @@ export function createRunnerQueue(input: {
     /** Pre-verify the candidate as a confirm would, recording what passed against which release base. */
     async function verify(): Promise<OperationEvent> {
       const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal });
-      // A yield or kill stops its commands, which then read as failures.
+      // A kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks, nonAdditiveMigrations: result.nonAdditiveMigrations };
       if (result.status === "verification_failed") return { type: "failed", stage: "verifying", reason: result.reason,
