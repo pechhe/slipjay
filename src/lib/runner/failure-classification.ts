@@ -1,4 +1,4 @@
-import { OWNER_KILL_REASON, type ClassifiedFact, type OperationEvent, type RunRecord } from "./runner-contract.ts";
+import { OWNER_KILL_REASON, type ClassifiedCheck, type ClassifiedFact, type OperationEvent, type RunRecord, type VerificationFailureRef } from "./runner-contract.ts";
 import { diagnostics, failingTests, outputLines } from "../infra/verification-failure.ts";
 
 export const FAILURE_RULE_VERSION = 1;
@@ -81,4 +81,32 @@ export function classifyFailure(
     return fact("gate");
   }
   return fact("infrastructure");
+}
+
+/** A failed check with the run it was matched to by `runId`. */
+export type FailureRun = { failure: VerificationFailureRef; run?: RunRecord };
+
+/**
+ * Classify each failed verification check from its own run, then combine: `gate` if any check is a
+ * gate failure, `infrastructure` only if all are. Tests and diagnostics merge; `checks` keeps who failed what.
+ */
+export function classifyVerificationFailures(
+  event: Extract<OperationEvent, { type: "failed" }>,
+  context: { paused: boolean; held: boolean },
+  failures: readonly FailureRun[],
+): ClassifiedFact {
+  const checks: ClassifiedCheck[] = failures.map(({ failure, run }, position) => {
+    // The event's own text names every check (the index), so only the first failure's output and a bare outcome speak for a check.
+    const single: Extract<OperationEvent, { type: "failed" }> = { type: "failed", stage: event.stage, command: failure.command,
+      reason: failure.outcome === "timeout" ? "timed out" : failure.outcome === "spawn_failure" ? "spawn failed" : "check failed",
+      ...position === 0 && event.output ? { output: event.output } : {} };
+    const fact = classifyFailure(single, { ...context, ...run ? { run: { ...run, command: failure.command } } : {} });
+    return { checkIndex: failure.checkIndex, command: failure.command, cause: fact.cause, ...failure.runId ? { runId: failure.runId } : {},
+      failingTests: fact.failingTests, diagnostics: fact.diagnostics };
+  });
+  const cause = checks.find((check) => check.cause === "gate")?.cause ?? checks.find((check) => check.cause !== "infrastructure")?.cause ?? "infrastructure";
+  return { type: "classified", ruleVersion: FAILURE_RULE_VERSION, cause,
+    ...checks[0] ? { command: checks[0].command } : {},
+    failingTests: boundedUnique(checks.flatMap((check) => check.failingTests)),
+    diagnostics: boundedUnique(checks.flatMap((check) => check.diagnostics)), checks };
 }

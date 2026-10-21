@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { classifyFailure, FAILURE_COMMAND_PATTERNS, FAILURE_RULE_VERSION, parseFailureOutput } from "../../src/lib/runner/failure-classification.ts";
-import { OWNER_KILL_REASON, type OperationEvent } from "../../src/lib/runner/runner-contract.ts";
+import { classifyFailure, classifyVerificationFailures, FAILURE_COMMAND_PATTERNS, FAILURE_RULE_VERSION, parseFailureOutput } from "../../src/lib/runner/failure-classification.ts";
+import { OWNER_KILL_REASON, type OperationEvent, type VerificationFailureRef } from "../../src/lib/runner/runner-contract.ts";
 
 test("parses Vitest, Bun and node TAP failures as concrete test execution", () => {
   const vitest = parseFailureOutput([
@@ -70,4 +70,32 @@ test("classifies terminal precedence, rebase conflicts, verification infrastruct
 
   assert.deepEqual(FAILURE_COMMAND_PATTERNS.map(({ kind }) => kind), ["fetch", "install", "test", "lint", "typecheck"]);
   assert.equal(FAILURE_RULE_VERSION, 1);
+});
+
+test("combines per-check causes: gate if any check is a gate failure, infrastructure only if all are", () => {
+  const timeout: VerificationFailureRef = { checkIndex: 0, command: "bun run check:slow", outcome: "timeout", runId: "r-timeout" };
+  const tests: VerificationFailureRef = { checkIndex: 1, command: "vp test run", outcome: "nonzero_exit", runId: "r-test" };
+  const run = (runId: string, command: string, extra: object = {}) => ({ runId, command, host: "runner", startedAt: "now", ...extra });
+  const event = (failures: VerificationFailureRef[]): Extract<OperationEvent, { type: "failed" }> => ({
+    type: "failed", stage: "verifying", reason: "1. bun run check:slow timed out\n2. vp test run failed", command: failures[0]!.command, failures,
+  });
+  const context = { paused: false, held: false };
+  const timedOut = { timedOut: true, testBodyRan: false };
+  const testRun = { testBodyRan: true, failingTests: ["tests/a.test.ts > breaks"] };
+
+  const mixed = classifyVerificationFailures(event([timeout, tests]), context, [
+    { failure: timeout, run: run("r-timeout", timeout.command, timedOut) },
+    { failure: tests, run: run("r-test", tests.command, testRun) },
+  ]);
+  assert.equal(mixed.cause, "gate");
+  assert.deepEqual(mixed.checks?.map((check) => [check.command, check.cause, check.runId]), [
+    ["bun run check:slow", "infrastructure", "r-timeout"], ["vp test run", "gate", "r-test"],
+  ]);
+  assert.deepEqual(mixed.failingTests, ["tests/a.test.ts > breaks"]);
+  assert.deepEqual(mixed.checks?.[0]?.failingTests, []);
+
+  const only = classifyVerificationFailures(event([timeout]), context, [{ failure: timeout, run: run("r-timeout", timeout.command, timedOut) }]);
+  assert.equal(only.cause, "infrastructure");
+  // The index text of a gate failure must not make the timeout look like a timeout-with-body or vice versa.
+  assert.equal(classifyVerificationFailures(event([tests]), context, [{ failure: tests, run: run("r-test", tests.command, testRun) }]).cause, "gate");
 });

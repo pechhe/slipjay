@@ -1,4 +1,6 @@
-export type VerificationCommand = { executable: string; args: string[]; cwd?: string; baseline?: unknown; concurrent?: boolean };
+export type VerificationCommand = { executable: string; args: string[]; cwd?: string; baseline?: unknown; concurrent?: boolean;
+  /** A failed check ends verification once its stage settles; later checks do not start (for installs and generation steps). */
+  stopOnFailure?: boolean };
 
 export type CapabilityDeclaration = {
   id: string;
@@ -36,17 +38,24 @@ const command = (value: unknown, field: string): VerificationCommand => {
     || (value.cwd != null && typeof value.cwd !== "string")) {
     throw new Error(`Malformed ${field} command`);
   }
+  if (value.stopOnFailure != null && typeof value.stopOnFailure !== "boolean") throw new Error(`Malformed ${field} command`);
   return { executable: value.executable, args: [...(value.args as string[])], ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
     ...(value.baseline && typeof value.baseline === "object" ? { baseline: value.baseline } : {}),
-    ...(value.concurrent === true ? { concurrent: true } : {}) };
+    ...(value.concurrent === true ? { concurrent: true } : {}),
+    ...(value.stopOnFailure === true ? { stopOnFailure: true } : {}) };
 };
 
 /**
  * Run declared checks in order, except that consecutive `concurrent` checks run
- * together. Outcomes keep declaration order; the first failure in that order is
- * thrown once its group has settled, so no check is left running.
+ * together. A check that finishes unsuccessfully is the caller's outcome to
+ * represent, not an exception: later stages still run unless `stopsAfter` says an
+ * outcome ends verification, in which case nothing is scheduled once that stage
+ * has settled. Outcomes keep declaration order and cover only the checks that
+ * started, so a shorter result means the rest were not run. A thrown error is not
+ * an outcome: the first one in declaration order propagates once its stage settles,
+ * so no check is left running.
  */
-export async function runVerificationStages<Check extends { concurrent?: unknown } | null, Outcome>(checks: readonly Check[], verify: (check: Check, index: number) => Promise<Outcome>): Promise<Outcome[]> {
+export async function runVerificationStages<Check extends { concurrent?: unknown } | null, Outcome>(checks: readonly Check[], verify: (check: Check, index: number) => Promise<Outcome>, stopsAfter: (outcome: Outcome) => boolean = () => false): Promise<Outcome[]> {
   const stages: number[][] = [];
   checks.forEach((check, index) => {
     const last = stages.at(-1);
@@ -60,6 +69,7 @@ export async function runVerificationStages<Check extends { concurrent?: unknown
       if (result.status === "rejected") throw result.reason;
       outcomes.push(result.value);
     }
+    if (settled.some((result) => result.status === "fulfilled" && stopsAfter(result.value))) break;
   }
   return outcomes;
 }

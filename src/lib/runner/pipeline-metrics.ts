@@ -139,7 +139,11 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
     for (const row of op.events) if (row.event.type === "run_started") commandByRun.set(row.event.runId, row.event.command);
     for (const row of op.events) {
       if (row.event.type === "classified" && row.event.cause === "gate" && row.event.command) {
-        for (const test of row.event.failingTests) failures.push({ operationId: op.id, seq: row.seq, at: eventTime(row), repo: op.submitted.repo, changeId: op.submitted.changeId, source: op.submitted.commitId, test, command: row.event.command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
+        // With per-check facts each test belongs to the command that failed it, and only gate checks count.
+        const attributed = row.event.checks?.length
+          ? row.event.checks.filter((check) => check.cause === "gate").flatMap((check) => check.failingTests.map((test) => ({ test, command: check.command })))
+          : row.event.failingTests.map((test) => ({ test, command: row.event.type === "classified" ? row.event.command! : "" }));
+        for (const { test, command } of attributed) failures.push({ operationId: op.id, seq: row.seq, at: eventTime(row), repo: op.submitted.repo, changeId: op.submitted.changeId, source: op.submitted.commitId, test, command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
       }
       if (row.event.type !== "run_finished") continue;
       const command = commandByRun.get(row.event.runId);

@@ -403,3 +403,72 @@ test("held facts retain retry count, elapsed time and publication outcome", () =
     log.close();
   }
 });
+
+type FailedVerification = Extract<OperationEvent, { type: "failed" }>;
+function failedChecks(log: ReturnType<typeof openOperationLog>, id: string, checks: { runId: string; command: string; timedOut?: boolean; testBodyRan: boolean; failingTests?: string[] }[]): void {
+  log.append(id, submission("owner/repo", "k".repeat(32), "commit"));
+  log.append(id, { type: "stage", stage: "verifying" });
+  for (const check of checks) {
+    log.append(id, { type: "run_started", runId: check.runId, command: check.command, host: "runner" });
+    log.append(id, { type: "run_finished", runId: check.runId, exitCode: check.timedOut ? null : 1, signal: null, timedOut: check.timedOut ?? false, durationMs: 5,
+      testBodyRan: check.testBodyRan, ...check.failingTests ? { failingTests: check.failingTests } : {} });
+  }
+  const failures: NonNullable<FailedVerification["failures"]> = checks.map((check, checkIndex) => ({ checkIndex, command: check.command, outcome: check.timedOut ? "timeout" : "nonzero_exit", runId: check.runId }));
+  log.append(id, { type: "failed", stage: "verifying", reason: "index", command: checks[0]!.command, failures });
+}
+const classifiedOf = (log: ReturnType<typeof openOperationLog>, id: string) => {
+  const fact = log.events({ operationId: id }).find((row) => row.event.type === "classified")?.event;
+  return fact?.type === "classified" ? fact : undefined;
+};
+
+test("two identical failed commands are classified from their own runs, matched by runId", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    failedChecks(log, "twice", [
+      { runId: "first", command: "vp test run", timedOut: true, testBodyRan: false },
+      { runId: "second", command: "vp test run", testBodyRan: true, failingTests: ["tests/a.test.ts > breaks"] },
+    ]);
+    const fact = classifiedOf(log, "twice");
+    assert.equal(fact?.cause, "gate");
+    assert.deepEqual(fact?.checks?.map((check) => [check.runId, check.cause]), [["first", "infrastructure"], ["second", "gate"]]);
+  } finally { log.close(); }
+});
+
+test("a check timeout without a test body is infrastructure alone and gate beside a failing test", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    failedChecks(log, "timeout-only", [{ runId: "t", command: "bun run check:slow", timedOut: true, testBodyRan: false }]);
+    failedChecks(log, "mixed", [
+      { runId: "m1", command: "bun run check:slow", timedOut: true, testBodyRan: false },
+      { runId: "m2", command: "vp test run", testBodyRan: true, failingTests: ["tests/a.test.ts > breaks"] },
+    ]);
+    assert.equal(classifiedOf(log, "timeout-only")?.cause, "infrastructure");
+    assert.equal(classifiedOf(log, "mixed")?.cause, "gate");
+    assert.deepEqual(classifiedOf(log, "mixed")?.failingTests, ["tests/a.test.ts > breaks"]);
+    assert.deepEqual(classifiedOf(log, "mixed")?.checks?.map((check) => check.failingTests), [[], ["tests/a.test.ts > breaks"]]);
+  } finally { log.close(); }
+});
+
+test("an owner kill after an earlier failed check is classified killed, never gate", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append("killed", submission());
+    log.append("killed", { type: "run_started", runId: "k1", command: "vp test run", host: "runner" });
+    log.append("killed", { type: "run_finished", runId: "k1", exitCode: 1, signal: null, timedOut: false, durationMs: 5, testBodyRan: true });
+    log.append("killed", { type: "cancelled", reason: OWNER_KILL_REASON });
+    assert.equal(classifiedOf(log, "killed")?.cause, "killed");
+    assert.equal(classifiedOf(log, "killed")?.checks, undefined);
+  } finally { log.close(); }
+});
+
+test("a failed event without failures classifies one run by command as before", () => {
+  const log = openOperationLog(":memory:");
+  try {
+    log.append("legacy", submission());
+    log.append("legacy", { type: "run_started", runId: "l1", command: "vp test run", host: "runner" });
+    log.append("legacy", { type: "run_finished", runId: "l1", exitCode: 1, signal: null, timedOut: false, durationMs: 5, testBodyRan: true });
+    log.append("legacy", { type: "failed", stage: "verifying", reason: "failed", command: "vp test run" });
+    assert.equal(classifiedOf(log, "legacy")?.cause, "gate");
+    assert.equal(classifiedOf(log, "legacy")?.checks, undefined);
+  } finally { log.close(); }
+});

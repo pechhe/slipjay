@@ -127,3 +127,30 @@ test("held, published, killed, migration and paused histories never grant a codi
     } finally { log.close(); }
   }
 });
+
+function failedWithChecks(log: OperationLog, id: string, checks: { runId: string; command: string; timedOut?: boolean; testBodyRan: boolean }[]) {
+  log.append(id, { type: "submitted", repo: "owner/repo", changeId, commitId: source, bookmark: candidateBookmark(changeId), submittedBy: "author" });
+  log.append(id, { type: "source_retained", commitId: source, sourceRef: "retained", manifestSha256: "d".repeat(64), handoffComplete: false });
+  for (const check of checks) {
+    log.append(id, { type: "run_started", runId: check.runId, command: check.command, host: "runner", purpose: "gate" });
+    log.append(id, { type: "run_finished", runId: check.runId, exitCode: check.timedOut ? null : 1, signal: null, timedOut: check.timedOut ?? false, durationMs: 5, testBodyRan: check.testBodyRan });
+  }
+  log.append(id, { type: "failed", stage: "verifying", reason: "index", command: checks[0]!.command,
+    failures: checks.map((check, checkIndex) => ({ checkIndex, command: check.command, outcome: check.timedOut ? "timeout" as const : "nonzero_exit" as const, runId: check.runId })) });
+}
+
+test("repair eligibility follows the combined cause of every failed check", async () => {
+  const log = openOperationLog(":memory:");
+  try {
+    failedWithChecks(log, "op_mixed", [
+      { runId: "a", command: "bun run check:slow", timedOut: true, testBodyRan: false },
+      { runId: "b", command: "vp test run", testBodyRan: true },
+    ]);
+    assert.equal((await call(handler(log), "operations/op_mixed/repair", claim)).status, 200);
+  } finally { log.close(); }
+  const timeoutOnly = openOperationLog(":memory:");
+  try {
+    failedWithChecks(timeoutOnly, "op_timeout", [{ runId: "a", command: "bun run check:slow", timedOut: true, testBodyRan: false }]);
+    assert.equal((await call(handler(timeoutOnly), "operations/op_timeout/repair", claim)).status, 409);
+  } finally { timeoutOnly.close(); }
+});

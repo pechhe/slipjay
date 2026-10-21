@@ -9,7 +9,8 @@
       "args": [
         "install",
         "--frozen-lockfile"
-      ]
+      ],
+      "stopOnFailure": true
     },
     {
       "executable": "bun",
@@ -52,7 +53,8 @@
         "args": [
           "install",
           "--frozen-lockfile"
-        ]
+        ],
+        "stopOnFailure": true
       },
       {
         "executable": "bun",

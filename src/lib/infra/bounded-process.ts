@@ -45,6 +45,8 @@ export type BoundedProcessResult = BoundedProcessOutput & {
   /** Selected redacted lines from the untruncated local streams; absent for older/broker capture. */
   diagnosticOutput?: { stdout: string; stderr: string; incomplete: boolean };
   error?: string;
+  /** Set by the runner's run wrapper: the `runId` it recorded for this command. */
+  runId?: string;
 };
 
 /** A serialisable bounded-process request as a host broker receives it. */

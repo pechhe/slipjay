@@ -340,3 +340,17 @@ test("each repository's metrics carry its audit status", () => {
   assert.equal(metrics.repositories[0]?.audit?.overdue, false);
   assert.match(formatPipelineMetrics(metrics), /Audit: last green aaaaaaaaaaaa at .*; no open failure; 0 escapes/);
 });
+
+test("attributes each failing test to the command that failed it, not to the first failed command", () => {
+  const failing = (id: string, seq: number, ms: number): StoredEvent[] => [
+    row(seq, id, ms, submitted("acme/app", "per-check")),
+    row(seq + 1, id, ms + 1, { type: "classified", ruleVersion: 1, cause: "gate", command: "bun run typecheck", failingTests: ["tests/a.test.ts > breaks"], diagnostics: [],
+      checks: [
+        { checkIndex: 0, command: "bun run typecheck", cause: "infrastructure", failingTests: [], diagnostics: [] },
+        { checkIndex: 1, command: "vp test run", cause: "gate", runId: "r2", failingTests: ["tests/a.test.ts > breaks"], diagnostics: [] },
+      ] }),
+  ];
+  const events = [...failing("op-a", 1, 1_000), ...failing("op-b", 10, 2_000).map((entry) => ({ ...entry, event: entry.event.type === "submitted" ? { ...entry.event, changeId: "other" } : entry.event }))];
+  const metrics = pipelineMetrics(events, at(0));
+  assert.deepEqual(metrics.flakes.map((candidate) => [candidate.test, candidate.command]), [["tests/a.test.ts > breaks", "vp test run"]]);
+});

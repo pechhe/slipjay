@@ -95,7 +95,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
+  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false }: { recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -111,7 +111,7 @@ export async function fixture(migrations = false, release = false, deployments?:
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: branch,
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLandingVerification: [{ executable: "node", args: ["-e", prefixGate?.(root) ?? gate] }],
+    requiredLandingVerification: (gates?.(root) ?? [prefixGate?.(root) ?? gate]).map((script) => ({ executable: "node", args: ["-e", script] })),
     unattendedMergeToIntegration: true,
     ...(migrations ? {
       migrationFinalization: {
@@ -139,7 +139,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     } : {}),
     ...(release ? {
       releaseBranch: "release",
-      requiredReleaseVerification: [{ executable: "node", args: ["-e", releaseCheck(root)] }],
+      requiredReleaseVerification: [releaseCheck(root), ...releaseGates?.(root) ?? []].map((script) => ({ executable: "node", args: ["-e", script] })),
     } : {}),
     ...(reset ? {
       reset: {

@@ -108,7 +108,11 @@ export type ClientFact =
   | { kind: "land_follow"; reattached: boolean }
   | { kind: "ssh_forward_failure"; reason: string; observedAt: string }
   | { kind: "preview_start"; workspace: string; port: number };
-export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
+/** One failed verification check of a `failed` event; `runId` names its run when the runner ran it. */
+export type VerificationFailureRef = { checkIndex: number; command: string; outcome: "nonzero_exit" | "timeout" | "cancelled" | "signal" | "spawn_failure"; runId?: string };
+/** One failed check's own classification (SJ-51): `failingTests` are the tests that command failed. */
+export type ClassifiedCheck = { checkIndex: number; command: string; cause: CauseClass; runId?: string; failingTests: string[]; diagnostics: string[] };
+export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; checks?: ClassifiedCheck[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
 /**
  * Why a failing audit failed, as the person who looked recorded it. `culprits` names the
  * published commits of the landings that broke the suite; the others say no landing did.
@@ -218,8 +222,11 @@ export type OperationEvent =
   | { type: "reset"; target: string; source: string }
   /** The change touches migration trigger or artifact paths; the author lands it locally (until #11). */
   | { type: "declined"; reason: string; paths: string[]; build?: { code: string; retryable: boolean } }
-  /** `output` is the failing command's output verbatim (bounded as the local gate bounds it). */
-  | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; deployment?: DeployRecord }
+  /**
+   * `command` and `output` describe the first failing command (bounded as the local gate bounds it).
+   * `failures` lists every failed verification check in declaration order (SJ-51).
+   */
+  | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; failures?: VerificationFailureRef[]; deployment?: DeployRecord }
   /** A queued operation replaced by a newer submission of the same change. */
   | { type: "superseded"; by: string }
   | { type: "cancelled"; reason: string; by?: string }

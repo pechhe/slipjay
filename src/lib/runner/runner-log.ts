@@ -1,6 +1,6 @@
 import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { landingOutcome } from "../landing/landing-outcome.ts";
-import { classifyFailure } from "./failure-classification.ts";
+import { classifyFailure, classifyVerificationFailures } from "./failure-classification.ts";
 import { deliveryState } from "../build/build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -240,12 +240,21 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       if (["failed", "declined", "cancelled", "superseded"].includes(event.type)) {
         const history = events({ operationId });
         const current = operation(operationId);
-        const run = current?.runs.findLast((entry) => event.type === "failed" && entry.command === event.command) ?? current?.runs.at(-1);
-        const finished = history.findLast((row) => row.event.type === "run_finished" && row.event.runId === run?.runId)?.event;
-        const classification = classifyFailure(event as Extract<OperationEvent, { type: "failed" | "declined" | "cancelled" | "superseded" }>, {
-          paused: paused() !== null, held: history.some((row) => row.event.type === "integrated" || row.event.type === "integration_held"),
-          ...(run ? { run: { ...run, ...(finished?.type === "run_finished" ? { testBodyRan: finished.testBodyRan } : {}) } } : {}),
-        });
+        const context = { paused: paused() !== null, held: history.some((row) => row.event.type === "integrated" || row.event.type === "integration_held") };
+        const withBody = (entry: RunRecord) => {
+          const done = history.findLast((row) => row.event.type === "run_finished" && row.event.runId === entry.runId)?.event;
+          return { ...entry, ...(done?.type === "run_finished" ? { testBodyRan: done.testBodyRan } : {}) };
+        };
+        // Several failed checks classify one by one, each from the run its `runId` names; otherwise one run by command.
+        const classification = event.type === "failed" && event.failures?.length
+          ? classifyVerificationFailures(event, context, event.failures.map((failure) => {
+            const found = failure.runId ? current?.runs.find((entry) => entry.runId === failure.runId) : undefined;
+            return { failure, ...(found ? { run: withBody(found) } : {}) };
+          }))
+          : (() => {
+            const run = current?.runs.findLast((entry) => event.type === "failed" && entry.command === event.command) ?? current?.runs.at(-1);
+            return classifyFailure(event as Extract<OperationEvent, { type: "failed" | "declined" | "cancelled" | "superseded" }>, { ...context, ...(run ? { run: withBody(run) } : {}) });
+          })();
         if (classification.cause === "gate" && current?.kind === "landing") {
           const base = history.findLast((row) => row.event.type === "verification_base")?.event;
           for (const earlier of projectIds((changeIds.all(current.repo, current.changeId) as { operation_id: string }[]).map((row) => row.operation_id))) {

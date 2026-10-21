@@ -104,6 +104,11 @@ function failureKind(result: VerificationFailureResult, lines: string[], tests: 
   return "error";
 }
 
+/** How many failing tests a failed check's output names. */
+export function countFailingTests(result: VerificationFailureResult): number {
+  return failingTests(outputLines(result)).length;
+}
+
 /**
  * A bounded, readable account of one failed verification command.
  * @param {{ stdout?: string, stderr?: string, code?: number | null, signal?: string | null, timedOut?: boolean }} result

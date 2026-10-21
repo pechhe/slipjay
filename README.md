@@ -446,7 +446,16 @@ ends interrupted verifier attempts, and reconciles canonical publication intent
 and held state through the existing recovery path.
 
 - **Gate.** `requiredLandingVerification` in `slipjay.json`, an array of commands
-  (`{ "executable", "args"?, "cwd"? }`), run in the runner's checkout.
+  (`{ "executable", "args"?, "cwd"?, "concurrent"?, "stopOnFailure"? }`), run in the runner's checkout.
+  Consecutive `concurrent` checks run together. A failed check (nonzero exit, signal or
+  timeout) does not stop the gate: every later check still runs, and one failure reports
+  every failed check in declaration order, led by an index of each check's outcome (passed,
+  failed, timed out, accepted by baseline, capability unavailable, not run). The index and
+  summaries are capped at about 24,000 characters; the structured record is complete.
+  `"stopOnFailure": true` marks a check that later checks depend on, such as an install or
+  a generation step: if it fails, nothing after its stage (its concurrent siblings included)
+  starts and the later checks show as not run. Dependency is declared, never inferred.
+  Cancellation and infrastructure errors still end verification at once.
   A policy declaring its former name, `requiredLocalVerification`, is refused.
   A policy declaring `postLandVerification` (no longer run)
   is refused; move its checks into the gate or remove it.

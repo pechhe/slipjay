@@ -20,7 +20,7 @@ import { confirmRelease, passedVerification, returnRelease, verifyRelease } from
 import type { BuildReader } from "../build/tracker.ts";
 import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "../build/build-check-access.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
-import { RequiredVerificationError, runRequiredVerification } from "../landing/required-verification.ts";
+import { RequiredVerificationError, runRequiredVerification, type RequiredVerificationFailureEvidence } from "../landing/required-verification.ts";
 import { readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import { readPolicyTextAtCommit } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
@@ -654,7 +654,7 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "test_report", runId, ...await readTestReports(reports, await realpath(checkout).catch(() => checkout)) });
         await rm(reports, { recursive: true, force: true });
       }
-      return result;
+      return { ...result, runId };
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
     async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string, publisher = checkout, expectedBase?: string): Promise<void> {
@@ -843,6 +843,7 @@ export function createRunnerQueue(input: {
             const verification = await runRequiredVerification({
               root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
               environment, onProgress: progress, run,
+              abortSignal: AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]),
             });
             if (prefix?.invalidation.signal.aborted) throw new Error("Exact predecessor invalidated this attempt; late verification success is not evidence");
             if (verification.status === "passed") append(operation.id, { type: "verification_passed", base, candidate });
@@ -952,7 +953,7 @@ export function createRunnerQueue(input: {
       }
       else if (error instanceof RequiredVerificationError) verdict = {
         type: "failed", stage: "verifying", reason: error.message,
-        command: error.evidence.command, output: error.evidence.stdoutTail + error.evidence.stderrTail,
+        ...failedVerification(error.evidence),
       };
       else verdict = { type: "failed", stage, reason: message(error) };
       if (prefix && verdict?.type !== "landed") {
@@ -1047,7 +1048,7 @@ export function createRunnerQueue(input: {
       await jj(checkout, ["new", head]);
       setStage("verifying");
       const commands = auditPolicy.commands.map((check) => [check.executable, ...check.args].join(" "));
-      const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, run });
+      const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, run, abortSignal: controller.signal });
       // A kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
       if (verification.gaps.length) return { type: "failed", stage, reason: `The audit did not run in full, so it is not green: ${verification.gaps.map((gap) => `${gap.command} (${gap.reason || gap.capability})`).join("; ")}` };
@@ -1114,7 +1115,7 @@ export function createRunnerQueue(input: {
         if (promotes) wakeDeploys();
       } else if (result.status === "verification_failed") append(operation.id, {
         type: "failed", stage: "verifying", reason: result.reason,
-        command: result.evidence.command, output: result.evidence.stdoutTail + result.evidence.stderrTail,
+        ...failedVerification(result.evidence),
       });
       else if (!result.ok && result.status === "refused") append(operation.id, { type: "failed", stage, reason: result.reason });
       else throw new Error(`Unexpected release result ${result.status}`);
@@ -1126,7 +1127,7 @@ export function createRunnerQueue(input: {
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks };
       if (result.status === "verification_failed") return { type: "failed", stage: "verifying", reason: result.reason,
-        command: result.evidence.command, output: result.evidence.stdoutTail + result.evidence.stderrTail };
+        ...failedVerification(result.evidence) };
       return { type: "failed", stage, reason: result.reason };
     }
   }
@@ -1366,4 +1367,9 @@ export function createRunnerQueue(input: {
 const recordOf = (operation: DeployOperation): DeployRecord | undefined =>
   operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
 
+/** The legacy fields keep the first failure; `failures` lists every failed check by index, command, outcome and run. */
+function failedVerification(evidence: RequiredVerificationFailureEvidence): Pick<Extract<OperationEvent, { type: "failed" }>, "command" | "output" | "failures"> {
+  return { command: evidence.command, output: evidence.stdoutTail + evidence.stderrTail,
+    failures: (evidence.failures ?? [evidence]).map(({ checkIndex, command, outcome, runId }) => ({ checkIndex, command, outcome, ...runId ? { runId } : {} })) };
+}
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
