@@ -478,7 +478,9 @@ and held state through the existing recovery path.
   `ssh://<host>`, and `land` opens an SSH port forward for the duration of the call
   (the host must be reachable with key auth). Without a location, `land` refuses.
 - **Credential.** A bearer token: `SLIPJAY_RUNNER_TOKEN` in the environment, or else
-  the Bitwarden Secrets Manager key of that name, read through `bws`. A request
+  the Bitwarden Secrets Manager key of that name, read through `bws`. A lookup that
+  fails (`bws` cannot be started, exits non-zero, times out after 15 s, or prints unparsable output) is tried three times; the final error
+  names which, never any `bws` output. Another secret holding a raw newline or tab does not hide the token. A request
   without it is refused. The runner binds loopback only.
 - **What `land` prints.** One line per stage, naming the runner and the queue
   position. Then a summary: the verdict, the failing command's output verbatim on

@@ -27,7 +27,7 @@ test("missing token stays in watch loop, waits thirty seconds and cancellation s
     throw new Error("aborted");
   });
   await watchThroughRunner("http://runner", value => values.push(value), controller.signal, {});
-  assert.equal(mocks.credential.mock.calls.length, 1);
+  assert.equal(mocks.credential.mock.calls.length, 3, "one lookup tries bws three times");
   assert.equal(fetch.mock.calls.length, 0);
   assert.deepEqual(values, ["connecting", "disconnected"].map(state => ({ version: 1, type: "connection", state, cursor: 0 })));
 });
@@ -36,7 +36,9 @@ test("credential recovery caches successful token across transport retries", asy
   const controller = new AbortController();
   const values: WatchEnvelope[] = [];
   const waits: number[] = [];
-  mocks.credential.mockResolvedValueOnce({ exitCode: 1, stdout: "" })
+  // A whole lookup fails (three attempts) before the watcher's thirty-second retry finds the token.
+  mocks.credential.mockResolvedValueOnce({ exitCode: 1, stdout: "" }).mockResolvedValueOnce({ exitCode: 1, stdout: "" })
+    .mockResolvedValueOnce({ exitCode: 1, stdout: "" })
     .mockResolvedValue({ exitCode: 0, stdout: JSON.stringify([{ key: "SLIPJAY_RUNNER_TOKEN", value: "test-only" }]) });
   let health = 0;
   vi.stubGlobal("fetch", vi.fn(async (url: string, options: RequestInit) => {
@@ -55,7 +57,7 @@ test("credential recovery caches successful token across transport retries", asy
     if (value.type === "connection" && value.state === "connected") controller.abort();
   }, controller.signal, {});
   assert.deepEqual(waits, [30_000, 2000]);
-  assert.equal(mocks.credential.mock.calls.length, 2, "successful credential reused after failed health check");
+  assert.equal(mocks.credential.mock.calls.length, 4, "successful credential reused after failed health check");
   assert.deepEqual(values.filter(value => value.type === "connection").map(value => value.state),
     ["connecting", "disconnected", "connecting", "disconnected", "connecting", "connected"]);
 });

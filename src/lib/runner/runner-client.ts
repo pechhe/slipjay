@@ -163,17 +163,47 @@ export async function runnerToken(env: NodeJS.ProcessEnv = process.env): Promise
   return savedToken;
 }
 
-async function bitwardenRunnerToken(env: NodeJS.ProcessEnv): Promise<string> {
+const MISSING_TOKEN = "Set SLIPJAY_RUNNER_TOKEN or save the Bitwarden key SLIPJAY_RUNNER_TOKEN";
+/** A lookup that fails is tried this many times, a quarter second apart, each bounded by `timeoutMs`. */
+const TOKEN_LOOKUP_ATTEMPTS = 3;
+
+/** Escapes raw control characters inside JSON strings, which `bws` prints unescaped for an unrelated secret's value. */
+function escapeControlCharacters(json: string): string {
+  let inString = false, escaped = false, out = "";
+  for (const char of json) {
+    if (inString && char < " ") out += `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`;
+    else out += char;
+    if (escaped) escaped = false;
+    else if (char === "\\") escaped = inString;
+    else if (char === '"') inString = !inString;
+  }
+  return out;
+}
+
+/** One `bws` lookup: the token, null when the key is absent, or why the lookup failed (never any output). */
+async function lookupBitwardenToken(env: NodeJS.ProcessEnv): Promise<string | null | { failure: string }> {
   const result = await runBoundedProcess({ executable: "bws", args: ["secret", "list"], cwd: process.cwd(), env,
     timeoutMs: 15_000, maxOutputBytes: 4 * 1024 * 1024 });
-  if (result.exitCode === 0) {
-    try {
-      const entries = JSON.parse(result.stdout) as { key: string; value: string }[];
-      const token = entries.find((entry) => entry.key === "SLIPJAY_RUNNER_TOKEN")?.value;
-      if (token) return token;
-    } catch { /* Never include secret-list output in an error. */ }
+  if (result.timedOut) return { failure: "bws timed out" };
+  if (result.error) return { failure: "bws could not be started" };
+  if (result.exitCode !== 0) return { failure: "bws exited non-zero" };
+  try {
+    const entries = JSON.parse(escapeControlCharacters(result.stdout)) as { key: string; value: string }[];
+    return entries.find((entry) => entry.key === "SLIPJAY_RUNNER_TOKEN")?.value || null;
+  } catch { return { failure: "bws returned unparsable output" }; }
+}
+
+async function bitwardenRunnerToken(env: NodeJS.ProcessEnv): Promise<string> {
+  let failure = "";
+  for (let attempt = 1; attempt <= TOKEN_LOOKUP_ATTEMPTS; attempt++) {
+    const found = await lookupBitwardenToken(env);
+    if (typeof found === "string") return found;
+    if (found === null) throw new Error(MISSING_TOKEN);
+    failure = found.failure;
+    if (attempt < TOKEN_LOOKUP_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  throw new Error("Set SLIPJAY_RUNNER_TOKEN or save the Bitwarden key SLIPJAY_RUNNER_TOKEN");
+  // The cause only; the lookup's output may hold secrets.
+  throw new Error(`Could not read SLIPJAY_RUNNER_TOKEN from Bitwarden after ${TOKEN_LOOKUP_ATTEMPTS} attempts (${failure}). ${MISSING_TOKEN}`);
 }
 
 /** An explicit runner refusal; deferred admission may name an already retained operation. */

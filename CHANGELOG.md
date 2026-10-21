@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.43.1
+
+- **The runner token lookup survives a transient Bitwarden failure (Build #3355, SJ-15):** `slipjay land` and the other runner
+  commands try `bws secret list` three times before giving up, and the final error says whether `bws` could not be started, exited non-zero,
+  timed out or returned unparsable output (never its output). A raw newline or tab in an unrelated secret's value no longer makes
+  the whole list unparsable, so the token is still read; a key that is truly absent keeps the existing message.
+
 ## v3.43.0
 
 - **`pool-refill.log` shows where each spare's dependencies came from (Build #3401, SJ-26):** a provisioning line now adds
