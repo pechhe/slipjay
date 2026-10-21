@@ -254,7 +254,7 @@ consumer requires a SlipJay version that implements this environment contract.
 Releases are git tags. Nothing is published to npm.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.39.3
+bun add -g github:pechhe/slipjay#v3.39.4
 slipjay status
 ```
 
@@ -662,11 +662,11 @@ integration branch; `production` deploys only through a promotion (see
   own local compensation; declared environment keys cannot override its authority.
 - **Production migrations.** `production` may declare `migrations: { verify, apply }`,
   two commands run in the same source view and environment as its projects. For a
-  promotion whose migration files are all SQL and additive they run before any project
+  promotion whose migration files are all additive they run before any project
   deploys, so the health checks run the new code on its own schema (the code production
   serves already fits an added schema); a failure there deploys nothing. Otherwise (a
-  non-additive migration, see `nonAdditiveMigrations` below, a file that is not SQL, or a
-  rerun deploy that does not know the promotion's files) they run after every project
+  non-additive migration, see `nonAdditiveMigrations` below, or a rerun deploy that does
+  not know the promotion's files) they run after every project
   passed its check and before any activates, so earlier code runs on the new schema only
   briefly. `verify` exits 0 when the
   database matches the commit, 2 when the commit's migrations are pending, anything
@@ -866,7 +866,9 @@ An unknown outcome or a failed pointer return records `automatic: false`. So
 `production` must declare `activate` for every project. A project that could not
 be moved back is named, and the release branch stays on the release because
 production may still serve the candidate. Rollback is
-code only. The plan's `nonAdditiveMigrations` names migration artifacts that drop,
+code only. The plan's `nonAdditiveMigrations` names migration artifacts not known to be additive:
+any that is neither SQL nor JSON metadata (such as Drizzle's `meta/` snapshots and journal,
+which are never counted), and SQL ones that drop,
 rename, retype, delete or rewrite something, or tighten what an existing table accepts
 (a heuristic, `nonAdditiveSql` in `src/lib/release/release.ts`: it does not flag tables or
 columns the migration itself adds, or a CHECK dropped and added back under the same

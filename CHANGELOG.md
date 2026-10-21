@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.39.4
+
+- **Additive migrations shipped with Drizzle metadata go before the health checks too (Build #4408, SJ-55):** v3.39.3
+  migrated first only when every migration file was SQL, but a promotion's migration files are everything changed under
+  `artifactPaths`, so Drizzle's `meta/*_snapshot.json` and `meta/_journal.json` beside an additive migration (YardSmith
+  0352) put it back on the late order. The order now follows the plan's one additivity classification
+  (`nonAdditiveMigrations`), as rollback does; a deploy that does not know its files still migrates last. That
+  classification now skips JSON metadata and counts any other migration file that is not SQL as not additive, since it
+  cannot be read: such a file migrates last, and a failed promotion carrying it now waits for the owner instead of rolling back.
+
 ## v3.39.3
 
 - **Additive production migrations apply before the health checks (Build #4408, SJ-55):** a promotion whose migration

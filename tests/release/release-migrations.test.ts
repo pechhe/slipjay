@@ -16,6 +16,9 @@ test("a release carrying migration artifacts needs --migrations-ready and names 
     await writeFile(join(f.repo, "migrations", "0001.sql"), "create table t (a int); -- drop nothing\n");
     await writeFile(join(f.repo, "migrations", "0002.sql"), "alter table t alter column a set data type text;\n");
     await writeFile(join(f.repo, "migrations", "0003.sql"), "/* DROP TABLE t; */ alter table t add column b int;\n");
+    await writeFile(join(f.repo, "migrations", "0004.ts"), "export const up = 'drop table t';\n");
+    await mkdir(join(f.repo, "migrations", "meta"), { recursive: true });
+    await writeFile(join(f.repo, "migrations", "meta", "_journal.json"), "{}\n");
     git(["add", "migrations"]);
     git(["commit", "-qm", "Add a migration"]);
     git(["push", "-q", "origin", "main"]);
@@ -23,8 +26,9 @@ test("a release carrying migration artifacts needs --migrations-ready and names 
     const candidate = execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.repo, encoding: "utf8" }).trim();
     const plan = await releaseIntegration(f.repo);
     assert.ok(plan.ok && plan.status === "planned");
-    assert.deepEqual(plan.migrationArtifacts, ["migrations/0001.sql", "migrations/0002.sql", "migrations/0003.sql"]);
-    assert.deepEqual(plan.nonAdditiveMigrations, ["migrations/0002.sql"], "commented-out SQL does not count");
+    assert.deepEqual(plan.migrationArtifacts, ["migrations/0001.sql", "migrations/0002.sql", "migrations/0003.sql", "migrations/0004.ts", "migrations/meta/_journal.json"]);
+    // Commented-out SQL and JSON metadata do not count; a migration that is not SQL cannot be read, so it is not known to be additive.
+    assert.deepEqual(plan.nonAdditiveMigrations, ["migrations/0002.sql", "migrations/0004.ts"]);
     const refused = await confirmRelease(f.repo, { candidate });
     assert.ok(!refused.ok && /--migrations-ready/.test(refused.reason), JSON.stringify(refused));
     const released = await confirmRelease(f.repo, { candidate, migrationsReady: true });

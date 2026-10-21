@@ -133,11 +133,11 @@ export async function runDeploy(input: {
     const activates = policy.projects.some((project) => project.activate);
     // Additive migrations go first, so the health checks run the new code on its own schema;
     // the code before the commit already fits it. Any others go last before traffic moves, so
-    // code before the commit runs on their schema only briefly: non-additive ones, files that
-    // are not SQL (never classified), and a deploy that does not know its files (a rerun whose
-    // plan saw no commits, or a record from before they were carried).
+    // code before the commit runs on their schema only briefly: non-additive ones, and those of
+    // a deploy that does not know its files (a rerun whose plan saw no commits, or a record from
+    // before they were carried). Additivity is the plan's one classification (`nonAdditive`).
     const artifacts = input.migrationArtifacts ?? [];
-    const migrateFirst = activates && !nonAdditive && artifacts.length > 0 && artifacts.every((file) => file.endsWith(".sql"));
+    const migrateFirst = activates && !nonAdditive && artifacts.length > 0;
     if (migrateFirst && !await migrate()) {
       holdBack();
       return [];

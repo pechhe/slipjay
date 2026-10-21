@@ -65,7 +65,7 @@ test("a command that throws fails the deploy only after the other projects stop,
   });
 });
 
-test("migrations go before the projects deploy only when the promotion's files are all SQL known to be additive", async () => {
+test("migrations go before the projects deploy only when the promotion's known files are all additive", async () => {
   const repo = mkdtempSync(path.join(tmpdir(), "slipjay-deploy-order-"));
   try {
     const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
@@ -95,7 +95,7 @@ test("migrations go before the projects deploy only when the promotion's files a
     const late = "deploy health verify apply verify activate";
     assert.equal(await order(["migrations/0001.sql"]), early);
     assert.equal(await order(["migrations/0001.sql"], true), late, "non-additive");
-    assert.equal(await order(["migrations/0001.ts"]), late, "not SQL, so never classified");
+    assert.equal(await order(["drizzle/0001.sql", "drizzle/meta/0001_snapshot.json", "drizzle/meta/_journal.json"]), early, "Drizzle metadata beside the SQL");
     assert.equal(await order([]), late, "a rerun whose plan saw no commits does not know its files");
     assert.equal(await order(undefined), late, "a record from before the files were carried");
   } finally {

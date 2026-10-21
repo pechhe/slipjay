@@ -40,7 +40,7 @@ export type ReleasePlan = {
   migrationArtifacts: string[];
   /** The candidate's `migrationFinalization.artifactPaths`: what counts as a migration artifact. */
   migrationPaths: string[];
-  /** The SQL migration artifacts that are not additive (see `nonAdditiveSql`): a failed promotion carrying one is not rolled back automatically. */
+  /** The migration artifacts not known to be additive: SQL that `nonAdditiveSql` flags or the release deletes, and any other file that is not JSON metadata. A failed promotion carrying one is not rolled back automatically. */
   nonAdditiveMigrations: string[];
   /** Every path the release changes. */
   paths: string[];
@@ -436,7 +436,13 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
   const migrationArtifacts = changed.filter((file) => under(artifactPaths, file));
   const nonAdditiveMigrations: string[] = [];
-  for (const file of migrationArtifacts.filter((name) => name.endsWith(".sql"))) {
+  // JSON beside a migration is metadata (Drizzle's snapshots and journal), not a migration.
+  // Any other file that is not SQL cannot be read for additivity, so it is not known to be additive.
+  for (const file of migrationArtifacts.filter((name) => !name.endsWith(".json"))) {
+    if (!file.endsWith(".sql")) {
+      nonAdditiveMigrations.push(file);
+      continue;
+    }
     const shown = await jjRun(root, ["file", "show", "-r", candidate, "--", `root-file:${symbol(file)}`]);
     // A migration the release deletes is not additive either.
     if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
