@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.39.3
+
+- **Additive production migrations apply before the health checks (Build #4408, SJ-55):** a promotion whose migration
+  files are all SQL and additive now verifies and applies them before any project deploys, so its health checks run the new code on
+  its own schema. Before, they always ran last before traffic moved, so a release whose health-checked path read a
+  table its own migration creates failed every health check and rolled back, and retrying failed the same way
+  (YardSmith release d19003ef, migration 0352). A failure there deploys nothing. Non-additive migrations, files that are
+  not SQL, and a rerun deploy that does not know the promotion's files keep the old order and the owner's decision.
+
 ## v3.39.2
 
 - **HQ follows the runner within seconds:** the pipeline relay now pushes five seconds after a new ledger event (one

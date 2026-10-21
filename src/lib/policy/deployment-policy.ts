@@ -32,8 +32,9 @@ export type DeploymentEnvironment = {
 };
 
 /**
- * How a promotion migrates production, run once every project deployed and passed its
- * check, before any activates, in the same source view and environment as the projects.
+ * How a promotion migrates production, in the same source view and environment as the
+ * projects: before any project deploys when its migration files are all SQL known to be
+ * additive, otherwise once every project deployed and passed its check, before any activates.
  * `verify` exits 0 when the database matches the commit, 2 when the commit's migrations
  * are pending (the only case `apply` runs), and anything else to refuse; after `apply`,
  * `verify` must exit 0.

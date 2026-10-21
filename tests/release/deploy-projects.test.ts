@@ -64,3 +64,41 @@ test("a command that throws fails the deploy only after the other projects stop,
     await assert.rejects(record, /could not stop app's processes/);
   });
 });
+
+test("migrations go before the projects deploy only when the promotion's files are all SQL known to be additive", async () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "slipjay-deploy-order-"));
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+    git("init", "--quiet");
+    writeFileSync(path.join(repo, "README.md"), "fixture\n");
+    git("add", "README.md");
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--quiet", "-m", "Initial");
+    const command = (name: string) => ({ executable: name, args: [], cwd: "." });
+    const policy: DeploymentEnvironment = { minIntervalMs: 0, timeoutMs: 60_000, environmentKeys: [],
+      projects: [{ name: "app", command: command("deploy"), healthCheck: command("health"), activate: command("activate") }],
+      migrations: { verify: command("verify"), apply: command("apply") } };
+    const order = async (migrationArtifacts: string[] | undefined, nonAdditive = false) => {
+      const steps: string[] = [];
+      let applied = false;
+      await runDeploy({
+        gitDirectory: path.join(repo, ".git"), environment: "production", commitId: git("rev-parse", "HEAD"), previous: null, policy,
+        nonAdditive, ...migrationArtifacts ? { migrationArtifacts } : {}, readEnvironment: () => ({}), onProgress: () => {},
+        run: async ({ executable }) => {
+          steps.push(executable);
+          if (executable === "apply") applied = true;
+          return exited(executable === "verify" && !applied ? 2 : 0, executable === "deploy" ? "https://app.example.test" : "");
+        },
+      });
+      return steps.join(" ");
+    };
+    const early = "verify apply verify deploy health activate";
+    const late = "deploy health verify apply verify activate";
+    assert.equal(await order(["migrations/0001.sql"]), early);
+    assert.equal(await order(["migrations/0001.sql"], true), late, "non-additive");
+    assert.equal(await order(["migrations/0001.ts"]), late, "not SQL, so never classified");
+    assert.equal(await order([]), late, "a rerun whose plan saw no commits does not know its files");
+    assert.equal(await order(undefined), late, "a record from before the files were carried");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

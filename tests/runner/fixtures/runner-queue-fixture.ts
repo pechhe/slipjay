@@ -72,6 +72,12 @@ if ("${step}" === "activate") {
   fs.writeFileSync(${JSON.stringify(join(root, `active-${name}.txt`))}, process.env.SLIPJAY_DEPLOY_URL);
 }
 if (!restore && fs.existsSync(${JSON.stringify(join(root, `fail-${step}-${name}`))})) { console.error("${name} ${step} failed"); process.exit(6); }
+// While \`health-needs-schema\` exists, a health check reads the commit's tables: it fails until production applied its migrations.
+if ("${step}" === "health" && fs.existsSync(${JSON.stringify(join(root, "health-needs-schema"))})) {
+  const db=${JSON.stringify(join(root, "production-db.json"))}; const applied=fs.existsSync(db)?JSON.parse(fs.readFileSync(db,"utf8")):[];
+  const wanted=fs.existsSync("migrations")?fs.readdirSync("migrations").sort():[];
+  if (wanted.some((file) => !applied.includes(file))) { console.error("relation does not exist"); process.exit(8); }
+}
 fs.appendFileSync(${JSON.stringify(join(root, `${step}.jsonl`))}, JSON.stringify({ project: "${name}", url: process.env.SLIPJAY_DEPLOY_URL, ...process.env.SLIPJAY_DEPLOY_RESTORE ? { restore: true } : {} }) + "\\n");
 fs.appendFileSync(${JSON.stringify(join(root, "order.log"))}, "${step} ${name}\\n");`;
 // Production's database is \`production-db.json\`, the migrations it applied. Verify exits 0 when they are

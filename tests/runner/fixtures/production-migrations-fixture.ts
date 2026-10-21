@@ -3,7 +3,8 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { fixture } from "./runner-queue-fixture.ts";
 
-export async function productionMigrations() {
+/** A production deploy with migrations, after landing a first migration: non-additive unless `additive`. */
+export async function productionMigrations({ additive = false } = {}) {
   const f = await fixture(true, true, { minIntervalMs: 0, production: "migrations" });
   const promote = async (commit: string) => {
     const promotion = f.submitRelease(commit);
@@ -25,8 +26,8 @@ export async function productionMigrations() {
     }, []).flatMap((run) => run.sort());
   };
   try {
-    // Non-additive, so only a deploy that changed nothing in the schema (a refused first verify, or one that never reached the migrations) is rolled back automatically.
-    await f.land(f.submit(await f.candidate("schema/drop")));
+    // Unless `additive`, the migration is non-additive, so only a deploy that changed nothing in the schema (a refused first verify, or one that never reached the migrations) is rolled back automatically.
+    await f.land(f.submit(await f.candidate(additive ? "schema/add" : "schema/drop")));
     await f.queue.idle();
     const first = f.main();
     const before = f.releaseRef();

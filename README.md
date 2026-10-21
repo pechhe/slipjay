@@ -661,8 +661,14 @@ integration branch; `production` deploys only through a promotion (see
   prohibits it. Downstream activation commands must honor this flag before their
   own local compensation; declared environment keys cannot override its authority.
 - **Production migrations.** `production` may declare `migrations: { verify, apply }`,
-  two commands run in the same source view and environment as its projects, after
-  every project passed its check and before any activates. `verify` exits 0 when the
+  two commands run in the same source view and environment as its projects. For a
+  promotion whose migration files are all SQL and additive they run before any project
+  deploys, so the health checks run the new code on its own schema (the code production
+  serves already fits an added schema); a failure there deploys nothing. Otherwise (a
+  non-additive migration, see `nonAdditiveMigrations` below, a file that is not SQL, or a
+  rerun deploy that does not know the promotion's files) they run after every project
+  passed its check and before any activates, so earlier code runs on the new schema only
+  briefly. `verify` exits 0 when the
   database matches the commit, 2 when the commit's migrations are pending, anything
   else to refuse. Only on 2 does `apply` run, and `verify` must then exit 0. Either
   failure activates nothing. The deploy's `migrations` records the promotion's
@@ -673,7 +679,8 @@ integration branch; `production` deploys only through a promotion (see
 - **Records.** A deploy ends `deployed`, or `failed` with `deploy failed: <project> (<reason>)`.
   Once its projects ran, either way it records the commit, the commit the environment
   served before (the last deploy any project succeeded in), the commits between them,
-  and each project's outcome. A deploy that failed before its projects ran (the commit
+  and each project's outcome (none when additive migrations failed before any deployed).
+  A deploy that failed before its projects ran (the commit
   is not on the integration branch, or the runner restarted) records only its reason.
   `slipjay deploys` reads them back. The contract is `src/lib/runner/runner-contract.ts`.
 

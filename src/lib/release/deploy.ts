@@ -77,6 +77,8 @@ export const schemaMayHaveChanged = (declared: boolean, migrations: DeployMigrat
  * declared migrations brought the database to the commit, and an activation that
  * fails moves the projects already activated back to `previousUrls`, unless the promotion
  * is `nonAdditive` and its migrations may have changed the schema (the owner decides).
+ * Migrations known to be additive are applied before any project deploys, so the health
+ * checks run the new code on its own schema; migrations that fail there leave nothing deployed.
  */
 export async function runDeploy(input: {
   gitDirectory: string; environment: string; commitId: string; previous: string | null;
@@ -104,6 +106,42 @@ export async function runDeploy(input: {
     Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
     const step = (command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}) => input.run({ executable: command.executable, args: command.args,
       cwd: path.join(root, command.cwd), env: { ...env, ...url ? { SLIPJAY_DEPLOY_URL: url } : {}, ...extra }, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
+    // Brings the database to the commit and records how; false when it could not.
+    const migrate = async (): Promise<boolean> => {
+      if (!policy.migrations) return true;
+      const { verify, apply } = policy.migrations;
+      // A connection error can print the database URL: redact whole streams before clipping them.
+      const redact = (value: string) => redactMigrationOutput(value, root, env);
+      const failed = (result: BoundedProcessResult) => failure({ ...result, stdout: redact(result.stdout), stderr: redact(result.stderr) }, policy.timeoutMs);
+      input.onProgress(`[migrations] verifying ${environment} against ${commitId.slice(0, 12)}`);
+      const first = await step(verify);
+      if (failure(first, policy.timeoutMs) === null) migrations = { artifacts, status: "current" };
+      else if (first.exitCode !== 2 || first.timedOut || first.signal || first.error)
+        migrations = { artifacts, status: "verify_failed", reason: `verify ${failed(first)}` };
+      else {
+        input.onProgress(`[migrations] applying pending migrations`);
+        const applied = await step(apply);
+        const after = failure(applied, policy.timeoutMs) === null ? await step(verify) : null;
+        migrations = !after ? { artifacts, status: "apply_failed", reason: `apply ${failed(applied)}` }
+          : failure(after, policy.timeoutMs) !== null ? { artifacts, status: "apply_failed", reason: `verify after apply ${failed(after)}` }
+          : { artifacts, status: "applied" };
+      }
+      input.onProgress(`[migrations] ${migrations.status}${migrations.reason ? `: ${migrations.reason}` : ""}`);
+      return !migrations.reason;
+    };
+    const holdBack = () => input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);
+    const activates = policy.projects.some((project) => project.activate);
+    // Additive migrations go first, so the health checks run the new code on its own schema;
+    // the code before the commit already fits it. Any others go last before traffic moves, so
+    // code before the commit runs on their schema only briefly: non-additive ones, files that
+    // are not SQL (never classified), and a deploy that does not know its files (a rerun whose
+    // plan saw no commits, or a record from before they were carried).
+    const artifacts = input.migrationArtifacts ?? [];
+    const migrateFirst = activates && !nonAdditive && artifacts.length > 0 && artifacts.every((file) => file.endsWith(".sql"));
+    if (migrateFirst && !await migrate()) {
+      holdBack();
+      return [];
+    }
     // Projects deploy side by side: none takes traffic from another's deploy, and where the
     // environment activates, nothing moves until every one has passed. A command that throws
     // fails the deploy only once the others have stopped, since they share this source view.
@@ -128,38 +166,11 @@ export async function runDeploy(input: {
     const thrown = settled.find((result) => result.status === "rejected");
     if (thrown) throw thrown.reason;
     const outcomes = settled.map((result) => (result as PromiseFulfilledResult<DeployProjectOutcome>).value);
-    if (!policy.projects.some((project) => project.activate)) return outcomes;
+    if (!activates) return outcomes;
     for (const outcome of outcomes) outcome.activated = false;
-    const holdBack = () => input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);
-    if (outcomes.some((outcome) => !outcome.ok)) {
+    if (outcomes.some((outcome) => !outcome.ok) || !migrateFirst && !await migrate()) {
       holdBack();
       return outcomes;
-    }
-    if (policy.migrations) {
-      // Last before traffic moves, so code before the commit runs on its schema only briefly.
-      const { verify, apply } = policy.migrations;
-      const artifacts = input.migrationArtifacts ?? [];
-      // A connection error can print the database URL: redact whole streams before clipping them.
-      const redact = (value: string) => redactMigrationOutput(value, root, env);
-      const failed = (result: BoundedProcessResult) => failure({ ...result, stdout: redact(result.stdout), stderr: redact(result.stderr) }, policy.timeoutMs);
-      input.onProgress(`[migrations] verifying ${environment} against ${commitId.slice(0, 12)}`);
-      const first = await step(verify);
-      if (failure(first, policy.timeoutMs) === null) migrations = { artifacts, status: "current" };
-      else if (first.exitCode !== 2 || first.timedOut || first.signal || first.error)
-        migrations = { artifacts, status: "verify_failed", reason: `verify ${failed(first)}` };
-      else {
-        input.onProgress(`[migrations] applying pending migrations`);
-        const applied = await step(apply);
-        const after = failure(applied, policy.timeoutMs) === null ? await step(verify) : null;
-        migrations = !after ? { artifacts, status: "apply_failed", reason: `apply ${failed(applied)}` }
-          : failure(after, policy.timeoutMs) !== null ? { artifacts, status: "apply_failed", reason: `verify after apply ${failed(after)}` }
-          : { artifacts, status: "applied" };
-      }
-      input.onProgress(`[migrations] ${migrations.status}${migrations.reason ? `: ${migrations.reason}` : ""}`);
-      if (migrations.reason) {
-        holdBack();
-        return outcomes;
-      }
     }
     // Until the schema may have changed, earlier code still fits it, so moving back is safe.
     const restore = !nonAdditive || !schemaMayHaveChanged(policy.migrations !== undefined, migrations, earlierSchemaChange);
