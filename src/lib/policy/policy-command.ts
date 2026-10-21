@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { DEFAULT_SPARES, EXECUTION_POLICY_PATH, processLevel, readIntegrationPolicy, readPolicyTextAtCommit, RETIRED_POLICY_FIELDS } from "./execution-policy.ts";
 import { applyPolicyPatch, parsePolicyPatch, POLICY_BASE_TRAILER, policyDigest } from "./policy-settings.ts";
 import type { PolicyPatch } from "./policy-settings.ts";
-import type { TimeBudgets } from "./execution-policy.ts";
+import type { ProcessLevel, TimeBudgets } from "./execution-policy.ts";
 import { LandingNotSubmitted, landThroughRunner } from "../runner/runner-client.ts";
 import { publicationRemote } from "../landing/landing-steps.ts";
 import { createWorkspace } from "../workspace/workspace-create.ts";
@@ -25,7 +25,7 @@ export type PolicyView = {
   /** The file as committed, or null when the repository declares none. */
   declared: Record<string, unknown> | null;
   /** The settings in force, defaults filled in. */
-  settings: { spares: number; process: "standard" | "light"; budgets: TimeBudgets | null; requiredLandingVerification: unknown[] };
+  settings: { spares: number; process: ProcessLevel; budgets: TimeBudgets | null; requiredLandingVerification: unknown[] };
   /** Declared fields that drive nothing; `policy set` drops them. */
   retired: string[];
 };

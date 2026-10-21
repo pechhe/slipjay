@@ -372,7 +372,7 @@ function project(id: string, events: StoredEvent[]): Operation | null {
     runs: [], lastSeq: events.at(-1)!.seq,
   };
   const operation: Operation = submitted.event.kind === "release"
-    ? { ...fields, kind: "release", migrationsReady: submitted.event.migrationsReady }
+    ? { ...fields, kind: "release", migrationsReady: submitted.event.migrationsReady, ...submitted.event.automatic ? { automatic: submitted.event.automatic } : {} }
     : submitted.event.kind === "deploy"
       ? { ...fields, kind: "deploy", environment: submitted.event.environment, ...submitted.event.promotion ? { promotion: submitted.event.promotion } : {} }
       : submitted.event.kind === "reset" ? { ...fields, kind: "reset" }
