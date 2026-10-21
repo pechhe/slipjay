@@ -380,7 +380,13 @@ export function createRunnerQueue(input: {
     }
     append(operation.id, verdict);
     // Promotion reads staging: what it deployed green is the next candidate, so verify it ahead of the approval.
-    if (verdict.type === "deployed" && operation.environment === "staging" && promotes) queueVerification(operation.repo, operation.commitId);
+    if (verdict.type === "deployed" && operation.environment === "staging" && promotes) {
+      // A queued automatic release of an older candidate would hold back this one's pre-verification.
+      supersedeAutomaticReleases(operation.repo, operation.commitId, operation.id);
+      queueVerification(operation.repo, operation.commitId);
+    }
+    // A newer green candidate may have waited for this production deploy.
+    if (operation.environment === "production") void promoteAutomatically(operation.repo);
     // Landings that arrived while this deploy ran were told to wait for it; a deploy that
     // never reached its projects is retried once the interval passes.
     await scheduleLatest(operation.repo, progress);
@@ -432,6 +438,71 @@ export function createRunnerQueue(input: {
     append(id, { type: "submitted", kind: "verification", repo, commitId, submittedBy: `${executor.host}:staging` });
     wakeMain();
   }
+  const automaticPromotions = new Map<string, Promise<void>>();
+  /**
+   * `process: "development"`: promote the newest green staging commit the way `slipjay promote --confirm` would,
+   * by queueing the same release, once its pre-verification passed. The setting is read from the release
+   * branch's policy at the base the pre-verification ran against, never from the candidate. A candidate the
+   * safeguards refuse (non-additive migrations, an audit refusal, a failed or missing verification) stays
+   * unpromoted, with the reason on its pre-verification's log; a newer green candidate is asked again.
+   * Asked after a pre-verification passes, a release or a production deploy ends, and at startup.
+   */
+  function promoteAutomatically(repo: string): Promise<void> {
+    const next = (automaticPromotions.get(repo) ?? Promise.resolve()).then(() => considerAutomaticPromotion(repo))
+      .catch((error: unknown) => { console.error(`[runner] automatic promotion of ${repo} could not be considered: ${message(error)}`); });
+    automaticPromotions.set(repo, next);
+    return next;
+  }
+  async function considerAutomaticPromotion(repo: string): Promise<void> {
+    const green = log.deployments(repo, "staging").find((entry) => entry.result?.type === "deployed");
+    if (!green) return;
+    // Only the newest green candidate promotes: an older one still queued is replaced.
+    const next = newOperationId();
+    supersedeAutomaticReleases(repo, green.commitId, next);
+    const open = log.openOperations(repo);
+    const newest = () => log.deployments(repo, "staging").find((entry) => entry.result?.type === "deployed")?.commitId;
+    const verification = log.verifications(repo).find((entry) => entry.commitId === green.commitId && entry.status !== "superseded" && entry.status !== "cancelled");
+    if (!verification || verification.status === "queued" || verification.status === "running") return;
+    const withheld = (reason: string): void => {
+      const line = `Not promoting ${green.commitId.slice(0, 12)} automatically: ${reason}`;
+      if (!log.events({ operationId: verification.id }).some((stored) => stored.event.type === "progress" && stored.event.line === line)) {
+        append(verification.id, { type: "progress", line });
+        console.error(`[runner] ${repo}: ${line}`);
+      }
+    };
+    const verified = verification.result?.type === "verified" ? verification.result : undefined;
+    // What was promoted, or tried, or is under way is never promoted again.
+    if (log.releases(repo).some((entry) => entry.commitId === green.commitId)
+      || log.deployments(repo, "production").some((entry) => entry.commitId === green.commitId)) return;
+    if (open.some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
+    // The release base's policy, never the candidate's: the base the pre-verification ran against, or the release branch's head when it has none.
+    const candidate = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), green.commitId).then((exact) => exact.configuration, () => null);
+    const releaseBase = verified?.base ?? (candidate?.releaseBranch
+      ? await jj(join(home, "releases", repo), ["log", "-r", `${candidate.releaseBranch}@${candidate.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "") : "");
+    if (!releaseBase) return;
+    const base = await readExactExecutionPolicy(join(home, "releases", repo, ".git"), releaseBase).then((exact) => exact.configuration, () => null);
+    if (base?.process !== "development") return;
+    if (!verified) return withheld(`its pre-verification ${verification.status === "failed" ? "failed" : "did not pass"}`);
+    if (verified.nonAdditiveMigrations === undefined || verified.nonAdditiveMigrations.length)
+      return withheld(verified.nonAdditiveMigrations ? `it carries non-additive migrations (${verified.nonAdditiveMigrations.join(", ")}): the owner decides` : "its migrations were not assessed");
+    // Every decision input is the release base's, never the candidate's.
+    if (!promotesFrom(base)) return;
+    const refusal = base?.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
+    if (refusal) return withheld(refusal);
+    // Asked again after the reads above, which let a newer candidate turn green and a release or a production deploy begin.
+    if (newest() !== green.commitId) return;
+    if (log.releases(repo).some((entry) => entry.commitId === green.commitId) || log.openOperations(repo).some((entry) => entry.kind === "release")) return;
+    const automatic = { setting: "process", value: "development" } as const;
+    append(next, { type: "submitted", kind: "release", repo, commitId: green.commitId, migrationsReady: false, submittedBy: `${executor.host}:automatic`, automatic });
+    append(next, { type: "progress", line: `Promoting ${green.commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
+    console.error(`[runner] ${repo}: promoting ${green.commitId.slice(0, 12)} automatically (process: "development")`);
+    wakeMain();
+  }
+  /** Supersede the queued automatic releases of commits other than `keep`, which `by` replaces. */
+  function supersedeAutomaticReleases(repo: string, keep: string, by: string): void {
+    for (const stale of log.openOperations(repo))
+      if (stale.kind === "release" && stale.automatic && stale.status === "queued" && stale.commitId !== keep) append(stale.id, { type: "superseded", by });
+  }
   /** Run `work` in the repository's lane, after its running turn, and resume the queue after it. */
   function serially<T>(repo: string, work: () => Promise<T>): Promise<T> {
     let value: T;
@@ -455,7 +526,8 @@ export function createRunnerQueue(input: {
       ? log.deployments(promotion.repo, "production").find((entry) => entry.commitId === promotion.commitId && entry.promotion)?.promotion : undefined;
     const id = newOperationId();
     log.append(id, { type: "submitted", kind: "deploy", repo: promotion.repo, environment: "production", commitId: promotion.commitId,
-      submittedBy: `promotion:${promotion.id}`, promotion: shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations, migrationArtifacts: result.migrationArtifacts } });
+      submittedBy: `promotion:${promotion.id}`, promotion: { ...shipped ?? { merge: result.merge, nonAdditiveMigrations: result.nonAdditiveMigrations, migrationArtifacts: result.migrationArtifacts },
+        ...promotion.automatic ? { automatic: promotion.automatic } : {} } });
     return id;
   }
   /**
@@ -1001,6 +1073,8 @@ export function createRunnerQueue(input: {
       }
       if (verdict?.type === "landed") verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId) };
       if (verdict) append(operation.id, verdict);
+      // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
+      if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo);
       if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
       if (verdict?.type === "landed")
         await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
@@ -1084,7 +1158,23 @@ export function createRunnerQueue(input: {
      * changes during verification; `confirmRelease` rechecks the planned release base.
      */
     async function release(operation: ReleaseOperation): Promise<void> {
-      const { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), operation.commitId);
+      let { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), operation.commitId);
+      if (operation.automatic) {
+        // No human approved it: it must still be the newest green candidate, and its decisions come from the release base's policy, not the candidate's.
+        const newest = log.deployments(operation.repo, "staging").find((entry) => entry.result?.type === "deployed")?.commitId;
+        if (newest !== operation.commitId) {
+          append(operation.id, { type: "failed", stage, reason: `Not promoted automatically: superseded by ${newest?.slice(0, 12) ?? "a newer candidate"}` });
+          return;
+        }
+        const base = log.verifications(operation.repo).find((entry) => entry.commitId === operation.commitId && entry.result?.type === "verified")?.result;
+        const baseConfiguration = base?.type === "verified"
+          ? await readExactExecutionPolicy(join(checkout, ".git"), base.base).then((exact) => exact.configuration, () => null) : null;
+        if (!baseConfiguration) {
+          append(operation.id, { type: "failed", stage, reason: `Not promoted automatically: no pre-verification of ${operation.commitId.slice(0, 12)} passed against a readable release base` });
+          return;
+        }
+        configuration = baseConfiguration;
+      }
       // A repository that audits promotes only while its latest audit is not an unexplained failure.
       // Asked again under the publication lane: an audit can fail while the release verifies.
       const unexplainedAudit = () => configuration?.audit ? promotionRefusal(auditSummary({ audits: log.audits(operation.repo), landings: log.landings(operation.repo) }, new Date())) : null;
@@ -1100,7 +1190,14 @@ export function createRunnerQueue(input: {
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal,
-        preverified: (plan) => passedVerification(plan, log.verifications(operation.repo))?.id ?? null,
+        preverified: (plan) => {
+          const passed = passedVerification(plan, log.verifications(operation.repo))?.id ?? null;
+          // No human approved an automatic promotion: it publishes only what a pre-verification passed against this release base,
+          // and never migrations that are not known to be additive.
+          if (operation.automatic && !passed) throw new Error(`Not promoted automatically: no pre-verification of ${plan.candidate.slice(0, 12)} passed against ${plan.releaseBranch} ${plan.base.slice(0, 12)}`);
+          if (operation.automatic && plan.nonAdditiveMigrations.length) throw new Error(`Not promoted automatically: it carries non-additive migrations (${plan.nonAdditiveMigrations.join(", ")}): the owner decides`);
+          return passed;
+        },
         publicationRefusal: unexplainedAudit,
         exclusively: (publication) => {
           // A shared-lane release owns the publication lane for its whole turn.
@@ -1125,7 +1222,7 @@ export function createRunnerQueue(input: {
       const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal });
       // A yield or kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
-      if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks };
+      if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks, nonAdditiveMigrations: result.nonAdditiveMigrations };
       if (result.status === "verification_failed") return { type: "failed", stage: "verifying", reason: result.reason,
         ...failedVerification(result.evidence) };
       return { type: "failed", stage, reason: result.reason };
@@ -1302,6 +1399,7 @@ export function createRunnerQueue(input: {
         // A hold nothing else will publish: the landing that held it ended, and Build refuses a reland while it is held.
         recoverHeld(repo);
         await reconcileVerification(repo);
+        await promoteAutomatically(repo);
         await scheduleLatest(repo);
       }
       // A repository that landed here is scheduled above, from the policy of its last landing; only one that never
