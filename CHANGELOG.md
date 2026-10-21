@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.45.0
+
+- **Automatic promotion no longer waits for a quiet moment:** in `development` mode the runner released only the newest green
+  staging commit, and only when its own pre-verification had passed, so under steady landings every verified commit was already
+  superseded by a newer, still-unverified one and nothing shipped. It now releases the newest green commit whose
+  pre-verification passed, looking back no further than the newest commit already released or tried; a newer commit that is still
+  verifying or whose verification failed no longer holds it back (and a failed one is still reported on its log). A newer verified
+  commit replaces a queued automatic release of an older one. `standard` and `light` are unchanged.
+
 ## v3.44.0
 
 - **A pre-verification is never starved or stopped by landings:** it is admitted like a release, in arrival order, beside its

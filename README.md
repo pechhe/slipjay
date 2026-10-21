@@ -884,19 +884,22 @@ Both fields appear on promotion plans that have commits to release.
 
 **Automatic promotion (`process: "development"`).** When the policy committed on the release
 branch, at the base the pre-verification ran against (never the candidate's policy), has
-`process: "development"`, the runner queues a release of the newest green candidate by itself
-once its pre-verification passed. It is the release `slipjay promote --confirm` submits, in the
-same release queue, so landings, resets and releases keep their order, and it reuses the passed
-pre-verification. The release, its production deploy and the `slipjay promote --confirm` and
-`slipjay deploys` output carry `automatic: { "setting": "process", "value": "development" }`, and
+`process: "development"`, the runner queues a release by itself of the newest green candidate
+whose pre-verification passed, looking back no further than the newest commit already released or
+tried. A newer green commit that is still verifying, or whose verification failed, does not hold it
+back, so a stream of landings cannot keep every verified commit from shipping; the newer commit
+ships in turn once its own verification passes. It is the release `slipjay promote --confirm`
+submits, in the same release queue, so landings, resets and releases keep their order, and it reuses
+the passed pre-verification. The release, its production deploy and the `slipjay promote --confirm`
+and `slipjay deploys` output carry `automatic: { "setting": "process", "value": "development" }`, and
 the runner log says `promoting <commit> automatically`. The safeguards stay: nothing is promoted
 automatically when the candidate has `nonAdditiveMigrations`, when its verification failed or is
 missing, or when the audits refuse a promotion; a failed production health check rolls back as
 above. Such a candidate stays unpromoted, with the reason (`Not promoting <commit> automatically:
-…`) on its pre-verification's log, and the next green candidate is tried. A candidate with a
-release, or a production deploy, on record, or any release or production deploy in flight, is
-never released again; a newer green candidate replaces a queued automatic release of an older
-one. Under `standard` and `light` nothing promotes without a human `--confirm`.
+…`) on its pre-verification's log. A candidate with a release, or a production deploy, on record, or
+any release or production deploy in flight, is never released again; a newer verified candidate
+replaces a queued automatic release of an older one, and an automatic release that starts after one
+has passed fails as superseded. one. Under `standard` and `light` nothing promotes without a human `--confirm`.
 
 When recovery can be proven, a failed production promotion is rolled back
 automatically: production
