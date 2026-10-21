@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.41.0
+
+- **Adopted helper workspaces retire once the lead's landing publishes (Build #4399, SJ-53):** `slipjay adopt <helper-workspace-path>`
+  replaces the lead's manual `jj duplicate` and `jj squash`: it adopts the helper's commits into the lead's working copy, refuses
+  with the conflicted paths when they conflict, and records the adoption. `slipjay land` carries each adopted revision in the
+  handoff's `helpers`, and once the landing publishes the adoption coverage is archived with the landing. `remove`, `cleanup`,
+  `prune --plan`, `prune --empty` and the sweeps then treat the helper as delivered, while an adoption whose landing is not yet
+  published keeps it with the reason `adopted, landing not published`. `slipjay remove --discard <path>` is the explicit
+  confirmation for work nobody adopted. A reland over a candidate an earlier attempt left on the remote no longer fails with a
+  conflicted bookmark or a divergent change, and a failure before a retry's submission keeps the earlier submission's runner pin.
+
 ## v3.40.1
 
 - **Rerunning a landing and its cleanup work once the candidate bookmark has made the candidate immutable (Build #4510, SJ-65):**
