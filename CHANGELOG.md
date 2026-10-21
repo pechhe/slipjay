@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.39.6
+
+- **pnpm 12 repositories install on runners without reflinks (Build #4441, SJ-62):** workspace installs ran
+  `pnpm install --package-import-method=clone`, which pnpm 12 refuses on a filesystem without copy-on-write clones,
+  so every landing of a pnpm 12 repository on an ext4 runner failed at `installing` (os error 95). Installs now use
+  `clone-or-copy`: copy-on-write where the filesystem has it, plain copies elsewhere.
+
 ## v3.39.5
 
 - **A landing caught retrying someone else's held integration no longer locks its Spec out of Build (Build #4336, SJ-47):**

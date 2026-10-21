@@ -26,9 +26,10 @@ async function workspaceDependencyCommand(workspacePath: string): Promise<{ comm
     };
   }
   if (packageManager === "pnpm" || packageManager.startsWith("pnpm@")) {
+    // pnpm 12 refuses plain `clone` where the filesystem has no reflinks (ext4 runners).
     return {
       command: "pnpm",
-      args: ["install", "--frozen-lockfile", "--prefer-offline", "--package-import-method=clone"],
+      args: ["install", "--frozen-lockfile", "--prefer-offline", "--package-import-method=clone-or-copy"],
     };
   }
   if (packageManager === "npm" || packageManager.startsWith("npm@")) {
