@@ -112,3 +112,58 @@ test("pre-verification with two failing checks records both in its failed event"
     assert.ok(outcome.failures!.every((failure) => failure.runId));
   } finally { await f.dispose(); }
 }, 120_000);
+
+// A kill during a release's checks: the failing check is recorded, the hanging one is killed, and the one after it never starts.
+const killedCheck = (root: string) => `const fs=require("node:fs");fs.writeFileSync(${JSON.stringify(join(root, "second-started"))},"");setInterval(()=>{},1000);`;
+const killGates = (root: string) => [failing(join(root, "fail-release-a"), "release-a", 5), killedCheck(root),
+  `require("node:fs").writeFileSync(${JSON.stringify(join(root, "third-started"))},"");`];
+// The kill reaches the hanging check as a cancellation, which ends verification by itself, so the abort signal would go
+// unnoticed. This reports that stop as a signal instead, as an executor may, leaving the abort signal to stop the next check.
+function reportKillAsSignal(f: Awaited<ReturnType<typeof fixture>>) {
+  const run = f.executor.run;
+  const script = killedCheck(f.root);
+  f.executor.run = async (request) => {
+    const result = await run(request);
+    return request.args[1] === script && result.cancelled ? { ...result, cancelled: false, exitCode: null, signal: "SIGTERM" } : result;
+  };
+}
+
+test("an owner kill during a runner-managed release's checks is cancelled, and no check after the killed one starts", async () => {
+  const f = await fixture(false, true, undefined, false, { releaseGates: killGates });
+  try {
+    reportKillAsSignal(f);
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    await writeFile(join(f.root, "fail-release-a"), "");
+    const id = f.submitRelease(f.main());
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "second-started"), "utf8").then(() => true, () => undefined));
+    const outcome = f.queue.kill();
+    assert.ok(outcome.status === "killed", JSON.stringify(outcome));
+    await f.queue.idle();
+    assert.deepEqual(f.result(id), { type: "cancelled", reason: OWNER_KILL_REASON });
+    await assert.rejects(readFile(join(f.root, "third-started"), "utf8"), "the check after the killed one never started");
+    assert.equal(checkRuns(f, id).length, 3, "the fixture's release check, the failing check and the killed check ran as gates");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("an owner kill during a pre-verification's checks is cancelled, and no check after the killed one starts", async () => {
+  const f = await fixture(false, true, undefined, false, { releaseGates: killGates });
+  try {
+    reportKillAsSignal(f);
+    await writeFile(join(f.root, "fail-release-a"), "");
+    // Main one commit past the release branch, as a landing leaves it, without a landing's staging wait.
+    const identity = { GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.com" };
+    const git = (args: string[]) => execFileSync("git", ["--git-dir", join(f.root, "origin.git"), ...args], { encoding: "utf8", env: { ...process.env, ...identity } }).trim();
+    git(["update-ref", "refs/heads/main", git(["commit-tree", `${f.main()}^{tree}`, "-p", f.main(), "-m", "Landed"])]);
+    const id = newOperationId();
+    f.log.append(id, { type: "submitted", kind: "verification", repo: "fixture/repo", commitId: f.main(), submittedBy: "test" });
+    f.queue.wake();
+    await until(async () => await readFile(join(f.root, "second-started"), "utf8").then(() => true, () => undefined));
+    const outcome = f.queue.kill();
+    assert.ok(outcome.status === "killed", JSON.stringify(outcome));
+    await f.queue.idle();
+    assert.deepEqual(f.result(id), { type: "cancelled", reason: OWNER_KILL_REASON });
+    await assert.rejects(readFile(join(f.root, "third-started"), "utf8"), "the check after the killed one never started");
+    assert.equal(checkRuns(f, id).length, 3, "the fixture's release check, the failing check and the killed check ran as gates");
+  } finally { await f.dispose(); }
+}, 120_000);
