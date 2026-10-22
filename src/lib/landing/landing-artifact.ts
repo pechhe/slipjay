@@ -97,10 +97,13 @@ export async function duplicateLandingSource(cwd: string, source: string, base: 
     // treating merged-in upstream history as the feature's description.
     const description = await jj(cwd, ["log", "-r", firstLine, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
     await jj(cwd, ["squash", "--from", `${base}..${head}`, "--onto", base, "--use-destination-message"]);
-    const squashed = `heads(all() ~ at_operation(${beforeSquash}, all()))`;
-    // Described on stdin, as above; the new commit is the squash's only visible head until then.
+    const created = `heads(all() ~ at_operation(${beforeSquash}, all()))`;
+    const squashed = await jj(cwd, ["log", "-r", created, "--no-graph", "-T", 'commit_id ++ "\\n"']);
+    if (!/^[a-f0-9]{40}$/.test(squashed)) throw new Error("Source assembly did not produce exactly one candidate");
+    // Described on stdin, as above, and by the commit's id: a revset resolves differently under `describe` when the stack's
+    // changes are divergent, as retained submissions of the same change are, and names an immutable copy instead.
     await jj(cwd, ["describe", "-r", squashed, "--stdin"], { input: description });
-    candidate = await jj(cwd, ["log", "-r", `heads(all() ~ at_operation(${beforeSquash}, all()))`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
+    candidate = await jj(cwd, ["log", "-r", created, "--no-graph", "-T", 'commit_id ++ "\\n"']);
     if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error("Source assembly did not produce exactly one candidate");
   }
   await jj(cwd, ["edit", candidate]);

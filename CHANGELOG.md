@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.4
+
+- **Landing assembly describes its squashed candidate by commit id:** v3.46.2 described the squashed candidate by a revset naming the
+  commits the squash had just created. On a runner checkout whose stack held divergent changes (retained earlier submissions of the
+  same change), `jj describe` resolved that revset to an immutable submitted copy and failed with `Commit … is immutable`, so the
+  conflict probe skipped its check for every such submission (seen on `pechhe/yardsmith`). The candidate's commit id is now read with
+  `jj log` first and described by id. The regression test builds a stack with a divergent change.
 ## v3.46.3
 
 - **A partially written checkout is named, not reported as edited or unlanded work:** a workspace missing most of the tracked files
