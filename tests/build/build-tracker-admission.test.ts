@@ -53,3 +53,33 @@ test("a Build-tracked landing with no Build item is reported to Build as a chore
     await f.dispose();
   }
 }, 120_000);
+
+test("a landing from a Landed Spec's own workspace lands as a chore, reaching Build with no second workspace (SJ-43)", async () => {
+  const f = await project({ policy: { tracker: "build" } });
+  const buildToken = "build-secret";
+  // Build binds a Spec for delivery only while it is Ready or In progress: this one has landed already.
+  const spec = item({ number: 96620, kind: "spec", status: "landed", title: "The Spec that landed" });
+  const fake = await buildServer(buildToken, [spec]);
+  const workspace = await createWorkspace("Placeholder task", f.repo, { issueNumber: 96620 });
+  try {
+    await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
+    const landed = await landThroughTestRunner(f, workspace.workspacePath, { build: { origin: fake.origin, token: buildToken }, session: SESSION,
+      before: () => until(() => fake.requests.some((request) => request.action === "recordChoreLanding"), "the chore receipt") });
+    assert.equal(landed.ok, true, landed.lines.join("\n"));
+    // The fix is published rather than refused for a session Build would not bind, and Build records a chore, not an admission.
+    assert.equal(fake.requests.some((request) => request.action === "admitAttempt"), false, "a closed Spec takes no delivery");
+    const chore = fake.requests.find((request) => request.action === "recordChoreLanding")!.input;
+    assert.equal(chore.unassociated, true);
+    assert.equal(chore.title, "The Spec that landed");
+    const said = landed.lines.join("\n");
+    assert.match(said, /\[build\] Build #96620's Spec #\d+ is landed, so Build takes no delivery of this landing: dispose the finding with hq_build_dispose_finding \(decision fix\)/);
+    // The chore note still names the association, so the fix is attached to the Spec from Build's own item.
+    assert.match(said, /as a chore.*attach it with hq_build_associate_landing/);
+    const message = execFileSync("git", ["--git-dir", f.remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();
+    assert.equal(message, "The Spec that landed\n\nBuild: #96620", "the workspace's own item still names the landing");
+  } finally {
+    await rm(workspace.workspacePath, { recursive: true, force: true });
+    await fake.close();
+    await f.dispose();
+  }
+}, 120_000);

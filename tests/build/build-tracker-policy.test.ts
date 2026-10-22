@@ -76,8 +76,11 @@ test("Build's 503 for an unknown item is its refusal; any other 503 is no answer
 test("a Build-tracked landing refuses before submitting when Build cannot confirm whose delivery it is", async () => {
   const spec = item({ number: 10, kind: "spec", status: "in_progress" });
   const other = item({ number: 20, kind: "spec", status: "in_progress" });
+  const landed = item({ number: 50, kind: "spec", status: "landed" });
+  const accepted = item({ number: 60, kind: "spec", status: "accepted" });
   const { read } = build([spec, other, item({ number: 11, parentId: spec.id }), item({ number: 12, parentId: spec.id }), item({ number: 21, parentId: other.id }),
-    item({ number: 30, kind: "decision", status: "proposed" }), item({ number: 40, kind: "spec", status: "inbox" })]);
+    item({ number: 30, kind: "decision", status: "proposed" }), item({ number: 40, kind: "spec", status: "inbox" }), landed, accepted,
+    item({ number: 51, parentId: landed.id, status: "landed" }), item({ number: 61, parentId: accepted.id, status: "landed" })]);
   const binds: Record<string, { generation: number; endedAt: string | null }[]> = { [spec.id]: [{ generation: 1, endedAt: null }] };
   const reader: BuildReader = (action, input) => action === "binds" ? Promise.resolve(binds[input.specId as string] ?? []) : read(action, input);
   const request = (fields: Partial<Parameters<typeof buildLandingHandoff>[0]>) =>
@@ -100,4 +103,33 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   await assert.rejects(request({ issueNumber: null, tickets: [11] }), /--ticket needs a workspace with a Build item/);
   await assert.rejects(request({ issueNumber: null }), /Build session needs a workspace with a Build item: attach the Spec with attach-issue/, "a session with no Build item is refused, not landed as a chore");
   assert.deepEqual((await request({ issueNumber: null, sessionId: "  " })).build, { unassociated: true }, "a blank session is no session");
+  // A Spec Build takes no delivery of still takes the fix, from the workspace it was found in, as a chore its lead attaches.
+  assert.deepEqual((await request({ issueNumber: 50 })).build, { unassociated: true }, "a Landed Spec's own workspace lands as a chore");
+  assert.deepEqual((await request({ issueNumber: 50, sessionId: undefined })).build, { unassociated: true });
+  assert.deepEqual((await request({ issueNumber: 51 })).build, { unassociated: true }, "a Ticket whose Spec has landed lands as a chore too");
+  assert.deepEqual((await request({ issueNumber: 60 })).build, { unassociated: true });
+  // A named --ticket cannot be honored as a chore: the error names the routes that work, not a session Build would refuse.
+  await assert.rejects(request({ issueNumber: 50, tickets: [51] }), /cannot be a delivery of Spec #50, which is landed.*bind_status_invalid.*hq_build_dispose_finding \(decision fix\).*In progress.*--session <id> --ticket <n>.*hq_build_associate_landing/);
+  await assert.rejects(request({ issueNumber: 50, tickets: [51] }), /drop --ticket/, "the chore route says to drop --ticket");
+  await assert.rejects(request({ issueNumber: 60, tickets: [61] }), /Spec #60, which is accepted, and Build would refuse the bind \(bind_status_invalid\): accepted work is not reopened, so a later defect is new linked work: land it as a chore \(drop --ticket\) and attach it with hq_build_associate_landing/,
+    "accepted work names its route, never a reopen");
+  await assert.doesNotReject(request({ issueNumber: 50, sessionId: "not-a-session" }), "a closed Spec never needs the session's shape: nothing is bound");
+
+  // The notice printed for a chore fallback names the route for that status only.
+  const notices = async (issueNumber: number) => {
+    const told: string[] = [];
+    await request({ issueNumber, onNoDelivery: (message) => told.push(message) });
+    return told;
+  };
+  assert.match((await notices(50)).join(), /Spec #50 is landed.*hq_build_dispose_finding \(decision fix\)/, "a Landed Spec may be reopened by a fix disposition");
+  const [acceptedNotice] = await notices(60);
+  assert.match(acceptedNotice!, /Spec #60 is accepted.*accepted work is not reopened/);
+  assert.doesNotMatch(acceptedNotice!, /dispose_finding/, "an Accepted Spec is never pointed at a reopen");
+  assert.deepEqual(await notices(10), [], "a Spec Build takes a delivery of says nothing");
+  const dropped = item({ number: 70, kind: "spec", status: "dropped" });
+  const later = build([dropped]).read;
+  const told: string[] = [];
+  await buildLandingHandoff({ source: "a".repeat(40), description: "x", issueNumber: 70, tickets: [], sessionId: undefined, read: later, onNoDelivery: (message) => told.push(message) });
+  assert.match(told.join(), /Spec #70 is dropped.*land it as a chore.*hq_build_associate_landing/);
+  assert.doesNotMatch(told.join(), /dispose_finding/);
 });

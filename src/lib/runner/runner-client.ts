@@ -770,21 +770,25 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
         reconciling = Boolean((metadata?.pendingLandingRequests as Record<string, string> | undefined)?.[landingRequestKey(location, repo, target.commitId)]);
         if (reconciling) progress.engaged = true;
         const supplied = handoff;
-        handoff = await writtenLandingHandoff(context, landingRequestKey(location, repo, target.commitId), target.commitId, awaitingAdmission, async (hasAdoptions) => supplied ?? (buildTracked ? prepared(await buildLandingHandoff({
-          source: target.commitId, description: target.description, issueNumber: typeof issueNumber === "number" ? issueNumber : null,
-          tickets: options.tickets ?? [], sessionId: options.session ?? buildSessionFrom(env), read: (action, input) => readBuildThroughRunner(action, input, env) })) : hasAdoptions ? {
+        handoff = await writtenLandingHandoff(context, landingRequestKey(location, repo, target.commitId), target.commitId, awaitingAdmission, async (hasAdoptions) => {
+          if (supplied) return supplied;
+          if (!buildTracked) return hasAdoptions ? {
             version: 1, source: target.commitId, intent: target.description.trim().slice(0, 2000) || "Land workspace contribution", scope: [], spec: null,
             helpers: [], checks: [], reviews: [], toolchain: [], gaps: [],
-          } : undefined), undefined, async (id) => {
-            const accepted = await operationRunnerLocation(id, env) ?? location;
-            const retained = accepted === location ? connection : await connectRunner(accepted, { ...env, SLIPJAY_RUNNER_TOKEN: token });
-            try {
-              const response = await request(retained.baseUrl, token, `/v1/operations/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(15_000) });
-              if (!response.ok) return undefined;
-              const { operation: recorded } = await response.json() as { operation: Operation };
-              return recorded?.id === id && recorded.kind === "landing" ? recorded.result : undefined;
-            } finally { if (retained !== connection) retained.close(); }
-          }, existing.filter((op) => op.status === "queued" && op.commitId !== target.commitId));
+          } : undefined;
+          const written = await buildLandingHandoff({ source: target.commitId, description: target.description, issueNumber: typeof issueNumber === "number" ? issueNumber : null,
+            tickets: options.tickets ?? [], sessionId: options.session ?? buildSessionFrom(env), read: (action, input) => readBuildThroughRunner(action, input, env), onNoDelivery: (message) => onLine(`[build] ${message}`) });
+          return prepared(written);
+        }, undefined, async (id) => {
+          const accepted = await operationRunnerLocation(id, env) ?? location;
+          const retained = accepted === location ? connection : await connectRunner(accepted, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+          try {
+            const response = await request(retained.baseUrl, token, `/v1/operations/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(15_000) });
+            if (!response.ok) return undefined;
+            const { operation: recorded } = await response.json() as { operation: Operation };
+            return recorded?.id === id && recorded.kind === "landing" ? recorded.result : undefined;
+          } finally { if (retained !== connection) retained.close(); }
+        }, existing.filter((op) => op.status === "queued" && op.commitId !== target.commitId));
       }
       requestId = await landingRequestIdentity(context, location, repo, target.commitId);
       // Named on the submission so a queue view can say which Spec a landing delivers before the runner reads its trailers.

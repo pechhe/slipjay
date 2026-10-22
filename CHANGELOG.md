@@ -8,6 +8,17 @@
   `--session`, `HQ_FORGE_SESSION_ID` or, for a repository or environment that has not switched, `HQ_BUILD_SESSION_ID`. Guidance in
   `land`, `attach-issue` and the chore-landing output names the `hq_forge_*` MCP tools, which Weave serves beside the old ones.
 
+## v3.46.7
+
+- **A fix found in a Landed Spec's own workspace lands there (#4310):** `slipjay land` in a workspace attached to a Spec Build will not bind
+  for delivery — it has landed, so a delivery bind is refused (`bind_status_invalid`) — asked for a lead session or bind Build would refuse,
+  and the fix could only land from a second workspace with no item. Land now publishes it from the workspace it was found in as a chore and
+  says so: attach it to the Spec with `hq_build_associate_landing`, which Build accepts for a Landed Spec and which records the published
+  revision against it. A source review fix that should land as the Spec's own delivery takes Build's `fix` route instead:
+  `hq_build_dispose_finding` with decision `fix` creates the review-origin Ticket and returns the Spec to In progress, after which the Spec
+  binds again and `slipjay land --session <id> --ticket <n>` lands it as delivery. A `--ticket` named for such a Spec is refused before
+  submitting, naming both routes; Accepted, dropped and imported-closed Specs say why they take no delivery and name the chore route.
+
 ## v3.46.6
 
 - **A chore landing says so, and names Build's item and the action that attaches it:** in a Build-tracked repository, a workspace
