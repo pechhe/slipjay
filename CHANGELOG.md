@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.46.5
+
+- **`slipjay land --session` in a workspace with no Build item is refused:** a session id (or `HQ_BUILD_SESSION_ID`) says the landing is
+  a Spec's, but with no Build item it was submitted as a chore and the Spec stayed unlanded (Build #3662 landed as chore #3663). Land now
+  refuses before submitting and names `attach-issue <n>`, as it does for `--ticket`. A workspace with no Build item and no session still lands as a chore.
+
 ## v3.46.4
 
 - **Landing assembly describes its squashed candidate by commit id:** v3.46.2 described the squashed candidate by a revset naming the

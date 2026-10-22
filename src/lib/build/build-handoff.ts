@@ -38,6 +38,8 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
   const { issueNumber, tickets, read } = request;
   if (issueNumber === null) {
     if (tickets.length) throw new Error("--ticket needs a workspace with a Build item: start it with --issue <n> or attach-issue <n>");
+    // A session id says the landing is a Spec's: landing it as a chore would leave the Spec unlanded without a word.
+    if (request.sessionId?.trim()) throw new Error(`A Build session needs a workspace with a Build item: attach the Spec with attach-issue <n> (or start it with --issue <n>), or drop --session/${BUILD_SESSION_ENV} to land a chore`);
     return { unassociated: true };
   }
   const named = await item(read, { number: issueNumber }, `#${issueNumber}`);

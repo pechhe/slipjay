@@ -82,7 +82,7 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   assert.deepEqual((await request({})).build, { specId: spec.id, ticketIds: [item({ number: 11 }).id], bodyRevision: null, bindGeneration: 1, sessionId: SESSION });
   assert.deepEqual((await request({ issueNumber: 10 })).build, { specId: spec.id, ticketIds: [], bodyRevision: null, bindGeneration: 1, sessionId: SESSION }, "a Spec lands with no Tickets");
   assert.deepEqual((await request({ tickets: [12, 11] })).build, { specId: spec.id, ticketIds: [item({ number: 11 }).id, item({ number: 12 }).id], bodyRevision: null, bindGeneration: 1, sessionId: SESSION });
-  assert.deepEqual((await request({ issueNumber: null })).build, { unassociated: true });
+  assert.deepEqual((await request({ issueNumber: null, sessionId: undefined })).build, { unassociated: true });
   assert.equal((await request({})).intent, "Do it");
 
   await assert.rejects(request({ sessionId: undefined }), /hq_build_start_session.*--session <id>.*HQ_BUILD_SESSION_ID/);
@@ -94,4 +94,6 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   await assert.rejects(request({ issueNumber: 30 }), /is a decision, not a Spec or a Spec's Ticket/);
   await assert.rejects(request({ issueNumber: 99 }), /Build has no item #99/);
   await assert.rejects(request({ issueNumber: null, tickets: [11] }), /--ticket needs a workspace with a Build item/);
+  await assert.rejects(request({ issueNumber: null }), /Build session needs a workspace with a Build item: attach the Spec with attach-issue/, "a session with no Build item is refused, not landed as a chore");
+  assert.deepEqual((await request({ issueNumber: null, sessionId: "  " })).build, { unassociated: true }, "a blank session is no session");
 });
