@@ -38,6 +38,8 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     const requestIds: string[] = [];
     // The next submission fails in transport: `lost` after the runner recorded it, `unreceived` before it saw it.
     let failNextSubmission: "lost" | "unreceived" | undefined;
+    // The next submission is refused with an error and no operation, as a pre-queue refusal is; `before` runs as the runner answers.
+    let refuseNextSubmission: (() => void) | undefined;
     const route = async (request: Request) => {
       if (request.method === "GET" && new URL(request.url).pathname.endsWith("/events")) {
         streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
@@ -52,6 +54,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
       if (isSubmission) requestIds.push((await request.clone().json() as { requestId: string }).requestId);
       if (isSubmission && typeof loseSubmissionResponse === "number")
         return Response.json({ error: "fixture refusal" }, { status: loseSubmissionResponse });
+      if (isSubmission && refuseNextSubmission) { refuseNextSubmission(); refuseNextSubmission = undefined; return Response.json({ error: "fixture refusal before queuing" }, { status: 409 }); }
       const failing = isSubmission ? failNextSubmission : undefined;
       if (failing) failNextSubmission = undefined;
       if (failing === "unreceived") return new Response("bad gateway", { status: 502 });
@@ -82,6 +85,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
       setKill: (outcome: KillOutcome) => { killed = outcome; },
       killRequests, requestIds,
       failNextSubmission: (how: "lost" | "unreceived") => { failNextSubmission = how; },
+      refuseNextSubmission: (before: () => void = () => {}) => { refuseNextSubmission = before; },
       dispose: async () => {
         try { await server.close(); log.close(); }
         finally { try { transport.restore(); } finally { await f.dispose(); } }

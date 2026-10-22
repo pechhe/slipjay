@@ -206,10 +206,14 @@ async function bitwardenRunnerToken(env: NodeJS.ProcessEnv): Promise<string> {
   throw new Error(`Could not read SLIPJAY_RUNNER_TOKEN from Bitwarden after ${TOKEN_LOOKUP_ATTEMPTS} attempts (${failure}). ${MISSING_TOKEN}`);
 }
 
-/** Deletes the remote copy of a candidate bookmark, as the runner does when an operation closes; a copy already gone needs nothing. */
-async function deleteRemoteCandidate(root: string, remote: string, bookmark: string): Promise<void> {
+/**
+ * Deletes this landing's remote copy of a candidate bookmark, as the runner does when an operation closes; a copy already
+ * gone needs nothing, and one that now names another commit belongs to a newer landing of the change and is left.
+ */
+async function deleteRemoteCandidate(root: string, remote: string, bookmark: string, commitId: string): Promise<void> {
   try {
     await jj(root, ["--ignore-working-copy", "git", "fetch", "--remote", remote, "--branch", bookmark]);
+    if (await jj(root, ["--ignore-working-copy", "log", "-r", `${bookmark}@${remote}`, "--no-graph", "-T", "commit_id"]) !== commitId) return;
     await jj(root, ["--ignore-working-copy", "bookmark", "track", `${bookmark}@${remote}`]);
     await jj(root, ["--ignore-working-copy", "bookmark", "delete", bookmark]);
     await jj(root, ["--ignore-working-copy", "git", "push", "--remote", remote, "--bookmark", bookmark]);
@@ -869,7 +873,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     if (operation.result) {
       // A rerun that reattached to an operation closed long ago pushed the candidate again, and the runner's cleanup
       // ran when that operation closed: delete the copy here, or the next full fetch makes the candidate immutable.
-      if (pushedCandidate && reattached) await deleteRemoteCandidate(context.integration.root, remote!, candidateBookmark(target.changeId));
+      if (pushedCandidate && reattached) await deleteRemoteCandidate(context.integration.root, remote!, candidateBookmark(target.changeId), target.commitId);
       await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", candidateBookmark(target.changeId)]).catch(() => {});
     }
     // The forward and its port end with this call, so the log is named by a command, not a URL.
@@ -944,6 +948,13 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       // Only a refusal of this attempt's own submission releases the pin; an earlier
       // attempt's pin still names where its possibly-held submission went.
       if (pinned && error instanceof LandingNotSubmitted) await landingRunner(context, target.commitId, null).catch(() => undefined);
+      // A submission that never reached the runner, or was refused, leaves it with no operation to clean up after, so the
+      // pushed copy of the candidate would stay: a full fetch would import it beside the author's rewrite of the same change,
+      // which is then divergent.
+      if (pushedCandidate) {
+        await deleteRemoteCandidate(context.integration.root, remote, candidateBookmark(target.changeId), target.commitId);
+        await jj(context.integration.root, ["--ignore-working-copy", "bookmark", "forget", "--include-remotes", candidateBookmark(target.changeId)]).catch(() => {});
+      }
     }
     throw error;
   } finally { connection.close(); }

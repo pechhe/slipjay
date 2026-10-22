@@ -494,7 +494,10 @@ and held state through the existing recovery path.
   without a remote ref, on the candidate: another workspace that imported the runner's copy
   would otherwise abandon the candidate, and rebase what is stacked on it, when the runner
   deletes the copy. A rerun reaches the original submission's outcome, which retires it, and deletes the
-  remote copy it pushed again when the operation had already closed.
+  remote copy it pushed again when the operation had already closed. A submission the runner refuses
+  without creating an operation, or that fails before it is sent, holds nothing there: the client deletes the remote
+  copy it pushed (unless a newer commit of the change has replaced it) and forgets the local bookmark, so the author's
+  later rewrite of the change is not divergent from an imported copy.
 - **Commit descriptions.** A candidate published as a stack keeps its commits and
   descriptions. When the runner folds a multi-commit candidate into one
   landing artifact, its title comes from the first commit on the submitted

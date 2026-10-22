@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.1
+
+- **A candidate refused before queuing no longer leaves a copy on the remote:** when the runner refuses a submission without
+  creating an operation, `slipjay land` now deletes the candidate it pushed and forgets its local bookmark. The retained copy made
+  an author's full fetch import it beside the rewrite of the same change (a rebase after the refusal), so the change was divergent
+  and the next `slipjay land` failed on it until the author abandoned a commit by hand.
+
 ## v3.46.0
 
 - **Promote an older staging-green commit:** `slipjay promote --candidate <commit>` plans, and `--confirm <commit>` releases,
