@@ -7,6 +7,7 @@ import { jj, jjWorkspaceRoot, parseWorkspaceList, revisionExists, revisionFacts,
 import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./workspace-paths.ts";
 import { processAlive } from "./workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { dropForgottenWorkspaceName } from "./workspace-store-names.ts";
 import { mapBounded } from "./bounded-map.ts";
 import { partialCheckout } from "./workspace-partial-checkout.ts";
 import type { PartialCheckout } from "./workspace-partial-checkout.ts";
@@ -214,6 +215,9 @@ export async function renameListedWorkspace(current: Pick<WorkspaceEntry, "name"
   let name = base;
   for (let index = 2; taken.has(name); index += 1) name = `${base}-${index}`;
 
+  // A name some earlier workspace held and JJ forgot is dropped from its store first (see the module).
+  const integrationRoot = workspaces.find((workspace) => workspace.name === "default")?.root;
+  if (integrationRoot) await dropForgottenWorkspaceName(integrationRoot, name);
   await jj(current.root, ["workspace", "rename", name]);
   const oldName = current.name;
   const operationId = await jj(current.root, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
