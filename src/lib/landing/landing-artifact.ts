@@ -100,8 +100,8 @@ export async function duplicateLandingSource(cwd: string, source: string, base: 
     const created = `heads(all() ~ at_operation(${beforeSquash}, all()))`;
     const squashed = await jj(cwd, ["log", "-r", created, "--no-graph", "-T", 'commit_id ++ "\\n"']);
     if (!/^[a-f0-9]{40}$/.test(squashed)) throw new Error("Source assembly did not produce exactly one candidate");
-    // Described on stdin, as above, and by the commit's id: a revset resolves differently under `describe` when the stack's
-    // changes are divergent, as retained submissions of the same change are, and names an immutable copy instead.
+    // Described on stdin, as above, and by the commit's id: on a runner probe checkout whose stack holds divergent changes (retained
+    // submissions of the same change), `describe -r <revset>` failed with "Commit … is immutable", while the id always resolves.
     await jj(cwd, ["describe", "-r", squashed, "--stdin"], { input: description });
     candidate = await jj(cwd, ["log", "-r", created, "--no-graph", "-T", 'commit_id ++ "\\n"']);
     if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error("Source assembly did not produce exactly one candidate");

@@ -7,7 +7,7 @@ import { jj, project } from "../support/workspace-project.ts";
 
 const commit = (cwd: string, revision: string) => jj(cwd, ["log", "-r", revision, "--no-graph", "-T", "commit_id"]);
 
-test("a stack whose head is one copy of a divergent change is assembled and described without touching the other copy", async () => {
+test("smoke: a stack whose head is one copy of a divergent change is assembled and described without touching the other copy", async () => {
   const f = await project();
   try {
     await writeFile(join(f.repo, "first"), "first\n");

@@ -6,7 +6,7 @@
   commits the squash had just created. On a runner checkout whose stack held divergent changes (retained earlier submissions of the
   same change), `jj describe` resolved that revset to an immutable submitted copy and failed with `Commit … is immutable`, so the
   conflict probe skipped its check for every such submission (seen on `pechhe/yardsmith`). The candidate's commit id is now read with
-  `jj log` first and described by id. The regression test builds a stack with a divergent change.
+  `jj log` first and described by id. The new test is a smoke test on a stack with a divergent change; it passes on the earlier code too, so the failure itself was reproduced only against a copy of the runner's probe checkout.
 ## v3.46.3
 
 - **A partially written checkout is named, not reported as edited or unlanded work:** a workspace missing most of the tracked files
