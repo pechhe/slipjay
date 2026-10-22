@@ -7,7 +7,7 @@ import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { candidateBookmark, RUNNER_API, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitRequest, SubmitResponse } from "../../src/lib/runner/runner-contract.ts";
+import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitRequest, SubmitResponse, VerificationResponse } from "../../src/lib/runner/runner-contract.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 
@@ -368,6 +368,42 @@ test("owner controls kill the running operation until verification ends, and pau
 
 test("runner HTTP adapter rejects public listen hosts", async () => {
   await assert.rejects(serveRunner(() => Promise.resolve(new Response()), { host: "0.0.0.0", port: 0 }), /loopback/);
+});
+
+test("a verification request queues a staging-green commit's pre-verification once and never supersedes another", async () => {
+  const f = await fixture();
+  try {
+    const verify = (body: unknown) => f.request("/verifications", { method: "POST", body: JSON.stringify(body) });
+    const deploy = async (commitId: string, green: boolean) => {
+      const queued = await (await f.request("/deploys", { method: "POST", body: JSON.stringify({ repo: "Owner/Repo", environment: "staging", commitId, submittedBy: "author" }) })).json() as DeployResponse;
+      if (green) f.append(queued.operation.id, { type: "deployed", record: { projects: [] } as never });
+    };
+    const older = "a".repeat(40);
+    const newer = "b".repeat(40);
+    await deploy(older, true);
+    const body = { repo: "Owner/Repo", commitId: older, submittedBy: "author" };
+    assert.equal((await verify({ ...body, commitId: newer })).status, 400, "staging is not green on it");
+    const first = await (await verify(body)).json() as VerificationResponse;
+    assert.equal(first.requested, true);
+    assert.equal(first.operation.kind, "verification");
+    assert.equal(first.operation.commitId, older);
+    const again = await (await verify({ ...body, repo: "owner/repo" })).json() as VerificationResponse;
+    assert.equal(again.requested, false);
+    assert.equal(again.operation.id, first.operation.id);
+    await deploy(newer, true);
+    const second = await (await verify({ ...body, commitId: newer })).json() as VerificationResponse;
+    assert.equal(second.requested, true);
+    assert.equal(f.log.operation(first.operation.id)?.status, "queued", "a newer request does not supersede a queued pre-verification");
+    // A newer green deploy superseded the queued one: planning again requests it afresh.
+    f.append(first.operation.id, { type: "superseded", by: second.operation.id });
+    const renewed = await (await verify(body)).json() as VerificationResponse;
+    assert.equal(renewed.requested, true);
+    assert.notEqual(renewed.operation.id, first.operation.id);
+    for (const invalid of [{ ...body, commitId: "abc" }, { ...body, submittedBy: "" }, { ...body, repo: "" }])
+      assert.equal((await verify(invalid)).status, 400);
+  } finally {
+    await f.close();
+  }
 });
 
 test("deploy submissions queue a deploy, reattach to the open deploy of the same commit, supersede a queued older one and list records", async () => {

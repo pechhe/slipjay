@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.46.0
+
+- **Promote an older staging-green commit:** `slipjay promote --candidate <commit>` plans, and `--confirm <commit>` releases,
+  a commit older than the newest one staging is green on, for when Preview runs newer, unaccepted work. It must have a green
+  staging deploy of exactly that commit and not be behind the release branch (a prefix of integration history containing every integration commit it holds);
+  anything else is refused with the reason. Pre-verification, migrations, audit refusal and approval coverage apply to it as to
+  the newest. The plan reports `candidateSource` (`newest_green` or `requested`) and, for `requested`, the `newerGreen`
+  commits it leaves out. A requested commit without a pre-verification gets one queued through the new `POST /v1/verifications`,
+  which never supersedes or delays the newest green commit's. Without `--candidate`, behaviour is unchanged.
+
 ## v3.45.1
 
 - **A published landing is always reported as landed:** `slipjay land` now prints the runner's verdict (the published commit

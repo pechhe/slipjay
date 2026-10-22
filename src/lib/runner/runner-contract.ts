@@ -422,6 +422,13 @@ export type ReleaseRequest = { repo: string; candidate: string; migrationsReady:
 export type ReleaseResponse = { operation: ReleaseOperation; reattached: boolean };
 
 /**
+ * POST /v1/verifications body: the full id of a commit staging recorded a green deploy of. Queues its
+ * pre-verification unless it has one on record (any status), without superseding another; 400 for a commit staging did not deploy green.
+ */
+export type VerificationRequest = { repo: string; commitId: string; submittedBy: string };
+export type VerificationResponse = { operation: VerificationOperation; requested: boolean };
+
+/**
  * POST /v1/deploys body: the full id of a commit already on the integration branch.
  * An open deploy of the same environment is returned instead of a second.
  */
@@ -459,6 +466,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - POST /v1/operations                         SubmitRequest → SubmitResponse (200, or 409 `{ operation }`)
  * - POST /v1/releases                           ReleaseRequest → ReleaseResponse
  * - POST /v1/deploys                            DeployRequest → DeployResponse
+ * - POST /v1/verifications                      VerificationRequest → VerificationResponse
  * - POST /v1/resets                             ResetRequest → ResetResponse (400 until the repository has landed here)
  * - GET  /v1/resets?repo=<owner/name>           → `{ operations: ResetOperation[] }` newest first
  * - GET  /v1/audits?repo=<owner/name>           → `{ operations: AuditOperation[], summary: AuditSummary }` newest first

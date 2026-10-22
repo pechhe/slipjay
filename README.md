@@ -320,7 +320,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `metrics [--since <ISO date>] [--repo <owner/name>] [--json]` | Pipeline outcomes and causes; stage, queue and command percentiles per repository and operation kind; each repository's landing verify time against its budgets, and its slowest, growing and over-budget test files; held integrations, attempts and flake candidates, from the runner ledger. |
 | `land [--direct]` | Send the current workspace (or, with `--direct`, the primary checkout) to the runner, which verifies, integrates and publishes it (see [Runner](#runner)); without a runner location it refuses. Afterwards it moves the primary checkout onto the new integration, carrying its uncommitted edits along when they apply cleanly; edits that would conflict there, a conflicted checkout and unlanded commits under it stay where they are (`status` reports the outcome as `landing.primaryCheckout`). It removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
 | `land [--session <id>] [--ticket <n>]...` | In a Build-tracked repository (`tracker`), a landing without `--handoff` writes its own Build handoff, so Build always learns of it. A workspace with no Build item lands as a chore (`build: { "unassociated": true }`, titled by the description's first line). One started with `--issue <n>` (or `attach-issue <n>`) lands as delivery of item `n`'s Spec: `n` itself when it is a Spec, else the Spec of Ticket `n`, which it lists with each `--ticket <m>` of the same Spec. The binding takes the Spec's body revision and its current bind's generation from Build, and the lead's open Build session from `--session` or `HQ_BUILD_SESSION_ID`. Land refuses before submitting when the session is missing (start one with `hq_build_start_session`), the Spec has no current bind (`hq_build_bind`), or the item is neither a Spec nor a Ticket; Build's admission then checks the session and bind itself. The handoff is written only for a new submission: rerunning `land` to follow a submitted landing needs neither the session nor Build, and a retry of a submission still unacknowledged or awaiting Build admission replays the handoff first written, so Build changing meanwhile cannot make it unreconcilable. `--session` and `--ticket` cannot be combined with `--handoff`, and need a Build-tracked repository. |
-| `promote [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
+| `promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch (or of an older staging-green `--candidate`) to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
 | `deploys [--environment <name>] [--json]` | Each deploy, newest first: environment, commit, outcome per project, and the commits it added since the previous deploy. |
 | `reset` | Have the runner reset the repository's declared `reset` target now (or follow its open reset) and print the verdict as JSON; exits 0 once it is `reset` (see [Reset](#reset)). |
@@ -829,6 +829,30 @@ the release branch holds the candidate, the runner deploys production from exact
 that commit in the deploy lane, and `--confirm` follows it: the promotion ends
 `deployed`, or `deploy failed: <project> (<reason>)` (exit 1). Rerunning `--confirm`
 deploys a failed promotion again and reuses one that deployed.
+
+By default the candidate is the newest staging-green commit. When Preview (staging) runs
+newer, unaccepted work, `slipjay promote --candidate <commit>` plans the release of an
+older commit instead, and `slipjay promote --confirm <commit>` releases it. It is allowed
+only when staging recorded a green (deployed, health-passed) deploy of exactly that
+commit, and it is on the integration branch and is not behind the release: it
+contains every integration commit the release branch already holds, so it is a prefix of integration history. Anything else is refused with the
+reason: a commit staging never deployed green, one that is behind the release or on
+another line. Every other rule applies to it as to the newest:
+the pre-verification, migrations, an audit refusal, and approval coverage computed against
+that candidate. The deploy hooks map a commit to the images built at its staging deploy, so
+promoting it ships exactly what staging verified for it. The plan's `candidateSource` is
+`newest_green` or `requested`; for `requested`, `newerGreen` lists the newer green commits it
+leaves out, newest first. A `--candidate` plan whose commit has no pre-verification asks the
+runner to queue one (`POST /v1/verifications`), which neither supersedes nor delays the
+newest green commit's; the plan reports it `queued` and a confirm before it passes verifies
+as usual. A newer green staging deploy supersedes a queued requested pre-verification like any
+queued one, and planning again requests it afresh (a superseded or cancelled one counts as none).
+The runner lists the staging-green commits for this (`stagingGreenCommits` of the promotion
+state); against an older runner that does not, only the newest green commit can be chosen, and
+asking for another says the runner is too old to list older green commits. `--candidate` on a
+repository that does not ship by promotion is refused. The runner also checks the prefix rule
+itself when it runs the release, and refuses such a commit
+before verifying or publishing.
 
 A promotion is verified before anyone approves it. When staging records a green
 deploy of a commit, the runner queues a **pre-verification** of it. This runs the

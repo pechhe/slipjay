@@ -3,7 +3,7 @@ import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim,
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
-import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest } from "./runner-contract.ts";
+import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-contract.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
@@ -421,6 +421,26 @@ export function createRunnerHandler(input: {
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.releases(repositoryKey(repo)) });
     }
+    if (request.method === "POST" && path === `${RUNNER_API}/verifications`) {
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "Invalid JSON body" }, 400);
+      }
+      if (!validVerification(body))
+        return json({ error: "Invalid verification" }, 400);
+      const repo = repositoryKey(body.repo);
+      if (!input.log.deployments(repo, "staging").some((entry) => entry.commitId === body.commitId && entry.result?.type === "deployed"))
+        return json({ error: `Staging is not green on ${body.commitId.slice(0, 12)}` }, 400);
+      const existing = input.log.verifications(repo).find((entry) => entry.commitId === body.commitId && entry.status !== "superseded" && entry.status !== "cancelled");
+      if (existing)
+        return json({ operation: existing, requested: false });
+      const id = newOperationId();
+      input.log.append(id, { type: "submitted", kind: "verification", repo, commitId: body.commitId, submittedBy: body.submittedBy });
+      input.onSubmitted();
+      return json({ operation: input.log.operation(id), requested: true });
+    }
     if (request.method === "GET" && path === `${RUNNER_API}/verifications`) {
       const repo = url.searchParams.get("repo");
       if (!repo)
@@ -573,6 +593,14 @@ function validRelease(body: unknown): body is ReleaseRequest {
   const value = body as Record<string, unknown>;
   return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0)
     && typeof value.candidate === "string" && /^[a-f0-9]{40,64}$/.test(value.candidate) && typeof value.migrationsReady === "boolean";
+}
+
+function validVerification(body: unknown): body is VerificationRequest {
+  if (typeof body !== "object" || body === null)
+    return false;
+  const value = body as Record<string, unknown>;
+  return ["repo", "submittedBy"].every((key) => typeof value[key] === "string" && value[key].trim().length > 0)
+    && typeof value.commitId === "string" && /^[a-f0-9]{40,64}$/.test(value.commitId);
 }
 
 function validReset(body: unknown): body is ResetRequest {

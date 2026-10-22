@@ -21,7 +21,7 @@ import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation } from "./runner-contract.ts";
+import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest } from "./runner-contract.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
@@ -1149,8 +1149,27 @@ export async function readPromotionState(cwd: string, options: { location: strin
       verifications,
       ...audits ? { auditRefusal: promotionRefusal(audits) } : {},
       stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,
+      stagingGreenCommits: [...new Set(staging.filter((operation) => operation.result?.type === "deployed").map((operation) => operation.commitId))],
       approved: releases.filter((operation) => operation.status !== "cancelled" && operation.status !== "superseded").map((operation) => operation.commitId),
     };
+  } finally { connection.close(); }
+}
+
+/**
+ * Ask the runner to pre-verify `commit`, a commit staging is green on that has no pre-verification
+ * yet. It does not disturb the queue: the newest green commit's verification is neither superseded nor delayed by it.
+ */
+export async function requestVerificationThroughRunner(cwd: string, options: { commit: string; location: string; env?: NodeJS.ProcessEnv }): Promise<void> {
+  const env = options.env ?? process.env;
+  const context = await workspaceContext(cwd);
+  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
+  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
+  if (!repo) throw new Error("Runner promotions require a GitHub repository on the publication remote");
+  const token = await runnerToken(env);
+  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    await request(connection.baseUrl, token, "/v1/verifications", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo, commitId: options.commit, submittedBy: `${hostname()}:${cwd}` } satisfies VerificationRequest) });
   } finally { connection.close(); }
 }
 

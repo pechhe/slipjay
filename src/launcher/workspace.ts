@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { readAudits, recordAuditCause, cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
+import { readAudits, recordAuditCause, cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, requestVerificationThroughRunner, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/runner/pipeline-metrics.ts";
 import type { AutomaticPromotion, Operation } from "../lib/runner/runner-contract.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/landing/submission-handoff.ts";
@@ -194,26 +194,31 @@ async function removeWorkspaceAt(path: string, discard = false): Promise<number>
 }
 
 /**
- * `promote [--confirm <commit>] [--migrations-ready]`: plan a release here, or send
+ * `promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]`: plan a release
+ * here (of the newest staging-green commit, or of the older one `--candidate` names), or send
  * the candidate a human approved to the runner, which verifies and publishes it.
  * Progress goes to stderr; stdout is one JSON result.
  */
 async function runPromote(args: string[]): Promise<number> {
-  const options: { migrationsReady: boolean; confirm?: string } = { migrationsReady: false };
+  const options: { migrationsReady: boolean; confirm?: string; candidate?: string } = { migrationsReady: false };
   for (let index = 0; index < args.length; index += 1) {
     if (args[index] === "--migrations-ready") options.migrationsReady = true;
     else if (args[index] === "--confirm" && args[index + 1] && !args[index + 1]!.startsWith("-")) options.confirm = args[++index];
-    else throw new Error("Usage: slipjay promote [--confirm <commit>] [--migrations-ready]");
+    else if (args[index] === "--candidate" && args[index + 1] && !args[index + 1]!.startsWith("-")) options.candidate = args[++index];
+    else throw new Error("Usage: slipjay promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]");
   }
+  if (options.candidate !== undefined && options.confirm !== undefined) throw new Error("slipjay promote takes --candidate to plan or --confirm to release, not both: confirm names the commit itself");
   const location = runnerLocation();
   if (options.confirm === undefined) {
-    const plan = await releaseIntegration(process.cwd(),
-      location ? { readPromotion: () => readPromotionState(process.cwd(), { location }) } : {});
+    const plan = await releaseIntegration(process.cwd(), {
+      ...options.candidate !== undefined ? { candidate: options.candidate } : {},
+      ...location ? { readPromotion: () => readPromotionState(process.cwd(), { location }),
+        requestVerification: (commit: string) => requestVerificationThroughRunner(process.cwd(), { commit, location }) } : {} });
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
   }
   if (!location) throw new Error("slipjay promote --confirm runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
-  const confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady);
+  const confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady, () => readPromotionState(process.cwd(), { location }));
   if (confirmable.status !== "confirmable") {
     console.log(JSON.stringify(confirmable, null, 2));
     return 1;
@@ -805,7 +810,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
