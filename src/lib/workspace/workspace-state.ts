@@ -8,6 +8,8 @@ import { landedHome, lockHome, metadataHome, modePath, stateHome } from "./works
 import { processAlive } from "./workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { mapBounded } from "./bounded-map.ts";
+import { partialCheckout } from "./workspace-partial-checkout.ts";
+import type { PartialCheckout } from "./workspace-partial-checkout.ts";
 
 export type LandingState = Record<string, unknown> & {
   version: number;
@@ -126,9 +128,10 @@ export async function listWorkspaces(cwd: string = process.cwd(), options: { rea
 /**
  * A workspace with its unlanded-work and landing-record facts. `unreadable` is JJ's error when
  * its working copy could not be read (a broken identity, a missing checkout), when `hasWork` is
- * assumed rather than known.
+ * assumed rather than known. `partial` is set for a checkout missing most of its tracked files,
+ * which inspection then never snapshots.
  */
-export type InspectedWorkspace = WorkspaceEntry & { hasWork: boolean; landed: boolean; unreadable?: string };
+export type InspectedWorkspace = WorkspaceEntry & { hasWork: boolean; landed: boolean; unreadable?: string; partial?: PartialCheckout };
 
 /**
  * Every workspace with its facts. `readOnly` corrects no metadata and snapshots no
@@ -147,15 +150,19 @@ export async function inspectWorkspaces(cwd: string = process.cwd(), { readOnly 
   const context = await workspaceContext(cwd);
   if (!context) return [];
   const workspaces = await listWorkspaces(cwd, { readOnly });
-  return await mapBounded(workspaces, WORKSPACE_INSPECTION_CONCURRENCY, async (workspace) => ({
+  return await mapBounded(workspaces, WORKSPACE_INSPECTION_CONCURRENCY, async (workspace) => {
+    const partial = workspace.name === "default" || !workspace.root ? null : await partialCheckout(workspace.root, workspace.name);
+    return {
       ...workspace,
       ...workspace.name === "default"
         ? { hasWork: false }
-        : await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch, { ignoreWorkingCopy: readOnly }).then(
+        : await workspaceHasUnintegratedWork(workspace.root, context.integrationBranch, { ignoreWorkingCopy: readOnly || partial !== null }).then(
           (hasWork) => ({ hasWork }),
           (error: unknown) => ({ hasWork: true, unreadable: firstLine(error) })),
+      ...partial ? { partial } : {},
       landed: Boolean(await readLandingState(workspace.name, { readOnly: true })),
-    }));
+    };
+  });
 }
 
 export async function inspectWorkspace(cwd: string = process.cwd()): Promise<InspectedWorkspace | null> {

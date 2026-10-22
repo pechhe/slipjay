@@ -22,6 +22,8 @@ import { discardCheckout } from "./workspace-trash.ts";
 import { releaseSpareHandover, reserveSpareForHandover } from "./workspace-spares.ts";
 import { moveNodeModules } from "./workspace-dependencies.ts";
 import { workspaceCoverage } from "./workspace-coverage.ts";
+import { describePartialCheckout, partialCheckout, snapshotFileList, sparseFiles } from "./workspace-partial-checkout.ts";
+import type { PartialCheckout } from "./workspace-partial-checkout.ts";
 
 /** Host seams for retiring a checkout: its guarded forget and lifecycle event. */
 export interface RetirementHooks {
@@ -41,6 +43,8 @@ type CleanupResult = {
   paths?: string[];
   /** `archived-elsewhere`: the workspace whose landing already archived the artifact this checkout's record names. */
   archivedAs?: string;
+  /** `partial-checkout`: the checkout missing most of its tracked files. */
+  partial?: PartialCheckout;
 };
 
 async function jj(cwd: string, args: string[]): Promise<string> {
@@ -73,7 +77,8 @@ export async function unsnapshottedEdits(root: string, integrationRoot: string, 
 export const STALE_EDITS = "its stale working copy held edits, now restored as its working-copy change on the commit they were made on";
 
 /** One human explanation of why cleanup kept a landed workspace. */
-export function describeRetention(result: { reason?: string; paths?: string[]; archivedAs?: string } | null | undefined): string {
+export function describeRetention(result: { reason?: string; paths?: string[]; archivedAs?: string; partial?: PartialCheckout } | null | undefined): string {
+  if (result?.reason === "partial-checkout" && result.partial) return describePartialCheckout(result.partial);
   if (result?.reason === "archived-elsewhere") {
     return `its landing record names an artifact already archived as workspace ${result.archivedAs}'s landing, so it proves nothing about this checkout: `
       + "if the checkout holds nothing you need, remove it with `slipjay remove <its path>`";
@@ -186,7 +191,7 @@ function matchesSnapshot(root: string, path: string, size: number): Promise<bool
 
 /** Files in the checkout's last snapshot. Never snapshots: a snapshot here would turn an on-disk edit into a commit no caller has judged. */
 async function snapshotFiles(root: string): Promise<Set<string>> {
-  return new Set((await jj(root, ["--ignore-working-copy", "file", "list"])).split("\n").filter(Boolean));
+  return new Set(await snapshotFileList(root));
 }
 
 /** Whether an entry is a symlink into the primary checkout, whose target outlives the checkout. */
@@ -217,7 +222,8 @@ async function editedSinceSnapshot(root: string, generated: RegExp[] = [], prima
   const tracked = await snapshotFiles(root);
   const found: string[] = [];
   let comparisons = 0;
-  for (const path of tracked) {
+  // A sparse checkout leaves files out on purpose: they are not deleted.
+  for (const path of await sparseFiles(root, [...tracked])) {
     if (found.length >= limit) return found;
     const info = await lstat(join(root, path)).catch(() => null);
     if (info && info.mtimeMs <= snapshot) continue;
@@ -274,6 +280,9 @@ export class WorkingCopyChangedError extends Error {
  * snapshots: an edit since the last snapshot keeps the checkout instead.
  */
 async function judgeCheckout(context: WorkspaceContext, { readOnly = false }: { readOnly?: boolean } = {}): Promise<{ commit: string; retained: CleanupResult | null }> {
+  // Snapshotting a half-written checkout would record its missing files as deletions.
+  const partial = await partialCheckout(context.current.root, context.current.name);
+  if (partial) return { commit: "", retained: { cleaned: false, reason: "partial-checkout", partial } };
   const generated = await disposablePaths(context.integration.root);
   const commit = readOnly
     ? await jj(context.current.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"])
@@ -396,6 +405,9 @@ export async function removeWorkspace(cwd: string, workspaceName: string, option
     const metadata = await workspaceMetadata(workspaceName);
     const refusal = await removalRefusal({ name: workspaceName, root: target.root }, metadata);
     if (refusal) throw new Error(refusal);
+    // Discarding is the explicit choice; without it a suspected partial checkout is neither snapshotted nor removed.
+    const partial = options.allowWork === true ? null : await partialCheckout(target.root, workspaceName);
+    if (partial) throw new Error(describePartialCheckout(partial));
     // Snapshot once; retirement then refuses a working copy that moved since.
     const judged = await workingCopyCommit(target.root).catch(() => null);
     const coverage = judged === null ? "uncovered" : await workspaceCoverage(context, workspaceName, judged, target.root).catch(() => "uncovered" as const);

@@ -4,6 +4,7 @@ import { realpath, stat } from "node:fs/promises";
 import { run, STALE_WORKING_COPY, updateStaleWorkingCopy, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { trackerOf, workItemClosed } from "../build/tracker.ts";
 import type { BuildReader } from "../build/tracker.ts";
+import { describePartialCheckout } from "./workspace-partial-checkout.ts";
 import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState, WORKSPACE_INSPECTION_CONCURRENCY } from "./workspace-state.ts";
 import { mapBounded } from "./bounded-map.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
@@ -169,6 +170,8 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
         + `run \`jj workspace forget ${workspace.name}\` in the integration checkout and delete the directory`);
     }
     if (workspace.metadata?.spare) return keep("prepared spare", false);
+    // Whatever else it holds, a half-written checkout is neither work nor disposable until its owner chooses.
+    if (workspace.partial) return keep(describePartialCheckout(workspace.partial));
     const coverage = await workspaceCoverage(context, workspace.name, "@", workspace.root);
     const refusal = await removalRefusal(workspace, workspace.metadata);
     if (refusal) return keep(refusal);

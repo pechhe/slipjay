@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.46.3
+
+- **A partially written checkout is named, not reported as edited or unlanded work:** a workspace missing most of the tracked files
+  its sparse patterns include (as an interrupted checkout leaves it) used to read as edits since its last snapshot or unlanded work,
+  and a sweep, cleanup or `remove` would snapshot the missing files as deletions. Inspection, the sweep, `prune --plan`, `cleanup` and
+  `remove` now read the last snapshot and the disk, name the missing and expected tracked-file counts, and snapshot and remove nothing;
+  the message says how to inspect the last snapshot, restore the checkout (`slipjay start --base <workspace>@`) or delete it
+  (`remove --discard`). Files outside a sparse checkout's patterns no longer count as edited. A few deleted files remain ordinary edits.
 ## v3.46.2
 
 - **Large retained descriptions no longer break landing assembly:** assembling a submitted stack or merge into its landing
