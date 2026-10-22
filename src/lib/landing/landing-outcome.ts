@@ -56,11 +56,15 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
   const owed = bound ? owedReceipts(operation, history) : [];
   const settled = owed.filter((receipt) => receipt.after === undefined || receiptSettlement(history, { operationId: receipt.operationId, key: receipt.after })?.state !== "parked")
     .map((receipt) => receiptSettlement(history, receipt)?.state);
+  // A chore's Build number is Build's own, recorded with the receipt once Build has answered for that publication.
+  const choreReceipt = owed.find((receipt) => receipt.action === "recordChoreLanding");
+  const chore = choreReceipt && receiptSettlement(history, choreReceipt)?.chore;
   // A published landing whose receipt has not reached Build yet is still landed: delivery is reported apart.
   const build: LandingOutcome["build"] = bound ? {
     admission: bound.type === "submitted" && "chore" in bound && bound.chore ? "unassociated" : events.some((event) => event.type === "build_admitted") ? "admitted"
       : result?.type === "declined" && result.build ? "refused" : "pending",
-    receipts: !owed.length ? "none" : settled.includes(undefined) ? "pending" : settled.includes("parked") ? "parked" : "delivered" } : undefined;
+    receipts: !owed.length ? "none" : settled.includes(undefined) ? "pending" : settled.includes("parked") ? "parked" : "delivered",
+    ...chore ? { chore } : {} } : undefined;
   return { version: 1, operationId: operation.id, repo: operation.repo, changeId: operation.changeId, sourceCommitId: operation.commitId,
     status: operation.status, stage: operation.stage, terminal: Boolean(result), asOfSeq: operation.lastSeq,
     submittedAt: operation.submittedAt, ...(operation.finishedAt ? { finishedAt: operation.finishedAt } : {}),
@@ -68,4 +72,16 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     ...(attempt ? { attempt } : {}), publication, ...(failure ? { failure } : {}), ...(classification ? { classification } : {}), runs,
     evidence: { coverage: "partial", gaps, logCommand: `slipjay runner log ${operation.id}`, logPath: `/v1/operations/${encodeURIComponent(operation.id)}/log` },
     recovery: { kind: recovery, automaticRetry: false }, ...build ? { build } : {} };
+}
+
+/**
+ * What `slipjay land` says after a landing Build records as a chore, and nothing for a landing under a Spec. The chore
+ * belongs to no Spec, so attaching it is the author's decision, made with Build's own action: `land` prints no more than that.
+ */
+export function choreLandingNote(build: LandingOutcome["build"], landedCommitId: string): string | null {
+  if (build?.admission !== "unassociated") return null;
+  const revision = landedCommitId.slice(0, 12);
+  return build.chore
+    ? `landed ${revision} as a chore: Build #${build.chore.number} is in no Spec; attach it with hq_build_associate_landing`
+    : `landed ${revision} as a chore, in no Spec; attach it with hq_build_associate_landing (Build has not recorded the chore's number yet)`;
 }

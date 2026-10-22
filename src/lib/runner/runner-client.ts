@@ -34,6 +34,7 @@ import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace
 import { frozenAdoptions } from "../workspace/workspace-coverage.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../workspace/workspace-finalization.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../landing/submission-adoptions.ts";
+import { choreLandingNote } from "../landing/landing-outcome.ts";
 
 type PendingRunnerFact = {
   id: string; fact: Extract<ClientFact, { kind: "ssh_forward_failure" }>;
@@ -382,6 +383,26 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
 
 /** How to read retained operation events from any machine with the runner location. */
 export const runLogCommand = (operationId: string): string => `slipjay runner log ${operationId}`;
+
+/**
+ * A published chore landing's Build item is Build's own, created when the drain reports the publication, so its number
+ * arrives just after the landing's verdict. Wait for it briefly, within one deadline that also bounds each request, so
+ * an outage, a stall or an abort never holds or fails `land`: the note is then the one without the number.
+ */
+async function landedChore(baseUrl: string, token: string, operation: Operation, landedCommitId: string, signal?: AbortSignal): Promise<string | null> {
+  const buildOf = (candidate: Operation) => candidate.kind === "landing" ? candidate.outcome?.build : undefined;
+  let build = buildOf(operation);
+  const deadline = AbortSignal.timeout(CHORE_NUMBER_WAIT_MS), bounded = signal ? AbortSignal.any([signal, deadline]) : deadline;
+  try {
+    while (build?.admission === "unassociated" && !build.chore && build.receipts === "pending" && !bounded.aborted) {
+      await delay(500, undefined, { signal: bounded });
+      const refreshed = (await (await request(baseUrl, token, `/v1/operations/${encodeURIComponent(operation.id)}`, { signal: bounded })).json() as { operation: Operation }).operation;
+      build = buildOf(refreshed) ?? build;
+    }
+  } catch { /* the landing published: say what it is without the number */ }
+  return choreLandingNote(build, landedCommitId);
+}
+const CHORE_NUMBER_WAIT_MS = 6_000;
 
 /** This machine's record of which runner accepted each operation it submitted, newest last. */
 const operationRunnersPath = (): string => join(stateHome(), "operation-runners.json");
@@ -889,6 +910,9 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       // The runner's verdict comes first and stands: a local step after publication that fails is a warning,
       // never the outcome, and the author can still tell the commit published.
       onLine(`[runner ${name}] landed ${result.commitId} on ${result.branch} (operation ${operation.id})`);
+      // A chore's Build number is Build's own: say what this landing is now, and wait a little for that number.
+      const chore = await landedChore(baseUrl, token, operation, result.commitId, options.signal);
+      if (chore) onLine(`[runner ${name}] ${chore}`);
       const published = result.commitId.slice(0, 12);
       const warn = async <T>(step: string, run: () => Promise<T>): Promise<T | undefined> => {
         try { return await run(); }

@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.46.6
+
+- **A chore landing says so, and names Build's item and the action that attaches it:** in a Build-tracked repository, a workspace
+  with no Build item lands as a chore, and `slipjay land` printed the landing as if it had delivered a Spec. It now says the landing
+  is a chore, names the Build number Build created for it and the landed revision, and names `hq_build_associate_landing` as the way
+  to attach it to a Spec. A landing under a Spec prints nothing new. Nothing is attached automatically, and a `Build: #n` trailer in
+  a commit message is still never trusted. The chore's number is Build's own: the runner reads the chore item its answer names and
+  records it with the receipt, so `land` waits briefly for that receipt — when Build has not answered yet, the line says so instead
+  and still names the revision and the action.
+
 ## v3.46.5
 
 - **`slipjay land --session` in a workspace with no Build item is refused:** a session id (or `HQ_BUILD_SESSION_ID`) says the landing is

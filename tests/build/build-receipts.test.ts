@@ -45,7 +45,9 @@ function fakeBuild(answer: (input: BuildReceiptInput, call: number) => BuildRout
       runs.push(run);
       return Promise.resolve({ kind: "accepted", value: null });
     }
-    if (action === "recordChoreLanding") { chores.push(input as BuildChoreInput); return Promise.resolve({ kind: "accepted", value: null }); }
+    if (action === "recordChoreLanding") { const chore = input as BuildChoreInput; chores.push(chore);
+      // Build answers with the attempt it recorded, which names the chore item it created; a read then has its number.
+      return Promise.resolve({ kind: "accepted", value: { specId: `chore:${chore.operationId}` } }); }
     if (action === "admitAttempt") { admissions.push(input as BuildAdmissionRequest); return Promise.resolve(admit(input as BuildAdmissionRequest)); }
     // The admitter reads the numbers of the items it admitted.
     if (action === "read") return Promise.resolve({ kind: "accepted", value: { id: (input as { itemId: string }).itemId, number: 1, kind: "spec" } });
@@ -243,4 +245,54 @@ test("a failure with hundreds of long commands is bounded inside Build's body li
   assert.equal(build.sent[0]!.failure!.truncated, true);
   assert.deepEqual(settled(log, id).map((event) => event.type === "build_receipt" && event.state), ["delivered"]);
   drain.close(); log.close();
+});
+
+test("a delivered chore receipt records the Build number Build's answer names; a Spec landing's receipt records none", async () => {
+  const log = openOperationLog(":memory:");
+  const chore = newOperationId();
+  const change = "b".repeat(32), published = "d".repeat(40);
+  log.append(chore, { type: "submitted", repo: "owner/repo", changeId: change, commitId: "a".repeat(40), bookmark: candidateBookmark(change), submittedBy: "author",
+    chore: { title: "Tidy the readme", helperRevisions: [] } });
+  log.append(chore, { type: "landed", base: "c".repeat(40), commitId: published, branch: "main", remote: "origin" });
+  const landedRow = log.events({ operationId: chore }).find((row) => row.event.type === "landed")!;
+  const spec = landing(log, "e", "landed");
+  const build = fakeBuild();
+  const drain = createReceiptDrain({ log, route: build.route });
+  drain.wake(); await drain.idle();
+  assert.deepEqual(build.chores.map((input) => input.publishedRevision), [published]);
+  // The fake Build answers a read of the chore item with number 1: the ledger keeps the number, not only delivery.
+  assert.deepEqual(settled(log, chore), [{ type: "build_receipt", sequence: landedRow.seq, state: "delivered", chore: { number: 1 } }]);
+  assert.ok(settled(log, spec).every((event) => !("chore" in event && event.chore)));
+  assert.equal((log.operation(chore) as { outcome?: { build?: { chore?: { number: number } } } }).outcome?.build?.chore?.number, 1);
+  drain.close(); log.close();
+});
+
+test("a chore's number unread because Build did not answer leaves the receipt owed until it is read; a refused read delivers it without one", async () => {
+  const publish = (log: ReturnType<typeof openOperationLog>) => {
+    const id = newOperationId(), change = "b".repeat(32);
+    log.append(id, { type: "submitted", repo: "owner/repo", changeId: change, commitId: "a".repeat(40), bookmark: candidateBookmark(change), submittedBy: "author",
+      chore: { title: "Tidy the readme", helperRevisions: [] } });
+    log.append(id, { type: "landed", base: "c".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin" });
+    return id;
+  };
+  const log = openOperationLog(":memory:");
+  const id = publish(log);
+  const build = fakeBuild();
+  let reads = 0;
+  const route: typeof build.route = (action, input) => action === "read" && reads++ === 0 ? Promise.resolve({ kind: "unavailable", reason: "Build is down" }) : build.route(action, input);
+  const drain = createReceiptDrain({ log, route, initialBackoffMs: 1 });
+  drain.wake(); await drain.idle();
+  assert.deepEqual(settled(log, id), [], "unread, the receipt stays owed");
+  // The backoff timer runs the next pass: wait for the receipt to settle rather than for a fixed time.
+  for (let waited = 0; !settled(log, id).length && waited < 5_000; waited += 10) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(settled(log, id).map((event) => event.type === "build_receipt" && event.state === "delivered" && event.chore?.number), [1]);
+  drain.close(); log.close();
+
+  const refusing = openOperationLog(":memory:");
+  const refused = publish(refusing);
+  const other = fakeBuild();
+  const refusedDrain = createReceiptDrain({ log: refusing, route: (action, input) => action === "read" ? Promise.resolve({ kind: "refused", code: "item_unavailable" }) : other.route(action, input) });
+  refusedDrain.wake(); await refusedDrain.idle();
+  assert.deepEqual(settled(refusing, refused).map((event) => event.type === "build_receipt" && event.state === "delivered" && !event.chore), [true]);
+  refusedDrain.close(); refusing.close();
 });

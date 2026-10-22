@@ -169,8 +169,9 @@ export type OperationEvent =
   | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null;
       /** The admitted Spec's and Tickets' numbers; absent on admissions recorded before they were read. */
       items?: import("../build/build-admission.ts").BuildAdmittedItems }
-  /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`. */
-  | { type: "build_receipt"; sequence: number; state: "delivered" | "parked"; code?: string }
+  /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`.
+      A delivered chore landing names the Build item Build created for it, read by the id Build's answer gave. */
+  | { type: "build_receipt"; sequence: number; state: "delivered" | "parked"; code?: string; chore?: { number: number } }
   /** Runner-wide, under RUNNER_CONTROL_ID: Build stopped (or resumed) answering receipt delivery. */
   | { type: "build_delivery"; state: "available" | "unavailable"; reason?: string }
   /** A release of `commitId`, the integration commit a human approved. */
@@ -305,8 +306,10 @@ export type LandingOutcome = {
   evidence: { coverage: "partial"; gaps: string[]; logCommand: string; logPath: string };
   recovery: { kind: "follow" | "inspect-failure" | "reconcile-publication" | "already-published" | "owner-stopped" | "superseded" | "policy-refusal"; automaticRetry: false };
   /** Build-bound only. `receipts` concerns delivery to Build, never the landing's own verdict. */
-  /** `unassociated`: its author declared it part of no Spec, so it is never admitted and reports only its publication. */
-  build?: { admission: "pending" | "admitted" | "refused" | "unassociated"; receipts: "none" | "pending" | "delivered" | "parked" };
+  /** `unassociated`: its author declared it part of no Spec, so it is never admitted and reports only its publication.
+      `chore` is Build's own item number for that publication, once Build has recorded it and its number was read. */
+  build?: { admission: "pending" | "admitted" | "refused" | "unassociated"; receipts: "none" | "pending" | "delivered" | "parked";
+    chore?: { number: number } };
 };
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */
 export type ReleaseOperation = OperationFields & { kind: "release"; migrationsReady: boolean; automatic?: AutomaticPromotion };

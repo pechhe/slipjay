@@ -1,5 +1,6 @@
-import { admissionSettled, buildAdmitter, settleAdmission } from "./build-admission.ts";
+import { admissionSettled, buildAdmitter, buildReader, settleAdmission } from "./build-admission.ts";
 import type { BuildAdmissionRecord, BuildRoute } from "./build-admission.ts";
+import { BuildRefusal, readBuildItem } from "./tracker.ts";
 import { recoveryKey, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
 import type { LandingOperation, OperationEvent, OperationLog, StoredEvent } from "../runner/runner-contract.ts";
 
@@ -240,6 +241,23 @@ export function owedAdmission(history: readonly StoredEvent[]): StoredEvent | un
   return submitted?.event.type === "submitted" && "admission" in submitted.event && submitted.event.admission && !admissionSettled(history) ? submitted : undefined;
 }
 
+/**
+ * The number of the Build item a delivered chore receipt created: Build's answer names its id, and the item its number.
+ * Build refusing the read leaves the receipt delivered without a number; Build not answering throws, so the receipt stays
+ * owed and the next pass records both again (a replay of `recordChoreLanding` answers the same item).
+ */
+async function choreNumber(route: BuildRoute, value: unknown): Promise<{ number: number } | undefined> {
+  const itemId = (value as { specId?: unknown } | null)?.specId;
+  if (typeof itemId !== "string" || !itemId) return undefined;
+  try {
+    const item = await readBuildItem(buildReader(route), { itemId });
+    return item && Number.isSafeInteger(item.number) ? { number: item.number } : undefined;
+  } catch (error) {
+    if (error instanceof BuildRefusal) return undefined;
+    throw error;
+  }
+}
+
 /** Whether a receipt has been settled: delivered, or parked because Build will never accept it. */
 export const receiptSettlement = (history: readonly StoredEvent[], receipt: Pick<BuildReceipt, "operationId" | "key">) =>
   history.findLast((row) => row.operationId === receipt.operationId && row.event.type === "build_receipt" && row.event.sequence === receipt.key)?.event as
@@ -317,8 +335,13 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
         if (answer.kind === "unavailable") return unavailable(answer.reason);
         // Build ended the attempt already (its failure was never in doubt): the reconciliation has nothing left to do.
         const settled = answer.kind === "accepted" || receipt.reconciliation === true && answer.code === "attempt_already_ended";
+        let chore: { number: number } | undefined;
+        if (receipt.action === "recordChoreLanding" && answer.kind === "accepted") {
+          try { chore = await choreNumber(route, answer.value); }
+          catch (error) { return unavailable(error instanceof Error ? error.message : String(error)); }
+        }
         log.append(receipt.operationId, answer.kind === "refused" && !settled ? { type: "build_receipt", sequence: receipt.key, state: "parked", code: answer.code }
-          : { type: "build_receipt", sequence: receipt.key, state: "delivered" });
+          : { type: "build_receipt", sequence: receipt.key, state: "delivered", ...chore ? { chore } : {} });
         delivered ||= settled;
       }
     }

@@ -12,6 +12,7 @@ import type { LandingOperation, LandingOutcome } from "../../src/lib/runner/runn
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { readLandingOutcome } from "../../src/lib/runner/runner-client.ts";
+import { choreLandingNote } from "../../src/lib/landing/landing-outcome.ts";
 
 const source = "a".repeat(40), base = "b".repeat(40), candidate = "c".repeat(40), changeId = "k".repeat(32);
 function fixture(path = ":memory:") {
@@ -166,4 +167,42 @@ test("API, client and actual CLI retrieve identical durable outcome after restar
     log.append("op_release", { type: "submitted", kind: "release", repo: "owner/repo", commitId: candidate, migrationsReady: false, submittedBy: "author" });
     await assert.rejects(readLandingOutcome(server.url, "op_release", env), /409/);
   } finally { await server.close(); log.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+/** A landing of one declared kind, published, in its own ledger: what `slipjay land`'s final output reads. */
+function publish(kind: "chore" | "spec") {
+  const id = kind === "chore" ? "op_chore" : "op_spec";
+  const log = openOperationLog(":memory:");
+  log.append(id, kind === "chore"
+    ? { type: "submitted", repo: "owner/repo", changeId, commitId: source, bookmark: candidateBookmark(changeId), submittedBy: "author",
+        chore: { title: "Tidy the readme", helperRevisions: [] } }
+    : { type: "submitted", repo: "owner/repo", changeId, commitId: source, bookmark: candidateBookmark(changeId), submittedBy: "author",
+        admission: { binding: { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: 0, bindGeneration: 1,
+          sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" }, specBodyHash: null, helperRevisions: [], repairsOperationId: null, supersedes: null } });
+  if (kind === "spec") log.append(id, { type: "build_admitted", sequence: 1, sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff", recordedAt: null });
+  log.append(id, { type: "landed", base, commitId: candidate, branch: "main", remote: "origin" });
+  const landedSeq = log.events({ operationId: id }).find((row) => row.event.type === "landed")!.seq;
+  return { log, id, landedSeq, settle: (event: Parameters<typeof log.append>[1]) => log.append(id, event),
+    outcome: () => (log.operation(id) as LandingOperation).outcome! };
+}
+
+test("a chore landing's output names its Build chore and the attach action; a landing under a Spec adds nothing", () => {
+  const chore = publish("chore");
+  try {
+    // Published, but Build's own item number arrives with the receipt, which may not have been delivered yet.
+    assert.deepEqual(chore.outcome().build, { admission: "unassociated", receipts: "pending" });
+    assert.equal(choreLandingNote(chore.outcome().build, candidate),
+      `landed ${candidate.slice(0, 12)} as a chore, in no Spec; attach it with hq_build_associate_landing (Build has not recorded the chore's number yet)`);
+    chore.settle({ type: "build_receipt", sequence: chore.landedSeq, state: "delivered", chore: { number: 3721 } });
+    assert.deepEqual(chore.outcome().build, { admission: "unassociated", receipts: "delivered", chore: { number: 3721 } });
+    assert.equal(choreLandingNote(chore.outcome().build, candidate),
+      `landed ${candidate.slice(0, 12)} as a chore: Build #3721 is in no Spec; attach it with hq_build_associate_landing`);
+    assert.equal(chore.outcome().build?.chore?.number, 3721);
+  } finally { chore.log.close(); }
+  const spec = publish("spec");
+  try {
+    spec.settle({ type: "build_receipt", sequence: spec.landedSeq, state: "delivered" });
+    assert.deepEqual(spec.outcome().build, { admission: "admitted", receipts: "delivered" });
+    assert.equal(choreLandingNote(spec.outcome().build, candidate), null);
+  } finally { spec.log.close(); }
 });
