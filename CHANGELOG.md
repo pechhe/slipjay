@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.46.2
+
+- **Large retained descriptions no longer break landing assembly:** assembling a submitted stack or merge into its landing
+  candidate passed the first-parent commits' descriptions together as one `--message` argument, and a total over the operating
+  system's per-argument limit (128 KiB on Linux) failed with `spawn E2BIG`. That also made the runner's conflict probe skip its check
+  for the submission. The description now goes to `jj describe --stdin`; first-parent selection, source identity and the probe's
+  advisory behaviour are unchanged. The bounded process interface (`runWorkspaceCommand`) gained an `input` for stdin.
+
 ## v3.46.1
 
 - **A candidate refused before queuing no longer leaves a copy on the remote:** when the runner refuses a submission without

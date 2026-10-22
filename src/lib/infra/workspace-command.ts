@@ -40,14 +40,14 @@ export function jjEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 
 /**
  * Run one workspace command with a timeout and an output bound. Resolves with
- * `{ code, signal, stdout, stderr, timedOut, truncated }`; a timeout or spawn
+ * `{ code, signal, stdout, stderr, timedOut, truncated }`, with `input` sent to its stdin; a timeout or spawn
  * failure is a nonzero `code` with the reason in `stderr`. `inherit` streams to
  * this terminal unbounded in time, for interactive dependency installation.
  */
 export async function runWorkspaceCommand(
   command: string,
   args: readonly string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean; input?: string } = {},
 ): Promise<WorkspaceCommandResult> {
   if (options.inherit) return runInherited(command, args, options);
   const timeoutMs = commandTimeoutMs(options);
@@ -56,6 +56,7 @@ export async function runWorkspaceCommand(
     executable: command, args, cwd: options.cwd ?? process.cwd(), timeoutMs,
     maxOutputBytes: 2 * MAX_OUTPUT_BYTES, maxOutputBytesPerStream: MAX_OUTPUT_BYTES,
     env: command === "jj" ? jjEnvironment(env) : env,
+    ...options.input === undefined ? {} : { input: options.input },
   });
   const failure = result.timedOut ? `${command} ${args.slice(0, 3).join(" ")} timed out after ${Math.round(timeoutMs / 1000)}s`
     : result.error ? `${command} could not start: ${result.error}` : "";

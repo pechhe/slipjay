@@ -77,7 +77,9 @@ export async function duplicateLandingSource(cwd: string, source: string, base: 
     const frontier = (await jj(cwd, ["log", "-r", `parents(${firstLine}) ~ (${firstLine})`, "--no-graph", "-T", 'commit_id ++ "\\n"'])).split(/\s+/).filter(Boolean);
     const parents = [...new Set([rootParents[0]!, ...frontier])];
     const description = await jj(cwd, ["log", "-r", firstLine, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
-    await jj(cwd, ["new", ...parents, "--message", description]);
+    // A description goes in on stdin: the retained first-parent descriptions together can exceed one process argument.
+    await jj(cwd, ["new", ...parents]);
+    await jj(cwd, ["describe", "--stdin"], { input: description });
     await jj(cwd, ["restore", "--from", source]);
     return (await revisionFacts(cwd, "@")).commitId;
   }
@@ -94,7 +96,10 @@ export async function duplicateLandingSource(cwd: string, source: string, base: 
     // First-parent order keeps the feature title above its review fixes, without
     // treating merged-in upstream history as the feature's description.
     const description = await jj(cwd, ["log", "-r", firstLine, "--reversed", "--no-graph", "-T", 'description ++ "\\n"']);
-    await jj(cwd, ["squash", "--from", `${base}..${head}`, "--onto", base, "--message", description]);
+    await jj(cwd, ["squash", "--from", `${base}..${head}`, "--onto", base, "--use-destination-message"]);
+    const squashed = `heads(all() ~ at_operation(${beforeSquash}, all()))`;
+    // Described on stdin, as above; the new commit is the squash's only visible head until then.
+    await jj(cwd, ["describe", "-r", squashed, "--stdin"], { input: description });
     candidate = await jj(cwd, ["log", "-r", `heads(all() ~ at_operation(${beforeSquash}, all()))`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
     if (!/^[a-f0-9]{40}$/.test(candidate)) throw new Error("Source assembly did not produce exactly one candidate");
   }
