@@ -74,21 +74,21 @@ async function ownLandingCovers(cwd: string, context: WorkspaceContext, workspac
   const changed = await changedPaths(cwd, commits, state.artifactCommitId);
   if (changed === null) return false;
   for (const path of changed) {
-    const [here, artifact, branch] = await Promise.all([
-      entryAt(gitRoot, cwd, tip, path),
-      entryAt(gitRoot, cwd, state.artifactCommitId, path),
-      entryAt(gitRoot, cwd, context.integrationBranch, path),
-    ]);
-    if (sameEntry(here, artifact) || sameEntry(here, branch)) continue;
+    const here = await entryAt(gitRoot, cwd, tip, path);
+    if (here === undefined) return false;
+    if (sameEntry(here, await entryAt(gitRoot, cwd, state.artifactCommitId, path))) continue;
+    // A path the branch already holds is integrated whoever landed it, so the checkout's copy is not its work.
+    if (sameEntry(here, await entryAt(gitRoot, cwd, context.integrationBranch, path))) continue;
     return false;
   }
   return true;
 }
 
 /**
- * Repository-relative paths to judge: each of the checkout's own commits read alone, plus every
- * path the landing's artifact holds and the checkout no longer does. Null when they cannot be read
- * in full, including a rename or copy, whose two sides a summary does not give.
+ * Repository-relative paths to judge: each of the checkout's own commits read alone, plus the
+ * artifact's own change, so a path the landing delivered and the checkout has since dropped is
+ * judged even when one commit both added and deleted it. Null when they cannot be read in full,
+ * including a rename or copy, whose two sides a summary does not give.
  */
 async function changedPaths(cwd: string, commits: string[], artifactCommitId: string): Promise<Set<string> | null> {
   const paths = new Set<string>();
@@ -99,8 +99,6 @@ async function changedPaths(cwd: string, commits: string[], artifactCommitId: st
       const match = /^([A-Z]) (.*)$/.exec(line);
       if (!match) continue;
       if (match[2]!.includes(" => ") || match[2]!.includes("{")) return false;
-      // Only a deletion from the artifact's side matters there; what the checkout holds beyond it is its own commits' business.
-      if (revision === artifactCommitId && match[1] !== "D") continue;
       paths.add(match[2]!);
       if (paths.size > LANDING_COVERAGE_PATHS) return false;
     }
