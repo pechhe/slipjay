@@ -1,8 +1,8 @@
 import { validSubmissionHandoff, prepareSubmissionHandoff } from "../landing/submission-handoff.ts";
 import type { RepairProof } from "../landing/repair-claim.ts";
 import type { SubmissionHandoff } from "../landing/submission-handoff.ts";
-import { BuildRefusal, trackerOf } from "../build/tracker.ts";
-import { BUILD_SESSION_ENV, buildLandingHandoff } from "../build/build-handoff.ts";
+import { BuildRefusal, trackerIsBuild, trackerOf } from "../build/tracker.ts";
+import { buildLandingHandoff, buildSessionFrom } from "../build/build-handoff.ts";
 import type { BuildReadAction } from "../build/tracker.ts";
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
@@ -704,7 +704,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
   const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
   const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env)) : preview;
-  const buildTracked = trackerOf(context.configuration) === "build";
+  const buildTracked = trackerIsBuild(trackerOf(context.configuration));
   if ((options.session !== undefined || options.tickets?.length) && (options.handoff || !buildTracked))
     throw new Error(options.handoff ? "--session and --ticket shape the handoff land writes; with --handoff, put them in that file" : "--session and --ticket apply only in a Build-tracked repository");
   const prepared = (supplied: SubmissionHandoff) => {
@@ -773,7 +773,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
         const supplied = handoff;
         handoff = await writtenLandingHandoff(context, landingRequestKey(location, repo, target.commitId), target.commitId, awaitingAdmission, async (hasAdoptions) => supplied ?? (buildTracked ? prepared(await buildLandingHandoff({
           source: target.commitId, description: target.description, issueNumber: typeof issueNumber === "number" ? issueNumber : null,
-          tickets: options.tickets ?? [], sessionId: options.session ?? env[BUILD_SESSION_ENV], read: (action, input) => readBuildThroughRunner(action, input, env) })) : hasAdoptions ? {
+          tickets: options.tickets ?? [], sessionId: options.session ?? buildSessionFrom(env), read: (action, input) => readBuildThroughRunner(action, input, env) })) : hasAdoptions ? {
             version: 1, source: target.commitId, intent: target.description.trim().slice(0, 2000) || "Land workspace contribution", scope: [], spec: null,
             helpers: [], checks: [], reviews: [], toolchain: [], gaps: [],
           } : undefined), undefined, async (id) => {

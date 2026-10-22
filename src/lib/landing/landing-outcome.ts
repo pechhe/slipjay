@@ -82,6 +82,6 @@ export function choreLandingNote(build: LandingOutcome["build"], landedCommitId:
   if (build?.admission !== "unassociated") return null;
   const revision = landedCommitId.slice(0, 12);
   return build.chore
-    ? `landed ${revision} as a chore: Build #${build.chore.number} is in no Spec; attach it with hq_build_associate_landing`
-    : `landed ${revision} as a chore, in no Spec; attach it with hq_build_associate_landing (Build has not recorded the chore's number yet)`;
+    ? `landed ${revision} as a chore: Build #${build.chore.number} is in no Spec; attach it with hq_forge_associate_landing`
+    : `landed ${revision} as a chore, in no Spec; attach it with hq_forge_associate_landing (Build has not recorded the chore's number yet)`;
 }

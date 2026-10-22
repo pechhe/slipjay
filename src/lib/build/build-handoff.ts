@@ -9,8 +9,11 @@ import { readBuildItem } from "./tracker.ts";
 import type { BuildItem, BuildReader } from "./tracker.ts";
 import type { BuildBinding, SubmissionHandoff } from "../landing/submission-handoff.ts";
 
-/** Where `slipjay land` takes the lead's Build session from when `--session` is not given. */
-export const BUILD_SESSION_ENV = "HQ_BUILD_SESSION_ID";
+/** Where `slipjay land` takes the lead's Build session from when `--session` is not given. `HQ_FORGE_SESSION_ID` is the current name and `HQ_BUILD_SESSION_ID` the name it had before the rename (YS-185); both are read. */
+export const BUILD_SESSION_ENV = "HQ_FORGE_SESSION_ID";
+export const LEGACY_BUILD_SESSION_ENV = "HQ_BUILD_SESSION_ID";
+/** The first of the current and legacy session variables the environment sets. */
+export const buildSessionFrom = (env: NodeJS.ProcessEnv): string | undefined => env[BUILD_SESSION_ENV]?.trim() || env[LEGACY_BUILD_SESSION_ENV]?.trim() || undefined;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 type Bind = { generation: number; endedAt: string | null };
@@ -22,7 +25,7 @@ export type BuildHandoffRequest = {
   issueNumber: number | null;
   /** Further Tickets of the same Spec the landing completes. */
   tickets: number[];
-  /** The lead's open Build session, from `--session` or `HQ_BUILD_SESSION_ID`. */
+  /** The lead's open Build session, from `--session` or `HQ_FORGE_SESSION_ID` (formerly `HQ_BUILD_SESSION_ID`). */
   sessionId: string | undefined;
   read: BuildReader;
 };
@@ -55,14 +58,14 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
   }
   // Build binds only a shaped Spec, so an Inbox or Shaping one needs shaping before any lead session.
   if (spec.status === "inbox" || spec.status === "shaping")
-    throw new Error(`Landing Build #${issueNumber} needs Spec #${spec.number} shaped and bound, but it is in ${spec.status}: set it to ready with hq_build_set_status (inbox → shaping → ready), bind it with hq_build_bind, start a session with hq_build_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
+    throw new Error(`Landing Build #${issueNumber} needs Spec #${spec.number} shaped and bound, but it is in ${spec.status}: set it to ready with hq_forge_set_status (inbox → shaping → ready), bind it with hq_forge_bind, start a session with hq_forge_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
   const sessionId = request.sessionId?.trim();
   if (!sessionId)
-    throw new Error(`Landing Build #${issueNumber} needs your lead session for Spec #${spec.number}: start one with hq_build_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
+    throw new Error(`Landing Build #${issueNumber} needs your lead session for Spec #${spec.number}: start one with hq_forge_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
   if (!UUID.test(sessionId)) throw new Error(`The Build session ${JSON.stringify(sessionId)} is not a session id`);
   const binds = await read("binds", { specId: spec.id }) as Bind[];
   const current = binds.filter((bind) => bind.endedAt === null).at(-1);
-  if (!current) throw new Error(`Spec #${spec.number} has no current lead: bind it with hq_build_bind before landing`);
+  if (!current) throw new Error(`Spec #${spec.number} has no current lead: bind it with hq_forge_bind before landing`);
   return { specId: spec.id, ticketIds, bodyRevision: spec.bodyRevision ?? null,
     bindGeneration: current.generation, sessionId };
 }

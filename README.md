@@ -186,7 +186,7 @@ Optional `slipjay.json` fields for the workspace pool and shared output:
 | Field | Meaning |
 | --- | --- |
 | `spares` | Integer 0-8, default 1. How many prepared spare workspaces the pool keeps; 0 disables the pool. A refill tops the pool up one spare at a time, counting spares still being prepared, and holds the pool lock only to count and register a name, never during the dependency install, so a claim always takes any ready spare even while another is installing. Every new workspace `start` makes, a claimed spare or a fresh one after a miss, also starts a background refill, so a burst of starts finds the pool replenished and an empty pool fills itself. An idle spare costs nothing at landing. A machine can lower (never raise) a repository's count: `spares` in `~/.slipjay/config.json` maps integration checkout paths to counts, such as `{ "spares": { "/Users/me/Engineering/yardsmith": 2 } }`, and `0` disables the pool on that machine (the next refill retires spares beyond the count); `slipjay status` and `slipjay config` report the count in force with the declared and machine values and the `source` of the declared one: the integration branch and the commit whose committed `slipjay.json` was read. That is the integration bookmark as of the last fetch (every `start` fetches it before the refill it starts), never the primary checkout's working files, so an unlanded or stale local edit cannot change the allowance, and both hosts reach the same count once each has fetched. A machine limit applies to its checkout by real path, so a symlinked or differently spelled path still matches, and a spare whose record names a checkout path that no longer exists still counts against the allowance while it is one of the repository's workspaces. Retiring assigned workspaces never takes a spare. When the pool is short and no abandoned spare waits, retiring an assigned workspace instead makes the next spare from it: a new workspace, at its own path on the integration head, receives the retiring checkout's `node_modules` trees by rename once retirement's last checks pass (a checkout whose forget then fails gets them back), and the refill this starts installs over them in place, so a spare costs an incremental install rather than a full clone and install. One repository's refills run in turn, and refills of every repository on one machine install one at a time, holding that machine-wide lock only for each install, so repositories take turns between spares; claims never take either lock. Spares are not moved to each new integration head: a claim runs `jj new` on the head itself and keeps the spare's dependencies when the install inputs there are the ones they were installed for. After topping up, a refill refreshes one spare only when no ready spare recorded the head's install inputs (read from the head's commit), so a landing that changes them costs one install per refill, not one per spare: that spare moves to the head and installs over its existing `node_modules` in place, which changes only what changed. The others are refreshed in place when claimed, or one at a time by later refills. A claim takes the most recently prepared spare first. A start's installs into one repository's checkouts run one at a time on a machine, so a second waits for the first and clones its result; a start never waits for a refill's install. |
-| `tracker` | `"github"` (default) or `"build"`: where the repository's work items live. With `"build"`, the numbers `start --issue` and `attach-issue` record are HQ Build numbers: a landing names its item in a `Build: #N` trailer (instead of `Issue: owner/repo#N`), a landing with no description takes the item's title from Build, `prune --empty` and the landing sweep treat a workspace whose item is closed (landed, accepted, dropped, achieved, superseded or imported_closed, or any `legacy` item) as delivered, and `land` writes the landing's Build handoff itself (see `land`). Build is read only through the runner (see [Build reads](#build-reads)); when it cannot be read, the title falls back to the task, a workspace is kept, and promotion says it could not check. |
+| `tracker` | `"github"` (default) or `"forge"` (a repository still declaring `"build"` keeps working until that value is removed): where the repository's work items live. With either of the two, the numbers `start --issue` and `attach-issue` record are HQ Forge numbers: a landing names its item in a `Forge: #N` trailer (instead of `Issue: owner/repo#N`), a landing with no description takes the item's title from Forge, `prune --empty` and the landing sweep treat a workspace whose item is closed (landed, accepted, dropped, achieved, superseded or imported_closed, or any `legacy` item) as delivered, and `land` writes the landing's Forge handoff itself (see `land`). Forge is read only through the runner (see [Forge reads](#forge-reads)); when it cannot be read, the title falls back to the task, a workspace is kept, and promotion says it could not check. |
 | `sharedPaths` | Array of repository-relative directories (at most 20; literal paths, no globs, none inside another, none in `.jj`/`.git`). Each workspace gets a symlink at that path to the same path in the primary (integration) checkout, which is created when missing. The link is made when a workspace is started, resumed or claimed and when a spare is provisioned. An existing real directory is replaced only when empty; with content it is left alone with a warning. Cleanup ignores a link into the primary checkout, so git-ignored output such as `artifacts/` no longer keeps a landed workspace. List the path in `.gitignore`, or jj snapshots the link as source (slipjay warns). |
 
 When a new workspace has no spare to claim, or a spare is provisioned, and it has
@@ -231,8 +231,8 @@ landing.
 | --- | --- |
 | `SLIPJAY_WORKSPACE_NAME`, `SLIPJAY_WORKSPACE_PATH` | The `workspaceTeardown` command. |
 | `SLIPJAY_MIGRATION_CONTEXT` | Late-bound migration generation and verification commands. The same trusted JSON provenance record is bound before generation; see below. |
-| `SLIPJAY_BUILD_CONTEXT` | A Build-bound landing's `requiredLandingVerification` and migration `generate`/`verify` commands: its admitted Build binding (see [Build access for checks](#build-check-access)). |
-| `SLIPJAY_BUILD_READ_URL`, `_TOKEN` | The same commands, for every landing of a Build-tracked repository on a runner with a Build connection: read-only Build access for this operation only (see [Build access for checks](#build-check-access)). |
+| `SLIPJAY_BUILD_CONTEXT` | A Forge-bound landing's `requiredLandingVerification` and migration `generate`/`verify` commands: its admitted Forge binding (see [Forge access for checks](#forge-check-access)). |
+| `SLIPJAY_BUILD_READ_URL`, `_TOKEN` | The same commands, for every landing of a Forge-tracked repository on a runner with a Forge connection: read-only Forge access for this operation only (see [Forge access for checks](#forge-check-access)). |
 | `SLIPJAY_FINALIZATION_COMMIT`, `_KEY`, `_TARGET` | Post-integration finalization commands and target probes. A policy's `environmentKeys` may not start with `SLIPJAY_FINALIZATION_`. |
 | `SLIPJAY_RESET_TARGET`, `_SOURCE`, `_REASON_FILE` | The runner's `reset` command and target probe (see [Reset](#reset)). A policy's `environmentKeys` may not start with `SLIPJAY_RESET_`. |
 | `SLIPJAY_TEST_REPORT_DIR` | Each gate command on the runner. It also tells a test it is running in a landing on the runner: the systemd containment tests fail there, not skip, when the user systemd is missing. |
@@ -310,7 +310,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `pool [refill]` | Show ready spare workspaces, or provision one (up to `spares`). |
 | `prune --empty` | Remove empty workspaces, empty workspaces of a closed Issue, and state left by workspaces that no longer exist. A registered workspace whose checkout is gone from disk is forgotten when its revision holds no unlanded work; one whose working copy JJ cannot read is kept, with how to recover it. Directories in workspace storage that no repository lists (a forgotten checkout, one whose repository is gone, one with no JJ identity) are removed only when they hold nothing but reproducible output, are over an hour old and no live process uses them; any other is kept and named. |
 | `prune [--empty] --plan [--json]` | Change nothing; list every workspace of the repository with its path, state, Issue, task, assignment time, landing (and whether it is published, as of the last fetch), live processes, unique files and size, and whether the automatic sweep (or, with `--empty`, `prune --empty`) would remove it now and why not. It shares the sweep's decisions but snapshots no working copy, fetches nothing and finishes no landing, so an edit since a checkout's last snapshot, a checkout missing most of its tracked files (see `remove` below), a landing's pending housekeeping and an unreadable fact (an Issue state the tracker cannot report, metadata that cannot be parsed) each keep the workspace, with that reason. States are `integration`, `spare`, `unlanded`, `landed`, `empty`, `missing` (registered, checkout gone from disk), `broken` (JJ cannot read its working copy) and `orphan` (a directory in workspace storage no repository lists; its `repository` is the one it names, or null). |
-| `attach-issue <n>` | Bind the current workspace to Issue `n` (a Build number in a Build-tracked repository; see `tracker`). |
+| `attach-issue <n>` | Bind the current workspace to Issue `n` (a Forge number in a Forge-tracked repository; see `tracker`). |
 | `start "task"` | Assign an isolated workspace for a task and print its path. An empty, undescribed change is described `wip: <task> (#<n>)` so abandoned work is never anonymous; landing replaces exactly that generated text (recorded in the workspace metadata) with the Issue title or task, never publishing it; a description you write, `wip:` or not, lands as written, and a stack with the placeholder left on a lower commit is refused. A new workspace is based on the integration branch freshly fetched from the declared remote (best effort: offline, it starts from the local branch). The fetch runs before the start takes the repository's allocation lock, and starts within 30 seconds of a fetch, or arriving while one runs, share it, so concurrent starts never queue behind each other's fetch. |
 | `start [--integration] [--issue <n> \| --base <revision>] [--attempt <id>] [--refill] [--json] ["task"]` | `--integration` allocates from the integration checkout even inside a workspace; `--issue` creates or resumes that Issue's workspace (the task defaults to `Issue #<n>`), except that `--integration --issue <n>` run from the caller's own isolated workspace, when it has no Issue, holds no work and the Issue has no workspace to resume, is refused and names `slipjay attach-issue <n>`: a host such as T3 Code allocates each session's workspace when the session starts, so an Issue attaches to that workspace rather than taking a second; `--base` (implies `--integration`, no `--issue`) starts a new workspace, a claimed spare or a fresh one, on that revision of the current checkout instead of the integration head, so a helper sees a lead's unlanded work; it must name one commit other than the caller's working copy (`jj new`, then pass `@-`), and dependencies are reused unless that revision changed the install inputs; `--attempt <id>` records the start as that allocation attempt (see `attempt`); `--refill` then starts a background spare refill (a new workspace always does); `--json` prints one JSON object (`workspacePath`, `workspaceName`, `integrationRoot`, `issueNumber`, `created`, `reused`, `pooled`, `refill`, `steps`, and `attemptId` when given; `steps` gives the milliseconds spent in each step this start took, each exclusive of the others: `fetch` the integration fetch, `claim` taking a spare, `jjNew` moving it to its base, `fingerprint` computing install inputs, `install` making dependencies ready, absent when a claimed spare's are reused, `describe` the working-copy description) and sends all install output to stderr. With a runner configured, the start's metrics (`workspace_start`, `pool_claim`) are posted to its ledger by a detached process, so a slow or unreachable runner never delays the start; a failure is one line in `pool-refill.log`. |
 | `attempt show <id>` \| `attempt release <id>` | Recover a start a caller never got the result of. `start --attempt <id>` (an id the caller chose, such as a UUID, used once) records the attempt before anything is allocated: its status (`allocating`, `preparing`, `ready` or `failed`, with the error), the checkout once assigned, whether the attempt created or claimed it (`owned`) or bound or resumed an existing one, and the start's process, so `show` reports a start whose process died as `interrupted`. That survives a failed dependency install, a lost or malformed receipt, a timeout and a restart of either process. `release` reconciles it: it removes the checkout only when this attempt created or claimed it, no later start has bound or resumed it since, and it has no live process or owner, unlanded work, unique files or undelivered runner facts; a bound or resumed checkout (a resumed Issue's) or one that has gone is kept and the attempt forgotten, any other refusal keeps the attempt so the caller can retry, and a start still running is refused. It prints one JSON object (`released`, `removed`, `reason`) and exits 1 when it refuses. Housekeeping forgets an attempt once its start has ended and its checkout is gone. |
@@ -319,7 +319,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `record-preview <port>` | Record a host's started workspace preview in the runner ledger. |
 | `metrics [--since <ISO date>] [--repo <owner/name>] [--json]` | Pipeline outcomes and causes; stage, queue and command percentiles per repository and operation kind; each repository's landing verify time against its budgets, and its slowest, growing and over-budget test files; held integrations, attempts and flake candidates, from the runner ledger. |
 | `land [--direct]` | Send the current workspace (or, with `--direct`, the primary checkout) to the runner, which verifies, integrates and publishes it (see [Runner](#runner)); without a runner location it refuses. Afterwards it moves the primary checkout onto the new integration, carrying its uncommitted edits along when they apply cleanly; edits that would conflict there, a conflicted checkout and unlanded commits under it stay where they are (`status` reports the outcome as `landing.primaryCheckout`). It removes the landed workspace itself, as `cleanup` would: this process and the session that ran it do not keep it, but any other process with its working directory inside does, and is named with its pid and command (the shell's directory is gone once it is removed, so `cd` to the primary checkout). It also sweeps other delivered workspaces, saying why it kept any. |
-| `land [--session <id>] [--ticket <n>]...` | In a Build-tracked repository (`tracker`), a landing without `--handoff` writes its own Build handoff, so Build always learns of it. A workspace with no Build item lands as a chore (`build: { "unassociated": true }`, titled by the description's first line), and its output says so, naming Build's number for the chore, the landed revision and `hq_build_associate_landing` (see [Build receipts](#build-receipts)); with `--session` or `HQ_BUILD_SESSION_ID` it is refused before submitting, naming `attach-issue <n>`, since a session says the landing is a Spec's. One started with `--issue <n>` (or `attach-issue <n>`) lands as delivery of item `n`'s Spec: `n` itself when it is a Spec, else the Spec of Ticket `n`, which it lists with each `--ticket <m>` of the same Spec. The binding takes the Spec's body revision and its current bind's generation from Build, and the lead's open Build session from `--session` or `HQ_BUILD_SESSION_ID`. Land refuses before submitting when the session is missing (start one with `hq_build_start_session`), the Spec has no current bind (`hq_build_bind`), or the item is neither a Spec nor a Ticket; Build's admission then checks the session and bind itself. The handoff is written only for a new submission: rerunning `land` to follow a submitted landing needs neither the session nor Build, and a retry of a submission still unacknowledged or awaiting Build admission replays the handoff first written, so Build changing meanwhile cannot make it unreconcilable. `--session` and `--ticket` cannot be combined with `--handoff`, and need a Build-tracked repository. |
+| `land [--session <id>] [--ticket <n>]...` | In a Forge-tracked repository (`tracker`), a landing without `--handoff` writes its own Forge handoff, so Forge always learns of it. A workspace with no Forge item lands as a chore (`build: { "unassociated": true }`, titled by the description's first line), and its output says so, naming Forge's number for the chore, the landed revision and `hq_forge_associate_landing` (see [Forge receipts](#forge-receipts)); with `--session` or `HQ_FORGE_SESSION_ID` (formerly `HQ_BUILD_SESSION_ID`) it is refused before submitting, naming `attach-issue <n>`, since a session says the landing is a Spec's. One started with `--issue <n>` (or `attach-issue <n>`) lands as delivery of item `n`'s Spec: `n` itself when it is a Spec, else the Spec of Ticket `n`, which it lists with each `--ticket <m>` of the same Spec. The binding takes the Spec's body revision and its current bind's generation from Forge, and the lead's open Forge session from `--session` or `HQ_FORGE_SESSION_ID` (formerly `HQ_BUILD_SESSION_ID`). Land refuses before submitting when the session is missing (start one with `hq_forge_start_session`), the Spec has no current bind (`hq_forge_bind`), or the item is neither a Spec nor a Ticket; Forge's admission then checks the session and bind itself. The handoff is written only for a new submission: rerunning `land` to follow a submitted landing needs neither the session nor Forge, and a retry of a submission still unacknowledged or awaiting Forge admission replays the handoff first written, so Forge changing meanwhile cannot make it unreconcilable. `--session` and `--ticket` cannot be combined with `--handoff`, and need a Forge-tracked repository. |
 | `promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch (or of an older staging-green `--candidate`) to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
 | `deploys [--environment <name>] [--json]` | Each deploy, newest first: environment, commit, outcome per project, and the commits it added since the previous deploy. |
@@ -521,9 +521,9 @@ and held state through the existing recovery path.
   for a landing: at start the runner queues one recovery turn per repository that still holds
   an integration (a `recovery` operation in its lane, ahead of everything queued after it), which
   finishes and publishes it, so a hold nothing else will touch is cleared without a person.
-  Build keeps a held delivery in its custody until the publication is confirmed and refuses a
+  Forge keeps a held delivery in its custody until the publication is confirmed and refuses a
   new admission of the Spec meanwhile (`delivery_pending`), so relanding the commit whose
-  integration is held follows that recovery turn instead: it ends `landed`, and Build's
+  integration is held follows that recovery turn instead: it ends `landed`, and Forge's
   `published` receipt for the original landing follows from the confirmation. A deterministic
   failure needs a person: `slipjay runner pause` first, so the retries below stand still while
   you work, reconcile the target, then on the runner host move the
@@ -536,10 +536,10 @@ and held state through the existing recovery path.
   turn, which releases the hold and ends `cancelled`. Land the commit once more then, as
   an ordinary submission. A recovery turn that fails (the remote is unreachable, say) is queued
   again after 30 seconds, doubling per failure up to 15 minutes, until it publishes, releases the hold
-  or is stopped. Once the hold is released, the runner tells Build that the landing whose integration it
-  was failed unpublished (`failed`, recovering by `code_repair`), which ends Build's custody: that Spec is
+  or is stopped. Once the hold is released, the runner tells Forge that the landing whose integration it
+  was failed unpublished (`failed`, recovering by `code_repair`), which ends Forge's custody: that Spec is
   admitted again with no step in HQ. A landing that fails while retrying an earlier landing's hold never
-  integrated its own candidate, so Build records its failure as ended (`infrastructure_retry`) and admits
+  integrated its own candidate, so Forge records its failure as ended (`infrastructure_retry`) and admits
   its Spec again at once; land it again once the hold is cleared.
 - **Owner controls.** From any machine with the location, `slipjay runner kill <operation>` stops
   that running landing, release or pre-verification while it is still fetching, rebasing, installing or
@@ -579,7 +579,7 @@ and held state through the existing recovery path.
     and `jj`: settings set as repository config in every warm checkout. It must name `user.name` and
     `user.email`, the identity the runner commits as (use an email GitHub links to the owner);
     the runner also sets `snapshot.max-new-file-size` to 64MiB unless `jj` overrides it, so none of these depend on the host's jj config.
-    An optional `build.origin` names the HQ that Build admission and receipts go to; it takes effect
+    An optional `build.origin` names the HQ that Forge admission and receipts go to; it takes effect
     only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
     With both, the runner also pushes its metrics export to HQ (see Pipeline metrics relay).
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
@@ -880,7 +880,7 @@ approval covers the candidate:
 "verification": { "status": "failed", "commit": "<candidate>", "operationId": "op_…",
   "failedCommand": "bun run verify:release" },
 "approval": { "approvedCandidate": "<earlier candidate>", "covered": false,
-  "reasons": ["4f0c2a9e1b7d (Add exports) names Build: #2961, which the approved range does not"] }
+  "reasons": ["4f0c2a9e1b7d (Add exports) names Forge: #2961, which the approved range does not"] }
 ```
 
 - `verification.status` is `queued`, `running`, `failed` (with the `failedCommand`
@@ -897,7 +897,7 @@ approval covers the candidate:
   - no commit since it adds or changes a file under
     `migrationFinalization.artifactPaths`;
   - every commit since it names no work item, or only items the approved range
-    (`base..approvedCandidate`) already names. Work items are read from `Build: #N`
+    (`base..approvedCandidate`) already names. Work items are read from `Forge: #N`
     and `Issue:` trailer lines.
 
   A re-ask of exactly the approved candidate is covered. `reasons` names each rule
@@ -1155,7 +1155,7 @@ failures during integration or publication, keep their adoptions until resolved.
 Transferred adoptions leave the old record; published submissions keep their
 evidence without resending it. A failed push or definite submission refusal clears
 the pending request so a changed candidate can reclaim that freeze. Lost responses
-and retained operations still awaiting Build admission keep their request identities.
+and retained operations still awaiting Forge admission keep their request identities.
 Each adoption run keeps its own evolution anchor, so undoing a later adoption does
 not drop earlier helper revisions. Conflicting adoption duplicates are abandoned
 before any squash, preserving other workspaces' operations.
@@ -1166,83 +1166,83 @@ Before publication is known as of the last fetch, `prune --plan` reports
 `adopted, landing not published`; another guard (runner facts, processes or unique
 files) may take precedence. Unadopted contributions remain `unlanded work`.
 
-An optional `build` object carries the author's Build binding for the Spec work:
+An optional `build` object carries the author's Forge binding for the Spec work:
 `specId` and the lead execution `sessionId` (UUIDs), `ticketIds` (up to 200 distinct
 UUIDs, possibly empty for work with no Tickets), `bodyRevision` (the numeric HQ Docs
 revision, or `null` when unknown), and `bindGeneration` (an integer of at least 1).
 All five keys are required when `build` is present and are retained exactly as
 supplied; an invalid binding is refused before retention. Omitting `build` records no
-Build claim; `build: { "unassociated": true }` instead states that the work belongs
-to no Spec, so once published it is reported to Build as a chore landing titled by
+Forge claim; `build: { "unassociated": true }` instead states that the work belongs
+to no Spec, so once published it is reported to Forge as a chore landing titled by
 the handoff's `intent`, and it is never admitted. Nothing is inferred from the Spec ref, the identity's `sessionId` or
 branch names, and `bodyRevision` and the Spec's `bodySha256` are never coerced into
 each other.
 
-**Build admission.** A runner accepts a submission with a `build` binding only when its
+**Forge admission.** A runner accepts a submission with a `build` binding only when its
 config sets `build.origin` (HQ's https origin, or a loopback http one) and its environment holds
 `YARDSMITH_SLIPJAY_BUILD_TOKEN`; otherwise it refuses the submission (400) rather than
 queue it unadmitted. After retaining the source it records the operation as awaiting
-Build admission, then calls Build's `admitAttempt` (`POST {origin}/api/build/runner`)
-with that `submitted` record's ledger sequence, waiting at most 10 seconds. Until Build
+Forge admission, then calls Forge's `admitAttempt` (`POST {origin}/api/build/runner`)
+with that `submitted` record's ledger sequence, waiting at most 10 seconds. Until Forge
 admits it the operation has no place in its queue and never starts (`waitingFor`
-reads `Build admission`); once admitted it queues as usual, and a pause still holds
-it. A Build refusal (`bind_generation_stale`, `admission_session_invalid`,
-`delivery_pending`, `attempt_fact_conflict`, or an input Build will not accept) ends
-the operation as `declined` with Build's code, and nothing runs. Only `delivery_pending`
-is marked retryable: another delivery of the Spec is still in Build's custody, so land
-again once it has finished. When Build does not
+reads `Forge admission`); once admitted it queues as usual, and a pause still holds
+it. A Forge refusal (`bind_generation_stale`, `admission_session_invalid`,
+`delivery_pending`, `attempt_fact_conflict`, or an input Forge will not accept) ends
+the operation as `declined` with Forge's code, and nothing runs. Only `delivery_pending`
+is marked retryable: another delivery of the Spec is still in Forge's custody, so land
+again once it has finished. When Forge does not
 answer, the runner keeps the operation awaiting admission and refuses the submission
-as retryable (503). The receipt drain then keeps offering that same admission until Build
-answers, which Build replays, so a lost response never opens a second operation and
+as retryable (503). The receipt drain then keeps offering that same admission until Forge
+answers, which Forge replays, so a lost response never opens a second operation and
 needs no further landing; running `slipjay land` again only asks sooner. An owner may
 cancel an operation awaiting admission: the drain still settles its admission, and if
-Build had admitted it, reports it `failed` (`cancelled`), so Build never keeps custody of
+Forge had admitted it, reports it `failed` (`cancelled`), so Forge never keeps custody of
 abandoned work. A newer candidate of the same change names the queued one it supersedes
-to Build; if that one's admission never got an answer, the runner resends it first, and
-while Build stays silent it refuses the newer candidate as retryable and leaves the queued
-one as it was. A Build-bound newer candidate replaces the queued one only once Build admits
-it: until Build answers, the queued one waits (`waitingFor` reads `Build admission of a
-newer candidate`), and if Build refuses the newer one, the queued one keeps its place.
+to Forge; if that one's admission never got an answer, the runner resends it first, and
+while Forge stays silent it refuses the newer candidate as retryable and leaves the queued
+one as it was. A Forge-bound newer candidate replaces the queued one only once Forge admits
+it: until Forge answers, the queued one waits (`waitingFor` reads `Forge admission of a
+newer candidate`), and if Forge refuses the newer one, the queued one keeps its place.
 
-<a id="build-reads"></a>**Build reads.** A runner with a Build connection also answers clients' reads of Build at
-`POST /v1/build/read` (`{ "action", "input" }`, with the runner token), forwarding only Build's read-only
-`read`, `list`, `waits` and `binds` actions to its runner route; any other action is refused (400) before Build is
-asked. The answer is `{ "value" }`, Build's refusal is 409 with its `code`, and no answer is 503. So a
-client of a Build-tracked repository needs only the runner token: the Build credential never leaves
-the runner. A runner without a Build connection refuses the read (400).
+<a id="forge-reads"></a>**Forge reads.** A runner with a Forge connection also answers clients' reads of Forge at
+`POST /v1/build/read` (`{ "action", "input" }`, with the runner token), forwarding only Forge's read-only
+`read`, `list`, `waits` and `binds` actions to its runner route; any other action is refused (400) before Forge is
+asked. The answer is `{ "value" }`, Forge's refusal is 409 with its `code`, and no answer is 503. So a
+client of a Forge-tracked repository needs only the runner token: the Forge credential never leaves
+the runner. A runner without a Forge connection refuses the read (400).
 
-<a id="build-check-access"></a>**Build access for checks.** In a Build-tracked repository (`tracker: "build"`), a
+<a id="forge-check-access"></a>**Forge access for checks.** In a Forge-tracked repository (`tracker: "forge"`), a
 landing's `requiredLandingVerification` commands and its `migrationFinalization` `generate` and `verify` commands
-can see Build:
+can see Forge:
 
-- A Build-bound landing (`slipjay land --session … [--ticket …]`) gives them `SLIPJAY_BUILD_CONTEXT`,
+- A Forge-bound landing (`slipjay land --session … [--ticket …]`) gives them `SLIPJAY_BUILD_CONTEXT`,
   `{ "version": 1, "specId": "<uuid>", "specNumber": <n>, "ticketNumbers": [<n>…], "sessionId": "<uuid>" }`, from
-  the binding Build admitted, never from commit text. The runner reads the Spec's and Tickets' numbers by id when
-  Build admits the landing (an admission whose items it cannot read stays unresolved and is offered again), so the
-  checks get them without Build having to answer while they run.
-  A chore (no Build item) gets no `SLIPJAY_BUILD_CONTEXT`.
+  the binding Forge admitted, never from commit text. The runner reads the Spec's and Tickets' numbers by id when
+  Forge admits the landing (an admission whose items it cannot read stays unresolved and is offered again), so the
+  checks get them without Forge having to answer while they run.
+  A chore (no Forge item) gets no `SLIPJAY_BUILD_CONTEXT`.
 - Every landing, bound or not, gives them `SLIPJAY_BUILD_READ_URL` and `SLIPJAY_BUILD_READ_TOKEN`. A check POSTs
   `{ "action", "input" }` to the URL with `Authorization: Bearer <token>` and gets the answers of
-  [Build reads](#build-reads): `200 { "value" }`, `409 { "code" }` for Build's refusal (`build_item_unavailable`
-  for an unknown item), anything else meaning Build gave no answer. Only `read`, `list`, `waits` and `binds` are
+  [Forge reads](#forge-reads): `200 { "value" }`, `409 { "code" }` for Forge's refusal (`build_item_unavailable`
+  for an unknown item), anything else meaning Forge gave no answer. Only `read`, `list`, `waits` and `binds` are
   allowed. The token is random, reaches no other runner route, is good only while this operation runs and
-  never outlives a runner restart; it is neither the runner token nor the Build token, and it is redacted
+  never outlives a runner restart; it is neither the runner token nor the Forge token, and it is redacted
   from the runner's logs and stored evidence.
 
-On a runner with no Build connection, and in a GitHub-tracked repository, neither read variable is set: a check
-that needs Build should refuse by name rather than pass. Dependency installs, finalization, deploys and resets get none of these.
+On a runner with no Forge connection, and in a GitHub-tracked repository, neither read variable is set: a check
+that needs Forge should refuse by name rather than pass. Dependency installs, finalization, deploys and resets get none of these.
 
-<a id="build-receipts"></a>**Build receipts.** For each admitted landing the runner owes Build a receipt for each
+<a id="forge-receipts"></a>**Forge receipts.** For each admitted landing the runner owes Forge a receipt for each
 fact it reports, named by the operation and that fact's ledger sequence: its admission
-delivers `submitted`, and an admission Build never answered is owed like any receipt; its first held integration is reported `held`; its outcome is
+delivers `submitted`, and an admission Forge never answered is owed like any receipt; its first held integration is reported `held`; its outcome is
 `published`, or `failed` with how it recovers (`publication_unknown` when it failed while
 integrating or after integrating its own candidate, `cancelled` for an owner cancel or kill,
 `superseded`, `policy_refusal`, `infrastructure_retry` for an infrastructure failure or one
 retrying an earlier landing's hold, otherwise `code_repair`); and an integration whose
 publication was unknown is reported `published` once any later reconciliation confirms it,
 or `failed` with how it recovers once the runner releases it (`integration_released`). That
-release also ends any attempt that failed retrying the released hold, should Build still
-hold it open; Build answering that it already ended counts as delivered. Each command it ran is reported through `recordAttemptRun` as a named run
+release also ends any attempt that failed retrying the released hold, should Forge still
+hold it open; Forge answering that it already ended counts as delivered. Each command it ran is reported through `recordAttemptRun` as a named run
 (`passed`, `failed`, `incomplete` or `cancelled`, with its failing test names), attached to
 the outcome fact and sent only after it; a pass with no recorded verified candidate is
 reported `incomplete` with that gap. A settings landing that skipped its checks reports no
@@ -1250,26 +1250,26 @@ reported `incomplete` with that gap. A settings landing that skipped its checks 
 whose known gap names the changed fields and the reason. Repair linkage comes only from a repair the author
 proposed, never from queue-prefix ancestry. A declared chore reports only its
 publication, through `recordChoreLanding`, and its `land` output says the landing is a chore: it names
-the Build number Build created for the chore and the landed revision, and names
-`hq_build_associate_landing` as the way to attach it to a Spec, in this repository or another Build
+the Forge number Forge created for the chore and the landed revision, and names
+`hq_forge_associate_landing` as the way to attach it to a Spec, in this repository or another Forge
 repository. A Spec spanning repositories lands its parts in the other repositories as chores, each
-attached the same way. Nothing is attached automatically, a `Build: #<n>` or `Spec #<n>` line in a commit
-message is never trusted, and SlipJay has no attach command of its own: Build refuses the runner's identity.
+attached the same way. Nothing is attached automatically, a `Forge: #<n>` or `Spec #<n>` line in a commit
+message is never trusted, and SlipJay has no attach command of its own: Forge refuses the runner's identity.
 Every receipt repeats the admitted source tuple:
 the author's commit as `candidateRevision`, the Spec, Tickets, body revision and hash,
 and the bind generation. An independent drain sends owed receipts in ledger order,
-records each delivery in the ledger, and resends until Build answers, which Build
-replays, so a Build outage, a runner restart or a lost response delays a receipt but
-never loses it, and catch-up needs no further landing. When Build stops answering the
+records each delivery in the ledger, and resends until Forge answers, which Forge
+replays, so a Forge outage, a runner restart or a lost response delays a receipt but
+never loses it, and catch-up needs no further landing. When Forge stops answering the
 drain backs off (1 second, doubling to 5 minutes) and records a runner-wide
 `build_delivery` event, so watch clients see the outage; the queue snapshot's `build`
-reports whether Build is answering, how many receipts are owed and since when, and how
-many are parked. A receipt Build refuses, including one it finds too large, is parked with its code and never holds back
+reports whether Forge is answering, how many receipts are owed and since when, and how
+many are parked. A receipt Forge refuses, including one it finds too large, is parked with its code and never holds back
 another operation's; a failure's command lists and excerpt are cut, and the receipt marked truncated,
 to keep each request under 200 KB. A landing's outcome reports its `build` admission and receipt
 state apart from its verdict: a published landing whose receipt is still owed is
 landed, with `receipts: "pending"`. Refused, unadmitted and unbound operations owe
-nothing. No Build call is made during integration or publication.
+nothing. No Forge call is made during integration or publication.
 
 The client redacts with its environment before transport, then the runner redacts
 again before retention. Redacted Spec snapshots receive a new snapshot digest and
@@ -1348,10 +1348,10 @@ absence as a gap:
 Log output is quoted as untrusted data, and the brief is redacted with the caller's environment.
 
 The repair workspace belongs to the work item the failed candidate named: `land` writes
-it into the candidate's description (`Issue: owner/repo#<n>`, or `Build: #<n>` in a
-Build-tracked repository), so it is attached as `start --issue` would. A candidate that
+it into the candidate's description (`Issue: owner/repo#<n>`, or `Forge: #<n>` in a
+Forge-tracked repository), so it is attached as `start --issue` would. A candidate that
 named none, such as a chore, stays unassociated. Further Tickets named in the landing's
-Build binding are listed in the brief as `--ticket` flags. A failure that belonged to a
+Forge binding are listed in the brief as `--ticket` flags. A failure that belonged to a
 Spec therefore never lands as a chore.
 Custody stays the repairer's own: `land` needs their current lead session and the
 Spec's current bind, exactly as for any landing, and the old binding is never copied.
@@ -1486,7 +1486,7 @@ observations never enter the landing queue.
 `build.origin` and `YARDSMITH_SLIPJAY_BUILD_TOKEN` pushes its own export: at start, five seconds
 after a new ledger event (a burst goes in one pass, and an event during a pass is followed by
 another), and every 30 minutes regardless, it `POST`s pages of `/v1/metrics/events` (`{since, events, nextSeq, hasMore}`) to
-`{origin}/api/build/runner/pipeline` with the same bearer as Build admission. HQ owns the cursor: a
+`{origin}/api/build/runner/pipeline` with the same bearer as Forge admission. HQ owns the cursor: a
 pass opens with an empty page to learn it and follows any 409 to the cursor HQ names, so resending
 a stored page is harmless and the relay keeps no state. A page is read again with a lower `limit`
 until its body fits 3 MiB. It shares nothing with the landing queue or the receipt drain; every

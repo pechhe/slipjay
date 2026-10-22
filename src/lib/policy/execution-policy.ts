@@ -43,7 +43,7 @@ export type ExecutionPolicy = {
   /** Environments the runner deploys; undefined when undeclared. */
   deployments?: DeploymentPolicy;
   /** Where the repository's work is tracked (see `tracker.ts`); GitHub Issues when undeclared. */
-  tracker?: "github" | "build";
+  tracker?: "github" | "build" | "forge";
   /** How long landing verification may take before `slipjay metrics` calls it over budget; undefined when undeclared. */
   budgets?: TimeBudgets;
 };
@@ -308,7 +308,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   const reset = resetPolicy(parsed.reset);
   const audit = auditPolicy(parsed.audit, { checks: gateChecks, fail });
   const deployments = deploymentPolicy(parsed.deployments);
-  if (parsed.tracker !== undefined && parsed.tracker !== "github" && parsed.tracker !== "build") fail('declares a tracker other than "github" or "build"');
+  if (parsed.tracker !== undefined && parsed.tracker !== "github" && parsed.tracker !== "build" && parsed.tracker !== "forge") fail('declares a tracker other than "github", "build" or "forge"');
   generatedPathMatchers(parsed.generatedPaths);
   generatedPathMatchers(parsed.evidencePaths, "evidencePaths");
   const sharedPaths = sharedPathList(parsed.sharedPaths);

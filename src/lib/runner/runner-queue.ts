@@ -644,7 +644,7 @@ export function createRunnerQueue(input: {
     let integrationBranch: string | undefined;
     const progress = (line: string) => append(operation.id, { type: "progress", line });
     // Set once the integration policy is read: landing checks in a Build-tracked repository may read Build.
-    let tracker: "github" | "build" | undefined;
+    let tracker: "github" | "build" | "forge" | undefined;
     let checkEnvironment: Promise<Record<string, string>> | undefined;
     /**
      * What a landing's verification and migration commands get from Build: the admitted binding, never commit text,
@@ -653,7 +653,7 @@ export function createRunnerQueue(input: {
     function buildCheckEnvironment(): Promise<Record<string, string>> {
       return checkEnvironment ??= (async () => {
         if (operation.kind !== "landing") return {};
-        const read = tracker === "build" ? buildChecks?.grant() : null;
+        const read = tracker === "build" || tracker === "forge" ? buildChecks?.grant() : null;
         const events = log.events({ operationId: operation.id }).map((row) => row.event);
         const submitted = events.find((event) => event.type === "submitted");
         const admitted = events.find((event) => event.type === "build_admitted");

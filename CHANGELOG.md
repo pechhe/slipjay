@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Forge replaces Build as the tracker's name (YS-185):** `slipjay.json` accepts `"tracker": "forge"` and still accepts `"build"`, so a
+  repository that has not switched keeps working. A `"forge"` repository writes a `Forge: #N` trailer instead of `Build: #N`; both
+  trailers are still read, so a landing made before the rename still resolves to its item. The lead session comes from
+  `--session`, `HQ_FORGE_SESSION_ID` or, for a repository or environment that has not switched, `HQ_BUILD_SESSION_ID`. Guidance in
+  `land`, `attach-issue` and the chore-landing output names the `hq_forge_*` MCP tools, which Weave serves beside the old ones.
+
 ## v3.46.6
 
 - **A chore landing says so, and names Build's item and the action that attaches it:** in a Build-tracked repository, a workspace

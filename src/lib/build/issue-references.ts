@@ -1,4 +1,4 @@
-import type { Tracker } from "./tracker.ts";
+import { trackerIsBuild, type Tracker } from "./tracker.ts";
 
 /** GitHub repository and Issue references a landing reads from remotes and descriptions. */
 
@@ -50,8 +50,8 @@ export function referencesIssue(description: string | null | undefined, issueNum
 export function withIssueTrailer(description: string, issueNumber: number | null | undefined, repository: string | null, tracker: Tracker = "github"): string {
   const text = (description ?? "").trimEnd();
   if (!Number.isInteger(issueNumber) || issueNumber! <= 0) return text;
-  if (tracker === "build" ? buildTrailerItem(text) === issueNumber : referencesIssue(text, issueNumber!)) return text;
-  const trailer = tracker === "build" ? `Build: #${issueNumber}` : `Issue: ${repository ?? ""}#${issueNumber}`;
+  if (trackerIsBuild(tracker) ? buildTrailerItem(text) === issueNumber : referencesIssue(text, issueNumber!)) return text;
+  const trailer = tracker === "forge" ? `Forge: #${issueNumber}` : tracker === "build" ? `Build: #${issueNumber}` : `Issue: ${repository ?? ""}#${issueNumber}`;
   const paragraphs = text.split(/\n\s*\n/);
   const inTrailerBlock = paragraphs.length > 1 && paragraphs.at(-1)!.split("\n").every((line) => /^[A-Za-z][\w-]*: \S/.test(line));
   return `${text}${inTrailerBlock ? "\n" : "\n\n"}${trailer}`;
@@ -60,7 +60,7 @@ export function withIssueTrailer(description: string, issueNumber: number | null
 
 /** The Build item a description's `Build: #N` trailer names, or null. */
 export function buildTrailerItem(description: string | null | undefined): number | null {
-  const match = /^Build: #(\d+)\s*$/m.exec(description ?? "");
+  const match = /^(?:Build|Forge): #(\d+)\s*$/m.exec(description ?? "");
   return match ? Number(match[1]) : null;
 }
 
@@ -70,7 +70,7 @@ export function buildTrailerItem(description: string | null | undefined): number
  * is a GitHub number, which a Build number is not.
  */
 export function commitIssue(description: string | null | undefined, repository: string | null, tracker: Tracker = "github"): number | null {
-  if (tracker === "build") return buildTrailerItem(description);
+  if (trackerIsBuild(tracker)) return buildTrailerItem(description);
   for (const match of (description ?? "").matchAll(/^Issue: ([\w.-]+\/[\w.-]+)?#(\d+)\s*$/gm)) {
     if (!match[1] || match[1] === repository) return Number(match[2]);
   }

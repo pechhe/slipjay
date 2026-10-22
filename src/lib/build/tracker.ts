@@ -8,10 +8,14 @@
  */
 import { run } from "../infra/workspace-jj.ts";
 
-export type Tracker = "github" | "build";
+export type Tracker = "github" | "build" | "forge";
 
-/** The tracker a parsed policy declares; GitHub when it declares none. */
-export const trackerOf = (policy: { tracker?: unknown } | null | undefined): Tracker => policy?.tracker === "build" ? "build" : "github";
+/** The tracker a parsed policy declares; GitHub when it declares none. `forge` is Weave Forge in the current name, `build` the same tracker under the name it had before the rename (YS-185). */
+export const trackerOf = (policy: { tracker?: unknown } | null | undefined): Tracker =>
+  policy?.tracker === "forge" ? "forge" : policy?.tracker === "build" ? "build" : "github";
+
+/** Whether the tracker is Weave Forge, under either name it is declared by. */
+export const trackerIsBuild = (tracker: Tracker): boolean => tracker === "build" || tracker === "forge";
 
 /** Build's read-only actions the runner forwards; nothing else crosses that seam. */
 export const BUILD_READ_ACTIONS = ["read", "list", "waits", "binds"] as const;
@@ -47,7 +51,7 @@ export async function readBuildItem(read: BuildReader, reference: { number: numb
 
 /** The work item's title, or null when it cannot be read. */
 export async function workItemTitle(root: string, tracker: Tracker, number: number, read?: BuildReader): Promise<string | null> {
-  if (tracker === "build") {
+  if (trackerIsBuild(tracker)) {
     if (!read) return null;
     try {
       return (await readBuildItem(read, { number }))?.title?.trim() || null;
@@ -59,7 +63,7 @@ export async function workItemTitle(root: string, tracker: Tracker, number: numb
 
 /** Whether the work item is closed, or null when its state cannot be read. */
 export async function workItemClosed(root: string, tracker: Tracker, number: number, read?: BuildReader): Promise<boolean | null> {
-  if (tracker === "build") {
+  if (trackerIsBuild(tracker)) {
     if (!read) return null;
     try {
       const item = await readBuildItem(read, { number });

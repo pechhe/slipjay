@@ -31,7 +31,7 @@ test("a Build landing's repair keeps its item, lands under the repairer's own se
       const setup = await repairFailedLanding(cold, failed.operation.id, { location, env });
       assert.equal(setup.issueNumber, 96641, "the repair workspace belongs to the failed landing's Ticket");
       await writeFile(join(setup.workspacePath, "fixed.txt"), "corrected\n");
-      const land = (session?: string) => landThroughRunner(setup.workspacePath, { location, env: { ...env, HQ_BUILD_SESSION_ID: "" }, session, onLine: () => {} });
+      const land = (session?: string) => landThroughRunner(setup.workspacePath, { location, env: { ...env, HQ_FORGE_SESSION_ID: "", HQ_BUILD_SESSION_ID: "" }, session, onLine: () => {} });
       // Custody is the repairer's own: no session, or a Spec with no current lead, refuses before anything is submitted.
       await assert.rejects(land(), /needs your lead session for Spec #96640/);
       binds[spec.id] = [{ generation: 1, endedAt: "2026-10-17T00:00:00Z" }];

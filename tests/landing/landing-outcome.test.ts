@@ -192,11 +192,11 @@ test("a chore landing's output names its Build chore and the attach action; a la
     // Published, but Build's own item number arrives with the receipt, which may not have been delivered yet.
     assert.deepEqual(chore.outcome().build, { admission: "unassociated", receipts: "pending" });
     assert.equal(choreLandingNote(chore.outcome().build, candidate),
-      `landed ${candidate.slice(0, 12)} as a chore, in no Spec; attach it with hq_build_associate_landing (Build has not recorded the chore's number yet)`);
+      `landed ${candidate.slice(0, 12)} as a chore, in no Spec; attach it with hq_forge_associate_landing (Build has not recorded the chore's number yet)`);
     chore.settle({ type: "build_receipt", sequence: chore.landedSeq, state: "delivered", chore: { number: 3721 } });
     assert.deepEqual(chore.outcome().build, { admission: "unassociated", receipts: "delivered", chore: { number: 3721 } });
     assert.equal(choreLandingNote(chore.outcome().build, candidate),
-      `landed ${candidate.slice(0, 12)} as a chore: Build #3721 is in no Spec; attach it with hq_build_associate_landing`);
+      `landed ${candidate.slice(0, 12)} as a chore: Build #3721 is in no Spec; attach it with hq_forge_associate_landing`);
     assert.equal(chore.outcome().build?.chore?.number, 3721);
   } finally { chore.log.close(); }
   const spec = publish("spec");

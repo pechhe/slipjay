@@ -21,15 +21,19 @@ function build(items: BuildItem[]): { read: BuildReader; calls: string[] } {
   return { read, calls };
 }
 
-test("slipjay.json chooses the tracker: GitHub unless it declares Build, and nothing else", () => {
+test("slipjay.json chooses the tracker: GitHub unless it declares Forge, and nothing else", () => {
   const policy = (extra: Record<string, unknown>) => JSON.stringify({ version: 1, requiredLandingVerification: [], ...extra });
   assert.equal(trackerOf(parseExecutionPolicy(policy({}))), "github");
   assert.equal(trackerOf(parseExecutionPolicy(policy({ tracker: "github" }))), "github");
+  assert.equal(trackerOf(parseExecutionPolicy(policy({ tracker: "forge" }))), "forge");
+  // A repository that has not switched yet keeps working; #4667 removes the old value.
   assert.equal(trackerOf(parseExecutionPolicy(policy({ tracker: "build" }))), "build");
-  assert.throws(() => parseExecutionPolicy(policy({ tracker: "linear" })), /tracker other than "github" or "build"/);
+  assert.throws(() => parseExecutionPolicy(policy({ tracker: "linear" })), /tracker other than "github", "build" or "forge"/);
 });
 
-test("a Build-tracked landing names its item in a Build trailer, which promotion reads back", () => {
+test("a Forge-tracked landing names its item in a Forge trailer, which promotion reads back", () => {
+  assert.equal(withIssueTrailer("Do it", 41, "o/r", "forge"), "Do it\n\nForge: #41");
+  // A repository still declaring `build` writes the old trailer, which readers keep accepting.
   assert.equal(withIssueTrailer("Do it", 41, "o/r", "build"), "Do it\n\nBuild: #41");
   assert.equal(withIssueTrailer("Do it", 41, "o/r"), "Do it\n\nIssue: o/r#41");
   // `#N` in a description may be a GitHub reference, so it never stands in for the Build trailer.
@@ -85,10 +89,10 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   assert.deepEqual((await request({ issueNumber: null, sessionId: undefined })).build, { unassociated: true });
   assert.equal((await request({})).intent, "Do it");
 
-  await assert.rejects(request({ sessionId: undefined }), /hq_build_start_session.*--session <id>.*HQ_BUILD_SESSION_ID/);
+  await assert.rejects(request({ sessionId: undefined }), /hq_forge_start_session.*--session <id>.*HQ_FORGE_SESSION_ID/);
   await assert.rejects(request({ sessionId: "not-a-session" }), /not a session id/);
-  await assert.rejects(request({ issueNumber: 21 }), /Spec #20 has no current lead: bind it with hq_build_bind/);
-  await assert.rejects(request({ issueNumber: 40 }), /Spec #40 shaped and bound, but it is in inbox: set it to ready with hq_build_set_status/, "an unshaped Spec names shaping first, with or without a session");
+  await assert.rejects(request({ issueNumber: 21 }), /Spec #20 has no current lead: bind it with hq_forge_bind/);
+  await assert.rejects(request({ issueNumber: 40 }), /Spec #40 shaped and bound, but it is in inbox: set it to ready with hq_forge_set_status/, "an unshaped Spec names shaping first, with or without a session");
   await assert.rejects(request({ issueNumber: 40, sessionId: undefined }), /it is in inbox/);
   await assert.rejects(request({ tickets: [21] }), /#21 is not a Ticket of Spec #10/);
   await assert.rejects(request({ issueNumber: 30 }), /is a decision, not a Spec or a Spec's Ticket/);

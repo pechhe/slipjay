@@ -10,7 +10,7 @@ export type CandidateContext = {
   integration: { name: string; root: string };
   integrationBranch: string;
   /** Verification, publication and migration policy read by landing steps. */
-  configuration: { requiredLandingVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null; tracker?: "github" | "build" };
+  configuration: { requiredLandingVerification: unknown[]; remote?: string | null; migrationFinalization?: MigrationFinalizationPolicy | null; tracker?: "github" | "build" | "forge" };
 };
 /** What an Isolated landing did with the primary checkout; it never blocks integration or push. */
 export type PrimaryCheckoutOutcome = {

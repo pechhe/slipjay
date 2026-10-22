@@ -53,11 +53,11 @@ export function preflightRefusal(outcome: LandingOutcome, state: Awaited<ReturnT
  * into the candidate's description as a trailer, so a GitHub Issue, a Build Ticket or Spec, or none (a chore) is kept
  * exactly. In a Build-tracked repository, further Tickets the landing named come from its Build binding.
  */
-async function association(root: string, source: string, repo: string, tracker: "github" | "build", manifest: RetainedManifest | null, env: NodeJS.ProcessEnv) {
+async function association(root: string, source: string, repo: string, tracker: "github" | "build" | "forge", manifest: RetainedManifest | null, env: NodeJS.ProcessEnv) {
   const description = await jj(root, ["--ignore-working-copy", "log", "-r", source, "--no-graph", "-T", "description"]);
   const issueNumber = commitIssue(description, repo, tracker);
   const build = manifest?.handoff?.evidence.build;
-  if (tracker !== "build" || !isBuildBinding(build)) return { issueNumber, tickets: [] as number[] };
+  if ((tracker !== "build" && tracker !== "forge") || !isBuildBinding(build)) return { issueNumber, tickets: [] as number[] };
   const read: BuildReader = (action, input) => readBuildThroughRunner(action, input, env);
   const numbers = await Promise.all(build.ticketIds.map(async (itemId) => {
     const item = await readBuildItem(read, { itemId });
