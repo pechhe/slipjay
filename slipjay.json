@@ -80,5 +80,6 @@
     ],
     "timeOfDay": "02:00",
     "timeZone": "Europe/London"
-  }
+  },
+  "process": "development"
 }
