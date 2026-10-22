@@ -508,10 +508,10 @@ and held state through the existing recovery path.
 - **Migrations and finalization.** Within a change's turn, the runner generates its
   `migrationFinalization` artifacts on the rebased candidate (generation and its
   verification are recorded runs, like the gate), runs the gate, integrates, runs the
-  repository's `postIntegration` step (YardSmith: migrate Development), then publishes.
+  repository's `postIntegration` step (YardSmith: migrate Preview's PostgreSQL), then publishes.
   Because the queue is serial, concurrent migration changes get consecutive numbers.
-  The runner host therefore needs whatever that step needs (YardSmith: a logged-in
-  `vercel` CLI on the unit's `PATH`).
+  The runner host therefore needs whatever that step needs (YardSmith: Docker access to
+  its Coolify databases).
 - **Held integrations.** If finalization or publication fails, the external target
   may already reflect the integration, so the runner keeps it on its local
   integration branch instead of dropping it, and the failure says so. Every later
@@ -618,7 +618,7 @@ and held state through the existing recovery path.
   applied, so the rerun is not rolled back automatically if it carries non-additive
   ones (a deploy with no record cannot show the schema untouched).
 - **Moving the runner to another host.** Run Setup on the new host with the same
-  repositories, give it what their steps need (YardSmith: a logged-in `vercel`), and
+  repositories, give it what their steps need (YardSmith: Docker and its Coolify host), and
   stop its unit. On the old host, `slipjay runner pause`, wait until no operation is
   running and none is held (the last one landed or failed before integrating), then
   stop its unit. Copy `operations.sqlite`, `logs/` and `~/.slipjay/state/post-integration`
