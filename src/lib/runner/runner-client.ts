@@ -882,32 +882,47 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       return { ok: false, operation, logUrl };
     }
     if (result?.type === "landed") {
+      // The runner's verdict comes first and stands: a local step after publication that fails is a warning,
+      // never the outcome, and the author can still tell the commit published.
+      onLine(`[runner ${name}] landed ${result.commitId} on ${result.branch} (operation ${operation.id})`);
+      const published = result.commitId.slice(0, 12);
+      const warn = async <T>(step: string, run: () => Promise<T>): Promise<T | undefined> => {
+        try { return await run(); }
+        catch (error) { onLine(`warning: ${published} is published, but ${step} failed: ${error instanceof Error ? error.message : String(error)}`); return undefined; }
+      };
       // Record the landing before anything that snapshots the working copy: a stale one must
       // not leave a published change looking undelivered to cleanup.
-      await fetchIntegration(cwd, remote, result.branch, { ignoreWorkingCopy: true });
-      const facts = await revisionFacts(cwd, result.commitId, { ignoreWorkingCopy: true });
-      let state: Record<string, unknown> = { artifactCommitId: result.commitId };
-      if (context.current.name !== "default") {
-        await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
-        state = { ...await readLandingState(context.current.name), runner: { location: location, operationId: operation.id } };
-        await writeWorkspaceJson(statePath(context.current.name), state);
-        // Adoption coverage is archived as the landing publishes; other landings archive at cleanup, as before.
-        const adopted = Object.values(frozenAdoptions((await workspaceMetadata(context.current.name))?.landingAdoptions))
-          .some((item) => item.operationId === operation.id && item.adoptions.length > 0);
-        const landed = adopted ? await readLandingState(context.current.name, { readOnly: true }) : null;
-        if (landed) await archiveIntegratedWorkspaceEvidence(await jj(cwd, ["--ignore-working-copy", "git", "root"]), landed);
-      }
+      const state = await warn("recording the landing in this workspace", async () => {
+        await fetchIntegration(cwd, remote, result.branch, { ignoreWorkingCopy: true });
+        const facts = await revisionFacts(cwd, result.commitId, { ignoreWorkingCopy: true });
+        let recorded: Record<string, unknown> = { artifactCommitId: result.commitId };
+        if (context.current.name !== "default") {
+          await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
+          recorded = { ...await readLandingState(context.current.name), runner: { location: location, operationId: operation.id } };
+          await writeWorkspaceJson(statePath(context.current.name), recorded);
+          // Adoption coverage is archived as the landing publishes; other landings archive at cleanup, as before.
+          const adopted = Object.values(frozenAdoptions((await workspaceMetadata(context.current.name))?.landingAdoptions))
+            .some((item) => item.operationId === operation.id && item.adoptions.length > 0);
+          const landed = adopted ? await readLandingState(context.current.name, { readOnly: true }) : null;
+          if (landed) await archiveIntegratedWorkspaceEvidence(await jj(cwd, ["--ignore-working-copy", "git", "root"]), landed);
+        }
+        return recorded;
+      });
       // A concurrent jj command elsewhere in the repository can leave this working copy stale.
-      await jj(cwd, ["workspace", "update-stale"]);
-      if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`))
-        await dropSupersededCandidate(cwd, context.current.root, target, result.commitId, onLine);
-      await finishLandedWorkspace(context, state);
-      // Releasing this checkout and sweeping the others deletes whole checkouts, which takes minutes
-      // in a large repository, so it runs detached and the verdict is reported now.
-      housekeeping = await startLandedHousekeeping(context, await callerPids()).catch((error: unknown) => ({ started: false, reason: String(error) }));
-      onLine(housekeeping.started
-        ? `Releasing this workspace and sweeping others in the background; outcomes go to ${housekeeping.logPath}`
-        : `Housekeeping not started: ${housekeeping.reason}`);
+      await warn("updating this stale working copy", () => jj(cwd, ["workspace", "update-stale"]));
+      await warn("dropping the superseded candidate", async () => {
+        if (target.commitId !== result.commitId && !await revisionExists(cwd, `${target.commitId} & ::${result.branch}`))
+          await dropSupersededCandidate(cwd, context.current.root, target, result.commitId, onLine);
+      });
+      if (state) {
+        await warn("releasing this workspace", () => finishLandedWorkspace(context, state));
+        // Releasing this checkout and sweeping the others deletes whole checkouts, which takes minutes
+        // in a large repository, so it runs detached and the verdict is reported now.
+        housekeeping = await startLandedHousekeeping(context, await callerPids()).catch((error: unknown) => ({ started: false, reason: String(error) }));
+        onLine(housekeeping.started
+          ? `Releasing this workspace and sweeping others in the background; outcomes go to ${housekeeping.logPath}`
+          : `Housekeeping not started: ${housekeeping.reason}`);
+      } else onLine("The landing itself is complete; run slipjay land again from this workspace to finish recording it.");
     } else if (result?.type === "declined") {
       // A Build refusal of admission, or a runner from before migration landings; nothing lands locally now.
       onLine(`[runner ${name}] declined: ${result.reason}\n${result.paths.join("\n")}`);

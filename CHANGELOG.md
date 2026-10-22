@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.45.1
+
+- **A published landing is always reported as landed:** `slipjay land` now prints the runner's verdict (the published commit
+  and the operation id) the moment the operation lands, before any local step. A local step after publication that fails (fetching
+  or looking up the published commit, recording the landing, updating a stale working copy, dropping a superseded candidate,
+  releasing the workspace) is a `warning:` line after the verdict, with a pointer to rerunning `slipjay land`, which reattaches to the landed operation and finishes the recording, and no longer replaces it
+  or stops the later steps that do not depend on it.
+
 ## v3.45.0
 
 - **Automatic promotion no longer waits for a quiet moment:** in `development` mode the runner released only the newest green

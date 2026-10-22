@@ -35,6 +35,27 @@ test("a published landing finishes housekeeping and releases the author workspac
   } finally { await f.dispose(); }
 });
 
+test("a published landing the local repo cannot see yet is still reported as landed, with the local failure as a warning", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    // The runner published a commit this repository never fetches: the local lookup after publication fails.
+    const published = "c".repeat(40);
+    f.append(op.id, { type: "landed", base: "fixture-base", commitId: published, branch: "main", remote: "origin" });
+    const result = await running;
+    assert.equal(result.ok, true);
+    assert.equal(result.operation.result?.type, "landed");
+    const verdict = f.lines.findIndex((line) => line.includes(`landed ${published}`) && line.includes(op.id));
+    const warning = f.lines.findIndex((line) => line.startsWith("warning:") && line.includes(published.slice(0, 12)));
+    assert.ok(verdict >= 0, "the verdict names the published commit and operation");
+    assert.ok(warning > verdict, "the local failure follows the verdict as a warning");
+    assert.ok(f.lines.some((line) => line.includes("run slipjay land again")), "the warning names the recovery command");
+  } finally { await f.dispose(); }
+});
+
 test("a decline from an older runner reports its paths and fails without landing anywhere", async () => {
   const f = await fixture();
   try {
