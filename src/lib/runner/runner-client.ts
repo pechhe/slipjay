@@ -31,7 +31,6 @@ import { runnerSetting } from "../policy/machine-config.ts";
 import { startLandedHousekeeping } from "../workspace/workspace-housekeeping.ts";
 import { callerPids } from "../workspace/workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
-import { frozenAdoptions } from "../workspace/workspace-coverage.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../workspace/workspace-finalization.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../landing/submission-adoptions.ts";
 import { choreLandingNote } from "../landing/landing-outcome.ts";
@@ -928,11 +927,12 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
           await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
           recorded = { ...await readLandingState(context.current.name), runner: { location: location, operationId: operation.id } };
           await writeWorkspaceJson(statePath(context.current.name), recorded);
-          // Adoption coverage is archived as the landing publishes; other landings archive at cleanup, as before.
-          const adopted = Object.values(frozenAdoptions((await workspaceMetadata(context.current.name))?.landingAdoptions))
-            .some((item) => item.operationId === operation.id && item.adoptions.length > 0);
-          const landed = adopted ? await readLandingState(context.current.name, { readOnly: true }) : null;
-          if (landed) await archiveIntegratedWorkspaceEvidence(await jj(cwd, ["--ignore-working-copy", "git", "root"]), landed);
+          // Archive the delivery here as well: the runner keeps its own evidence, and this machine's
+          // cleanup can only judge what it holds. A helper's frozen source covers the lead's ancestry;
+          // a workspace that landed its own commit names that commit.
+          const landed = await readLandingState(context.current.name, { readOnly: true });
+          if (landed) await archiveIntegratedWorkspaceEvidence(await jj(cwd, ["--ignore-working-copy", "git", "root"]),
+            { ...landed, publishedSource: target.commitId });
         }
         return recorded;
       });

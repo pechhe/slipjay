@@ -24,6 +24,12 @@ export type LandingArchiveInput = {
   operationId?: string;
   /** Names this workspace had before a rename; an archive written under one is still its own. */
   previousWorkspaceNames?: string[];
+  /**
+   * The commit this workspace submitted, when its own landing delivered it. A landing that ran on a
+   * runner archives only in the runner's state home, so recording the source here is what lets this
+   * machine prove the delivery afterwards.
+   */
+  publishedSource?: string;
 };
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -57,9 +63,13 @@ export async function archiveIntegratedWorkspaceEvidence(gitDirectory: string, s
   const remote = context?.configuration.remote;
   const published = context && await revisionExists(context.integration.root,
     `${state.artifactCommitId} & ::${state.integrationBranch}${remote ? `@${remote}` : ""}`);
-  const provenance = frozen && published && metadata?.integrationRoot === state.integrationRoot ? {
-    coverageRepository: await realpath(gitDirectory), publishedSource: frozen.source,
-    adoptionCoverage: frozen.adoptions.map(({ workspaceName, base, revisions }) => ({ workspaceName, base, revisions })),
+  // A helper's frozen source proves the lead's ancestry; a workspace that landed its own commit names
+  // that commit instead, so cleanup here can see what the runner's own archive recorded there.
+  const source = frozen?.source ?? state.publishedSource;
+  const owned = frozen ? metadata?.integrationRoot === state.integrationRoot : true;
+  const provenance = source && published && owned ? {
+    coverageRepository: await realpath(gitDirectory), publishedSource: source,
+    ...frozen ? { adoptionCoverage: frozen.adoptions.map(({ workspaceName, base, revisions }) => ({ workspaceName, base, revisions })) } : {},
   } : undefined;
   if (existsSync(file) && !provenance) return;
   const previous = existsSync(file) ? JSON.parse(await readFile(file, "utf8")) as Record<string, unknown> : {};

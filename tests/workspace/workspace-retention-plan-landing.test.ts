@@ -2,11 +2,11 @@ import { jj, project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
-import { archiveIntegratedWorkspaceEvidence } from "../../src/lib/workspace/workspace-finalization.ts";
+import { landedHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { statePath } from "../../src/lib/workspace/workspace-state.ts";
 import { cli, later, byName, landed } from "./fixtures/workspace-retention-plan-fixture.ts";
 
@@ -33,8 +33,12 @@ test("a landing record naming another delivery's archived artifact is kept, with
   try {
     const workspace = await landed(f, "copied.txt");
     const state = JSON.parse(await readFile(statePath(workspace.current.name), "utf8"));
-    // The artifact was already retained as another workspace's landing.
-    await archiveIntegratedWorkspaceEvidence(jj(f.repo, ["git", "root"]), { ...state, workspaceName: "earlier-delivery" });
+    // The artifact's archive names another workspace's delivery: the landing archived it here under
+    // that name, as a delivery archived on another machine would when this one reads it.
+    const archived = await Promise.all((await readdir(landedHome())).map(async (name) => ({ name, record: JSON.parse(await readFile(join(landedHome(), name), "utf8")) as Record<string, unknown> })));
+    const own = archived.find((entry) => entry.record.artifactCommitId === state.artifactCommitId);
+    assert.ok(own, "the landing archived its own delivery first");
+    await writeFile(join(landedHome(), own.name), JSON.stringify({ ...own.record, workspaceName: "earlier-delivery" }));
     const planned = byName(await planDisposableWorkspaces(f.repo, { now: later() }))[workspace.current.name];
     assert.equal(planned?.action, "keep");
     assert.match(planned?.reason ?? "", /already archived as workspace earlier-delivery's landing.*slipjay remove /);
