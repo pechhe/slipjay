@@ -28,6 +28,13 @@ const ASSERTION = /AssertionError|ERR_ASSERTION|^error: expect\(|expected .* to 
 const ERROR_START = /^(?:[A-Z]\w*(?:Error|Exception)(?: \[\w+\])?|Error|error|panic):/;
 const DIAGNOSTIC = /\berror\b[^:]*:|\berror TS\d+|^\s*×\s|^Error: /;
 const POSITION = /[\w./-]+\.[a-z]+(?::\d+:\d+|\(\d+,\d+\))/;
+// svelte-check prints "<path>:L:C" then "Error:" / "Warn:" / "Hint:", then a source fragment; only Error blocks matter.
+const POSITION_ONLY = /^.+\.[a-z]+(?::\d+:\d+|\(\d+,\d+\))$/;
+const SOFT_SEVERITY = /^(?:Warn(?:ing)?|Hint):/;
+const CHECK_SUMMARY = /^(?:svelte-check found|Found) \d+ errors?\b/i;
+const SUMMARY_RESERVE_BYTES = 512;
+/** What the runner's command artifact keeps of one selected diagnostic stream; the collector never retains more than that. */
+export const DIAGNOSTIC_STREAM_BYTES = 8192;
 
 const clip = (line: string): string => (line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS - 1)}…` : line);
 
@@ -164,6 +171,7 @@ export function verificationDiagnosticCollector(redact: (value: string) => strin
 } {
   const decoder = new StringDecoder("utf8");
   const limit = 16_384;
+  const retainedLimit = DIAGNOSTIC_STREAM_BYTES;
   const retained: string[] = [];
   let pending = "";
   let dropping = false;
@@ -173,9 +181,10 @@ export function verificationDiagnosticCollector(redact: (value: string) => strin
   let context = 0;
   let previous = "";
   let testFile = "";
-  function retain(line: string): void {
+  let softBlock = false;
+  function retain(line: string, reserved = false): void {
     const size = Buffer.byteLength(line) + 1;
-    if (bytes + size > limit) { incomplete = true; return; }
+    if (bytes + size > (reserved ? retainedLimit : retainedLimit - SUMMARY_RESERVE_BYTES)) { incomplete = true; return; }
     retained.push(line);
     bytes += size;
   }
@@ -191,6 +200,11 @@ export function verificationDiagnosticCollector(redact: (value: string) => strin
     const value = redactVerificationOutput(redact(raw)).replace(ANSI_ESCAPE, "").trimEnd();
     const trimmed = value.trim();
     if (/^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(trimmed)) testFile = trimmed;
+    if (CHECK_SUMMARY.test(trimmed)) { softBlock = false; retain(value, true); previous = value; return; }
+    // A warning or hint block, source fragment (blank lines included) up to the next position line, never competes with real errors for the retained budget.
+    if (SOFT_SEVERITY.test(trimmed) && POSITION.test(previous)) softBlock = true;
+    else if (POSITION_ONLY.test(trimmed)) softBlock = false;
+    if (softBlock) { previous = value; context = 0; return; }
     const relevant = ERROR_START.test(trimmed) || DIAGNOSTIC.test(value) || ASSERTION.test(trimmed) || TIMEOUT.test(value)
       || /^(?:FAIL\s|[×✖]\s|\(fail\)\s|not ok \d+|test at |error: script |\$ )/.test(trimmed);
     if (relevant) {

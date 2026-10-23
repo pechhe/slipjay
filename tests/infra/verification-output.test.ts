@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { summarizeVerificationFailure, verificationDiagnosticCollector } from "../../src/lib/infra/verification-failure.ts";
+import { DIAGNOSTIC_STREAM_BYTES, summarizeVerificationFailure, verificationDiagnosticCollector } from "../../src/lib/infra/verification-failure.ts";
 
 const section = (summary: string, heading: string) => {
   const lines = summary.split("\n");
@@ -164,7 +164,7 @@ test("diagnostic selection bounds oversized lines and reports exhausted capacity
   collector.add(Buffer.from(`Error: SECRET_TOKEN=${"x".repeat(20_000)}\nError: retained afterwards\n`));
   for (let i = 0; i < 1000; i++) collector.add(Buffer.from(`Error: distinct diagnostic ${i}\n`));
   const result = collector.finish();
-  assert.ok(Buffer.byteLength(result.output) <= 16_384);
+  assert.ok(Buffer.byteLength(result.output) <= DIAGNOSTIC_STREAM_BYTES);
   assert.ok(!result.output.includes("SECRET_TOKEN"));
   assert.match(result.output, /retained afterwards/);
   assert.equal(result.incomplete, true);
@@ -175,4 +175,35 @@ test("streaming selection preserves a Bun filename across source and progress no
   collector.add(Buffer.from(`tests/bun.test.ts:\n${"source context\\n".repeat(40)}\n(fail) rejects stale source [0.3ms]\n`));
   const summary = summarizeVerificationFailure({ stderr: collector.finish().output, code: 1 });
   assert.deepEqual(section(summary, "Failing tests"), ["tests/bun.test.ts > rejects stale source"]);
+});
+
+test("Svelte warnings before and after real errors cannot displace the errors or the final count", () => {
+  const warning = (index: number) => [`/work/src/Cal${index}.svelte:${index + 3}:5`, `Warn: Unused CSS selector ".cell-${index}" (svelte)`,
+    `<div class="cell"> ${"x".repeat(180)} error: not a real error`, "", `.error:focus { color: red; } ${"x".repeat(150)}`, ""].join("\n");
+  const errors = [["/work/src/oauth-framework.test.ts:140:9", "Error: Type 'string' is not assignable to type 'number'. (ts)"],
+    ["/work/fixture/src/hooks.server.ts:1:7", "Error: Cannot find name 'foo'. (ts)"],
+    ["/work/fixture/src/hooks.server.ts:7:3", "Error: Property 'bar' does not exist. (ts)"],
+    ["/work/src/last.ts:2:2", "Error: Another. (ts)"]];
+  const output = [...Array.from({ length: 120 }, (_, index) => warning(index)),
+    ...errors.map(([position, message]) => `${position}\n${message}\nconst value = ${"y".repeat(120)}\n`),
+    ...Array.from({ length: 200 }, (_, index) => `    ${index} | <span class="fragment">${"z".repeat(200)}</span>`),
+    "svelte-check found 4 errors and 120 warnings"].join("\n") + "\n";
+  const collector = verificationDiagnosticCollector();
+  for (let offset = 0; offset < output.length; offset += 4096) collector.add(Buffer.from(output.slice(offset, offset + 4096)));
+  const result = collector.finish();
+  for (const [position, message] of errors) assert.ok(result.output.includes(`${position}\n${message}`), position ?? "");
+  assert.ok(result.output.endsWith("svelte-check found 4 errors and 120 warnings"));
+  assert.ok(!result.output.includes("Unused CSS selector"));
+  assert.ok(Buffer.byteLength(result.output) <= DIAGNOSTIC_STREAM_BYTES);
+
+  const spaced = verificationDiagnosticCollector();
+  spaced.add(Buffer.from("/work/src/Cal.svelte:3:5\nWarn: Unused CSS selector (svelte)\n<div>\n\n/work/src/My Component.svelte:7:3\nError: Cannot find name 'foo'. (ts)\nsvelte-check found 1 error and 1 warning\n"));
+  assert.match(spaced.finish().output, /My Component\.svelte:7:3\nError: Cannot find name 'foo'\./);
+
+  const flood = verificationDiagnosticCollector();
+  flood.add(Buffer.from(Array.from({ length: 400 }, (_, index) => `/work/src/f${index}.ts:1:1\nError: ${"m".repeat(200)} (ts)`).join("\n") + "\nsvelte-check found 400 errors and 0 warnings\n"));
+  const flooded = flood.finish();
+  assert.equal(flooded.incomplete, true);
+  assert.ok(flooded.output.endsWith("svelte-check found 400 errors and 0 warnings"));
+  assert.ok(Buffer.byteLength(flooded.output) <= DIAGNOSTIC_STREAM_BYTES);
 });

@@ -3,12 +3,13 @@ import { link, mkdir, open, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { truncateUtf8 } from "../infra/utf8.ts";
+import { DIAGNOSTIC_STREAM_BYTES } from "../infra/verification-failure.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { ArtifactChunk, CommandArtifact } from "./runner-types.ts";
 
 const digest = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
 const artifactPath = (home: string, operationId: string, runId: string) => join(home, "command-artifacts", digest(operationId), `${digest(runId)}.json`);
-const STREAM_BYTES = 8192;
+const STREAM_BYTES = DIAGNOSTIC_STREAM_BYTES;
 export const COMMAND_ARTIFACT_MAX_BYTES = 256 * 1024;
 
 /** Never persists truncated raw edges: a missing edge can be the other half of a secret. */
