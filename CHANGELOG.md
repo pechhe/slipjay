@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **A removed workspace's name can be claimed again:** JJ's `workspace forget` leaves the name in `.jj/repo/workspace_store/index`, still
+  pointing at the old checkout, so a spare renamed to that name afterwards (an Issue's `ys-<n>` after its workspace was removed) listed
+  at the old path and the start failed with "Created workspace could not be verified", leaving a ghost registration that kept the name
+  polluted. A claim now drops the forgotten name's entries from the store before the rename; names a live workspace holds are never
+  touched, and a store of another layout is left alone. A ghost an earlier failure left heals the next time its name is claimed.
+
 - **Forge replaces Build as the tracker's name (YS-185):** `slipjay.json` accepts `"tracker": "forge"` and still accepts `"build"`, so a
   repository that has not switched keeps working. A `"forge"` repository writes a `Forge: #N` trailer instead of `Build: #N`; both
   trailers are still read, so a landing made before the rename still resolves to its item. The lead session comes from
