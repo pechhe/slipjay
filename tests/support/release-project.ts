@@ -2,7 +2,7 @@ import { jj, project, recordCheckout } from "./workspace-project.ts";
 import { landThroughTestRunner } from "./test-runner.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 
@@ -40,7 +40,17 @@ export async function releaseProject(options: {
   git(["push", "-q", "origin", "main"]);
   git(["push", "-q", "origin", "HEAD~1:refs/heads/release"]);
   jj(f.repo, ["git", "import"]);
-  return { ...f, verifiedRelease };
+  /** Commit `files` straight to `main` on origin, the history a chain of landings would leave. */
+  const commit = async (files: Record<string, string>, message: string) => {
+    for (const [file, content] of Object.entries(files)) {
+      await mkdir(join(f.repo, file, ".."), { recursive: true });
+      await writeFile(join(f.repo, file), content);
+    }
+    git(["add", "-A"]); git(["commit", "-qm", message]); git(["push", "-q", "origin", "main"]);
+    jj(f.repo, ["git", "import"]);
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.repo, encoding: "utf8" }).trim();
+  };
+  return { ...f, verifiedRelease, commit };
 }
 
 export type ReleaseFixture = Awaited<ReturnType<typeof releaseProject>>;

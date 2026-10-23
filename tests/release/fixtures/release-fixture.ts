@@ -1,7 +1,5 @@
-import { jj } from "../../support/workspace-project.ts";
 import { releaseProject } from "../../support/release-project.ts";
-import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { releaseIntegration } from "../../../src/lib/release/release.ts";
 import type { OperationEvent, VerificationOperation } from "../../../src/lib/runner/runner-contract.ts";
@@ -9,16 +7,7 @@ import type { OperationEvent, VerificationOperation } from "../../../src/lib/run
 /** A promoting fixture that also declares production migrations, with a commit helper that writes straight to main. */
 export async function promotingProject() {
   const f = await releaseProject({ migrations: true, promotes: true });
-  const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
-  const commit = async (files: Record<string, string>, message: string) => {
-    for (const [file, content] of Object.entries(files)) {
-      await mkdir(join(f.repo, file, ".."), { recursive: true });
-      await writeFile(join(f.repo, file), content);
-    }
-    git(["add", "-A"]); git(["commit", "-qm", message]); git(["push", "-q", "origin", "main"]);
-    jj(f.repo, ["git", "import"]);
-    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: f.repo, encoding: "utf8" }).trim();
-  };
+  const commit = f.commit;
   const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
   const step = { executable: "node", args: ["-e", ""] };
   policy.deployments.environments.production.migrations = { verify: step, apply: step };

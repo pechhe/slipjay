@@ -1,4 +1,4 @@
-import { landFile, releaseProject } from "../support/release-project.ts";
+import { releaseProject } from "../support/release-project.ts";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
@@ -9,9 +9,9 @@ import { promotingProject } from "./fixtures/release-fixture.ts";
 test("a promotion plans the newest commit staging is green on, with its paths, and re-asks only the delta past an approval that did not ship", async () => {
   const f = await releaseProject({ promotes: true });
   try {
-    const a = await landFile(f, "a.txt");
-    const b = await landFile(f, "b.txt");
-    const c = await landFile(f, "c.txt");
+    const a = await f.commit({ "a.txt": "a.txt\n" }, "Add a.txt");
+    const b = await f.commit({ "b.txt": "b.txt\n" }, "Add b.txt");
+    const c = await f.commit({ "c.txt": "c.txt\n" }, "Add c.txt");
     const plan = (state: PromotionState) => releaseIntegration(f.repo, { readPromotion: async () => state });
     const offline = await releaseIntegration(f.repo);
     assert.ok(!offline.ok && /reads staging from the runner/.test(offline.reason), JSON.stringify(offline));
