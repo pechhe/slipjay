@@ -1026,7 +1026,9 @@ records the runner's load average, memory and running operations as it began, an
 the queue snapshot gives each operation's `startedAt`, when it left the queue.
 
 **Flake candidates** are a test failing for two different changes, or a test that
-failed and then passed on a retry of the same source commit.
+failed and then passed on a retry of the same source commit verified on the same candidate (the
+`verification_base` event's `candidate`); a pass on a different candidate shows the base changed, so it is not a flake, and a
+failure or pass with no recorded candidate is not enough to confirm one.
 
 Older operations retain their original evidence;
 missing instrumentation is not synthesized as a measured fact.

@@ -310,21 +310,46 @@ test("a test file's samples are its executed runs in one operation kind: skipped
   assert.deepEqual(repo.testFilesOverBudget, [], "a 60 s audit run is over no landing budget");
 });
 
-test("a test that failed and then passed on a retry of the same source commit is a confirmed flake", () => {
+test("a test that failed and then passed on a retry of the same verified candidate is a confirmed flake", () => {
   const command = "bun run test";
-  const retry = (id: string, seq: number, exitCode: number, failing?: string): StoredEvent[] => [
+  const retry = (id: string, seq: number, exitCode: number, failing?: string, candidate?: string): StoredEvent[] => [
     { type: "submitted", repo: "acme/app", changeId: "one-change", commitId: "same-source", bookmark: "b", submittedBy: "author" } as OperationEvent,
+    ...(candidate ? [{ type: "verification_base", base: `base-of-${candidate}`, candidate } as OperationEvent] : []),
     ...(failing ? [testFailure(command, failing)] : []),
     ...run(`${id}-run`, command, 10, exitCode),
   ].map((event, index) => row(seq + index, id, seq * 10 + index, event));
-  const events = [...retry("first", 1, 1, "spares > install one at a time"), ...retry("second", 10, 0)];
+  const events = [...retry("first", 1, 1, "spares > install one at a time", "tree-1"), ...retry("second", 10, 0, undefined, "tree-1")];
   const [flake] = pipelineMetrics(events, at(0)).flakes;
-  assert.deepEqual([flake?.test, flake?.confirmed, flake?.changes, flake?.retriedPass], ["spares > install one at a time", true, ["acme/app/one-change"], { operationId: "second", seq: 12 }]);
+  assert.deepEqual([flake?.test, flake?.confirmed, flake?.changes, flake?.retriedPass], ["spares > install one at a time", true, ["acme/app/one-change"], { operationId: "second", seq: 13 }]);
   assert.match(formatPipelineMetrics(pipelineMetrics(events, at(0))), /passed on retry second/);
+
+  // The same source verified on a different base is a different tree: the pass shows the base was fixed, not a flake.
+  const rebased = [...retry("first", 1, 1, "spares > install one at a time", "tree-1"), ...retry("second", 10, 0, undefined, "tree-2")];
+  const [moved] = pipelineMetrics(rebased, at(0)).flakes ?? [];
+  assert.equal(moved, undefined, "a pass on another candidate neither confirms nor lists a flake");
+
+  // Missing candidate evidence is not proof the tree was unchanged.
+  const unrecorded = [...retry("first", 1, 1, "spares > install one at a time"), ...retry("second", 10, 0)];
+  assert.equal(pipelineMetrics(unrecorded, at(0)).flakes.every((entry) => !entry.confirmed), true);
 
   // A different source commit is a changed input, so one change's failure and pass prove nothing.
   const changed = events.map((stored) => stored.operationId === "second" && stored.event.type === "submitted" ? { ...stored, event: { ...stored.event, commitId: "edited" } } : stored);
   assert.deepEqual(pipelineMetrics(changed, at(0)).flakes, []);
+});
+
+test("a failure is attributed to the verification base in force when it happened, not a later attempt's", () => {
+  const command = "bun run test";
+  const events = [
+    row(1, "first", 1_000, { type: "submitted", repo: "acme/app", changeId: "one-change", commitId: "same-source", bookmark: "b", submittedBy: "author" }),
+    row(2, "first", 1_001, { type: "verification_base", base: "base-1", candidate: "tree-1" }),
+    row(3, "first", 1_002, testFailure(command, "widget > retries")),
+    ...run("first-run", command, 10, 1).map((event, index) => row(4 + index, "first", 1_003 + index, event)),
+    row(6, "first", 1_005, { type: "verification_base", base: "base-2", candidate: "tree-2" }),
+    row(7, "second", 2_000, { type: "submitted", repo: "acme/app", changeId: "one-change", commitId: "same-source", bookmark: "b", submittedBy: "author" }),
+    row(8, "second", 2_001, { type: "verification_base", base: "base-2", candidate: "tree-2" }),
+    ...run("second-run", command, 10, 0).map((event, index) => row(9 + index, "second", 2_002 + index, event)),
+  ];
+  assert.deepEqual(pipelineMetrics(events, at(0)).flakes, [], "the failure verified tree-1; the pass tree-2 is another tree");
 });
 
 test("each repository's metrics carry its audit status", () => {

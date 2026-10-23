@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.11
+
+- **A flake is confirmed only on the same verified tree (#3036):** `slipjay metrics` called a test failure a confirmed flake when the same source commit
+  later passed the same command, but each retry is rebased onto the current integration head, so a pass on a moved base shows the base was fixed,
+  not that the test is flaky (eight YardSmith seed tests were handed off as flakes that way on 19 Oct). A retry now confirms only when the failing
+  and passing runs verified the same candidate; a different candidate, or one with no recorded candidate, does not.
+
 ## v3.46.10
 
 - **A chore landing's wait covers two slow Build requests (#3402 review fix):** the chore's number takes two sequential Build requests of up to ten

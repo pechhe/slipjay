@@ -128,14 +128,19 @@ function operationHistory(events: readonly StoredEvent[]): Map<string, Operation
 }
 
 function flakeCandidates(all: Map<string, OperationHistory>, since: number): FlakeCandidate[] {
-  type Failure = { operationId: string; seq: number; at: number; repo: string; changeId: string; source: string; test: string; command: string; fileSet?: string };
-  type Pass = { operationId: string; seq: number; repo: string; source: string; command: string; fileSet?: string };
+  type Failure = { operationId: string; seq: number; at: number; repo: string; changeId: string; source: string; candidate?: string; test: string; command: string; fileSet?: string };
+  type Pass = { operationId: string; seq: number; repo: string; source: string; candidate?: string; command: string; fileSet?: string };
   const failures: Failure[] = [];
   const passes: Pass[] = [];
 
   for (const op of all.values()) {
     if (!isLandingSubmission(op.submitted)) continue;
     const commandByRun = new Map<string, string>();
+    // The tree the gate verified is the candidate rebased onto the base at that point, not the submitted source.
+    const candidateAt = (seq: number): string | undefined => {
+      const verified = op.events.findLast((row) => row.seq < seq && row.event.type === "verification_base")?.event;
+      return verified?.type === "verification_base" ? verified.candidate : undefined;
+    };
     for (const row of op.events) if (row.event.type === "run_started") commandByRun.set(row.event.runId, row.event.command);
     for (const row of op.events) {
       if (row.event.type === "classified" && row.event.cause === "gate" && row.event.command) {
@@ -143,12 +148,12 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
         const attributed = row.event.checks?.length
           ? row.event.checks.filter((check) => check.cause === "gate").flatMap((check) => check.failingTests.map((test) => ({ test, command: check.command })))
           : row.event.failingTests.map((test) => ({ test, command: row.event.type === "classified" ? row.event.command! : "" }));
-        for (const { test, command } of attributed) failures.push({ operationId: op.id, seq: row.seq, at: eventTime(row), repo: op.submitted.repo, changeId: op.submitted.changeId, source: op.submitted.commitId, test, command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
+        for (const { test, command } of attributed) failures.push({ operationId: op.id, seq: row.seq, at: eventTime(row), repo: op.submitted.repo, changeId: op.submitted.changeId, source: op.submitted.commitId, ...(candidateAt(row.seq) ? { candidate: candidateAt(row.seq)! } : {}), test, command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
       }
       if (row.event.type !== "run_finished") continue;
       const command = commandByRun.get(row.event.runId);
       if (command && row.event.exitCode === 0 && row.event.signal === null && !row.event.timedOut && !row.event.killed)
-        passes.push({ operationId: op.id, seq: row.seq, repo: op.submitted.repo, source: op.submitted.commitId, command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
+        passes.push({ operationId: op.id, seq: row.seq, repo: op.submitted.repo, source: op.submitted.commitId, ...(candidateAt(row.seq) ? { candidate: candidateAt(row.seq)! } : {}), command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
     }
   }
 
@@ -171,9 +176,11 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
   for (const [key, group] of grouped) {
     const changes = [...new Set(group.map((entry) => `${entry.repo}/${entry.changeId}`))];
     const first = group[0]!;
-    // The same source commit passing the same command later: nothing the change controls differed.
+    // The same verified tree passing the same command later: nothing differed. A pass on another candidate shows the base
+    // changed, and one with no recorded candidate cannot show the tree was unchanged.
     const retried = group.flatMap((failure) => passes.filter((pass) => pass.seq > failure.seq && pass.operationId !== failure.operationId
-      && pass.repo === failure.repo && pass.source === failure.source && pass.command === failure.command)).sort((a, b) => a.seq - b.seq)[0];
+      && pass.repo === failure.repo && pass.source === failure.source && pass.command === failure.command
+      && failure.candidate !== undefined && pass.candidate === failure.candidate)).sort((a, b) => a.seq - b.seq)[0];
     if (changes.length < 2 && !retried) continue;
     const allFailures = latestFailures.get(key) ?? group;
     const latestFailureSeq = Math.max(...allFailures.map((entry) => entry.seq));
