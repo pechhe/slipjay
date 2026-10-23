@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.46.13
+
+- **A restart no longer waits for the runner's whole ledger (SJ-90):** the runner serves its API before it recovers what a
+  previous process left, so health and admission answer while recovery runs instead of minutes after a restart, and a
+  recovery that cannot stop the previous process's commands starts nothing rather than reusing checkouts it does not own.
+  The queue is projected once per ledger revision instead of once per read, which took the evidence-retention pass on a
+  113k-event ledger from 142 s to under a second.
+
+- **The ledger is bounded (SJ-90):** a closed operation's events stay whole for 31 days, then only the facts another read
+  needs survive — landings, published commits, holds and settlements, gate verdicts, audits, repair claims, Build receipts,
+  the evidence-expiry record and the submission's dedupe key — and after a year the operation and those facts go too unless
+  something still living names them. Open operations, unexpired evidence, an attempt Build still owes receipts to, a
+  cut-short deletion, and each repository's newest landing always stay. The write-ahead log is checkpointed every five
+  minutes and after each retention pass, so it stops sitting at its high-water mark (105 MB against an 18 MB ledger).
+  `slipjay metrics`, `runner log` and `runner outcome` show the last 31 days in full, the year's facts behind them, and
+  nothing older; README "Retention" documents the windows.
+
 ## v3.46.12
 
 - **The process lane covers only what a process can show (#3031):** `PROCESS_TESTS` added all 22 CLI/launcher tests to every
