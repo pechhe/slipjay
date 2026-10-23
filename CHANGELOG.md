@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.46.10
+
+- **A chore landing's wait covers two slow Build requests (#3402 review fix):** the chore's number takes two sequential Build requests of up to ten
+  seconds each, so the fifteen-second wait could still end before a slow but successful pair returned it. `slipjay land` now waits thirty seconds;
+  when Build is down or silent the note still names `slipjay runner outcome <operation>`, and an outage never holds or fails `land`.
+
 ## v3.46.9
 
 - **A chore landing's note gives its Build number, or the command that shows it (#3402 review fix):** `slipjay land` waited six seconds for
