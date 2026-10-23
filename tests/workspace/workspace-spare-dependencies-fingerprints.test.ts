@@ -108,3 +108,35 @@ test("the install-input fingerprint is computable on a host without Node", async
     await f.dispose();
   }
 }, 120_000);
+
+// A lifecycle script may really read a directory: copy it into node_modules, generate from it, or
+// walk it. The fingerprint cannot see what a script does with a path it names, so a directory the
+// script names stays a whole-tree input, and its contents count. Narrowing this to short-circuit a
+// slow claim would let a stale node_modules be judged current, which costs more than the install.
+test("a lifecycle script that reads a directory makes that directory's contents an install input", async () => {
+  const f = await bunProject();
+  try {
+    const manifest = (fields: Record<string, unknown> = {}) => write(f.repo, {
+      "package.json": JSON.stringify({
+        name: "fixture", private: true, packageManager: `bun@${BUN_VERSION}`, workspaces: ["packages/*"],
+        scripts: { postinstall: "node scripts/sync-templates.mjs" }, ...fields,
+      }, null, 2),
+    });
+    await manifest();
+    await write(f.repo, {
+      "scripts/sync-templates.mjs": 'import { cpSync } from "node:fs";\ncpSync(new URL("../templates", import.meta.url), "node_modules/templates", { recursive: true });\n',
+      "templates/greeting.txt": "hello\n",
+    });
+    const base = await installInputFingerprint(f.repo);
+    assert.match(base ?? "", /^sha256:[0-9a-f]{64}$/);
+
+    await write(f.repo, { "templates/greeting.txt": "goodbye\n" });
+    const afterTemplate = await installInputFingerprint(f.repo);
+    assert.ok(afterTemplate && afterTemplate !== base, "a file in the directory the script copies is an install input");
+
+    await manifest({ version: "2.0.0", description: "release notes", keywords: ["fixture"] });
+    assert.equal(await installInputFingerprint(f.repo), afterTemplate, "manifest metadata an install never reads is no input");
+  } finally {
+    await f.dispose();
+  }
+}, 120_000);
