@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { formatPipelineMetrics, pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
-import type { OperationEvent, StoredEvent } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationEvent, StoredEvent } from "../../src/lib/runner/runner-types.ts";
 
 const at = (ms: number): string => new Date(ms).toISOString();
 const row = (seq: number, operationId: string, ms: number, event: OperationEvent): StoredEvent => ({ seq, operationId, at: at(ms), event });

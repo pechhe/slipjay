@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { ensureRepoConfig, jj, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
 import { repositoryKey } from "../runner/runner-contract.ts";
-import type { SubmitRequest } from "../runner/runner-contract.ts";
+import type { SubmitRequest } from "../runner/runner-types.ts";
 import { duplicateLandingSource } from "./landing-artifact.ts";
 import { rebaseOntoIntegration } from "./landing-candidate.ts";
 import { conflictedPaths } from "./landing-steps.ts";

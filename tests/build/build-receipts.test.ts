@@ -4,8 +4,14 @@ import type { BuildAdmissionRequest, BuildRoute, BuildRouteAnswer } from "../../
 import { createReceiptDrain } from "../../src/lib/build/build-receipts.ts";
 import type { BuildChoreInput, BuildReceiptInput, BuildRunInput } from "../../src/lib/build/build-receipts.ts";
 import { candidateBookmark, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { OperationLog } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationLog } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { deliveryState } from "../../src/lib/build/build-receipts.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
+import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
+
+/** The ledger as the runner composes it: receipts read outcomes and their classifications, and the snapshot reports delivery. */
+const openLog = (path = ":memory:") => openOperationLog(path, {}, { classify: classifyEvent, landingOutcome, deliveryState });
 
 const binding = { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: ["11111111-2222-4333-8444-555555555555"], bodyRevision: 3, bindGeneration: 2,
   sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" };
@@ -69,7 +75,7 @@ const settled = (log: OperationLog, id: string) => {
 const until = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 10 });
 
 test("receipts carry the admitted source tuple and each fact's own sequence and revisions", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const landed = landing(log, "a", "landed");
   const failed = landing(log, "e", "failed");
   const build = fakeBuild();
@@ -90,7 +96,7 @@ test("receipts carry the admitted source tuple and each fact's own sequence and 
 });
 
 test("Build down then up: receipts wait, the outage is visible, and they catch up in ledger order", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   let down = true;
   const build = fakeBuild(() => down ? { kind: "unavailable", reason: "Build answered HTTP 503" } : { kind: "accepted", value: null });
   const ids = [landing(log, "a", "landed"), landing(log, "e", "failed"), landing(log, "f", "landed")];
@@ -116,7 +122,7 @@ test("Build down then up: receipts wait, the outage is visible, and they catch u
 });
 
 test("a restart mid-drain resumes from the ledger, and a lost response is resent without a second effect", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const first = landing(log, "a", "landed");
   const second = landing(log, "e", "landed");
   // The first answer is lost after Build recorded it; then the runner stops before resending.
@@ -139,7 +145,7 @@ test("a restart mid-drain resumes from the ledger, and a lost response is resent
 });
 
 test("a receipt Build refuses is parked with its code and does not hold back another operation's", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const poison = landing(log, "a", "landed");
   const healthy = landing(log, "e", "landed");
   const build = fakeBuild((input) => input.operationId === poison ? { kind: "refused", code: "attempt_fact_invalid" } : { kind: "accepted", value: null });
@@ -156,7 +162,7 @@ test("a receipt Build refuses is parked with its code and does not hold back ano
 });
 
 test("a published landing whose receipt is still owed reads as landed with its receipt pending", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const id = landing(log, "a", "landed");
   const operation = log.operation(id)!;
   assert.ok(operation.kind === "landing");
@@ -167,7 +173,7 @@ test("a published landing whose receipt is still owed reads as landed with its r
 });
 
 test("refused and unbound operations send nothing", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const refused = landing(log, "a", "open", "refused");
   landing(log, "f", "landed", "unbound");
   const build = fakeBuild();
@@ -181,7 +187,7 @@ test("refused and unbound operations send nothing", async () => {
 });
 
 test("an admission Build never answered is offered until it is, even once its operation closed, so Build's custody is settled", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   /** Submitted for admission, whose answer was lost; then cancelled by its owner or simply left queued. */
   const unanswered = (change: string, cancelled: boolean) => {
     const id = newOperationId();
@@ -218,7 +224,7 @@ test("an admission Build never answered is offered until it is, even once its op
 });
 
 test("new terminal facts wake the drain without another landing or an author", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const build = fakeBuild();
   const drain = createReceiptDrain({ log, route: build.route });
   const id = landing(log, "a", "landed");
@@ -227,7 +233,7 @@ test("new terminal facts wake the drain without another landing or an author", a
 });
 
 test("a failure with hundreds of long commands is bounded inside Build's body limit and reports its truncation", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const id = newOperationId();
   log.append(id, { type: "submitted", repo: "owner/repo", changeId: "k".repeat(32), commitId: "a".repeat(40), bookmark: candidateBookmark("k".repeat(32)), submittedBy: "author", admission });
   log.append(id, { type: "build_admitted", sequence: 1, sessionId: binding.sessionId, recordedAt: null });
@@ -248,7 +254,7 @@ test("a failure with hundreds of long commands is bounded inside Build's body li
 });
 
 test("a delivered chore receipt records the Build number Build's answer names; a Spec landing's receipt records none", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const chore = newOperationId();
   const change = "b".repeat(32), published = "d".repeat(40);
   log.append(chore, { type: "submitted", repo: "owner/repo", changeId: change, commitId: "a".repeat(40), bookmark: candidateBookmark(change), submittedBy: "author",
@@ -275,7 +281,7 @@ test("a chore's number unread because Build did not answer leaves the receipt ow
     log.append(id, { type: "landed", base: "c".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin" });
     return id;
   };
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const id = publish(log);
   const build = fakeBuild();
   let reads = 0;
@@ -288,7 +294,7 @@ test("a chore's number unread because Build did not answer leaves the receipt ow
   assert.deepEqual(settled(log, id).map((event) => event.type === "build_receipt" && event.state === "delivered" && event.chore?.number), [1]);
   drain.close(); log.close();
 
-  const refusing = openOperationLog(":memory:");
+  const refusing = openLog(":memory:");
   const refused = publish(refusing);
   const other = fakeBuild();
   const refusedDrain = createReceiptDrain({ log: refusing, route: (action, input) => action === "read" ? Promise.resolve({ kind: "refused", code: "item_unavailable" }) : other.route(action, input) });

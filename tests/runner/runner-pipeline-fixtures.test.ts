@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "vite-plus/test";
 import { formatPipelineMetrics, pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
-import type { CauseClass, StoredEvent } from "../../src/lib/runner/runner-contract.ts";
+import type { CauseClass, StoredEvent } from "../../src/lib/runner/runner-types.ts";
 
 const captures = ["landed", "gate", "conflict", "infrastructure", "held-recovered", "killed", "superseded", "policy", "cancelled", "paused_out"] as const;
 const logs = new Map(captures.map((name) => [name, JSON.parse(readFileSync(new URL(`./fixtures/pipeline/${name}.json`, import.meta.url), "utf8")) as StoredEvent[]]));

@@ -709,7 +709,8 @@ integration branch; `production` deploys only through a promotion (see
   and each project's outcome (none when additive migrations failed before any deployed).
   A deploy that failed before its projects ran (the commit
   is not on the integration branch, or the runner restarted) records only its reason.
-  `slipjay deploys` reads them back. The contract is `src/lib/runner/runner-contract.ts`.
+  `slipjay deploys` reads them back. The contract is `src/lib/runner/runner-contract.ts` (its values) and
+  `src/lib/runner/runner-types.ts` (its declarations).
 
 ### Reset
 
@@ -803,7 +804,7 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
   than 26 hours ago (when it has never been green: since its first audit).
 
 `GET /v1/audits?repo=<owner/name>` lists a repository's audits, newest first, with the summary
-above; `POST /v1/audits/cause` records a cause (`src/lib/runner/runner-contract.ts`). The ledger reads
+above; `POST /v1/audits/cause` records a cause (`src/lib/runner/runner-types.ts`). The ledger reads
 are `auditSummary` in `src/lib/release/audit-ledger.ts`.
 
 ## Release
@@ -1543,8 +1544,10 @@ including retries that started on an empty continuation child.
   affected tests (`bun run test:landing`) concurrently. The selector validates the exact
   rebased JJ candidate and its single integration parent, then uses `vp test related`
   plus explicit runtime fixture readers and source CLI/subprocess callers. Toolchain,
-  lockfile, test setup, deletions, unknown paths and unreadable/ambiguous candidates
-  run the complete landing suite. Only an explicit harmless list (docs, README,
+  lockfile, test setup, deletions of anything other than a `tests/**` or `scripts/**`
+  `*.test.ts`, unknown paths and unreadable/ambiguous candidates run the complete
+  landing suite. A deleted test file selects nothing: its tests are gone, and a guard
+  test keeps it true that nothing imports one. Only an explicit harmless list (docs, README,
   CHANGELOG, GLOSSARY, AGENTS and .gitignore) can skip Vitest; runtime tests always run.
   Command output records the candidate, changed paths, selection and reasons.
   `tests/quarantine.json` lists `{file, issue, reason}` entries naming an open Issue;

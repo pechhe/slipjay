@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { primary, land, status } from "./fixtures/landing-primary-checkout-fixture.ts";
+import { readLandingState } from "../../src/lib/workspace/workspace-state.ts";
+import { primary, land } from "./fixtures/landing-primary-checkout-fixture.ts";
 
 test("an empty primary checkout moves onto the new integration", async () => {
   const f = await project();
@@ -11,7 +12,8 @@ test("an empty primary checkout moves onto the new integration", async () => {
     const { workspace, result } = await land(f, "empty.txt");
     assert.deepEqual(result.primaryCheckout, { action: "moved" });
     assert.equal(primary(f).parent, jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]));
-    assert.deepEqual((await status(workspace.workspacePath)).landing, {
+    const state = (await readLandingState(workspace.current.name, { readOnly: true }))!;
+    assert.deepEqual({ phase: state.phase, artifactCommitId: state.artifactCommitId, primaryCheckout: state.primaryCheckout }, {
       phase: "landed", artifactCommitId: result.artifactCommitId, primaryCheckout: { action: "moved" } });
   } finally {
     await f.dispose();

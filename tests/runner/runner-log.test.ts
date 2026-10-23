@@ -4,15 +4,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent } from "../../src/lib/runner/runner-contract.ts";
+import type { LandingOperation, OperationEvent } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import type { OperationLogOptions } from "../../src/lib/runner/runner-log.ts";
+import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
+import { projectWatchOperation } from "../../src/lib/runner/runner-watch-projection.ts";
+
+/** The log as the runner composes it: this file's subject is the store and the projections it records. */
+const openLog = (path = ":memory:", options: OperationLogOptions = {}) => openOperationLog(path, options, { classify: classifyEvent, watch: projectWatchOperation });
 
 function submission(repo = "owner/repo", changeId = "k".repeat(32), commitId = "commit"): OperationEvent {
   return { type: "submitted", repo, changeId, commitId, bookmark: candidateBookmark(changeId), submittedBy: "author" };
 }
 
 test("a successful retry is counted separately from observing external publication", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append("failed", { type: "integration_held", repo: "owner/repo", commitId: "first", reason: "push failed" });
     log.append("retry", { type: "integration_recovered", repo: "owner/repo", commitId: "first", retried: true });
@@ -26,7 +32,7 @@ test("a successful retry is counted separately from observing external publicati
 });
 
 test("operation log projects stages, command runs and the latest terminal result", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     assert.equal(log.operation("unknown"), null);
     const id = newOperationId();
@@ -67,7 +73,7 @@ test("operation log projects stages, command runs and the latest terminal result
 });
 
 test("queue positions follow submitted sequence within each repository and close without a position", () => {
-  const log = openOperationLog(":memory:", { workers: 1 });
+  const log = openLog(":memory:", { workers: 1 });
   try {
     log.append("first", submission());
     log.append("other", submission("owner/other"));
@@ -76,13 +82,13 @@ test("queue positions follow submitted sequence within each repository and close
     assert.deepEqual(log.openOperations().map((op) => [op.id, op.position]), [["first", 1], ["other", 1], ["second", 2]]);
     // Another repository's operation waits for no landing of this one, only for a free worker.
     assert.equal(log.operation("other")?.waitingFor, `a worker (landing ${"k".repeat(12)})`);
-    const two = openOperationLog(":memory:");
+    const two = openLog(":memory:");
     two.append("first", submission());
     two.append("other", submission("owner/other"));
     two.append("first", { type: "stage", stage: "verifying" });
     assert.equal(two.operation("other")?.waitingFor, undefined, "with a worker free, nothing holds it");
     two.close();
-    const shared = openOperationLog(":memory:", { lane: () => "shared" });
+    const shared = openLog(":memory:", { lane: () => "shared" });
     shared.append("first", submission());
     shared.append("other", submission("owner/other"));
     shared.append("first", { type: "stage", stage: "verifying" });
@@ -101,7 +107,7 @@ test("queue positions follow submitted sequence within each repository and close
 });
 
 test("a release verifies in a lane of its own, and queued work waits behind it only while it publishes", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const candidate = "c".repeat(40);
     log.append("release", { type: "submitted", kind: "release", repo: "owner/repo", commitId: candidate, migrationsReady: true, submittedBy: "author" });
@@ -128,13 +134,13 @@ test("a release verifies in a lane of its own, and queued work waits behind it o
 test("file log preserves every appended event and increasing global sequence across reopening", () => {
   const directory = mkdtempSync(join(tmpdir(), "runner-log-"));
   const path = join(directory, "events.sqlite");
-  let log = openOperationLog(path);
+  let log = openLog(path);
   try {
     const first = log.append("one", submission());
     const second = log.append("two", submission());
     assert.ok(second.seq > first.seq);
     log.close();
-    log = openOperationLog(path);
+    log = openLog(path);
     const persisted = log.events();
     assert.deepEqual(persisted.map((row) => row.event.type), ["submitted", "queue_snapshot", "submitted", "queue_snapshot"]);
     assert.deepEqual(log.events(), persisted, "derived and direct events survive reopening");
@@ -150,7 +156,7 @@ test("file log preserves every appended event and increasing global sequence acr
 });
 
 test("deploys queue in their own lane, project their records, and the latest landing of a repository is known", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const commit = "d".repeat(40);
     log.append("landing", submission());
@@ -180,7 +186,7 @@ test("deploys queue in their own lane, project their records, and the latest lan
 });
 
 test("a repository's releases list newest first, without its deploys or other repositories' releases", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const release = (id: string, repo: string) => log.append(id, { type: "submitted", kind: "release", repo, commitId: "e".repeat(40), migrationsReady: false, submittedBy: "author" });
     release("first", "owner/repo");
@@ -195,7 +201,7 @@ test("a repository's releases list newest first, without its deploys or other re
 });
 
 test("a repository's resets share the landing lane, list newest first and close with their target and source", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const reset = (id: string, repo: string) => log.append(id, { type: "submitted", kind: "reset", repo, commitId: "e".repeat(40), submittedBy: "schedule" });
     reset("first", "owner/repo");
@@ -214,7 +220,7 @@ test("a repository's resets share the landing lane, list newest first and close 
 });
 
 test("atomic watch snapshot includes both lanes, cursor, holds and subscriptions", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const seen: number[] = [];
     const unsubscribe = log.subscribe((event) => seen.push(event.seq));
@@ -235,7 +241,7 @@ test("atomic watch snapshot includes both lanes, cursor, holds and subscriptions
 });
 
 test("watch snapshots retain every queued and running operation in order in both lanes", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append("serial-running", submission("owner/a", "first"));
     log.append("deploy-running", { type: "submitted", kind: "deploy", repo: "owner/a", environment: "staging", commitId: "first", submittedBy: "owner" });
@@ -258,7 +264,7 @@ test("watch snapshots retain every queued and running operation in order in both
 });
 
 test("snapshot hold SQL preserves repository lifecycle and ignores obsolete recovery", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const hold = (repo: string, commitId: string, reason = "blocked") => log.append("control", { type: "integration_held", repo, commitId, reason });
     const recover = (repo: string, commitId: string) => log.append("control", { type: "integration_recovered", repo, commitId });
@@ -283,7 +289,7 @@ test("snapshot hold SQL preserves repository lifecycle and ignores obsolete reco
 });
 
 test("snapshot latest staging attempt includes failure after success and a failure-only repository", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const deploy = (id: string, repo: string) => log.append(id, { type: "submitted", kind: "deploy", repo, environment: "staging", commitId: id, submittedBy: "owner" });
     deploy("success-A", "a");
@@ -295,7 +301,7 @@ test("snapshot latest staging attempt includes failure after success and a failu
 });
 
 test("snapshot retains a completed production outcome for a new watcher", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append("production", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "production", commitId: "candidate", submittedBy: "owner" });
     log.append("production", { type: "failed", stage: "deploying", reason: "health failed", deployment: {
@@ -313,7 +319,7 @@ test("snapshot retains a completed production outcome for a new watcher", () => 
 });
 
 test("terminal classifications record versioned killed, paused, superseded and held causes", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
     log.append("killed", submission());
@@ -336,7 +342,7 @@ test("terminal classifications record versioned killed, paused, superseded and h
 });
 
 test("a same-commit retry records when an earlier base passed and the new base failed", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     const old = log.append("old-base", submission());
     log.append("old-base", { type: "verification_base", base: "base-old" });
@@ -361,7 +367,7 @@ test("a same-commit retry records when an earlier base passed and the new base f
 });
 
 test("an incomplete earlier verification run does not establish a passing interaction", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append("interrupted", submission());
     log.append("interrupted", { type: "verification_base", base: "base-old" });
@@ -385,7 +391,7 @@ test("an incomplete earlier verification run does not establish a passing intera
 });
 
 test("held facts retain retry count, elapsed time and publication outcome", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const originalNow = Date.now;
   try {
     const first = log.append("control", { type: "integration_held", repo: "owner/repo", commitId: "commit", reason: "push refused" });
@@ -422,7 +428,7 @@ const classifiedOf = (log: ReturnType<typeof openOperationLog>, id: string) => {
 };
 
 test("two identical failed commands are classified from their own runs, matched by runId", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     failedChecks(log, "twice", [
       { runId: "first", command: "vp test run", timedOut: true, testBodyRan: false },
@@ -435,7 +441,7 @@ test("two identical failed commands are classified from their own runs, matched 
 });
 
 test("a check timeout without a test body is infrastructure alone and gate beside a failing test", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     failedChecks(log, "timeout-only", [{ runId: "t", command: "bun run check:slow", timedOut: true, testBodyRan: false }]);
     failedChecks(log, "mixed", [
@@ -450,7 +456,7 @@ test("a check timeout without a test body is infrastructure alone and gate besid
 });
 
 test("an owner kill after an earlier failed check is classified killed, never gate", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append("killed", submission());
     log.append("killed", { type: "run_started", runId: "k1", command: "vp test run", host: "runner" });
@@ -462,7 +468,7 @@ test("an owner kill after an earlier failed check is classified killed, never ga
 });
 
 test("a failed event without failures classifies one run by command as before", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     log.append("legacy", submission());
     log.append("legacy", { type: "run_started", runId: "l1", command: "vp test run", host: "runner" });

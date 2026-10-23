@@ -2,7 +2,7 @@ import { admissionSettled, buildAdmitter, buildReader, settleAdmission } from ".
 import type { BuildAdmissionRecord, BuildRoute } from "./build-admission.ts";
 import { BuildRefusal, readBuildItem } from "./tracker.ts";
 import { recoveryKey, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent, OperationLog, StoredEvent } from "../runner/runner-contract.ts";
+import type { LandingOperation, OperationEvent, OperationLog, StoredEvent } from "../runner/runner-types.ts";
 
 /** Build's `failed` bundle (pechhe/slipjay#57), bounded: references to retained logs, never their content. */
 type AttemptFailure = {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { readAudits, recordAuditCause, cancelThroughRunner, watchThroughRunner, controlRunner, deployThroughRunner, landThroughRunner, readDeploys, readPromotionState, requestVerificationThroughRunner, readBuildThroughRunner, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation, recordClientFacts, recordClientFactsInBackground, readMetricsEvents, operationRunnerLocation } from "../lib/runner/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/runner/pipeline-metrics.ts";
-import type { AutomaticPromotion, Operation } from "../lib/runner/runner-contract.ts";
+import type { AutomaticPromotion, Operation } from "../lib/runner/runner-types.ts";
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";

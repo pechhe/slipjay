@@ -1,5 +1,30 @@
 # Changelog
 
+## v3.46.12
+
+- **The process lane covers only what a process can show (#3031):** `PROCESS_TESTS` added all 22 CLI/launcher tests to every
+  landing that changed `src/**`, because a child process hides its imports, although several of them only asserted library
+  behaviour reached through a child. `landing-primary-checkout-{move,preserve}`, `workspace-{start-unused,sweep-guards,retention-plan-inventory}`
+  and `bun-store-damage` now call the function their command calls and are selected by the import graph; the CLI-surface
+  assertions they held moved to `tests/integration/cli.test.ts`. The remaining 16 each run the launcher, a launcher entry or
+  the installed package, and the array says which process fact each one asserts. A change to `runner-client` now adds 4
+  process tests instead of 6, and one to `runner-queue`/`landing-artifact` 8 instead of 10 (100/188 → 98/188 and
+  104/188 → 102/188 on the replayed landings, still above half). Behaviour and output are unchanged.
+
+- **A change to the runner's contract or a reporting projection runs far fewer landing tests (#3031):** the contract's
+  declarations now live in `src/lib/runner/runner-types.ts`, so a landing that only adds an event variant, a field or a
+  doc comment is erased at runtime and the import graph selects no test for it (only the process and runtime lanes a
+  `src/**` change always adds); `runner-contract.ts` keeps its values, and the machine
+  policy reads the runner's environment name from a leaf instead of the whole contract. The event store also records
+  facts rather than interpreting them: the runner composes failure classification, a landing's outcome, the watch
+  projection, Build's delivery state and short-landing classes, so a change to one of those selects 25–59 fewer test
+  files. Behaviour and output are unchanged.
+
+- **A deleted test file no longer runs the whole landing suite (#3031):** `selectLandingTests` treated any deletion as having unavailable
+  dependency edges, so a landing that deleted one `workspace-adopt.test.ts` ran all 183 tests. A deleted `tests/**` or `scripts/**`
+  `*.test.ts` now contributes nothing to selection: its own tests are gone and nothing imports a test file (a guard test keeps that true).
+  Deleting any other file, including `src`, a fixture or a config, still fails closed to the complete suite.
+
 ## v3.46.11
 
 - **A flake is confirmed only on the same verified tree (#3036):** `slipjay metrics` called a test failure a confirmed flake when the same source commit

@@ -8,7 +8,7 @@ import { probeCheckout, probeSubmission, submissionProbe } from "../../src/lib/l
 import { retainSubmissionSource } from "../../src/lib/landing/submission-source.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { candidateBookmark, RUNNER_API, RUNNER_JJ_DEFAULTS } from "../../src/lib/runner/runner-contract.ts";
-import type { SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
+import type { SubmitRequest } from "../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { jj, project } from "../support/workspace-project.ts";

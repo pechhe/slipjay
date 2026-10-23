@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { admits, RUNNER_CONTROL_ID, runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { shortRepositories } from "../../src/lib/runner/pipeline-metrics.ts";
 import { runnerLogOptions } from "../../src/lib/runner/runner-queue.ts";
 import { test, until } from "./fixtures/runner-queue-fixture.ts";
 import { landing, queueFixture, SHORT_MS, verified, waiting } from "./fixtures/short-landings.ts";
@@ -20,7 +21,7 @@ test("the admission rule caps long operations at workers and everything at one m
 });
 
 test("a repository is short when its verify p90 over the budget window is at or below the threshold, from enough samples", () => {
-  const log = openOperationLog(":memory:", { shortLandingP90Ms: SHORT_MS });
+  const log = openOperationLog(":memory:", { shortLandingP90Ms: SHORT_MS }, { shortRepositories });
   verified(log, "acme/fast", 10, SHORT_MS);
   verified(log, "acme/slow", 10, SHORT_MS + 1);
   verified(log, "acme/new", 9, 1_000);
@@ -51,7 +52,7 @@ test("without enforced combined limits, or a threshold, no repository is short",
 });
 
 test("a waiting operation names the places the rule holds it by", () => {
-  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS });
+  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS }, { shortRepositories });
   for (const repo of ["acme/a", "acme/b", "acme/e"]) verified(log, repo, 10, 400_000);
   for (const repo of ["acme/c", "acme/d"]) verified(log, repo, 10, 20_000);
   const a = landing(log, "acme/a", "long"), b = landing(log, "acme/b", "long");
@@ -70,7 +71,7 @@ test("a waiting operation names the places the rule holds it by", () => {
 });
 
 test("a depth-two successor counts as long and names the workers holding it", () => {
-  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 });
+  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 }, { shortRepositories });
   verified(log, "acme/a", 10, 400_000);
   verified(log, "acme/t", 10, 20_000);
   const a = landing(log, "acme/a", "long");
@@ -84,7 +85,7 @@ test("a depth-two successor counts as long and names the workers holding it", ()
 });
 
 test("an older release of its repository holds a depth-two successor back, and the successor names it", () => {
-  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 });
+  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 }, { shortRepositories });
   verified(log, "acme/t", 10, 20_000);
   landing(log, "acme/t", "long");
   const release = newOperationId();
@@ -95,7 +96,7 @@ test("an older release of its repository holds a depth-two successor back, and t
 });
 
 test("an older release of its repository holds a depth-two head back too, and the head names it", () => {
-  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 });
+  const log = openOperationLog(":memory:", { workers: 2, shortLandingP90Ms: SHORT_MS, depth: (repo) => repo === "acme/t" ? 2 : 1 }, { shortRepositories });
   verified(log, "acme/t", 10, 20_000);
   const release = newOperationId();
   log.append(release, { type: "submitted", kind: "release", repo: "acme/t", commitId: "e".repeat(40), migrationsReady: false, submittedBy: "test" });

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { BuildAdmissionRecord, BuildAdmissionRequest, BuildRoute } from "../../src/lib/build/build-admission.ts";
 import { createReceiptDrain } from "../../src/lib/build/build-receipts.ts";
 import type { BuildReceiptInput } from "../../src/lib/build/build-receipts.ts";
-import type { OperationLog, SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationLog, SubmitRequest } from "../../src/lib/runner/runner-types.ts";
 import { test, jj, fixture } from "./fixtures/runner-queue-fixture.ts";
 
 const earlierSpec = "1a1a1a1a-2b2b-4c3c-8d4d-5e5e5e5e5e5e", laterSpec = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";

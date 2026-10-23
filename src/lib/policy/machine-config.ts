@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spareCount } from "./execution-policy.ts";
-import { RUNNER_LOCATION_ENV } from "../runner/runner-contract.ts";
+import { RUNNER_LOCATION_ENV } from "../runner/runner-env.ts";
 import { machineConfigPath } from "../workspace/workspace-paths.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 

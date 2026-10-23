@@ -3,7 +3,7 @@ import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim,
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
-import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-contract.ts";
+import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
@@ -29,7 +29,7 @@ export function createRunnerHandler(input: {
    */
   probeSubmission?(request: SubmitRequest, ahead: QueuedLanding[]): Promise<SubmissionConflict | null>;
   /** Pin source and a manifest before acknowledgement; never runs in a mutable runner checkout. */
-  retainSubmission?(operationId: string, request: SubmitRequest): Promise<Extract<import("./runner-contract.ts").OperationEvent, { type: "source_retained" }>>;
+  retainSubmission?(operationId: string, request: SubmitRequest): Promise<Extract<import("./runner-types.ts").OperationEvent, { type: "source_retained" }>>;
   kill(operationId?: string): KillOutcome;
   /** Queues the publication of the repository's held integration unless one is queued or running; null when none is held. */
   recoverHeld?(repo: string): Operation | null;

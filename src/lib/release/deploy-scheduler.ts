@@ -1,5 +1,5 @@
 import type { DeploymentEnvironment } from "../policy/deployment-policy.ts";
-import type { DeployOperation, OperationLog } from "../runner/runner-contract.ts";
+import type { DeployOperation, OperationLog } from "../runner/runner-types.ts";
 
 const RETRY_MS = 3_600_000;
 

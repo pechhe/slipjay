@@ -10,13 +10,14 @@ import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { retainSubmissionSource } from "../../src/lib/landing/submission-source.ts";
 import { submissionSourceResponse, importSourceBundle } from "../../src/lib/landing/submission-source-export.ts";
 import { downloadSubmissionSource } from "../../src/lib/runner/runner-client.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { directExecutor } from "../support/executor.ts";
-import type { Executor } from "../../src/lib/runner/runner-contract.ts";
+import type { Executor } from "../../src/lib/runner/runner-types.ts";
 
 /** Records the environment of each jj call, which must carry COLUMNS so jj never runs `tput`. */
 function jjRecordingExecutor(): Executor & { jjColumns: (string | undefined)[] } {
@@ -30,7 +31,7 @@ function jjRecordingExecutor(): Executor & { jjColumns: (string | undefined)[] }
 
 test("CLI retrieves retained source after author/upstream loss and a cold worker restores using only bundle evidence", async () => {
   const f = await project();
-  const log = openOperationLog(":memory:");
+  const log = openOperationLog(":memory:", {}, { landingOutcome });
   let server: Awaited<ReturnType<typeof serveRunner>> | undefined;
   try {
     const contents = randomBytes(1024 * 1024);

@@ -1,4 +1,5 @@
-import { OWNER_KILL_REASON, type ClassifiedCheck, type ClassifiedFact, type OperationEvent, type RunRecord, type VerificationFailureRef } from "./runner-contract.ts";
+import { OWNER_KILL_REASON } from "./runner-contract.ts";
+import type { ClassifiedCheck, ClassifiedFact, FailureEvent, Operation, OperationEvent, RunRecord, StoredEvent, VerificationFailureRef } from "./runner-types.ts";
 import { diagnostics, failingTests, outputLines } from "../infra/verification-failure.ts";
 
 export const FAILURE_RULE_VERSION = 1;
@@ -109,4 +110,30 @@ export function classifyVerificationFailures(
     ...checks[0] ? { command: checks[0].command } : {},
     failingTests: boundedUnique(checks.flatMap((check) => check.failingTests)),
     diagnostics: boundedUnique(checks.flatMap((check) => check.diagnostics)), checks };
+}
+
+/**
+ * Classify a terminal failure the way the event log records it: each failed check from the run its `runId`
+ * names, otherwise the operation's run of the command (or its last). `operation` and `history` are the
+ * operation as projected before the event and the operation's events, so a run's `testBodyRan` is available.
+ */
+export function classifyEvent(input: {
+  event: FailureEvent;
+  operation: Operation | null;
+  history: StoredEvent[];
+  paused: boolean;
+  held: boolean;
+}): ClassifiedFact {
+  const { event, operation, history, paused, held } = input;
+  const withBody = (entry: RunRecord & { testBodyRan?: boolean }) => {
+    const done = history.findLast((row) => row.event.type === "run_finished" && row.event.runId === entry.runId)?.event;
+    return { ...entry, ...(done?.type === "run_finished" ? { testBodyRan: done.testBodyRan } : {}) };
+  };
+  if (event.type === "failed" && event.failures?.length)
+    return classifyVerificationFailures(event, { paused, held }, event.failures.map((failure) => {
+      const found = failure.runId ? operation?.runs.find((entry) => entry.runId === failure.runId) : undefined;
+      return { failure, ...(found ? { run: withBody(found) } : {}) };
+    }));
+  const run = operation?.runs.findLast((entry) => event.type === "failed" && entry.command === event.command) ?? operation?.runs.at(-1);
+  return classifyFailure(event, { paused, held, ...(run ? { run: withBody(run) } : {}) });
 }

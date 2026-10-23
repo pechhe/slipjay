@@ -5,9 +5,11 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, TERMINAL_EVENT_TYPES } from "../../../src/lib/runner/runner-contract.ts";
-import type { Executor, RunnerConfig, StoredEvent, SubmitRequest } from "../../../src/lib/runner/runner-contract.ts";
+import type { Executor, OperationLogProjections, RunnerConfig, StoredEvent, SubmitRequest } from "../../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue, runnerLogOptions } from "../../../src/lib/runner/runner-queue.ts";
+import { classifyEvent } from "../../../src/lib/runner/failure-classification.ts";
+import { landingOutcome } from "../../../src/lib/landing/landing-outcome.ts";
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
 import { directExecutor, testExecutor } from "../../support/executor.ts";
 import { systemdTest as gateSystemdTest } from "./systemd-gate.ts";
@@ -102,7 +104,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false }: { process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean } = {}) {
+  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, projections = {} }: { process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -204,7 +206,7 @@ export async function fixture(migrations = false, release = false, deployments?:
   const config: RunnerConfig = { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {}, ...extraRepos },
     ...workers === undefined ? {} : { workers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } };
-  const log = openOperationLog(logPath, runnerLogOptions(config, executor));
+  const log = openOperationLog(logPath, runnerLogOptions(config, executor), { classify: classifyEvent, landingOutcome, ...projections });
   const unsubscribe = log.subscribe((event) => {
     if (event.event.type !== "submitted") published.push(event);
     const operation = log.operation(event.operationId);

@@ -1,6 +1,6 @@
 import type { AuditPolicy } from "../policy/audit-policy.ts";
 import { latestAuditSlot, nextAuditSlot } from "./audit-schedule.ts";
-import type { OperationLog } from "../runner/runner-contract.ts";
+import type { OperationLog } from "../runner/runner-types.ts";
 
 const MAX_TIMER_MS = 2 ** 31 - 1;
 

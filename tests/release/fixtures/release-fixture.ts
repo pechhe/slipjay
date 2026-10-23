@@ -2,7 +2,7 @@ import { releaseProject } from "../../support/release-project.ts";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { releaseIntegration } from "../../../src/lib/release/release.ts";
-import type { OperationEvent, VerificationOperation } from "../../../src/lib/runner/runner-contract.ts";
+import type { OperationEvent, VerificationOperation } from "../../../src/lib/runner/runner-types.ts";
 
 /** A promoting fixture that also declares production migrations, with a commit helper that writes straight to main. */
 export async function promotingProject() {

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { classifyFailure, classifyVerificationFailures, FAILURE_COMMAND_PATTERNS, FAILURE_RULE_VERSION, parseFailureOutput } from "../../src/lib/runner/failure-classification.ts";
-import { OWNER_KILL_REASON, type OperationEvent, type VerificationFailureRef } from "../../src/lib/runner/runner-contract.ts";
+import { OWNER_KILL_REASON } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationEvent, VerificationFailureRef } from "../../src/lib/runner/runner-types.ts";
 
 test("parses Vitest, Bun and node TAP failures as concrete test execution", () => {
   const vitest = parseFailureOutput([

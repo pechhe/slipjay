@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { recordClientFactsInBackground } from "../../src/lib/runner/runner-client.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { poolRefillLogPath } from "../../src/lib/workspace/workspace-paths.ts";
 
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
@@ -157,17 +158,57 @@ test("a recorder that cannot be launched leaves a line in the background-work lo
   await rm(poolRefillLogPath(), { force: true });
 });
 
-test("start rejects an unknown flag, a missing task and an invalid Issue number", async () => {
+test("start rejects an unknown flag, help, a missing task and an invalid Issue number", async () => {
   const f = await project();
   try {
-    for (const args of [["start", "--bogus", "task"], ["start"], ["start", "--json"], ["start", "--issue", "x"]]) {
+    for (const args of [["start", "--bogus", "task"], ["start"], ["start", "--json"], ["start", "--issue", "x"], ["start", "--help"], ["start", "-h"]]) {
       const run = await slipjay(f.repo, args);
       assert.equal(run.code, 2, args.join(" "));
       assert.match(run.stderr, /Usage: slipjay start/);
     }
+    assert.deepEqual(jj(f.repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean), ["default"], "no workspace was created");
+    assert.equal(await readFile(join(f.repo, "README.md"), "utf8"), "fixture\n");
   } finally {
     await f.dispose();
   }
+});
+
+test("a start from a session's own unused workspace is refused, naming attach-issue, and allocates nothing", async () => {
+  const f = await project();
+  try {
+    const session = await createWorkspace("session", f.repo);
+    const names = () => jj(f.repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
+    const before = names();
+    const started = await slipjay(session.workspacePath, ["start", "--integration", "--issue", "97", "Issue work"]);
+    assert.notEqual(started.code, 0);
+    assert.match(started.stderr, /slipjay attach-issue 97/);
+    assert.deepEqual(names(), before, "no second workspace");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("prune --plan --json prints the plan, and prune refuses unknown flags", async () => {
+  const f = await project();
+  try {
+    const idle = JSON.parse((await slipjay(f.repo, ["start", "--integration", "--json", "idle"])).stdout);
+    const planOf = (stdout: string) => Object.fromEntries((JSON.parse(stdout) as { name: string; action: string; reason: string }[]).map((entry) => [entry.name, entry]));
+    const automatic = await slipjay(f.repo, ["prune", "--plan", "--json"]);
+    assert.equal(automatic.code, 0, automatic.stderr);
+    assert.equal(planOf(automatic.stdout)[idle.workspaceName]?.reason, "assigned within the idle period");
+    const explicit = await slipjay(f.repo, ["prune", "--empty", "--plan", "--json"]);
+    assert.equal(planOf(explicit.stdout)[idle.workspaceName]?.action, "remove", "with --empty the plan is the explicit prune's");
+    assert.ok(existsSync(idle.workspacePath), "planning removes nothing");
+    assert.notEqual((await slipjay(f.repo, ["prune", "--json"])).code, 0);
+    assert.ok(jj(f.repo, ["workspace", "list", "-T", 'name ++ "\\n"']).includes(idle.workspaceName));
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("--version prints the installed release", async () => {
+  const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+  assert.equal((await slipjay(homedir(), ["--version"])).stdout.trim(), pkg.version);
 });
 
 test("remove deletes an untouched workspace by path and keeps one with unlanded work", async () => {

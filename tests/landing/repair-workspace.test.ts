@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { test } from "vite-plus/test";
 import { preflightRefusal, repairBrief, repairFailedLanding } from "../../src/lib/landing/repair-workspace.ts";
 import { landThroughRunner, manageRepairClaim, readLandingOutcome } from "../../src/lib/runner/runner-client.ts";
-import type { LandingOutcome } from "../../src/lib/runner/runner-contract.ts";
+import type { LandingOutcome } from "../../src/lib/runner/runner-types.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { listWorkspaces } from "../../src/lib/workspace/workspace-state.ts";
 import { jj, project } from "../support/workspace-project.ts";

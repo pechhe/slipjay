@@ -7,7 +7,7 @@ import { readSubmissionManifest, submissionSourceRef, submissionStorePath } from
 import type { RetainedSubmission } from "./submission-source.ts";
 import { jj } from "../infra/workspace-jj.ts";
 import { jjEnvironment, landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
-import type { Executor } from "../runner/runner-contract.ts";
+import type { Executor } from "../runner/runner-types.ts";
 
 export const SOURCE_BUNDLE_MAX_BYTES = 128 * 1024 * 1024;
 

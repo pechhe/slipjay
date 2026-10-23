@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { auditSummary, promotionRefusal } from "../../src/lib/release/audit-ledger.ts";
 import { AUDIT_INTERRUPTED_REASON, candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
-import type { AuditOperation, SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
+import type { AuditOperation, SubmitRequest } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue } from "../../src/lib/runner/runner-queue.ts";
 import { directExecutor } from "../support/executor.ts";

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { jjEnvironment, landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
 import { jj } from "../infra/workspace-jj.ts";
 import { repositoryKey } from "../runner/runner-contract.ts";
-import type { Executor, OperationEvent, SubmitRequest } from "../runner/runner-contract.ts";
+import type { Executor, OperationEvent, SubmitRequest } from "../runner/runner-types.ts";
 
 export type RetainedSubmission = Extract<OperationEvent, { type: "source_retained" }>;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");

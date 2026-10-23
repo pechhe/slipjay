@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest } from "../infra/bounded-process.ts";
-import type { CommandEvidence } from "./runner-contract.ts";
+import type { CommandEvidence } from "./runner-types.ts";
 
 const secretFlag = /^--?(?:token|secret|password|passwd|api[-_]?key|private[-_]?key|authorization|cookie|credential|access[-_]?token)(?:=(.*))?$/i;
 

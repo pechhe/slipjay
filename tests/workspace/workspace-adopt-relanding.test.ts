@@ -8,7 +8,7 @@ import { revisionFacts, workspaceContext } from "../../src/lib/infra/workspace-j
 import { workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { project } from "../support/workspace-project.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../../src/lib/landing/submission-adoptions.ts";
-import type { Operation } from "../../src/lib/runner/runner-contract.ts";
+import type { Operation } from "../../src/lib/runner/runner-types.ts";
 import { isolateAdoptionFixtures, handoffFor, contribution } from "./fixtures/workspace-adopt-fixture.ts";
 
 isolateAdoptionFixtures();

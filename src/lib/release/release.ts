@@ -23,7 +23,7 @@ import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencie
 import { jj, run, workspaceContext } from "../infra/workspace-jj.ts";
 
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { RunnerStage, VerificationOperation } from "../runner/runner-contract.ts";
+import type { RunnerStage, VerificationOperation } from "../runner/runner-types.ts";
 import type { VerificationDeclaration } from "../policy/verification-policy.ts";
 import type { WorkspaceCommandResult } from "../infra/workspace-command.ts";
 

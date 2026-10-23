@@ -1,10 +1,8 @@
 import { jj, project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { attachWorkspaceIssue } from "../../src/lib/workspace/workspace-state.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
@@ -12,8 +10,6 @@ import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
 import { lockPath } from "../../src/lib/workspace/workspace-state.ts";
 import { later, occupy } from "./fixtures/workspace-sweep-fixture.ts";
-
-const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
 
 const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean);
 
@@ -100,21 +96,3 @@ test("an explicit prune removes unused empty workspaces now but never an occupie
     await f.dispose();
   }
 }, 120_000);
-
-test("start with a flag prints usage and creates no workspace", async () => {
-  const f = await project();
-  try {
-    for (const flag of ["--help", "-h"]) {
-      const exit = await new Promise<{ code: number; stderr: string }>((resolveExit) => {
-        execFile("bun", [cli, "start", flag], { cwd: f.repo }, (error, _stdout, stderr) =>
-          resolveExit({ code: error ? Number((error as { code?: number }).code ?? 1) : 0, stderr }));
-      });
-      assert.equal(exit.code, 2);
-      assert.match(exit.stderr, /Usage: slipjay start/);
-    }
-    assert.deepEqual(names(f.repo), ["default"]);
-    assert.equal(await readFile(join(f.repo, "README.md"), "utf8"), "fixture\n");
-  } finally {
-    await f.dispose();
-  }
-});

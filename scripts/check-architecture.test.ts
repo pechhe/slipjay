@@ -50,6 +50,22 @@ test("reports imports outside the closure and import cycles", () => {
   }
 });
 
+test("the runner event store composes no projection its caller supplies", () => {
+  const root = fixture({
+    "src/lib/runner/runner-log.ts": 'import { landingOutcome } from "../landing/landing-outcome.ts";\nimport type { LandingOutcome } from "../landing/landing-outcome.ts";\nimport { classifyEvent } from "./failure-classification.ts";\n',
+    "src/lib/landing/landing-outcome.ts": "export type LandingOutcome = 1;\nexport const landingOutcome = 1;\n",
+    "src/lib/runner/failure-classification.ts": "export const classifyEvent = 1;\n",
+  });
+  try {
+    assert.deepEqual(architectureViolations(root).sort(), [
+      "store-imports-projection|src/lib/runner/runner-log.ts|src/lib/landing/landing-outcome.ts",
+      "store-imports-projection|src/lib/runner/runner-log.ts|src/lib/runner/failure-classification.ts",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("declared specifiers include every type-only form but not comments or strings", () => {
   const code = [
     "// import { gone } from \"./commented.ts\";",

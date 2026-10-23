@@ -4,7 +4,7 @@
 // line to the log when the runner could not take them. It is an executable
 // entry: nothing in src/lib imports it, and runner-client.ts spawns it.
 import { recordClientFacts } from "../lib/runner/runner-client.ts";
-import type { ClientFact } from "../lib/runner/runner-contract.ts";
+import type { ClientFact } from "../lib/runner/runner-types.ts";
 
 try {
   const [cwd, facts] = process.argv.slice(2);

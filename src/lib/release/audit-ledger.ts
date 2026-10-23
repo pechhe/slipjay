@@ -1,5 +1,5 @@
 import { repositoryKey, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
-import type { AuditCause, AuditOperation, PublishedLanding, StoredEvent } from "../runner/runner-contract.ts";
+import type { AuditCause, AuditOperation, PublishedLanding, StoredEvent } from "../runner/runner-types.ts";
 
 /**
  * What the ledger says about a repository's nightly audits: which commit was last audited green, whether the

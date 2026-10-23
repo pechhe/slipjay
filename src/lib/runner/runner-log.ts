@@ -1,12 +1,7 @@
-import { projectWatchOperation } from "./runner-watch-projection.ts";
-import { landingOutcome } from "../landing/landing-outcome.ts";
-import { classifyFailure, classifyVerificationFailures } from "./failure-classification.ts";
-import { deliveryState } from "../build/build-receipts.ts";
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { admissionLane, admits, awaitingReplacement, recoveryKey, repositoryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import { BUDGET_MIN_SAMPLES, BUDGET_WINDOW_MS, pipelineMetrics } from "./pipeline-metrics.ts";
-import type { AuditOperation, DeployOperation, LandingOperation, Operation, OperationEvent, OperationLog, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, HeldIntegrationState, VerificationOperation } from "./runner-contract.ts";
+import type { AuditOperation, DeployOperation, HeldIntegrationState, LandingOperation, Operation, OperationEvent, OperationLog, OperationLogProjections, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, VerificationOperation, WatchOperation } from "./runner-types.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -24,7 +19,13 @@ export type OperationLogOptions = {
   shortLandingP90Ms?: number;
 };
 
-export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, lane = (repo: string) => repo, depth = () => 1, shortLandingP90Ms }: OperationLogOptions = {}): OperationLog {
+/**
+ * Open the append-only ledger. `projections` are the interpretations its callers report: classification on
+ * append, a landing's outcome, snapshot watch timing, Build's delivery state and short-landing classes. The
+ * store imports none of them; a runner composes the ones it reports (see `runner-service`), and a caller that
+ * reads only the ledger gets the bare facts.
+ */
+export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, lane = (repo: string) => repo, depth = () => 1, shortLandingP90Ms }: OperationLogOptions = {}, projections: OperationLogProjections = {}): OperationLog {
   const db = new DatabaseSync(path);
   if (path !== ":memory:")
     db.exec("PRAGMA journal_mode = WAL");
@@ -90,7 +91,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     return row && event?.type === "paused" ? { by: event.by, at: row.at } : null;
   }
   const projectIds = (ids: string[]): Operation[] =>
-    ids.flatMap((id) => { const operation = project(id, events({ operationId: id })); return operation ? [operation] : []; });
+    ids.flatMap((id) => { const operation = project(id, events({ operationId: id }), projections); return operation ? [operation] : []; });
   // Lanes in submission order: each repository lane's landings with its resets, its release
   // lane, and deploys. Queued work names the lane's running operation, or what else holds
   // it: a release publishing in its repository lane, and a release and a reset of one
@@ -164,15 +165,13 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   const eventsSince = db.prepare("SELECT seq, operation_id, at, data FROM events WHERE at >= ? ORDER BY seq");
   let shortClasses: { at: number; short: Set<string> } | undefined;
   function shortRepository(repo: string): boolean {
-    if (shortLandingP90Ms === undefined) return false;
+    if (shortLandingP90Ms === undefined || !projections.shortRepositories) return false;
     const now = Date.now();
     if (!shortClasses || now - shortClasses.at > SHORT_CLASS_REFRESH_MS) {
       // The window counts landings submitted in it, so no earlier event bears on it.
-      const recent = (eventsSince.all(new Date(now - BUDGET_WINDOW_MS).toISOString()) as EventRow[]).map((row) => ({
+      const read = (since: Date): StoredEvent[] => (eventsSince.all(since.toISOString()) as EventRow[]).map((row) => ({
         seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
-      const verify = pipelineMetrics(recent, new Date(now).toISOString(), { now }).repositories;
-      shortClasses = { at: now, short: new Set(verify.filter((entry) => entry.verify && entry.verify.samples >= BUDGET_MIN_SAMPLES
-        && entry.verify.p90Ms <= shortLandingP90Ms).map((entry) => repositoryKey(entry.repo))) };
+      shortClasses = { at: now, short: new Set(projections.shortRepositories(read, new Date(now), shortLandingP90Ms)) };
     }
     return shortClasses.short.has(repositoryKey(repo));
   }
@@ -195,7 +194,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       .map((entry) => placed(entry, open));
   }
   function operation(id: string): Operation | null {
-    const projected = project(id, events({ operationId: id }));
+    const projected = project(id, events({ operationId: id }), projections);
     return projected ? placed(projected, queue()) : null;
   }
   const snapshotRows = db.prepare(`SELECT seq, operation_id, at, data FROM events WHERE operation_id IN (
@@ -238,21 +237,12 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         const history = events({ operationId });
         const current = operation(operationId);
         const context = { paused: paused() !== null, held: history.some((row) => row.event.type === "integrated" || row.event.type === "integration_held") };
-        const withBody = (entry: RunRecord) => {
-          const done = history.findLast((row) => row.event.type === "run_finished" && row.event.runId === entry.runId)?.event;
-          return { ...entry, ...(done?.type === "run_finished" ? { testBodyRan: done.testBodyRan } : {}) };
-        };
-        // Several failed checks classify one by one, each from the run its `runId` names; otherwise one run by command.
-        const classification = event.type === "failed" && event.failures?.length
-          ? classifyVerificationFailures(event, context, event.failures.map((failure) => {
-            const found = failure.runId ? current?.runs.find((entry) => entry.runId === failure.runId) : undefined;
-            return { failure, ...(found ? { run: withBody(found) } : {}) };
-          }))
-          : (() => {
-            const run = current?.runs.findLast((entry) => event.type === "failed" && entry.command === event.command) ?? current?.runs.at(-1);
-            return classifyFailure(event as Extract<OperationEvent, { type: "failed" | "declined" | "cancelled" | "superseded" }>, { ...context, ...(run ? { run: withBody(run) } : {}) });
-          })();
-        if (classification.cause === "gate" && current?.kind === "landing") {
+        // The caller's classifier derives the recorded cause from the event, its run context and the operation's history.
+        const classification = projections.classify?.({ event: event as Extract<OperationEvent, { type: "failed" | "declined" | "cancelled" | "superseded" }>,
+          operation: current, history, ...context });
+        // A gate failure on a base that moved since an earlier passing attempt of the same commit names that interaction:
+        // only this history knows it, so it stays with the store.
+        if (classification && classification.cause === "gate" && current?.kind === "landing") {
           const base = history.findLast((row) => row.event.type === "verification_base")?.event;
           for (const earlier of projectIds((changeIds.all(current.repo, current.changeId) as { operation_id: string }[]).map((row) => row.operation_id))) {
             if (earlier.id === operationId || earlier.submittedAt > current.submittedAt) continue;
@@ -265,7 +255,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
             }
           }
         }
-        append(operationId, classification);
+        if (classification) append(operationId, classification);
       }
       const at = new Date().toISOString();
       const data = JSON.stringify(event);
@@ -290,7 +280,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       try {
         const seq = Number((db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events").get() as { seq: number }).seq);
         const all = (snapshotRows.all() as EventRow[]).map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
-        const open = queue().map((op) => projectWatchOperation(op, all, now));
+        const open = queue().map((op) => projections.watch ? projections.watch(op, all, now) : unwatched(op));
         const repos = (db.prepare("SELECT DISTINCT json_extract(data, '$.repo') AS repo FROM events WHERE type = 'submitted'").all() as { repo: string }[]).map((row) => row.repo);
         return { version: 1, runner, seq, observedAt: now.toISOString(),
           lanes: { serial: open.filter((op) => op.kind !== "deploy"), deploy: open.filter((op) => op.kind === "deploy") },
@@ -298,7 +288,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
           recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10).map(withoutRuns),
           recentProductionDeploys: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'deploy' AND json_extract(data, '$.environment') = 'production' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is DeployOperation => op.kind === "deploy").map(withoutRuns),
           lastStagingDeploys: repos.flatMap((repo) => { const latest = projectIds((db.prepare(`SELECT e.operation_id FROM events e WHERE e.type = 'submitted' AND json_extract(e.data, '$.kind') = 'deploy' AND json_extract(e.data, '$.repo') = ? AND json_extract(e.data, '$.environment') = 'staging' AND EXISTS (SELECT 1 FROM events d WHERE d.operation_id = e.operation_id AND d.type IN ${terminalTypes}) ORDER BY e.seq DESC LIMIT 1`).all(repo) as { operation_id: string }[]).map((row) => row.operation_id)).find((op) => op.kind === "deploy"); return latest?.kind === "deploy" ? [withoutRuns(latest)] : []; }),
-          lastSuite: { status: "unavailable" }, build: deliveryState(log) };
+          lastSuite: { status: "unavailable" }, build: projections.deliveryState ? projections.deliveryState(log) : null };
       } finally { db.exec("COMMIT"); }
     },
     events,
@@ -335,7 +325,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     held,
     buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
       AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL) ORDER BY seq`).all() as { operation_id: string }[])
-      .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history);
+      .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history, projections);
         return operation?.kind === "landing" ? [{ operation, history }] : []; }),
     integrationSettlements: () => {
       const settlements = new Map<string, StoredEvent[]>();
@@ -352,6 +342,11 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   return log;
 }
 
+/** A snapshot lane for a log whose caller reports no watch timing: the operation as the ledger has it. */
+const unwatched = (operation: Operation): WatchOperation => ({ ...operation,
+  timing: { state: "unknown", medianMs: null, amberAfterMs: null, samples: 0, commandDeadlineAt: null },
+  kill: { allowed: false, reason: "This log reports no watch timing" } });
+
 /** A finished operation as the snapshot's history shows it: its result without its runs' evidence. */
 const withoutRuns = <T extends Operation>({ runs: _runs, ...rest }: T): Omit<T, "runs"> => rest;
 
@@ -359,7 +354,7 @@ const withoutRuns = <T extends Operation>({ runs: _runs, ...rest }: T): Omit<T, 
 export const label = (operation: Operation): string =>
   operation.kind === "landing" ? `landing ${operation.changeId.slice(0, 12)}` : `${operation.kind} ${operation.commitId.slice(0, 12)}`;
 
-function project(id: string, events: StoredEvent[]): Operation | null {
+function project(id: string, events: StoredEvent[], projections: OperationLogProjections): Operation | null {
   const submitted = events.find((stored) => stored.event.type === "submitted");
   if (!submitted || submitted.event.type !== "submitted")
     return null;
@@ -441,6 +436,6 @@ function project(id: string, events: StoredEvent[]): Operation | null {
         break;
     }
   }
-  if (operation.kind === "landing") operation.outcome = landingOutcome(operation, events);
+  if (operation.kind === "landing" && projections.landingOutcome) operation.outcome = projections.landingOutcome(operation, events);
   return operation;
 }

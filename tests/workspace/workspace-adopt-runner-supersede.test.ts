@@ -12,7 +12,7 @@ import { workspaceContext } from "../../src/lib/infra/workspace-jj.ts";
 import { frozenAdoptions, workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { project } from "../support/workspace-project.ts";
 import { waitForExit, withTestRunner } from "../support/test-runner.ts";
-import type { Operation } from "../../src/lib/runner/runner-contract.ts";
+import type { Operation } from "../../src/lib/runner/runner-types.ts";
 import { occupy } from "./fixtures/workspace-sweep-fixture.ts";
 import { isolateAdoptionFixtures, contribution } from "./fixtures/workspace-adopt-fixture.ts";
 

@@ -8,15 +8,17 @@ import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { candidateBookmark, OWNER_KILL_REASON } from "../../src/lib/runner/runner-contract.ts";
-import type { LandingOperation, LandingOutcome } from "../../src/lib/runner/runner-contract.ts";
+import type { LandingOperation, LandingOutcome } from "../../src/lib/runner/runner-types.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { readLandingOutcome } from "../../src/lib/runner/runner-client.ts";
-import { choreLandingNote } from "../../src/lib/landing/landing-outcome.ts";
+import { choreLandingNote } from "../../src/lib/landing/landing-note.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
+import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
 
 const source = "a".repeat(40), base = "b".repeat(40), candidate = "c".repeat(40), changeId = "k".repeat(32);
 function fixture(path = ":memory:") {
-  const log = openOperationLog(path);
+  const log = openOperationLog(path, {}, { classify: classifyEvent, landingOutcome });
   log.append("op_fixture", { type: "submitted", repo: "owner/repo", changeId, commitId: source, bookmark: candidateBookmark(changeId), submittedBy: "author" });
   return { log, append: (event: Parameters<typeof log.append>[1]) => log.append("op_fixture", event),
     outcome: () => (log.operation("op_fixture") as LandingOperation).outcome! };
@@ -146,7 +148,7 @@ test("API, client and actual CLI retrieve identical durable outcome after restar
   original.append({ type: "failed", stage: "verifying", reason: "fixture failure" });
   const expected = original.outcome();
   original.log.close();
-  const log = openOperationLog(path);
+  const log = openOperationLog(path, {}, { classify: classifyEvent, landingOutcome });
   let submissions = 0;
   const server = await serveRunner(createRunnerHandler({ log, token: "fixture-token", runnerName: "fixture", readLog: async () => "retained",
     onSubmitted: () => { submissions++; }, kill: () => ({ status: "idle" }), subscribe: log.subscribe }), { host: "127.0.0.1", port: 0 });
@@ -172,7 +174,7 @@ test("API, client and actual CLI retrieve identical durable outcome after restar
 /** A landing of one declared kind, published, in its own ledger: what `slipjay land`'s final output reads. */
 function publish(kind: "chore" | "spec") {
   const id = kind === "chore" ? "op_chore" : "op_spec";
-  const log = openOperationLog(":memory:");
+  const log = openOperationLog(":memory:", {}, { classify: classifyEvent, landingOutcome });
   log.append(id, kind === "chore"
     ? { type: "submitted", repo: "owner/repo", changeId, commitId: source, bookmark: candidateBookmark(changeId), submittedBy: "author",
         chore: { title: "Tidy the readme", helperRevisions: [] } }

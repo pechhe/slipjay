@@ -1,5 +1,6 @@
 import { START_STEPS, type StartStep } from "../workspace/start-steps.ts";
-import { isLandingSubmission, repositoryKey, RUNNER_CONTROL_ID, type CauseClass, type Operation, type RunnerStage, type StoredEvent } from "./runner-contract.ts";
+import { isLandingSubmission, repositoryKey, RUNNER_CONTROL_ID } from "./runner-contract.ts";
+import type { CauseClass, Operation, RunnerStage, StoredEvent } from "./runner-types.ts";
 import type { TimeBudgets } from "../policy/execution-policy.ts";
 import { auditSummariesFromEvents, type AuditSummary } from "../release/audit-ledger.ts";
 
@@ -440,4 +441,15 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
   lines.push(`Held integrations: ${metrics.held.length ? metrics.held.map((entry) => `${entry.repo}/${entry.commitId} retries ${entry.retries}, ${entry.durationMs}ms, ${entry.published ? "published" : "unpublished"}`).join("; ") : "none"}`);
   lines.push(`Workspace starts: ${metrics.workspaceStarts.length ? metrics.workspaceStarts.map((entry) => `${entry.repo} on ${entry.machine} ${entry.starts} starts, ${entry.poolHits} from the pool, claim median ${Math.round(entry.claim.medianMs)}ms, p90 ${Math.round(entry.claim.p90Ms)}ms, median ${entry.medianSpares} spares at start${Object.keys(entry.steps).length ? ` (step medians: ${Object.entries(entry.steps).map(([step, ms]) => `${step} ${Math.round(ms)}ms`).join(", ")})` : ""}`).join("; ") : "none"}`);
   return lines.join("\n");
+}
+
+/**
+ * The repositories whose landings are short: their verify-stage p90 over the budget window, read through
+ * `read(since)`, is at or below `p90Ms` from at least `BUDGET_MIN_SAMPLES` samples. Keyed as `repositoryKey`.
+ */
+export function shortRepositories(read: (since: Date) => StoredEvent[], now: Date, p90Ms: number): ReadonlySet<string> {
+  const since = new Date(now.getTime() - BUDGET_WINDOW_MS);
+  const repositories = pipelineMetrics(read(since), since.toISOString(), { now: now.getTime() }).repositories;
+  return new Set(repositories.filter((entry) => entry.verify && entry.verify.samples >= BUDGET_MIN_SAMPLES && entry.verify.p90Ms <= p90Ms)
+    .map((entry) => repositoryKey(entry.repo)));
 }

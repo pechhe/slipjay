@@ -5,9 +5,14 @@ import { tmpdir } from "node:os";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
+import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { repairAdmission, repairAuthority } from "../../src/lib/landing/repair-claim.ts";
-import type { OperationLog, SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationLog, SubmitRequest } from "../../src/lib/runner/runner-types.ts";
+
+/** The ledger as the runner composes it: repair reads a landing's outcome and the classifications behind it. */
+const openLog = (path = ":memory:") => openOperationLog(path, {}, { classify: classifyEvent, landingOutcome });
 
 const changeId = "k".repeat(32), source = "a".repeat(40), token = "b".repeat(64);
 function failed(log: OperationLog, id = "op_failed") {
@@ -28,7 +33,7 @@ const submission = (): SubmitRequest => ({ repo: "owner/repo", changeId, commitI
 
 test("repair claim survives restart, rejects double claimant and stale author, and links one new attempt", async () => {
   const dir = await mkdtemp(join(tmpdir(), "repair-claim-"));
-  let log = openOperationLog(join(dir, "ledger.sqlite"));
+  let log = openLog(join(dir, "ledger.sqlite"));
   try {
     failed(log);
     let h = handler(log);
@@ -38,7 +43,7 @@ test("repair claim survives restart, rejects double claimant and stale author, a
     assert.equal(JSON.stringify(body).includes(token), false);
     assert.equal((await call(h, "operations/op_failed/repair", { ...claim, token: "f".repeat(64) })).status, 409);
     assert.equal((await call(h, "operations", submission())).status, 409);
-    log.close(); log = openOperationLog(join(dir, "ledger.sqlite")); h = handler(log);
+    log.close(); log = openLog(join(dir, "ledger.sqlite")); h = handler(log);
     assert.equal((await (await call(h, "operations/op_failed/repair", claim)).json() as typeof body).claim.claimId, body.claim.claimId);
     const repair = { operationId: "op_failed", claimId: body.claim.claimId, token };
     const submitted = await call(h, "operations", { ...submission(), repair });
@@ -58,7 +63,7 @@ test("repair claim survives restart, rejects double claimant and stale author, a
 });
 
 test("repair admission rechecks a claim revoked during retained-source capture", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   let capturing!: () => void, finish!: () => void;
   const started = new Promise<void>((resolve) => { capturing = resolve; });
   const waiting = new Promise<void>((resolve) => { finish = resolve; });
@@ -76,7 +81,7 @@ test("repair admission rechecks a claim revoked during retained-source capture",
 });
 
 test("repository casing preserves repair authority, retained admission and request identity", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const captured: SubmitRequest[] = [];
   const h = handler(log, { retainSubmission: async (_id, request) => {
     captured.push(request);
@@ -114,7 +119,7 @@ test("repository casing preserves repair authority, retained admission and reque
 
 test("held, published, killed, migration and paused histories never grant a coding repair claim", async () => {
   for (const mode of ["held", "published", "killed", "migration", "paused"] as const) {
-    const log = openOperationLog(":memory:");
+    const log = openLog(":memory:");
     try {
       failed(log);
       if (mode === "held") log.append("op_failed", { type: "publication_intent", attempt: 1, base: "d".repeat(40), candidate: source });
@@ -140,7 +145,7 @@ function failedWithChecks(log: OperationLog, id: string, checks: { runId: string
 }
 
 test("repair eligibility follows the combined cause of every failed check", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   try {
     failedWithChecks(log, "op_mixed", [
       { runId: "a", command: "bun run check:slow", timedOut: true, testBodyRan: false },
@@ -148,7 +153,7 @@ test("repair eligibility follows the combined cause of every failed check", asyn
     ]);
     assert.equal((await call(handler(log), "operations/op_mixed/repair", claim)).status, 200);
   } finally { log.close(); }
-  const timeoutOnly = openOperationLog(":memory:");
+  const timeoutOnly = openLog(":memory:");
   try {
     failedWithChecks(timeoutOnly, "op_timeout", [{ runId: "a", command: "bun run check:slow", timedOut: true, testBodyRan: false }]);
     assert.equal((await call(handler(timeoutOnly), "operations/op_timeout/repair", claim)).status, 409);

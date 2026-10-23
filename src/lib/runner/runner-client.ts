@@ -20,8 +20,9 @@ import { promotionRefusal } from "../release/audit-ledger.ts";
 import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
-import { candidateBookmark, RUNNER_DEFAULT_PORT, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest } from "./runner-contract.ts";
+import { candidateBookmark, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { RUNNER_DEFAULT_PORT } from "./runner-env.ts";
+import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest } from "./runner-types.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
@@ -33,7 +34,7 @@ import { callerPids } from "../workspace/workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../workspace/workspace-finalization.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../landing/submission-adoptions.ts";
-import { choreLandingNote } from "../landing/landing-outcome.ts";
+import { choreLandingNote } from "../landing/landing-note.ts";
 
 type PendingRunnerFact = {
   id: string; fact: Extract<ClientFact, { kind: "ssh_forward_failure" }>;
@@ -446,7 +447,7 @@ export async function readRunArtifact(location: string, operationId: string, run
     let offset = 0, sha256: string | undefined, size: number | undefined;
     for (let page = 0; page < 17; page++) {
       const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/artifacts/${encodeURIComponent(runId)}?offset=${offset}&limit=16384`, { signal: AbortSignal.timeout(15_000) });
-      const chunk = await response.json() as import("./runner-contract.ts").ArtifactChunk;
+      const chunk = await response.json() as import("./runner-types.ts").ArtifactChunk;
       if (chunk.version !== 1 || chunk.operationId !== operationId || chunk.runId !== runId || chunk.offset !== offset
         || !/^[a-f0-9]{64}$/.test(chunk.sha256) || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > 256 * 1024
         || (sha256 !== undefined && (chunk.sha256 !== sha256 || chunk.bytes !== size)) || typeof chunk.dataBase64 !== "string" || chunk.dataBase64.length > 21848)
@@ -467,13 +468,13 @@ export async function readRunArtifact(location: string, operationId: string, run
 }
 
 /** Read evidence without following, resubmitting, or claiming repair authority. */
-export async function readLandingOutcome(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<import("./runner-contract.ts").LandingOutcome> {
+export async function readLandingOutcome(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<import("./runner-types.ts").LandingOutcome> {
   const token = await runnerToken(env);
   const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
   try {
     const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`);
     if (!response.ok) throw new Error(`Runner outcome unavailable (${response.status}); no submission or repair was attempted`);
-    const body = await response.json() as { outcome: import("./runner-contract.ts").LandingOutcome };
+    const body = await response.json() as { outcome: import("./runner-types.ts").LandingOutcome };
     if (body.outcome?.version !== 1 || body.outcome.operationId !== operationId) throw new Error("Runner returned an unsupported or mismatched landing outcome");
     return body.outcome;
   } finally { connection.close(); }
@@ -500,7 +501,7 @@ export async function manageRepairClaim(cwd: string, location: string, operation
   const key = createHash("sha256").update(JSON.stringify([binding, repo.toLowerCase(), operationId])).digest("hex");
   try {
     const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`);
-    const result = await response.json() as { outcome?: import("./runner-contract.ts").LandingOutcome };
+    const result = await response.json() as { outcome?: import("./runner-types.ts").LandingOutcome };
     if (result.outcome?.repo.toLowerCase() !== repo.toLowerCase() || result.outcome.operationId !== operationId) throw new Error("Repair operation does not belong to this workspace repository");
     const changeId = result.outcome.changeId;
     const saved = await withWorkspaceTransaction(`writer:${context.current.name}`, async () => {
@@ -567,7 +568,7 @@ export async function downloadSubmissionSource(location: string, operationId: st
   try {
     if (await lstat(destination).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return false; throw error; }))
       throw new Error("EEXIST: recovery destination already exists");
-    const expected = await (await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`, { signal: AbortSignal.timeout(15000) })).json() as { outcome?: import("./runner-contract.ts").LandingOutcome };
+    const expected = await (await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/outcome`, { signal: AbortSignal.timeout(15000) })).json() as { outcome?: import("./runner-types.ts").LandingOutcome };
     const source = expected.outcome?.sourceCommitId;
     if (!source || !/^[a-f0-9]{40}$/.test(source) || expected.outcome?.operationId !== operationId || expected.outcome.sourceRetention?.commitId !== source)
       throw new Error("Operation has no exact retained source acknowledgement");
@@ -1345,7 +1346,7 @@ export async function watchThroughRunner(
       return {
         close: connection.close,
         snapshot: async (abort) =>
-          (await request(connection.baseUrl, credential, "/v1/queue", { signal: AbortSignal.any([abort, AbortSignal.timeout(15_000)]) })).json() as Promise<import("./runner-contract.ts").QueueSnapshot>,
+          (await request(connection.baseUrl, credential, "/v1/queue", { signal: AbortSignal.any([abort, AbortSignal.timeout(15_000)]) })).json() as Promise<import("./runner-types.ts").QueueSnapshot>,
         async stream(cursor, abort) {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 15_000);

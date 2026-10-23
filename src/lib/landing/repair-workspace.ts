@@ -10,7 +10,7 @@ import { commitIssue, githubRepository } from "../build/issue-references.ts";
 import { publicationRemote } from "./landing-steps.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { downloadSubmissionSource, manageRepairClaim, readBuildThroughRunner, readLandingHandoff, readLandingOutcome, readRepairState, RunnerRequestRefused } from "../runner/runner-client.ts";
-import type { LandingOutcome } from "../runner/runner-contract.ts";
+import type { LandingOutcome } from "../runner/runner-types.ts";
 import { importSourceBundle } from "./submission-source-export.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { isBuildBinding } from "./submission-handoff.ts";

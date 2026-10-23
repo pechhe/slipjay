@@ -6,7 +6,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "../infra/bounded-process.ts";
 import { RUNNER_DEFAULT_LIMITS, RUNNER_SLICE, SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
-import type { Executor, RunnerLimits } from "./runner-contract.ts";
+import type { Executor, RunnerLimits } from "./runner-types.ts";
 
 /** Where a runner keeps commands and their budget: see `localExecutor`. */
 export type LocalExecutorOptions = {

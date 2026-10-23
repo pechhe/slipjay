@@ -17,6 +17,18 @@ export const RUNTIME_PACKAGES = new Set(["effect", "proper-lockfile"]);
 /** The executable area: CLI, client-facts recorder, spare refill and housekeeping entries. Library code must not import it. */
 export const EXECUTABLE_AREA = "src/launcher/";
 
+/**
+ * The runner's event store records and reads events; the interpretations above it (classification, a landing's
+ * outcome, the watch projection, Build's delivery state, short-landing classes) are composed by its caller
+ * (`runner-service`, through `OperationLogProjections`). The store must not import one at runtime, or every test
+ * that reads the ledger inherits it again.
+ */
+export const RUNNER_EVENT_STORE = "src/lib/runner/runner-log.ts";
+export const RUNNER_PROJECTIONS = new Set([
+  "src/lib/runner/pipeline-metrics.ts", "src/lib/runner/failure-classification.ts", "src/lib/runner/runner-watch-projection.ts",
+  "src/lib/landing/landing-outcome.ts", "src/lib/build/build-receipts.ts",
+]);
+
 const transpiler = new Bun.Transpiler({ loader: "ts" });
 
 /** Runtime import specifiers of a module's source: static and literal dynamic, without type-only imports. */
@@ -101,7 +113,10 @@ export function architectureViolations(root = ROOT): string[] {
         const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
         if (!known.has(target)) violations.push(`external-import|${file}|${specifier}`);
         else {
-          if (runtime.has(specifier)) edges.get(file)!.add(target);
+          if (runtime.has(specifier)) {
+            if (file === RUNNER_EVENT_STORE && RUNNER_PROJECTIONS.has(target)) violations.push(`store-imports-projection|${file}|${target}`);
+            edges.get(file)!.add(target);
+          }
           if (target.startsWith(EXECUTABLE_AREA) && !file.startsWith(EXECUTABLE_AREA)) violations.push(`library-imports-executable|${file}|${target}`);
         }
       } else if (!builtin(specifier) && !RUNTIME_PACKAGES.has(packageName(specifier))) {
@@ -117,5 +132,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const violations = architectureViolations();
   for (const violation of violations) console.error(violation);
   if (violations.length) process.exitCode = 1;
-  else console.log("check:architecture: the src/ closure is self-contained, library code does not import executables, and the runtime graph is acyclic");
+  else console.log("check:architecture: the src/ closure is self-contained, library code does not import executables, the runner event store composes no projection, and the runtime graph is acyclic");
 }

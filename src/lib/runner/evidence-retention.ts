@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { repairAuthority } from "../landing/repair-claim.ts";
 import { submissionStorePath } from "../landing/submission-source.ts";
 import { landingCommandEnvironment } from "../infra/workspace-command.ts";
-import type { Executor, LandingOperation, OperationLog } from "./runner-contract.ts";
+import type { Executor, LandingOperation, OperationLog } from "./runner-types.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** After its logical change published, an attempt's evidence explains history only. */

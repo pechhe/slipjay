@@ -5,7 +5,7 @@ import { withFinalizationSource } from "./post-integration-source.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { DeploymentEnvironment } from "../policy/deployment-policy.ts";
 import type { FinalizationCommand } from "../policy/post-integration-policy.ts";
-import type { DeployMigrations, DeployProjectOutcome, DeployRecord } from "../runner/runner-contract.ts";
+import type { DeployMigrations, DeployProjectOutcome, DeployRecord } from "../runner/runner-types.ts";
 import { firstError, outputLines } from "../infra/verification-failure.ts";
 
 /** How many commits a deploy record lists; a longer range says how many it left out. */

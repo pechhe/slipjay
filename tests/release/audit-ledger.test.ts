@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { AUDIT_OVERDUE_AFTER_MS, auditSummariesFromEvents, auditSummary, auditToExplain, promotionRefusal, resolveCulprits } from "../../src/lib/release/audit-ledger.ts";
 import { AUDIT_INTERRUPTED_REASON } from "../../src/lib/runner/runner-contract.ts";
-import type { AuditCause } from "../../src/lib/runner/runner-contract.ts";
+import type { AuditCause } from "../../src/lib/runner/runner-types.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 
 const REPO = "owner/repo";

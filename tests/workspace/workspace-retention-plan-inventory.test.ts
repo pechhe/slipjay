@@ -1,6 +1,6 @@
-import { jj, project } from "../support/workspace-project.ts";
+import { project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -11,7 +11,7 @@ import { planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/l
 import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { lockPath, metadataPath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
-import { cli, later, byName, landed } from "./fixtures/workspace-retention-plan-fixture.ts";
+import { later, byName, landed } from "./fixtures/workspace-retention-plan-fixture.ts";
 
 /** A process working inside `cwd` until disposed, as a live session would be. */
 function occupy(cwd: string) {
@@ -106,24 +106,3 @@ test("the plan explains every workspace, changes nothing, and the sweep then doe
     await f.dispose();
   }
 }, 240_000);
-
-test("prune --plan --json prints the plan, and prune refuses unknown flags", async () => {
-  const f = await project();
-  try {
-    const idle = await createWorkspace("idle", f.repo);
-    const runCli = (args: string[]) => new Promise<{ code: number; stdout: string; stderr: string }>((resolveRun) => {
-      execFile("bun", [cli, ...args], { cwd: f.repo }, (error, stdout, stderr) =>
-        resolveRun({ code: error ? Number((error as { code?: number }).code ?? 1) : 0, stdout, stderr }));
-    });
-    const automatic = await runCli(["prune", "--plan", "--json"]);
-    assert.equal(automatic.code, 0, automatic.stderr);
-    assert.equal(byName(JSON.parse(automatic.stdout))[idle.current.name]?.reason, "assigned within the idle period");
-    const explicit = await runCli(["prune", "--empty", "--plan", "--json"]);
-    assert.equal(byName(JSON.parse(explicit.stdout))[idle.current.name]?.action, "remove", "with --empty the plan is the explicit prune's");
-    assert.ok(existsSync(idle.workspacePath), "planning removes nothing");
-    assert.notEqual((await runCli(["prune", "--json"])).code, 0);
-    assert.ok(jj(f.repo, ["workspace", "list", "-T", 'name ++ "\\n"']).includes(idle.current.name));
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);

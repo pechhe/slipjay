@@ -3,7 +3,7 @@ import { test } from "vite-plus/test";
 import { watchCursor, watchRunner, WATCH_REPLAY_LIMIT, type WatchEnvelope } from "../../src/lib/runner/runner-watch.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
-import type { QueueSnapshot, StoredEvent } from "../../src/lib/runner/runner-contract.ts";
+import type { QueueSnapshot, StoredEvent } from "../../src/lib/runner/runner-types.ts";
 
 test("watch cursor accepts only non-negative safe integers", () => {
   assert.equal(watchCursor(undefined), undefined);

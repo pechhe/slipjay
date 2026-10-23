@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "vite-plus/test";
 import { confirmRelease, verifyRelease } from "../../src/lib/release/release.ts";
-import type { OperationEvent, VerificationOperation } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationEvent, VerificationOperation } from "../../src/lib/runner/runner-types.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { promotingProject, verificationOf } from "./fixtures/release-fixture.ts";
 

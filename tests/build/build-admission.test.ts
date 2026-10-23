@@ -6,7 +6,7 @@ import { buildAdmitter, buildRoute } from "../../src/lib/build/build-admission.t
 import type { BuildAdmission, BuildAdmissionRequest } from "../../src/lib/build/build-admission.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { candidateBookmark, RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
-import type { Operation, SubmitRequest } from "../../src/lib/runner/runner-contract.ts";
+import type { Operation, SubmitRequest } from "../../src/lib/runner/runner-types.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import type { BuildBinding, SubmissionHandoff } from "../../src/lib/landing/submission-handoff.ts";
 

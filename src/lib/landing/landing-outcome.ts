@@ -1,4 +1,5 @@
-import { isLandingSubmission, type LandingOperation, type LandingOutcome, type StoredEvent } from "../runner/runner-contract.ts";
+import { isLandingSubmission } from "../runner/runner-contract.ts";
+import type { LandingOperation, LandingOutcome, StoredEvent } from "../runner/runner-types.ts";
 import { owedReceipts, receiptSettlement } from "../build/build-receipts.ts";
 
 /** Pure operation-local history: publication elsewhere is never inferred from age or a failed push. */
@@ -72,16 +73,4 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     ...(attempt ? { attempt } : {}), publication, ...(failure ? { failure } : {}), ...(classification ? { classification } : {}), runs,
     evidence: { coverage: "partial", gaps, logCommand: `slipjay runner log ${operation.id}`, logPath: `/v1/operations/${encodeURIComponent(operation.id)}/log` },
     recovery: { kind: recovery, automaticRetry: false }, ...build ? { build } : {} };
-}
-
-/**
- * What `slipjay land` says after a landing Build records as a chore, and nothing for a landing under a Spec. The chore
- * belongs to no Spec, so attaching it is the author's decision, made with Build's own action: `land` prints no more than that.
- */
-export function choreLandingNote(build: LandingOutcome["build"], landedCommitId: string, operationId: string): string | null {
-  if (build?.admission !== "unassociated") return null;
-  const revision = landedCommitId.slice(0, 12);
-  return build.chore
-    ? `landed ${revision} as a chore: Build #${build.chore.number} is in no Spec; attach it with hq_forge_associate_landing`
-    : `landed ${revision} as a chore, in no Spec; attach it with hq_forge_associate_landing (Build has not recorded the chore's number yet: slipjay runner outcome ${operationId} shows it once it has)`;
 }

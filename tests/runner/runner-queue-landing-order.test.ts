@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { StoredEvent } from "../../src/lib/runner/runner-contract.ts";
+import type { StoredEvent } from "../../src/lib/runner/runner-types.ts";
 import { gate, command, test, jj, fixture } from "./fixtures/runner-queue-fixture.ts";
 
 test("queued candidates land in arrival order on the previous candidate, with runner gate records and streamed logs", async () => {

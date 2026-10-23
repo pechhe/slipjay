@@ -4,7 +4,7 @@ import { promotionRefusal } from "../../src/lib/release/audit-ledger.ts";
 import type { AuditSummary } from "../../src/lib/release/audit-ledger.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
-import type { AuditOperation } from "../../src/lib/runner/runner-contract.ts";
+import type { AuditOperation } from "../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 

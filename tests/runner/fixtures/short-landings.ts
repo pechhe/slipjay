@@ -1,8 +1,9 @@
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { OperationLog } from "../../../src/lib/runner/runner-contract.ts";
+import type { OperationLog } from "../../../src/lib/runner/runner-types.ts";
 import { newOperationId } from "../../../src/lib/runner/runner-log.ts";
 import { fixture, until } from "./runner-queue-fixture.ts";
+import { shortRepositories } from "../../../src/lib/runner/pipeline-metrics.ts";
 
 /** What the short-landing queue tests share: ledger samples that make a repository short or long, and a queue whose gates hold on demand. */
 
@@ -40,7 +41,7 @@ for (const file of fs.readdirSync(".").filter((name) => name.startsWith("hold-")
 }`;
 
 export async function queueFixture(options: Parameters<typeof fixture>[4] = {}, releases = false, reset = false) {
-  const f = await fixture(false, releases, undefined, reset, { other: true, extra: ["Fixture/C", "Fixture/D", "Fixture/E"], prefixGate: holdGate, ...options });
+  const f = await fixture(false, releases, undefined, reset, { other: true, extra: ["Fixture/C", "Fixture/D", "Fixture/E"], prefixGate: holdGate, ...options, projections: { shortRepositories } });
   const authorOf = (repo: string) => repo === "fixture/repo" ? f.author : repo === "fixture/other" ? f.otherAuthor : f.authors[`Fixture/${repo.slice(8).toUpperCase()}`]!;
   /** Submit a landing of `repo` whose gate holds until `release(name)`. */
   async function held(repo: string, name: string): Promise<string> {

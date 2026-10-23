@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { bunStoreDamage, prepareWorkspaceDependencies } from "../../src/lib/workspace/workspace-dependencies.ts";
 import { jj, project } from "../support/workspace-project.ts";
@@ -57,10 +55,4 @@ test("preparing dependencies refuses a damaged store with the repair hint instea
   try {
     await assert.rejects(prepareWorkspaceDependencies(f.repo, { quiet: true, env: f.env }), /global package store is damaged[\s\S]*declared-dep/);
   } finally { await f.dispose(); }
-});
-
-test("--version prints the installed release", () => {
-  const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
-  const pkg = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
-  assert.equal(execFileSync("bun", [cli, "--version"], { encoding: "utf8" }).trim(), pkg.version);
 });

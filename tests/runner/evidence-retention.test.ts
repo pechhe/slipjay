@@ -8,9 +8,10 @@ import { retainCommandArtifact } from "../../src/lib/runner/command-artifact.ts"
 import { expiredEvidence, pruneRetainedEvidence } from "../../src/lib/runner/evidence-retention.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { retainSubmissionSource, submissionStorePath } from "../../src/lib/landing/submission-source.ts";
-import type { OperationLog } from "../../src/lib/runner/runner-contract.ts";
+import type { OperationLog } from "../../src/lib/runner/runner-types.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { directExecutor } from "../support/executor.ts";
 
@@ -43,7 +44,7 @@ test("retained evidence expires on its documented schedule, leaves ledger record
   const base = await project();
   const f = { ...base, home: join(base.root, "runner") };
   await mkdir(f.home);
-  const log = openOperationLog(join(f.home, "operations.sqlite"));
+  const log = openOperationLog(join(f.home, "operations.sqlite"), {}, { landingOutcome });
   try {
     const failed = await failedAttempt(log, "op_failed", f);
     assert.deepEqual(expiredEvidence(log, later(29)), [], "an unadopted failure keeps its evidence for 30 days");
@@ -82,7 +83,7 @@ test("once a logical change published, every attempt's evidence expires after 14
   const base = await project();
   const f = { ...base, home: join(base.root, "runner") };
   await mkdir(f.home);
-  const log = openOperationLog(join(f.home, "operations.sqlite"));
+  const log = openOperationLog(join(f.home, "operations.sqlite"), {}, { landingOutcome });
   try {
     const failed = await failedAttempt(log, "op_first", f);
     log.append("op_landed", { type: "submitted", repo: "owner/repo", changeId: failed.changeId, commitId: failed.commitId, bookmark: failed.bookmark, submittedBy: "fixture" });
@@ -96,7 +97,7 @@ test("a repair claim admitted during a retention pass keeps its evidence, and a 
   const base = await project();
   const f = { ...base, home: join(base.root, "runner") };
   await mkdir(f.home);
-  const log = openOperationLog(join(f.home, "operations.sqlite"));
+  const log = openOperationLog(join(f.home, "operations.sqlite"), {}, { landingOutcome });
   try {
     await failedAttempt(log, "op_first", f);
     jj(f.repo, ["new", "main"]);

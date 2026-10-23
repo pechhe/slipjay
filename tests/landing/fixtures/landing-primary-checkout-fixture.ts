@@ -1,10 +1,8 @@
 import { jj, project } from "../../support/workspace-project.ts";
 import { landThroughTestRunner } from "../../support/test-runner.ts";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createWorkspace } from "../../../src/lib/workspace/workspace-create.ts";
 import { readLandingState } from "../../../src/lib/workspace/workspace-state.ts";
 import type { PrimaryCheckoutOutcome } from "../../../src/lib/landing/landing-candidate.ts";
@@ -13,9 +11,6 @@ import type { PrimaryCheckoutOutcome } from "../../../src/lib/landing/landing-ca
 // moves that checkout onto integrated ancestry, carrying uncommitted edits that apply cleanly.
 
 type Fixture = Awaited<ReturnType<typeof project>>;
-const cli = fileURLToPath(new URL("../../../src/launcher/workspace.ts", import.meta.url));
-export const status = (cwd: string) => new Promise<Record<string, unknown>>((resolveStatus, reject) =>
-  execFile("bun", [cli, "status"], { cwd }, (error, stdout) => error ? reject(error) : resolveStatus(JSON.parse(stdout))));
 
 export const primary = (f: Fixture) => ({
   change: jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "change_id"]),

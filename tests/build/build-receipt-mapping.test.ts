@@ -4,8 +4,14 @@ import type { BuildAdmissionRecord, BuildRoute } from "../../src/lib/build/build
 import { createReceiptDrain, owedReceipts } from "../../src/lib/build/build-receipts.ts";
 import type { BuildReceipt, BuildReceiptInput, BuildRunInput } from "../../src/lib/build/build-receipts.ts";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent, OperationLog } from "../../src/lib/runner/runner-contract.ts";
+import type { LandingOperation, OperationEvent, OperationLog } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { deliveryState } from "../../src/lib/build/build-receipts.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
+import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
+
+/** The ledger as the runner composes it: receipts read outcomes and their classifications, and the snapshot reports delivery. */
+const openLog = (path = ":memory:") => openOperationLog(path, {}, { classify: classifyEvent, landingOutcome, deliveryState });
 
 const spec = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
 const tickets = ["11111111-2222-4333-8444-555555555555", "66666666-7777-4888-9999-aaaaaaaaaaaa"];
@@ -32,7 +38,7 @@ const tuple = (input: BuildReceiptInput) => [input.repository, input.operationId
   input.candidateRevision, input.bindGeneration, input.helperRevisions, input.repairsOperationId];
 
 test("held, unknown publication and its later confirmation keep one source tuple, and the confirmation is not lost behind the failure", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const id = operation(log, { admission: record() }, [
     { type: "stage", stage: "verifying" }, { type: "verification_base", base: "b".repeat(40), candidate: "c".repeat(40) },
     ...run("gate", "vp test", {}), { type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
@@ -55,7 +61,7 @@ test("held, unknown publication and its later confirmation keep one source tuple
 });
 
 test("a settings landing that skipped its checks is published without a verified revision", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const base = "b".repeat(40), candidate = "c".repeat(40);
   const id = operation(log, { admission: record() }, [
     { type: "verification_base", base, candidate },
@@ -86,7 +92,7 @@ test("a settings landing that skipped its checks is published without a verified
 });
 
 test("a confirmation counts only in the integration's own repository, and only once it follows the failure", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const unknown: OperationEvent[] = [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
     { type: "integrated", base: "b".repeat(40), commitId: "d".repeat(40) }, { type: "failed", stage: "publishing", reason: "Integration publication failed" }];
   // A fork holding the same commit, and an earlier confirmation in this repository, say nothing about this failure.
@@ -103,7 +109,7 @@ test("a confirmation counts only in the integration's own repository, and only o
 });
 
 test("a declared chore whose publication was unknown is reported once its repository confirms it", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const chore = operation(log, { chore: { title: "Bump dependencies", helperRevisions: [] } }, [
     { type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
     { type: "integrated", base: "b".repeat(40), commitId: "d".repeat(40) }, { type: "failed", stage: "publishing", reason: "Integration publication failed" }]);
@@ -121,7 +127,7 @@ test("a declared chore whose publication was unknown is reported once its reposi
 });
 
 test("cancel, kill, supersede, policy refusal and infrastructure failures each name how they recover", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const recovery = (events: OperationEvent[]) => attempts(owed(log, operation(log, { admission: record() }, events)))[0]!.failure!.recovery;
   assert.equal(recovery([{ type: "cancelled", reason: "owner cancelled" }]), "cancelled");
   assert.equal(recovery([{ type: "superseded", by: "op_next" }]), "superseded");
@@ -136,7 +142,7 @@ test("cancel, kill, supersede, policy refusal and infrastructure failures each n
 });
 
 test("commands are reported as named runs with their real outcome, never as test counts, once their attempt fact exists", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const id = operation(log, { admission: record() }, [
     { type: "stage", stage: "verifying" }, { type: "verification_base", base: "b".repeat(40), candidate: "c".repeat(40) },
     ...run("lint", "vp check", {}), ...run("gate", "vp test", { exitCode: 1, failingTests: ["adds numbers"] }),
@@ -158,7 +164,7 @@ test("commands are reported as named runs with their real outcome, never as test
 });
 
 test("a pass with no recorded verified candidate is incomplete with its gap named, since Build cannot accept it as evidence", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   // A row from before verification recorded its candidate.
   const id = operation(log, { admission: record() }, [{ type: "stage", stage: "verifying" }, { type: "verification_base", base: "b".repeat(40) },
     ...run("lint", "vp check", {}), { type: "failed", stage: "verifying", reason: "Required verification failed" }]);
@@ -169,7 +175,7 @@ test("a pass with no recorded verified candidate is incomplete with its gap name
 });
 
 test("repair linkage comes only from the repair the author proposed, never from queue-prefix ancestry", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const prepared: OperationEvent = { type: "attempt_prepared", attempt: 1, source: "a".repeat(40), base: "b".repeat(40), candidate: "c".repeat(40),
     predecessor: { operationId: "op_ahead_in_queue", attempt: 1, candidate: "9".repeat(40) }, overlap: false, checkout: "/tmp/x" };
   const ancestry = operation(log, { admission: record() }, [prepared, { type: "cancelled", reason: "stop" }]);
@@ -180,7 +186,7 @@ test("repair linkage comes only from the repair the author proposed, never from 
 });
 
 test("no-Ticket, multi-Ticket and unknown-body-revision scope pass through unchanged, with one terminal fact per operation", () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const landed: OperationEvent[] = [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
     { type: "landed", base: "b".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin" }];
   for (const binding of [{ ticketIds: [] }, { ticketIds: tickets }, { ticketIds: [], bodyRevision: null }]) {
@@ -192,7 +198,7 @@ test("no-Ticket, multi-Ticket and unknown-body-revision scope pass through uncha
 });
 
 test("only a declared chore is reported as one: replay cannot make another, and an unbound or unpublished landing makes none", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const published: OperationEvent[] = [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
     { type: "landed", base: "b".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin" }];
   const chore = operation(log, { chore: { title: "Bump dependencies", helperRevisions: [] } }, published);
@@ -213,7 +219,7 @@ test("only a declared chore is reported as one: replay cannot make another, and 
 });
 
 test("the drain delivers runs only after their attempt fact, and a parked fact strands none of them as pending", async () => {
-  const log = openOperationLog(":memory:");
+  const log = openLog(":memory:");
   const id = operation(log, { admission: record() }, [{ type: "stage", stage: "verifying" }, { type: "verification_base", base: "b".repeat(40), candidate: "c".repeat(40) },
     ...run("gate", "vp test", { exitCode: 1 }), { type: "failed", stage: "verifying", reason: "gate failed", command: "vp test" }]);
   const parked = operation(log, { admission: record() }, [{ type: "stage", stage: "verifying" }, ...run("gate2", "vp test", { exitCode: 1 }),

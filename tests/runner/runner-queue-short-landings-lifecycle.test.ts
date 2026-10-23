@@ -160,10 +160,11 @@ test("a runner killed while a short landing runs beside two long ones ends each 
       import { localExecutor } from ${JSON.stringify(new URL("../../src/lib/runner/local-executor.ts", import.meta.url).href)};
       import { runBoundedProcess } from ${JSON.stringify(new URL("../../src/lib/infra/bounded-process.ts", import.meta.url).href)};
       import { openOperationLog } from ${JSON.stringify(new URL("../../src/lib/runner/runner-log.ts", import.meta.url).href)};
+      import { shortRepositories } from ${JSON.stringify(new URL("../../src/lib/runner/pipeline-metrics.ts", import.meta.url).href)};
       const local = localExecutor({ home: ${JSON.stringify(f.home)}, slice: ${JSON.stringify(TEST_SLICE)} });
       const executor = { ...local, combinedLimits: true, run: local.combinedLimits ? local.run : runBoundedProcess };
       const config = ${JSON.stringify(config)};
-      const log = openOperationLog(${JSON.stringify(f.logPath)}, runnerLogOptions(config, executor));
+      const log = openOperationLog(${JSON.stringify(f.logPath)}, runnerLogOptions(config, executor), { shortRepositories });
       const queue = createRunnerQueue({ log, executor, home: ${JSON.stringify(f.home)}, config });
       queue.wake(); setInterval(() => {}, 1000);
     `;

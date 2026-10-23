@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { once } from "node:events";
 import type { ReadableStreamDefaultReader } from "node:stream/web";
-import type { RunnerHandler } from "./runner-contract.ts";
+import type { RunnerHandler } from "./runner-types.ts";
 
 export async function serveRunner(handler: RunnerHandler, options: { host: string; port: number }): Promise<{ port: number; url: string; close(): Promise<void> }> {
   if (!["127.0.0.1", "::1", "localhost"].includes(options.host))

@@ -8,7 +8,7 @@ import { metadataPath, recordedWorkspaceBase, workspaceMetadata } from "../works
 import { helperScope, validSubmissionHandoff } from "./submission-handoff.ts";
 import type { SubmissionHandoff } from "./submission-handoff.ts";
 import { KILLABLE_STAGES } from "../runner/runner-contract.ts";
-import type { Operation } from "../runner/runner-contract.ts";
+import type { Operation } from "../runner/runner-types.ts";
 
 /** Freeze source and adoption provenance together; retries never consume newer pending work. */
 export async function writtenLandingHandoff(context: WorkspaceContext, key: string, source: string, awaitingAdmission: boolean,

@@ -1,5 +1,6 @@
 import type { BuildBinding, SubmissionHandoff } from "../landing/submission-handoff.ts";
-import { isLandingSubmission, type OperationLog, type StoredEvent } from "../runner/runner-contract.ts";
+import { isLandingSubmission } from "../runner/runner-contract.ts";
+import type { OperationLog, StoredEvent } from "../runner/runner-types.ts";
 import { BUILD_ITEM_UNAVAILABLE, BuildRefusal, readBuildItem } from "./tracker.ts";
 import type { BuildReadAction, BuildReader } from "./tracker.ts";
 

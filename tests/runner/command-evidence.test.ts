@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { commandEvidence } from "../../src/lib/runner/command-evidence.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import type { BoundedProcessRequest } from "../../src/lib/infra/bounded-process.ts";
-import type { LandingOperation } from "../../src/lib/runner/runner-contract.ts";
+import type { LandingOperation } from "../../src/lib/runner/runner-types.ts";
 
 const request: BoundedProcessRequest = { executable: "bun", args: ["test", "a file.test.ts", "", "--filter=quoted value"], cwd: "/fixture/apps/hq", env: { CI: "1", PATH: "/bin", API_SECRET: "super-secret-value" }, timeoutMs: 123, maxOutputBytes: 500 };
 
@@ -44,7 +45,7 @@ test("outside paths and excessive context are explicit without persisting large 
 });
 
 test("structured context survives durable run projection and appears in the shared landing outcome", () => {
-  const log = openOperationLog(":memory:");
+  const log = openOperationLog(":memory:", {}, { landingOutcome });
   try {
     const changeId = "k".repeat(32);
     log.append("op_fixture", { type: "submitted", repo: "owner/repo", changeId, commitId: "a".repeat(40), bookmark: candidateBookmark(changeId), submittedBy: "author" });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { controlRunner, readPromotionState } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
-import type { Operation } from "../../src/lib/runner/runner-contract.ts";
+import type { Operation } from "../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { project } from "../support/workspace-project.ts";
 import { fixture } from "./fixtures/runner-client-fixture.ts";

@@ -13,7 +13,7 @@ import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { readRunArtifact } from "../../src/lib/runner/runner-client.ts";
 import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
-import type { CommandArtifact } from "../../src/lib/runner/runner-contract.ts";
+import type { CommandArtifact } from "../../src/lib/runner/runner-types.ts";
 
 const request: BoundedProcessRequest = { executable: "bun", args: ["test"], cwd: "/fixture", timeoutMs: 1000, maxOutputBytes: 64_000, env: { API_SECRET: "fixture-secret-value" } };
 const result = (fields: Partial<BoundedProcessResult> = {}): BoundedProcessResult => ({ stdout: "small output", stderr: "", stdoutTruncated: false, stderrTruncated: false,

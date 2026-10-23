@@ -7,9 +7,10 @@ import type { ReadableStreamDefaultReader } from "node:stream/web";
 import { test } from "vite-plus/test";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { candidateBookmark, RUNNER_API, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitRequest, SubmitResponse, VerificationResponse } from "../../src/lib/runner/runner-contract.ts";
+import type { DeployResponse, Operation, OperationEvent, ReleaseResponse, ResetResponse, StoredEvent, SubmitRequest, SubmitResponse, VerificationResponse } from "../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
 
 const token = "test-secret";
 const changeId = "k".repeat(32);
@@ -18,7 +19,7 @@ function submission(commitId = "commit-1", change = changeId) {
 }
 
 async function fixture(logPath = ":memory:", retainSubmission?: Parameters<typeof createRunnerHandler>[0]["retainSubmission"]) {
-  const log = openOperationLog(logPath);
+  const log = openOperationLog(logPath, {}, { classify: classifyEvent });
   const listeners = new Set<(event: StoredEvent) => void>();
   let submissions = 0;
   let onSubscribe: (() => void) | undefined;

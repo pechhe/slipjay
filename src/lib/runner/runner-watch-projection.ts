@@ -1,5 +1,5 @@
 import { KILLABLE_STAGES, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { Operation, StoredEvent, WatchOperation } from "./runner-contract.ts";
+import type { Operation, StoredEvent, WatchOperation } from "./runner-types.ts";
 
 /** Completed stage intervals only; cap each same-kind/stage sample at the latest 100. */
 export function projectWatchOperation(operation: Operation, events: readonly StoredEvent[], now: Date): WatchOperation {

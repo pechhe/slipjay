@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace } from "../../../src/lib/workspace/workspace-create.ts";
 import { createRunnerHandler } from "../../../src/lib/runner/runner-api.ts";
-import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../../../src/lib/runner/runner-contract.ts";
+import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../../src/lib/runner/runner-log.ts";
 import type { BuildAdmitter } from "../../../src/lib/build/build-admission.ts";

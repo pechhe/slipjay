@@ -1,4 +1,4 @@
-import type { QueueSnapshot, StoredEvent } from "./runner-contract.ts";
+import type { QueueSnapshot, StoredEvent } from "./runner-types.ts";
 
 export type WatchEnvelope =
   | { version: 1; type: "snapshot"; snapshot: QueueSnapshot }

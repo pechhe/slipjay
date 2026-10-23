@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { repositoryKey } from "../runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent, OperationLog, SubmitRequest } from "../runner/runner-contract.ts";
+import type { LandingOperation, OperationEvent, OperationLog, SubmitRequest } from "../runner/runner-types.ts";
 
 export type RepairProof = { operationId: string; claimId: string; token: string };
 export type RepairClaim = Extract<OperationEvent, { type: "repair_claimed" }> & { operationId: string };

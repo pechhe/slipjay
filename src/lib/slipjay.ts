@@ -70,7 +70,7 @@ export type { PostIntegrationInput, PostIntegrationResult } from "./release/post
 export type { BoundedProcessRequest, BoundedProcessResult, ProcessBroker } from "./infra/bounded-process.ts";
 
 export { landThroughRunner, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, readRunArtifact, runnerLocation, recordClientFacts, readMetricsEvents } from "./runner/runner-client.ts";
-export type { ArtifactChunk, CommandArtifact, CommandEvidence, LandingOutcome, CauseClass, ClassifiedFact, ClientFact, OperationEvent, StoredEvent } from "./runner/runner-contract.ts";
+export type { ArtifactChunk, CommandArtifact, CommandEvidence, LandingOutcome, CauseClass, ClassifiedFact, ClientFact, OperationEvent, StoredEvent } from "./runner/runner-types.ts";
 
 export type { SubmissionHandoff } from "./landing/submission-handoff.ts";
 
