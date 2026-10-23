@@ -8,6 +8,28 @@ import { metadataPath } from "../../src/lib/workspace/workspace-state.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { fixture, released, waitFor } from "./fixtures/runner-client-fixture.ts";
 
+test("following an already-published landing reports pending Forge receipts without resubmitting", async () => {
+  const f = await fixture(false, false, false, undefined, true);
+  try {
+    const binding = { specId: "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f", ticketIds: [], bodyRevision: 1, bindGeneration: 1,
+      sessionId: "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff" };
+    f.append("op_landed", { type: "submitted", repo: "fixture/project", changeId: f.change, commitId: f.commit,
+      bookmark: candidateBookmark(f.change), submittedBy: "earlier",
+      admission: { binding, specBodyHash: null, helperRevisions: [], repairsOperationId: null, supersedes: null } });
+    f.append("op_landed", { type: "build_admitted", sequence: 1, sessionId: binding.sessionId, recordedAt: null });
+    jj(f.cwd, ["git", "push", "--remote", "origin", "--named", `${candidateBookmark(f.change)}=${f.commit}`]);
+    jj(f.cwd, ["bookmark", "forget", candidateBookmark(f.change)]);
+    execFileSync("git", ["--git-dir", f.remote, "update-ref", "refs/heads/main", f.commit]);
+    f.append("op_landed", { type: "landed", base: "fixture-base", commitId: f.commit, branch: "main", remote: "origin" });
+    const result = await landThroughRunner(f.cwd, f.options);
+    assert.equal(result.ok, true);
+    assert.equal(result.operation.id, "op_landed");
+    assert.ok(f.lines.some((line) => /Forge receipts are still pending/.test(line) && line.includes("slipjay runner outcome op_landed")));
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 1);
+    await released(f.cwd);
+  } finally { await f.dispose(); }
+});
+
 test("rerunning after an unfollowed landing reattaches to it and finishes housekeeping without resubmitting", async () => {
   const f = await fixture();
   try {

@@ -916,6 +916,8 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       // The runner's verdict comes first and stands: a local step after publication that fails is a warning,
       // never the outcome, and the author can still tell the commit published.
       onLine(`[runner ${name}] landed ${result.commitId} on ${result.branch} (operation ${operation.id})`);
+      if (operation.kind === "landing" && operation.outcome?.build?.receipts === "pending")
+        onLine(`[build] publication is complete; Forge receipts are still pending and the runner will retry them. Inspect: slipjay runner outcome ${operation.id}`);
       // A chore's Build number is Build's own: say what this landing is now, and wait a little for that number.
       const chore = await landedChore(baseUrl, token, operation, result.commitId, options.signal);
       if (chore) onLine(`[runner ${name}] ${chore}`);

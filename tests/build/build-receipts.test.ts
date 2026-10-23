@@ -232,6 +232,60 @@ test("new terminal facts wake the drain without another landing or an author", a
   drain.close(); log.close();
 });
 
+test("an unavailable cancelled admission does not strand unrelated published receipts", async () => {
+  const log = openLog();
+  const cancelled = landing(log, "a", "open", "pending");
+  log.append(cancelled, { type: "cancelled", reason: "cancelled by the author" });
+  const published = landing(log, "e", "landed");
+  let readsFail = true;
+  const build = fakeBuild();
+  const route: BuildRoute = (action, input) => action === "read" && readsFail
+    ? Promise.resolve({ kind: "unavailable", reason: "item read timed out" }) : build.route(action, input);
+  const drain = createReceiptDrain({ log, route, initialBackoffMs: 10, maxBackoffMs: 20 });
+  try {
+    drain.wake(); await drain.idle();
+    const publishedOperation = log.operation(published), cancelledOperation = log.operation(cancelled);
+    assert.ok(publishedOperation?.kind === "landing" && cancelledOperation?.kind === "landing");
+    assert.equal(publishedOperation.outcome?.build?.receipts, "delivered");
+    assert.equal(cancelledOperation.admission, "pending");
+    assert.equal(log.snapshot("test").build?.state, "unavailable");
+    assert.match(log.snapshot("test").build?.reason ?? "", /item read timed out/);
+    const publishedSends = build.sent.filter((receipt) => receipt.operationId === published).length;
+    readsFail = false;
+    await until(() => log.snapshot("test").build?.pending === 0);
+    assert.equal(log.snapshot("test").build?.state, "available");
+    assert.ok(build.sent.some((receipt) => receipt.operationId === cancelled && receipt.failure?.recovery === "cancelled"));
+    drain.wake(); await drain.idle();
+    assert.equal(build.sent.filter((receipt) => receipt.operationId === published).length, publishedSends);
+    assert.equal(settled(log, published).length, 1);
+  } finally { drain.close(); log.close(); }
+});
+
+test("a total outage tries only the first admission and receipt in each backed-off pass", async () => {
+  vi.useFakeTimers();
+  const log = openLog();
+  landing(log, "a", "open", "pending");
+  landing(log, "b", "open", "pending");
+  landing(log, "e", "landed");
+  landing(log, "f", "landed");
+  const unavailable = { kind: "unavailable" as const, reason: "Build answered HTTP 503" };
+  const build = fakeBuild(() => unavailable, () => unavailable);
+  const drain = createReceiptDrain({ log, route: build.route, initialBackoffMs: 20, maxBackoffMs: 40 });
+  try {
+    drain.wake(); await drain.idle();
+    assert.deepEqual([build.admissions.length, build.sent.length], [1, 1]);
+    drain.wake(); await drain.idle();
+    assert.deepEqual([build.admissions.length, build.sent.length], [1, 1]);
+    await vi.advanceTimersByTimeAsync(20); await drain.idle();
+    assert.deepEqual([build.admissions.length, build.sent.length], [2, 2]);
+    await vi.advanceTimersByTimeAsync(39); await drain.idle();
+    assert.deepEqual([build.admissions.length, build.sent.length], [2, 2]);
+    await vi.advanceTimersByTimeAsync(1); await drain.idle();
+    assert.deepEqual([build.admissions.length, build.sent.length], [3, 3]);
+    assert.equal(log.snapshot("test").build?.state, "unavailable");
+  } finally { drain.close(); log.close(); vi.useRealTimers(); }
+});
+
 test("a failure with hundreds of long commands is bounded inside Build's body limit and reports its truncation", async () => {
   const log = openLog(":memory:");
   const id = newOperationId();

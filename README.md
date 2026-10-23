@@ -1260,7 +1260,9 @@ attached the same way. Nothing is attached automatically, a `Forge: #<n>` or `Sp
 message is never trusted, and SlipJay has no attach command of its own: Forge refuses the runner's identity.
 Every receipt repeats the admitted source tuple:
 the author's commit as `candidateRevision`, the Spec, Tickets, body revision and hash,
-and the bind generation. An independent drain sends owed receipts in ledger order,
+and the bind generation. An independent drain reconciles unanswered admissions and sends owed receipts in ledger order,
+with each lane stopping at its first unavailable answer. An unresolved admission never blocks receipts for already-admitted work;
+either lane still owing an answer retains the shared outage state and exponential backoff. The drain
 records each delivery in the ledger, and resends until Forge answers, which Forge
 replays, so a Forge outage, a runner restart or a lost response delays a receipt but
 never loses it, and catch-up needs no further landing. When Forge stops answering the

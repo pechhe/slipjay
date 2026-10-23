@@ -7,10 +7,11 @@ import { createRunnerHandler } from "../../../src/lib/runner/runner-api.ts";
 import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../../src/lib/runner/runner-log.ts";
+import { landingOutcome } from "../../../src/lib/landing/landing-outcome.ts";
 import type { BuildAdmitter } from "../../../src/lib/build/build-admission.ts";
 import { configureLocalGithubTransport, jj, project } from "../../support/workspace-project.ts";
 
-export async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 | 409 | 422 | 503 = false, admitBuild?: BuildAdmitter) {
+export async function fixture(dropStream = false, racedSubmission = false, loseSubmissionResponse: boolean | 400 | 401 | 409 | 422 | 503 = false, admitBuild?: BuildAdmitter, withOutcome = false) {
   const f = await project();
   const transport = await configureLocalGithubTransport(f);
   try {
@@ -20,7 +21,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     jj(cwd, ["describe", "-m", "Implement candidate"]);
     const commit = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
     const change = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
-    const log = openOperationLog(":memory:");
+    const log = openOperationLog(":memory:", {}, withOutcome ? { landingOutcome } : {});
     const listeners = new Set<(event: StoredEvent) => void>();
     const append = (id: string, event: OperationEvent) => {
       const stored = log.append(id, event);
