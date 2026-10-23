@@ -45,6 +45,19 @@ export const isLandingSubmission = (event: OperationEvent | undefined): event is
 /** Event types that close an operation. */
 export const TERMINAL_EVENT_TYPES = ["landed", "released", "verified", "deployed", "reset", "audited", "failed", "declined", "superseded", "cancelled"] as const;
 
+/**
+ * The event types whose `seq` keys a receipt for the operation that owns the event: `build-receipts.ts` builds one receipt
+ * per such event it owes, and settles it with a `build_receipt` naming that sequence. A type added to those keys belongs here.
+ */
+export const RECEIPT_KEY_EVENT_TYPES = ["landed", "failed", "cancelled", "superseded", "declined", "integration_held", "run_started", "verification_skipped"] as const;
+
+/**
+ * The settlement events a later reconciliation receipt is keyed by: a failed attempt's integration, once some other record
+ * confirms it published or released it. The receipt belongs to the failed attempt, not to the operation that settled it, so
+ * `build-receipts.ts` keys it by the settlement's sequence and records it against the attempt.
+ */
+export const RECEIPT_SETTLEMENT_EVENT_TYPES = ["integration_recovered", "integration_released"] as const;
+
 /** Names one repository's integrated commit: the same commit may exist in several configured repositories. */
 export const recoveryKey = (repo: string, commitId: string) => `${repo}\n${commitId}`;
 

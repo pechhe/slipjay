@@ -11,7 +11,7 @@ import { createRunnerHandler } from "./runner-api.ts";
 import { BUILD_TOKEN_ENV, buildAdmitter, buildReader, buildRoute } from "../build/build-admission.ts";
 import { createBuildCheckAccess } from "../build/build-check-access.ts";
 import { createPipelineRelay, localPipelineReader } from "../build/build-pipeline-relay.ts";
-import { createReceiptDrain, deliveryState } from "../build/build-receipts.ts";
+import { createReceiptDrain, deliveryState, receiptsOwedTo } from "../build/build-receipts.ts";
 import { landingOutcome } from "../landing/landing-outcome.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV } from "./runner-env.ts";
 import { RUNNER_JJ_DEFAULTS, runnerConfigProblem } from "./runner-contract.ts";
@@ -34,8 +34,12 @@ export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");
  * Start the runner: recover what a previous process held, then serve the API on
  * loopback and process the queue. The token comes from the environment (the
  * systemd unit runs this under `bws run`).
+ *
+ * The API is served before recovery runs, and `recovered` settles after it: recovery reads the
+ * ledger's whole history, so a restart that waited for it would keep health and admission
+ * unanswered for as long as that history takes, and the queue admits no work until it is done.
  */
-export async function startRunner(options: { home?: string; env?: NodeJS.ProcessEnv; port?: number; executor?: Executor } = {}): Promise<{ url: string; close(): Promise<void>; drain(): Promise<void> }> {
+export async function startRunner(options: { home?: string; env?: NodeJS.ProcessEnv; port?: number; executor?: Executor } = {}): Promise<{ url: string; recovered: Promise<void>; close(): Promise<void>; drain(): Promise<void> }> {
   const home = options.home ?? runnerHome();
   const env = options.env ?? process.env;
   const token = env[RUNNER_TOKEN_ENV];
@@ -58,7 +62,6 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     environment: () => env,
     ...build ? { readBuild: buildReader(build), buildChecks } : {},
   });
-  await queue.recover();
   // Receipts go from the ledger to Build on their own schedule: publication never waits on HQ.
   // Admissions Build never answered are settled there too, and each answer may let queued work start.
   const receipts = build ? createReceiptDrain({ log, route: build, onAdmissionSettled: queue.wake }) : undefined;
@@ -96,14 +99,38 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const relay = config.build && buildToken
     ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }), subscribe: log.subscribe }) : undefined;
   relay?.start();
-  // Queued operations from before a restart resume here.
-  queue.wake();
-  receipts?.wake();
-  // Retained evidence is bounded: expire it at start and every six hours. One pass at a time.
+  // Retained evidence is bounded: expire it at start and every six hours. One pass at a time. The ledger follows it,
+  // so an attempt's evidence is recorded expired before the events explaining it go, and the WAL returns its pages then.
   let pruning: Promise<unknown> = Promise.resolve();
-  const prune = () => { pruning = pruning.then(() => pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] })).catch(() => {}); };
-  prune();
-  const retention = setInterval(prune, 6 * 60 * 60 * 1000);
+  const retain = () => {
+    pruning = pruning.then(async () => {
+      const pass = await pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] });
+      // What no reader has finished with stays whole: an attempt whose files a cut-short deletion left behind (it must
+      // be found again to finish), and one whose receipts Build has not taken (the history is what says what to send).
+      // Owning a receipt is a fact of the ledger, not of this process's connection: a runner restarted without one still
+      // protects it.
+      const owed = receiptsOwedTo(log);
+      log.forgetHistory(new Date(), new Set([...pass.unfinished, ...owed]));
+      log.checkpoint();
+    }).catch(() => {});
+    return pruning;
+  };
+  const retention = setInterval(retain, 6 * 60 * 60 * 1000);
   retention.unref();
-  return { url: server.url, drain: queue.drain, close: async () => { clearInterval(retention); await pruning; relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
+  // A busy ledger's WAL would otherwise sit at its high-water mark until the next retention pass.
+  const journal = setInterval(() => log.checkpoint(), 5 * 60 * 1000);
+  journal.unref();
+  // Recovery settles what a previous process left half-done; the queue starts nothing until it has, so queued work
+  // from before the restart resumes here, once. A recovery that fails leaves the commands of that process unaccounted
+  // for, so the runner keeps answering, and retention keeps its schedule, while nothing new starts.
+  let startHeld = false;
+  const recovered = queue.recover()
+    .catch((error) => {
+      startHeld = true;
+      const reason = error instanceof Error ? error.message : String(error);
+      console.error(`[recovery] could not finish, and the runner will start nothing until it restarts: ${reason}`);
+      queue.hold(reason);
+    })
+    .then(() => { if (!startHeld) { queue.wake(); receipts?.wake(); } void retain(); });
+  return { url: server.url, recovered, drain: queue.drain, close: async () => { clearInterval(retention); clearInterval(journal); await recovered; await pruning; relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
 }

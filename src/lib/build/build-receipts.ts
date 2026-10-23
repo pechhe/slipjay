@@ -268,6 +268,19 @@ export function sendable(operation: LandingOperation, history: readonly StoredEv
     && (receipt.after === undefined || receiptSettlement(history, { operationId: receipt.operationId, key: receipt.after })?.state === "delivered"));
 }
 
+/**
+ * The Build-bound attempts whose receipts Build has not taken yet. Their history is what says which receipts are owed and
+ * what each reports, so the ledger keeps them whole however old they are; every other attempt's window may close.
+ */
+export function receiptsOwedTo(log: OperationLog): ReadonlySet<string> {
+  const settlements = log.integrationSettlements();
+  // Only an operation whose receipt-key events Build has not settled can owe one; the projection decides which really do.
+  return new Set(log.unsettledReceipts().flatMap((id) => {
+    const operation = log.operation(id), history = log.events({ operationId: id });
+    return operation?.kind === "landing" && owedReceipts(operation, history, settlements).some((receipt) => !receiptSettlement(history, receipt)) ? [id] : [];
+  }));
+}
+
 /** Receipt delivery as recorded in the ledger, for the snapshot and each landing's outcome. */
 export function deliveryState(log: OperationLog): BuildDeliveryState | null {
   const bound = log.buildBound();

@@ -342,7 +342,11 @@ export interface OperationLog {
   /** Events after `afterSeq` (exclusive), optionally for one operation, in seq order. */
   events(options?: { operationId?: string; afterSeq?: number; limit?: number }): StoredEvent[];
   operation(id: string): Operation | null;
-  /** A persisted landing request, including terminal operations, scoped to its repository. */
+  /**
+   * A persisted landing request, including terminal operations, scoped to its repository, while the ledger keeps the
+   * operation: inside the fact horizon (`LEDGER_FACT_MS`), or longer when another live fact still names it. A request whose
+   * operation the ledger has forgotten is unknown, so resubmitting it opens a new operation.
+   */
   submission(repo: string, requestId: string): { operation: LandingOperation; request: Extract<OperationEvent, { type: "submission_request" }> } | null;
   /** Every operation of a change, newest first. */
   operationsForChange(repo: string, changeId: string): LandingOperation[];
@@ -380,6 +384,22 @@ export interface OperationLog {
   buildBound(): { operation: LandingOperation; history: StoredEvent[] }[];
   /** Every event settling a held integration (confirmed published, or released unpublished), in ledger order, keyed by `recoveryKey(repo, commitId)`. */
   integrationSettlements(): Map<string, StoredEvent[]>;
+  /** Checkpoint the write-ahead log, truncating it to the pages still in use. Safe to call while anything reads. */
+  checkpoint(): void;
+  /**
+   * Forget what closed operations recorded: past the history window (`LEDGER_HISTORY_MS`) everything that only
+   * explained them, keeping the facts a read across operations needs; past the fact horizon (`LEDGER_FACT_MS`) the
+   * operation and those facts too. Open operations, ones inside the window, ones whose retained evidence has not been
+   * recorded as expired, and the ids in `keep` stay whole. Returns how much went.
+   */
+  forgetHistory(now?: Date, keep?: ReadonlySet<string>): { events: number; operations: number };
+  /** The operations that still name retained evidence (a source ref, or a retained command artifact): the retention pass's work. */
+  retainedEvidence(): string[];
+  /**
+   * The operations with a receipt-key event (`RECEIPT_KEY_EVENT_TYPES`) that has no `build_receipt` settlement: the only
+   * ones that can still owe Build a receipt, so the only ones whose history an owed receipt is built from.
+   */
+  unsettledReceipts(): string[];
   close(): void;
 }
 

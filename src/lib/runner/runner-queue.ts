@@ -123,6 +123,11 @@ export function createRunnerQueue(input: {
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /**
+   * Start nothing more, now or later in this process: recovery could not stop the commands a previous process left, so
+   * no checkout is safe to reuse. The runner still answers reads; a restart is what clears it.
+   */
+  hold(reason: string): void;
+  /**
    * Queue the recovery of `repo`'s held integration, unless one is queued or running: that operation, or null when nothing is held.
    */
   recoverHeld(repo: string): Operation | null;
@@ -174,6 +179,8 @@ export function createRunnerQueue(input: {
     freeMemoryBytes: freemem(), totalMemoryBytes: totalmem(), running: running.size });
   /** Recovery holds every lane: nothing is admitted until it finishes. */
   let recovering: Promise<void> | undefined;
+  /** Why nothing may start at all: a recovery that failed left commands of a previous process unaccounted for. */
+  let heldStart: string | undefined;
   /** Set once the process was told to stop: nothing new is admitted, and the runner exits when no operation is past the point a kill may stop it. */
   let draining = false;
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
@@ -310,7 +317,8 @@ export function createRunnerQueue(input: {
   }
   async function deployLoop(): Promise<void> {
     for (;;) {
-      if (log.paused() || draining) return;
+      // Recovery settles the commands a previous process left, deploys included: they wait for it as landings do.
+      if (log.paused() || draining || recovering || heldStart) return;
       const operation = log.openOperations().find((entry): entry is DeployOperation => entry.kind === "deploy" && entry.status === "queued");
       if (!operation) return;
       await processDeploy(operation);
@@ -552,7 +560,7 @@ export function createRunnerQueue(input: {
    * that waits for a place. A pause admits nothing new; running operations finish.
    */
   function wakeMain(): void {
-    if (recovering || draining || log.paused()) return;
+    if (recovering || draining || log.paused() || heldStart) return;
     const open = log.openOperations();
     // Repository lanes whose oldest startable operation found no place: nothing later in them may pass it.
     const behind = new Set<string>();
@@ -1358,6 +1366,14 @@ export function createRunnerQueue(input: {
   /** Whether `operation` is past the stages an owner's kill may stop, or is finishing a held integration. Its verdict ends it. */
   const inTail = (operation: Operation) => operation.status === "running"
     && (operation.kind === "recovery" || operation.stage === "integrating" || operation.stage === "finalizing" || operation.stage === "publishing" || operation.stage === "deploying");
+  /** Stop whatever would start work on its own: the interval schedulers that submit deploys, resets, audits and recoveries. */
+  function stopScheduling(): void {
+    scheduler.close(); resetScheduler.close(); auditScheduler.close();
+    for (const retry of auditDiscovery.values()) clearTimeout(retry);
+    auditDiscovery.clear();
+    for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
+    recoveryRetries.clear();
+  }
   /** Run `work` in `lane`, after whatever holds it. A failure of earlier work does not stop it. */
   function inLane(lane: string, work: () => Promise<void>): Promise<void> {
     const previous = lanes.get(lane) ?? Promise.resolve();
@@ -1371,6 +1387,10 @@ export function createRunnerQueue(input: {
     wake() {
       wakeMain();
       wakeDeploys();
+    },
+    hold(reason) {
+      heldStart = reason;
+      stopScheduling();
     },
     async recover() {
       // Every lane is idle at startup; recovery waits for any that is not, and holds them all.
@@ -1418,11 +1438,7 @@ export function createRunnerQueue(input: {
       }
     },
     close() {
-      scheduler.close(); resetScheduler.close(); auditScheduler.close();
-      for (const retry of auditDiscovery.values()) clearTimeout(retry);
-      auditDiscovery.clear();
-      for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
-      recoveryRetries.clear();
+      stopScheduling();
     },
     kill(operationId) {
       const target = operationId === undefined ? undefined : running.get(operationId);

@@ -15,6 +15,9 @@ const digest = (text: string) => createHash("sha256").update(text).digest("hex")
 
 type Expiry = { operation: LandingOperation; policy: "published" | "unadopted" };
 
+/** What one retention pass did: the attempts whose evidence it expired, and the ones whose files a later pass must finish. */
+export type RetentionPass = { pruned: string[]; unfinished: string[] };
+
 /**
  * The retention policy that has expired `operation`'s evidence, if any. Open attempts,
  * unconfirmed publication and a change under an active repair claim never expire: they
@@ -29,8 +32,7 @@ function expiryPolicy(log: OperationLog, operation: LandingOperation, now: Date)
     ? published ? "published" : "unadopted" : null;
 }
 
-const retainedOperations = (log: OperationLog) => [...new Set(log.events().flatMap((row) => row.event.type === "source_retained"
-  || row.event.type === "run_finished" && row.event.artifact?.status === "retained" ? [row.operationId] : []))]
+const retainedOperations = (log: OperationLog) => log.retainedEvidence()
   .flatMap((id) => { const operation = log.operation(id); return operation?.kind === "landing" ? [operation] : []; });
 
 /** Landing attempts whose retained source, manifest and command artifacts may now be deleted. */
@@ -50,7 +52,7 @@ export function expiredEvidence(log: OperationLog, now: Date): Expiry[] {
  */
 export async function pruneRetainedEvidence(input: {
   home: string; log: OperationLog; executor: Executor; gitExecutable?: string; env?: NodeJS.ProcessEnv; now?: Date;
-}): Promise<string[]> {
+}): Promise<RetentionPass> {
   const { home, log, executor } = input;
   const now = input.now ?? new Date();
   const stores = new Set<string>();
@@ -63,6 +65,7 @@ export async function pruneRetainedEvidence(input: {
   const artifacts = (id: string) => join(home, "command-artifacts", digest(id));
   const present = (path: string) => stat(path).then(() => true, () => false);
   const pruned: string[] = [];
+  const unfinished: string[] = [];
   for (const candidate of retainedOperations(log)) {
     // Current state, not the scan's: an earlier deletion awaited I/O.
     const operation = log.operation(candidate.id);
@@ -79,8 +82,8 @@ export async function pruneRetainedEvidence(input: {
         await rm(manifest(operation.id), { force: true });
       }
       await rm(artifacts(operation.id), { recursive: true, force: true });
-    } catch { /* Recorded as expired; a later pass finishes the deletion. */ }
+    } catch { /* Recorded as expired; a later pass finishes the deletion, and the caller keeps what names the files. */ unfinished.push(operation.id); }
   }
   for (const store of stores) await git(["--git-dir", store, "gc", "--auto", "--quiet"]).catch(() => {});
-  return pruned;
+  return { pruned, unfinished };
 }

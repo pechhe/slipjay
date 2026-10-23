@@ -3,10 +3,10 @@ import { test, vi } from "vite-plus/test";
 import type { BuildAdmissionRequest, BuildRoute, BuildRouteAnswer } from "../../src/lib/build/build-admission.ts";
 import { createReceiptDrain } from "../../src/lib/build/build-receipts.ts";
 import type { BuildChoreInput, BuildReceiptInput, BuildRunInput } from "../../src/lib/build/build-receipts.ts";
-import { candidateBookmark, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
+import { candidateBookmark, RECEIPT_KEY_EVENT_TYPES, RECEIPT_SETTLEMENT_EVENT_TYPES, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import type { OperationLog } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
-import { deliveryState } from "../../src/lib/build/build-receipts.ts";
+import { deliveryState, owedReceipts, receiptsOwedTo } from "../../src/lib/build/build-receipts.ts";
 import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
 import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
 
@@ -169,6 +169,55 @@ test("a published landing whose receipt is still owed reads as landed with its r
   assert.equal(operation.status, "landed");
   assert.equal(operation.outcome!.recovery.kind, "already-published");
   assert.deepEqual(operation.outcome!.build, { admission: "admitted", receipts: "pending" });
+  log.close();
+});
+
+test("an attempt that owes a receipt for its integration's later settlement stays protected", async () => {
+  const log = openLog(":memory:");
+  // An admitted attempt that integrated, then failed with its publication unknown.
+  const id = newOperationId(), commitId = "f".repeat(40);
+  log.append(id, { type: "submitted", repo: "owner/repo", changeId: "a".repeat(32), commitId, bookmark: candidateBookmark("a".repeat(32)), submittedBy: "author", admission });
+  log.append(id, { type: "build_admitted", sequence: 1, sessionId: binding.sessionId, recordedAt: null });
+  log.append(id, { type: "stage", stage: "integrating" });
+  log.append(id, { type: "integrated", base: "b".repeat(40), commitId });
+  log.append(id, { type: "failed", stage: "publishing", reason: "Publication unknown" });
+  // A later record settles that commit unpublished: the failed attempt owes that reconciliation, not the record.
+  const recovery = newOperationId();
+  log.append(recovery, { type: "submitted", kind: "recovery", repo: "owner/repo", commitId, submittedBy: "runner:recovery" });
+  log.append(recovery, { type: "integration_released", repo: "owner/repo", commitId, reason: "push failed" });
+  assert.deepEqual([...receiptsOwedTo(log)], [id], "the attempt whose integration was settled owes the receipt");
+  const build = fakeBuild();
+  const drain = createReceiptDrain({ log, route: build.route });
+  drain.wake(); await drain.idle(); drain.close();
+  assert.deepEqual([...receiptsOwedTo(log)], [], "delivered, nothing keeps the attempt whole");
+  log.close();
+});
+
+test("every receipt the projection owes is keyed by an event type the ledger knows settles receipts", () => {
+  const log = openLog(":memory:");
+  landing(log, "a", "landed");
+  landing(log, "b", "failed");
+  const settings = landing(log, "c", "landed");
+  log.append(settings, { type: "verification_skipped", base: "b".repeat(40), candidate: "c".repeat(40), fields: ["process"], reason: "only the process setting changed" });
+  const held = landing(log, "e", "open");
+  log.append(held, { type: "integration_held", repo: "owner/repo", commitId: "e".repeat(40), reason: "push failed" });
+  // `unsettledReceipts()` finds candidates by that list, so a key type missing from it loses a receipt to the window.
+  const owed = log.buildBound().flatMap(({ operation, history }) => owedReceipts(operation, history, log.integrationSettlements()));
+  const types = new Map(log.events().map((row) => [row.seq, row.event.type]));
+  assert.ok(owed.length >= 6, `${owed.length} receipts`);
+  const keys: readonly string[] = [...RECEIPT_KEY_EVENT_TYPES, ...RECEIPT_SETTLEMENT_EVENT_TYPES];
+  for (const receipt of owed) assert.ok(keys.includes(types.get(receipt.key)!), `${types.get(receipt.key)} keys a receipt`);
+  log.close();
+});
+
+test("the attempts whose receipts Build has not taken are the ones its ledger must keep whole", async () => {
+  const log = openLog(":memory:");
+  const first = landing(log, "a", "landed"), second = landing(log, "b", "failed");
+  assert.deepEqual([...receiptsOwedTo(log)].sort(), [first, second].sort(), "an undelivered attempt fact and its runs are owed");
+  const build = fakeBuild();
+  const drain = createReceiptDrain({ log, route: build.route });
+  drain.wake(); await drain.idle(); drain.close();
+  assert.deepEqual([...receiptsOwedTo(log)], [], "once Build has taken them, nothing keeps the attempt's history alive");
   log.close();
 });
 

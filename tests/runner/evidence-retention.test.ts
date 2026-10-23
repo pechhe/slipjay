@@ -62,7 +62,7 @@ test("retained evidence expires on its documented schedule, leaves ledger record
 
     const h = createRunnerHandler({ log, token: "t", runnerName: "fixture", readLog: async () => "", onSubmitted: () => {}, kill: () => ({ status: "idle" }), subscribe: log.subscribe });
     const get = (path: string) => h(new Request(`http://runner/v1/operations/${path}`, { headers: { authorization: "Bearer t" } }));
-    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: directExecutor("test"), now: later(31) }), ["op_failed"]);
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: directExecutor("test"), now: later(31) }), { pruned: ["op_failed"], unfinished: [] });
     assert.doesNotMatch(refs(f.home), new RegExp(log.events({ operationId: "op_failed" }).flatMap((row) => row.event.type === "source_retained" ? [row.event.sourceRef] : [])[0]!));
     assert.equal((await files(join(f.home, "submissions"))).length, 1, "only the unconfirmed attempt's manifest remains");
     assert.equal((await files(join(f.home, "command-artifacts"))).length, 1);
@@ -75,7 +75,7 @@ test("retained evidence expires on its documented schedule, leaves ledger record
       assert.equal(response.status, 410, path);
       assert.match((await response.json() as { error: string }).error, /expired under the runner's unadopted retention policy/);
     }
-    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: directExecutor("test"), now: later(400) }), [], "expiry is recorded once");
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: directExecutor("test"), now: later(400) }), { pruned: [], unfinished: [] }, "expiry is recorded once");
   } finally { log.close(); await f.dispose(); }
 }, 120_000);
 
@@ -113,11 +113,11 @@ test("a repair claim admitted during a retention pass keeps its evidence, and a 
       }
       return real.run(request);
     } };
-    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor, now: later(31) }), ["op_first"]);
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor, now: later(31) }), { pruned: ["op_first"], unfinished: ["op_first"] });
     const claimed = log.operation("op_second");
     assert.ok(claimed?.kind === "landing" && !claimed.outcome?.evidenceExpired, "the claimed change keeps its evidence");
     assert.equal((await files(join(f.home, "submissions"))).length, 2, "the first deletion was cut short");
-    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: real, now: later(31) }), []);
+    assert.deepEqual(await pruneRetainedEvidence({ home: f.home, log, executor: real, now: later(31) }), { pruned: [], unfinished: [] });
     assert.equal((await files(join(f.home, "submissions"))).length, 1, "a later pass finishes it without recording expiry again");
     assert.equal(log.events({ operationId: "op_first" }).filter((row) => row.event.type === "evidence_expired").length, 1);
   } finally { log.close(); await f.dispose(); }

@@ -583,6 +583,10 @@ and held state through the existing recovery path.
     only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
     With both, the runner also pushes its metrics export to HQ (see Pipeline metrics relay).
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
+    It keeps everything for its history window and only lasting facts past it (see Retention), and its
+    write-ahead log is checkpointed every five minutes and after each retention pass, so it never sits at a
+    high-water mark. The API is served before a restart's recovery runs, so health and admission answer while
+    it does; no queued work starts until recovery finishes.
   - `logs/<operation>.log`: the run logs. A reset's step output goes to the owner-only
     `logs/<operation>.reset-output` beside it, never into the log.
   - `repos/<owner>/<name>`: the warm checkouts; `releases/<owner>/<name>`: each repository's release checkout.
@@ -1416,11 +1420,31 @@ unconfirmed, and while its logical change has an active repair claim. Otherwise 
 are deleted 14 days after the attempt's outcome once any attempt of its change has
 published, or 30 days after it when none has. The runner checks at start and every six
 hours, and records an `evidence_expired` event: `outcome` then names the policy and
-time, and `source`, `handoff` and `artifact` return 410 saying the evidence expired. The
-ledger's own events, run records and failure excerpts are never deleted. Unreferenced
-source objects leave the private store through Git's own gc expiry, so a submission
-retained at the same moment keeps its objects. Claim a failure within 30 days to keep
-its evidence.
+time, and `source`, `handoff` and `artifact` return 410 saying the evidence expired.
+Unreferenced source objects leave the private store through Git's own gc expiry, so a
+submission retained at the same moment keeps its objects. Claim a failure within 30
+days to keep its evidence.
+
+The ledger is bounded the same way. It keeps an operation's every event for 31 days
+after its newest one; past that it forgets what only explained the work — command runs,
+stages, test reports, progress lines and client traffic — and keeps what a read across
+operations needs: the submission, its terminal result, the commit it integrated or
+published, its gate verdict, holds and settlements, an audit's head and cause, repair
+claims, Build admission and receipts, the evidence-expiry record, and its submission's
+dedupe key. An open operation, one inside the window, one whose retained source is not
+yet recorded as expired, one whose file deletion was cut short, and one whose receipts
+Build has not taken stay whole. A retained source is named only until its expiry is
+recorded, so the scan for evidence to expire stays a month deep rather than growing
+with every submission ever. A year after its newest event, an operation and those
+lasting facts go too: past every window in which anything reads them, and the point at
+which the ledger, the scans over it and its recovery cost would otherwise grow with
+the runner's age. A submission's request id is deduped while the ledger keeps its
+operation: for a year, or longer when the operation is retained below, after which a
+resubmission opens a new operation. An operation another surviving operation's facts
+name is kept, as is each repository's newest landing and everything those kept
+operations still name, whatever its age.
+`slipjay metrics`, `runner log` and `runner outcome` show the last 31 days in full,
+the year's facts behind them, and nothing older.
 
 `slipjay runner outcome <operation>` reads one landing's version-1 JSON evidence
 without following or submitting it. The authenticated API route is
