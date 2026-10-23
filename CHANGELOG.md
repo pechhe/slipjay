@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v3.46.8
+
+v3.46.7 was never tagged; its entry below ships in this release.
 
 - **A removed workspace's name can be claimed again:** JJ's `workspace forget` leaves the name in `.jj/repo/workspace_store/index`, still
   pointing at the old checkout, so a spare renamed to that name afterwards (an Issue's `ys-<n>` after its workspace was removed) listed
