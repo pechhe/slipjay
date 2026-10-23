@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.46.9
+
+- **A chore landing's note gives its Build number, or the command that shows it (#3402 review fix):** `slipjay land` waited six seconds for
+  Build to assign the chore's number, so a receipt that took longer left the note without it. It now waits fifteen seconds, past Build's
+  own ten-second request timeout, and when the number is still not recorded the note says `slipjay runner outcome <operation>` shows it once it is.
+
 ## v3.46.8
 
 v3.46.7 was never tagged; its entry below ships in this release.

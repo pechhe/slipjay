@@ -399,9 +399,10 @@ async function landedChore(baseUrl: string, token: string, operation: Operation,
       build = buildOf(refreshed) ?? build;
     }
   } catch { /* the landing published: say what it is without the number */ }
-  return choreLandingNote(build, landedCommitId);
+  return choreLandingNote(build, landedCommitId, operation.id);
 }
-const CHORE_NUMBER_WAIT_MS = 6_000;
+// Past Build's own 10 s request timeout, so a slow but successful receipt still gives the number.
+const CHORE_NUMBER_WAIT_MS = 15_000;
 
 /** This machine's record of which runner accepted each operation it submitted, newest last. */
 const operationRunnersPath = (): string => join(stateHome(), "operation-runners.json");
