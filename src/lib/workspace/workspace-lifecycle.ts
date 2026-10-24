@@ -622,12 +622,19 @@ async function evidenceUnchanged(integrationRoot: string, root: string, inventor
  * this after a crash, and it must not report `retired` while `slipjay list` still holds
  * the workspace — so any failure here is thrown, not swallowed.
  */
+/**
+ * Whether the registration for `workspaceName` at `workspacePath` still exists, read straight
+ * from jj. Throws when the list cannot be read, so an unknown registration is never read as
+ * a missing one — `listWorkspaces` answers [] in that case, which is not the same fact.
+ */
+export async function workspaceRegistered(integrationRoot: string, workspaceName: string, workspacePath: string): Promise<boolean> {
+  const listed = await jj(integrationRoot, ["--ignore-working-copy", "workspace", "list", "-T", 'name ++ "\\t" ++ root ++ "\\n"']);
+  return listed.split("\n").map((line) => line.split("\t")).some(([name, root]) => name === workspaceName && (!root || resolve(root) === resolve(workspacePath)));
+}
+
 export async function finishMissingRetirement(integrationRoot: string, workspaceName: string, workspacePath: string): Promise<void> {
-  // Read the registration directly: `listWorkspaces` answers [] when jj fails, which would
-  // read as "nothing to forget" and let a retirement claim a checkout it never forgot.
-  const listed = await jj(integrationRoot, ["--ignore-working-copy", "workspace", "list", "-T", 'name ++ "\\t" ++ root ++ "\\n"'])
+  const registered = await workspaceRegistered(integrationRoot, workspaceName, workspacePath)
     .catch((error: unknown) => { throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}: ${error instanceof Error ? error.message : String(error)}`); });
-  const registered = listed.split("\n").map((line) => line.split("\t")).some(([name, root]) => name === workspaceName && (!root || resolve(root) === resolve(workspacePath)));
   if (registered) {
     await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
   }

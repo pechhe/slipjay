@@ -332,13 +332,15 @@ export async function restoreArchive(id: string, options: { name?: string; path?
     if (digest !== archive.payload.sha256) return { refusal: `archive ${id} has a payload that no longer matches its manifest` };
   }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await withWorkspaceTransaction(`allocate:${archive.repository}`, async () => {
+  // The lock covers the whole restore, unpack included: a release that acquires it after the
+  // registration exists but before the payload lands would see an empty checkout and retire it.
+  const failure = await withWorkspaceTransaction(`allocate:${archive.repository}`, async (): Promise<string | null> => {
     await jj(archive.repository, ["workspace", "add", "--name", name, "--revision", archive.commitId, path]);
-  }, { waitMs: 120_000 });
-  if (archive.payload) {
+    if (!archive.payload) return null;
     const unpacked = await run("tar", ["-xpzf", archive.payload.file], { cwd: path });
-    if (unpacked.code !== 0) return { refusal: `restored ${path}, but its files outside history did not unpack: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
-  }
+    return unpacked.code === 0 ? null : `restored ${path}, but its files outside history did not unpack: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}`;
+  }, { waitMs: 120_000 });
+  if (failure) return { refusal: failure };
   return { workspacePath: path, workspaceName: name, archive };
 }
 

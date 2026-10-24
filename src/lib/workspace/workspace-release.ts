@@ -8,7 +8,7 @@ import { listWorkspaces, workspaceMetadata } from "./workspace-state.ts";
 import { callerPids, describeHolders, workspaceHolders } from "./workspace-holders.ts";
 import type { ProcessWorkingDirectory } from "./workspace-holders.ts";
 import { archiveWorkspace, inventoryOf, materialDigests, readArchive, syncPath } from "./workspace-archive.ts";
-import { finishMissingRetirement, withinWorkspaceStorage, WorkingCopyChangedError, retireWorkspace } from "./workspace-lifecycle.ts";
+import { finishMissingRetirement, withinWorkspaceStorage, WorkingCopyChangedError, retireWorkspace, workspaceRegistered } from "./workspace-lifecycle.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 
 /**
@@ -276,10 +276,12 @@ async function releaseOperation(workspacePath: string, options: {
           return await refused(changed ?? "the checkout changed between the archive and the removal");
         }
         const reason = error instanceof Error ? error.message : String(error);
-        // Nothing was removed if the checkout and its registration are both still here: that
-        // is a refusal of the removal, not an uncertainty about it.
-        const intact = existsSync(absolute) && await workspaceMetadata(workspace.name).then((metadata) => metadata !== null, () => false);
-        if (intact) return await refused(reason);
+        // Nothing was removed only if the checkout, its record *and* its registration are all
+        // still here. A forget can succeed and the discard then fail, leaving a directory that
+        // looks intact; an unreadable registration is unknown, so it errs to uncertainty.
+        const present = existsSync(absolute) && await workspaceMetadata(workspace.name).then((metadata) => metadata !== null, () => false);
+        const registered = present && await workspaceRegistered(integrationRoot, workspace.name, absolute).catch(() => false);
+        if (registered) return await refused(reason);
         return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId: archive.id,
           workspaceName: workspace.name, reason, at });
       }
