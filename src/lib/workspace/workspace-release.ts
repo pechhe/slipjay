@@ -5,7 +5,7 @@ import { jj, workspaceContext } from "../infra/workspace-jj.ts";
 import { writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { stateHome } from "./workspace-paths.ts";
 import { listWorkspaces, workspaceMetadata } from "./workspace-state.ts";
-import { workspaceHolders, describeHolders } from "./workspace-holders.ts";
+import { callerPids, describeHolders, workspaceHolders } from "./workspace-holders.ts";
 import type { ProcessWorkingDirectory } from "./workspace-holders.ts";
 import { archiveWorkspace, inventoryOf, materialDigests, readArchive, syncPath } from "./workspace-archive.ts";
 import { finishMissingRetirement, withinWorkspaceStorage, WorkingCopyChangedError, retireWorkspace } from "./workspace-lifecycle.ts";
@@ -183,7 +183,13 @@ export async function releaseWorkspace(workspacePath: string, options: {
   const integrationRoot = resolve(context.integration.root);
   const workspace = (await listWorkspaces(integrationRoot)).find((entry) => entry.root && resolve(entry.root) === absolute);
   if (!workspace) return await refused("the repository does not list it as a workspace");
-  const holders = await workspaceHolders(absolute, { processes: options.processes ?? null }).catch(() => null);
+  // The CLI's own process and its parents are not users of the checkout: they are the
+  // command releasing it, and counting them would refuse every release run from its own
+  // working directory.
+  // An injected process list is the caller's whole view (tests and hosts use it), so only
+  // the real reading discounts the command's own process and its parents.
+  const ignore = options.processes ? new Set<number>() : await callerPids().catch(() => new Set<number>());
+  const holders = await workspaceHolders(absolute, { processes: options.processes ?? null, ignore }).catch(() => null);
   if (holders === null) return await refused("the processes using it cannot be read");
   if (holders.length) return await refused(`in use by a live process: ${describeHolders(holders)}`);
   if ((await workspaceMetadata(workspace.name))?.spare === true) return await refused("it is a pool spare");
@@ -200,7 +206,7 @@ export async function releaseWorkspace(workspacePath: string, options: {
           reason: `operation ${operationId} already names ${raced.workspacePath}`, at };
       }
       // The holder and spare checks were made before the lock: make them again inside it.
-      const held = await workspaceHolders(absolute, { processes: options.processes ?? null }).catch(() => null);
+      const held = await workspaceHolders(absolute, { processes: options.processes ?? null, ignore }).catch(() => null);
       if (held === null) return await refused("the processes using it cannot be read");
       if (held.length) return await refused(`in use by a live process: ${describeHolders(held)}`);
       if ((await workspaceMetadata(workspace.name))?.spare === true) return await refused("it is a pool spare");

@@ -315,7 +315,7 @@ export async function latestArchiveFor(workspacePath: string): Promise<Workspace
   return null;
 }
 
-export async function restoreArchive(id: string, options: { name?: string; path?: string } = {}): Promise<{ workspacePath: string; archive: WorkspaceArchive } | { refusal: string }> {
+export async function restoreArchive(id: string, options: { name?: string; path?: string } = {}): Promise<{ workspacePath: string; workspaceName: string; archive: WorkspaceArchive } | { refusal: string }> {
   const archive = await readArchive(id);
   if (!archive) return { refusal: `no archive ${id}` };
   if (!existsSync(archive.repository)) return { refusal: `the repository ${archive.repository} is not on this machine` };
@@ -337,7 +337,7 @@ export async function restoreArchive(id: string, options: { name?: string; path?
     const unpacked = await run("tar", ["-xzf", archive.payload.file], { cwd: path });
     if (unpacked.code !== 0) return { refusal: `restored ${path}, but its files outside history did not unpack: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
   }
-  return { workspacePath: path, archive };
+  return { workspacePath: path, workspaceName: name, archive };
 }
 
 /**

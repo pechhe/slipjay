@@ -619,7 +619,7 @@ try {
     if (!archiveId) throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
     const outcome = await restoreArchive(archiveId, { name, path });
     if ("refusal" in outcome) throw new Error(`Cannot restore ${archiveId}: ${outcome.refusal}`);
-    console.log(JSON.stringify({ state: "restored", archiveId: outcome.archive.id, workspacePath: outcome.workspacePath, workspaceName: outcome.archive.workspaceName }));
+    console.log(JSON.stringify({ state: "restored", archiveId: outcome.archive.id, workspacePath: outcome.workspacePath, workspaceName: outcome.workspaceName }));
   } else if (command === "archives") {
     if (rest.length) throw new Error("Usage: slipjay archives");
     const archives = await listArchives();
