@@ -122,6 +122,40 @@ test("a request asking to retire archives, then waits for an ownership claim rat
   assert.equal(existsSync(join(archiveRequestsHome(), "req-3.json")), true, "the request stays for the pass that can honour it");
 });
 
+test("a file named like an option is archived, and a payload missing an entry is refused", async () => {
+  const f = await project();
+  const created = await createWorkspace("option-named", f.repo);
+  const workspace = { name: created.current.name, root: created.workspacePath };
+  await writeFile(join(workspace.root, ".gitignore"), ".env\n--exclude=*\n");
+  await writeFile(join(workspace.root, "--exclude=*"), "not an option\n");
+  await writeFile(join(workspace.root, "notes.txt"), "kept\n");
+
+  const archived = await archiveWorkspace(workspace.root, { reason: "test" });
+  assert.ok("archive" in archived, JSON.stringify(archived));
+  assert.ok(archived.archive.inventory.includes("--exclude=*"), "the option-shaped name is inventoried");
+  assert.ok((archived.archive.payload?.bytes ?? 0) > 0);
+
+  const restored = await restoreArchive(archived.archive.id, { name: `${workspace.name}-restored` });
+  assert.ok("workspacePath" in restored, JSON.stringify(restored));
+  assert.equal(await readFile(join(restored.workspacePath, "--exclude=*"), "utf8"), "not an option\n");
+  assert.equal(await readFile(join(restored.workspacePath, "notes.txt"), "utf8"), "kept\n");
+});
+
+test("a request whose identity cannot be read is retried rather than dropped", async () => {
+  const f = await project();
+  const { mkdtemp } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const notAWorkspace = await mkdtemp(join(tmpdir(), "slipjay-not-a-repo-"));
+  await writeFile(join(notAWorkspace, "loose.txt"), "no history here\n");
+  await request({ id: "req-4", workspacePath: notAWorkspace });
+
+  const outcomes = await processArchiveRequests();
+  const entry = outcomes.find((outcome) => outcome.requestId === "req-4");
+  assert.equal(entry?.outcome, "failed");
+  assert.match(entry?.reason ?? "", /could not be read this pass/);
+  assert.equal(existsSync(join(archiveRequestsHome(), "req-4.json")), true, "the request survives for the next pass");
+});
+
 test("a request that cannot be archived is kept for the next pass, with its attempt", async () => {
   const f = await project();
   const workspace = await createWorkspace("release-refused", f.repo);

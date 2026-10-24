@@ -193,9 +193,22 @@ export async function archiveWorkspace(root: string, options: {
   if (inventory.length) {
     await mkdir(archivesHome(), { recursive: true, mode: 0o700 });
     const file = archivePayloadPath(id);
-    const listing = inventory.join("\n");
+    // `./` before every entry: a file someone named `--exclude=*` is a name, never an option.
+    const listing = inventory.map((path) => `./${path}`).join("\n");
     const packed = await run("tar", ["-czf", file, "--files-from", "-"], { cwd: root, input: listing });
-    if (packed.code !== 0) return { refusal: `its files outside history could not be packed: ${packed.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
+    if (packed.code !== 0) {
+      await rm(file, { force: true });
+      return { refusal: `its files outside history could not be packed: ${packed.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
+    }
+    // The payload must hold exactly what the inventory names: a packer that quietly dropped
+    // entries would otherwise produce an archive whose manifest promises bytes it lacks.
+    const listed = await run("tar", ["-tzf", file], { cwd: root });
+    const packedFiles = new Set(listed.stdout.split("\n").map((entry) => entry.replace(/^\.\//, "")).filter((entry) => entry && !entry.endsWith("/")));
+    const missing = inventory.filter((path) => !packedFiles.has(path));
+    if (listed.code !== 0 || missing.length) {
+      await rm(file, { force: true });
+      return { refusal: `its payload does not hold every file its inventory names (missing ${missing.slice(0, 3).join(", ") || "members unreadable"})` };
+    }
     const bytes = readFileSync(file);
     syncPath(file);
     payload = { file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength };
@@ -335,10 +348,14 @@ export async function processArchiveRequests(options: { now?: number; retire?: b
         await rm(file, { force: true });
         continue;
       }
+      // A null context is ambiguous: the checkout may have left SlipJay, or Jujutsu may have
+      // failed for a moment. Dropping the request on the second reading would lose it, so it
+      // is retried and reported instead.
       const context = await workspaceContext(request.workspacePath).catch(() => null);
       if (!context) {
-        await record({ ...base, outcome: "skipped", reason: "it is no longer a SlipJay workspace" });
-        await rm(file, { force: true });
+        const reason = "its Jujutsu identity could not be read this pass; retrying next pass";
+        await record({ ...base, outcome: "failed", reason });
+        await writeRequestRetry(file, request, reason, now);
         continue;
       }
       // A request waiting for ownership keeps the archive it already made: re-archiving every
