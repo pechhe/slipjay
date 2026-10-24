@@ -231,3 +231,28 @@ test("a name reused by another checkout is never stripped by a stale replay", as
   assert.match((result as { reason: string }).reason, /now belongs to/);
   assert.equal(existsSync(metadataPath(workspace.name)), true, "the live workspace keeps its record");
 });
+
+test("a record that cannot be read is not an absent one", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-unreadable");
+  const archived = await archiveWorkspace(workspace.root, { reason: "crashed" });
+  assert.ok("archive" in archived);
+  const { retirementResultPath } = await import("../../src/lib/workspace/workspace-release.ts");
+  const { metadataPath } = await import("../../src/lib/workspace/workspace-state.ts");
+  const { mkdir, writeFile: write } = await import("node:fs/promises");
+  await mkdir(dirname(retirementResultPath("op-unreadable")), { recursive: true });
+  await write(retirementResultPath("op-unreadable"), JSON.stringify({
+    state: "retiring", operationId: "op-unreadable", workspacePath: workspace.root,
+    workspaceName: workspace.name, archiveId: archived.archive.id, commitId: archived.archive.commitId,
+    at: new Date().toISOString(),
+  }));
+  await rm(workspace.root, { recursive: true, force: true });
+  // A truncated record: it exists, so it is not evidence that nothing is owned here.
+  await write(metadataPath(workspace.name), "{ not json");
+
+  const result = await releaseWorkspace(workspace.root, { operationId: "op-unreadable" });
+
+  assert.equal(result.state, "uncertain", JSON.stringify(result));
+  assert.match((result as { reason: string }).reason, /unreadable/);
+  assert.equal(existsSync(metadataPath(workspace.name)), true, "the record is left for someone to repair");
+});

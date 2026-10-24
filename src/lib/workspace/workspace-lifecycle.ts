@@ -8,7 +8,7 @@ import { artifactPublished, finishLandedWorkspace } from "../landing/landing-ste
 import type { WorkspaceContext, WorkspaceEntry, WorkspaceMetadata } from "../infra/workspace-jj.ts";
 import { repositoryProjectCode, revisionExists, revisionFacts, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workingCopyCommit, workspaceContext } from "../infra/workspace-jj.ts";
 import { evidenceHome, workspaceHome, workspaceStorageHomes } from "./workspace-paths.ts";
-import { landingStatePaths, listWorkspaces, lockOwnerAlive, lockPath, metadataPath, readLandingState, workspaceMetadata } from "./workspace-state.ts";
+import { landingStatePaths, listWorkspaces, lockOwnerAlive, lockPath, metadataPath, metadataReadable, readLandingState, workspaceMetadata } from "./workspace-state.ts";
 import type { LandingState } from "./workspace-state.ts";
 import { generatedPathMatchers, readIntegrationPolicy } from "../policy/execution-policy.ts";
 import { cleanupRetentionReason, hasPendingRunnerFacts } from "./workspace-delivery-lifecycle.ts";
@@ -631,10 +631,12 @@ export async function finishMissingRetirement(integrationRoot: string, workspace
   if (registered) {
     await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
   }
-  // The name may have been reused by another checkout since (`renameWorkspace` moves it
-  // with its sidecars). Clearing them then would strip a live workspace, so a record that
-  // names a different path is a refusal, not something to tidy up.
+  // A record that exists but cannot be read is not an absent one: its path is unknown, so
+  // clearing its sidecars could strip a live workspace whose record a full disk truncated.
   const metadata = await workspaceMetadata(workspaceName);
+  if (metadata === null && !await metadataReadable(workspaceName)) {
+    throw new Error(`the record for ${workspaceName} is unreadable; refusing to clear it`);
+  }
   const recordedPath = typeof metadata?.workspacePath === "string" ? resolve(metadata.workspacePath) : null;
   if (recordedPath !== null && recordedPath !== resolve(workspacePath)) {
     throw new Error(`the name ${workspaceName} now belongs to ${recordedPath}; refusing to clear its record`);
