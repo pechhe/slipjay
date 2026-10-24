@@ -35,6 +35,12 @@ export interface RetirementHooks {
   afterChecks?: () => void | Promise<void>;
   /** Called after retirement copies a checkout's evidence and before its last look (tests). */
   afterEvidence?: () => void | Promise<void>;
+  /**
+   * The last look: called after every check retirement makes and immediately before it
+   * forgets the checkout. A host that holds its own proof of what the checkout contained
+   * (a release's archive) re-checks it here, and throwing keeps everything.
+   */
+  beforeForget?: () => void | Promise<void>;
 }
 
 type CleanupResult = {
@@ -610,6 +616,23 @@ async function evidenceUnchanged(integrationRoot: string, root: string, inventor
 }
 
 /** Unregister a workspace from JJ and discard its checkout (`discardCheckout`), through the host's guarded forget when given. */
+/**
+ * Finish a retirement whose checkout is already gone: forget the registration if it is
+ * still there, then remove the sidecars a normal retirement removes. A release reaches
+ * this after a crash, and it must not report `retired` while `slipjay list` still holds
+ * the workspace — so any failure here is thrown, not swallowed.
+ */
+export async function finishMissingRetirement(integrationRoot: string, workspaceName: string, workspacePath: string): Promise<void> {
+  const listed = await listWorkspaces(integrationRoot).catch(() => null);
+  if (listed === null) throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}`);
+  if (listed.some((entry) => entry.name === workspaceName)) {
+    await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
+  }
+  await rm(metadataPath(workspaceName), { force: true });
+  for (const candidate of landingStatePaths(workspaceName)) await rm(candidate, { force: true });
+  await rm(lockPath(workspaceName), { force: true });
+}
+
 export async function forgetWorkspace(integrationRoot: string, workspaceName: string, workspacePath: string, hooks: Pick<RetirementHooks, "forget"> = {}): Promise<void> {
   if (hooks.forget) return hooks.forget(integrationRoot, workspaceName, workspacePath);
   await jj(integrationRoot, ["--ignore-working-copy", "workspace", "forget", workspaceName]);
@@ -664,6 +687,7 @@ export async function retireWorkspace(integrationRoot: string, workspace: { name
         throw new WorkingCopyChangedError(workspace.name);
       }
       if (preserved && !await evidenceUnchanged(integrationRoot, workspace.root, preserved.inventory)) throw new WorkingCopyChangedError(workspace.name);
+      await hooks.beforeForget?.();
     } catch (error) {
       // The checkout is kept, evidence and all: a later retirement copies it afresh.
       if (preserved) await rm(preserved.directory, { recursive: true, force: true });

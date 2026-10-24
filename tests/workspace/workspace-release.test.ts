@@ -162,3 +162,41 @@ test("an operation id already naming another workspace is answered without overw
   assert.equal(stillRecorded?.state, "retired", "the first result stays authoritative");
   assert.equal(existsSync(other.root), true, "the other checkout is untouched");
 });
+
+test("a refused operation stays refused under its own id, even at the same path", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-refused-terminal");
+  const processes = [{ pid: process.pid, cwd: workspace.root, command: "bun test" }];
+  const first = await releaseWorkspace(workspace.root, { operationId: "op-terminal", processes });
+  assert.equal(first.state, "refused");
+
+  // The holder is gone, but the id named one attempt: replaying it must not release what is
+  // there now — a new attempt is a new operation.
+  const second = await releaseWorkspace(workspace.root, { operationId: "op-terminal" });
+
+  assert.equal(second.state, "refused");
+  assert.equal(existsSync(workspace.root), true, "the checkout is untouched by the replay");
+  assert.deepEqual(await readReleaseResult("op-terminal"), first);
+});
+
+test("reconciling an interrupted retirement also clears the workspace's own record", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-reconcile-meta");
+  const archived = await archiveWorkspace(workspace.root, { reason: "interrupted" });
+  assert.ok("archive" in archived);
+  const { retirementResultPath } = await import("../../src/lib/workspace/workspace-release.ts");
+  const { metadataPath } = await import("../../src/lib/workspace/workspace-state.ts");
+  const { mkdir, writeFile: write } = await import("node:fs/promises");
+  await mkdir(dirname(retirementResultPath("op-meta")), { recursive: true });
+  await write(retirementResultPath("op-meta"), JSON.stringify({
+    state: "retiring", operationId: "op-meta", workspacePath: workspace.root,
+    workspaceName: workspace.name, archiveId: archived.archive.id, commitId: archived.archive.commitId,
+    at: new Date().toISOString(),
+  }));
+  await rm(workspace.root, { recursive: true, force: true });
+
+  const result = await releaseWorkspace(workspace.root, { operationId: "op-meta" });
+
+  assert.equal(result.state, "retired", JSON.stringify(result));
+  assert.equal(existsSync(metadataPath(workspace.name)), false, "the workspace record does not outlive the checkout");
+});

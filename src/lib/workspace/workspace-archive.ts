@@ -185,7 +185,8 @@ export async function archiveWorkspace(root: string, options: {
   const changeId = (await jj(root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "change_id"])).trim();
   const baseCommitId = (await jj(root, ["--ignore-working-copy", "log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
   const inventory = await inventoryOf(root, integrationRoot);
-  const inventoryDigests = await materialDigests(root, inventory);
+  // Digests are taken after packing, below: a file rewritten during the pack would
+  // otherwise leave transient bytes in the payload and the final bytes in the manifest.
   const id = createHash("sha256").update(`${integrationRoot}\n${workspaceName}\n${commitId}\n${createdAt.toISOString()}`).digest("hex").slice(0, 16);
   const bookmark = `slipjay-archive-${id}`;
 
@@ -193,6 +194,7 @@ export async function archiveWorkspace(root: string, options: {
   await jj(integrationRoot, ["bookmark", "create", bookmark, "-r", commitId]);
 
   let payload: WorkspaceArchive["payload"] = null;
+  let inventoryDigests: Record<string, string> = {};
   if (inventory.length) {
     await mkdir(archivesHome(), { recursive: true, mode: 0o700 });
     const file = archivePayloadPath(id);
@@ -215,6 +217,8 @@ export async function archiveWorkspace(root: string, options: {
     const bytes = readFileSync(file);
     syncPath(file);
     payload = { file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength };
+    // Now that the payload holds its bytes, describe exactly those.
+    inventoryDigests = await materialDigests(root, inventory);
   }
 
   const archive: WorkspaceArchive = {

@@ -654,7 +654,11 @@ try {
     if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay retire-result <operation-id>");
     const result = await readReleaseResult(rest[0]!);
     console.log(JSON.stringify(result));
+    // A harness reads this status: only a retirement is a success, and an unfinished
+    // attempt is its own answer rather than something to mistake for one.
     if (!result) process.exitCode = 1;
+    else if (result.state === "uncertain" || result.state === "retiring") process.exitCode = 2;
+    else if (result.state === "refused") process.exitCode = 1;
   } else if (command === "retirements") {
     if (rest.length) throw new Error("Usage: slipjay retirements");
     const results = await listReleaseResults();

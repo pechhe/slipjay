@@ -8,7 +8,7 @@ import { listWorkspaces, workspaceMetadata } from "./workspace-state.ts";
 import { workspaceHolders, describeHolders } from "./workspace-holders.ts";
 import type { ProcessWorkingDirectory } from "./workspace-holders.ts";
 import { archiveWorkspace, inventoryOf, materialDigests, readArchive, syncPath } from "./workspace-archive.ts";
-import { forgetWorkspace, withinWorkspaceStorage, WorkingCopyChangedError, retireWorkspace } from "./workspace-lifecycle.ts";
+import { finishMissingRetirement, withinWorkspaceStorage, WorkingCopyChangedError, retireWorkspace } from "./workspace-lifecycle.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 
 /**
@@ -124,29 +124,45 @@ export async function releaseWorkspace(workspacePath: string, options: {
     return { state: "refused", operationId, workspacePath: absolute,
       reason: `operation ${operationId} already names ${known.workspacePath}`, at };
   }
-  if (known && known.state === "retired") return known;
+  // A finished answer is authoritative: a replay reports it and acts on nothing. A refused
+  // operation is not retried under its own id either — a new attempt is a new operation,
+  // otherwise a stale id could release whatever now occupies the path.
+  if (known && (known.state === "retired" || known.state === "refused")) return known;
 
   if (!existsSync(absolute)) {
     // An intent or an uncertain result outlived the checkout: the removal happened and the
-    // answer did not. Reconcile the registration it may have left behind, then say retired.
-    const unfinished = known?.state === "retiring" || known?.state === "uncertain" ? known : null;
-    if (unfinished?.archiveId) {
-      const archive = await readArchive(unfinished.archiveId);
-      if (!archive) {
-        return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId: unfinished.archiveId,
-          reason: "the archive this operation made is missing, so what it removed cannot be established", at });
+    // answer did not. Reconcile the registration and sidecars it left, under the lock, and
+    // only then call it retired.
+    const unfinished = known && (known.state === "retiring" || known.state === "uncertain") ? known : null;
+    if (!unfinished?.archiveId) return await refused("the checkout is not on disk");
+    const archiveId: string = unfinished.archiveId;
+    const archive = await readArchive(archiveId);
+    if (!archive) {
+      return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId: unfinished.archiveId,
+        reason: "the archive this operation made is missing, so what it removed cannot be established", at });
+    }
+    return await withWorkspaceTransaction(`allocate:${archive.repository}`, async (): Promise<ReleaseResult> => {
+      const latest = await readReleaseResult(operationId);
+      if (latest && latest.state === "retired") return latest;
+      if (latest && resolve(latest.workspacePath) !== absolute) {
+        return { state: "refused", operationId, workspacePath: absolute,
+          reason: `operation ${operationId} already names ${latest.workspacePath}`, at };
       }
-      // A directory gone while Jujutsu still lists the workspace is a removal that stopped
-      // half-way; forgetting it now is what makes the record true.
-      const listed = await listWorkspaces(archive.repository).catch(() => []);
-      const workspaceName = unfinished.workspaceName ?? archive.workspaceName;
-      if (listed.some((entry) => entry.name === workspaceName)) {
-        await forgetWorkspace(archive.repository, workspaceName, absolute).catch(() => undefined);
+      if (existsSync(absolute)) {
+        // Something occupies the path again: forget nothing, and do not claim a retirement.
+        return { state: "uncertain", operationId, workspacePath: absolute, archiveId,
+          reason: "a checkout now occupies the path; reconcile this operation by hand", at };
+      }
+      const workspaceName: string = unfinished.workspaceName ?? archive.workspaceName;
+      try {
+        await finishMissingRetirement(archive.repository, workspaceName, absolute);
+      } catch (error) {
+        return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId,
+          workspaceName, reason: `its registration could not be reconciled: ${error instanceof Error ? error.message : String(error)}`, at });
       }
       return await record({ state: "retired", operationId, workspacePath: absolute, workspaceName,
-        archiveId: unfinished.archiveId, commitId: unfinished.commitId ?? archive.commitId, at });
-    }
-    return await refused("the checkout is not on disk");
+        archiveId, commitId: unfinished.commitId ?? archive.commitId, at });
+    }, { waitMs: 120_000 });
   }
   // The checkout is still here but an earlier attempt never finished: act on nothing until
   // the caller reconciles that attempt, because it may have been removing this very path.
@@ -166,63 +182,84 @@ export async function releaseWorkspace(workspacePath: string, options: {
   if (holders.length) return await refused(`in use by a live process: ${describeHolders(holders)}`);
   if ((await workspaceMetadata(workspace.name))?.spare === true) return await refused("it is a pool spare");
 
-  return await withWorkspaceTransaction(`writer:${workspace.name}`, async (): Promise<ReleaseResult> => {
-    // Re-read under the lock: a concurrent call with the same id may have finished.
-    const raced = await readReleaseResult(operationId);
-    if (raced && raced.state !== "retiring") return raced;
-
-    // Snapshot the working copy first: the archive records the commit it finds, and the
-    // retirement compares that same commit before it forgets anything.
-    await jj(absolute, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]).catch(() => null);
-    const archived = await archiveWorkspace(absolute, { reason: `released by ${operationId}`, now: options.now });
-    if ("refusal" in archived) return await refused(archived.refusal);
-    const archive = archived.archive;
-
-    const fresh = async (): Promise<string | null> => {
-      const inventory = await inventoryOf(absolute, integrationRoot).catch(() => null);
-      if (inventory === null) return "its files outside history could not be read again after the archive";
-      const digests = await materialDigests(absolute, inventory);
-      return stillArchivedState(archive, { commitId: archive.commitId, inventory, inventoryDigests: digests })
-        ? null : "the checkout changed while it was being archived";
-    };
-    const stale = await fresh();
-    if (stale) return await refused(stale);
-
-    // The intent is durable before anything is removed: a crash from here on is reconcilable.
-    await mkdir(retirementsHome(), { recursive: true, mode: 0o700 });
-    await writeWorkspaceJson(retirementResultPath(operationId), {
-      state: "retiring", operationId, workspacePath: absolute, workspaceName: workspace.name,
-      archiveId: archive.id, commitId: archive.commitId, at,
-    } satisfies ReleaseIntent);
-    syncPath(retirementResultPath(operationId));
-    syncPath(retirementsHome());
-
-    let changedAfterTeardown: string | null = null;
-    try {
-      await retireWorkspace(integrationRoot, { name: workspace.name, root: absolute }, {
-        // The teardown runs inside retirement, so this is where its effect on the material is
-        // seen: a hook that only recorded the change would let the removal continue.
-        afterEvidence: async () => {
-          const changed = await fresh();
-          if (changed) {
-            changedAfterTeardown = changed;
-            throw new WorkingCopyChangedError(workspace.name);
-          }
-        },
-      }, { expectedCommitId: archive.commitId });
-    } catch (error) {
-      if (error instanceof WorkingCopyChangedError) {
-        return await refused(changedAfterTeardown ?? "the checkout changed between the archive and the removal");
+  // `allocate:` is the key a start or a resume takes, and `writer:` the one a removal takes:
+  // holding both is what makes "cleanup first, resume waits" true rather than hoped for.
+  return await withWorkspaceTransaction(`allocate:${integrationRoot}`, () =>
+    withWorkspaceTransaction(`writer:${workspace.name}`, async (): Promise<ReleaseResult> => {
+      // Re-read under both locks: a concurrent call with the same id may have finished.
+      const raced = await readReleaseResult(operationId);
+      if (raced && (raced.state === "retired" || raced.state === "refused")) return raced;
+      if (raced && resolve(raced.workspacePath) !== absolute) {
+        return { state: "refused", operationId, workspacePath: absolute,
+          reason: `operation ${operationId} already names ${raced.workspacePath}`, at };
       }
-      return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId: archive.id,
-        workspaceName: workspace.name, reason: error instanceof Error ? error.message : String(error), at });
-    }
-    if (changedAfterTeardown) {
-      // Retirement refuses on this too, but name it plainly if a host ever returns first.
-      return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId: archive.id,
-        workspaceName: workspace.name, reason: changedAfterTeardown, at });
-    }
-    return await record({ state: "retired", operationId, workspacePath: absolute, workspaceName: workspace.name,
-      archiveId: archive.id, commitId: archive.commitId, at });
-  }, { waitMs: 120_000 });
+      // The holder and spare checks were made before the lock: make them again inside it.
+      const held = await workspaceHolders(absolute, { processes: options.processes ?? null }).catch(() => null);
+      if (held === null) return await refused("the processes using it cannot be read");
+      if (held.length) return await refused(`in use by a live process: ${describeHolders(held)}`);
+      if ((await workspaceMetadata(workspace.name))?.spare === true) return await refused("it is a pool spare");
+
+      // Snapshot the working copy first: the archive records the commit it finds, and the
+      // retirement compares that same commit before it forgets anything.
+      await jj(absolute, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]).catch(() => null);
+      const archived = await archiveWorkspace(absolute, { reason: `released by ${operationId}`, now: options.now });
+      if ("refusal" in archived) return await refused(archived.refusal);
+      const archive = archived.archive;
+
+      const fresh = async (): Promise<string | null> => {
+        const commit = (await jj(absolute, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"]).catch(() => null))?.trim();
+        if (!commit) return "its working copy could not be read again after the archive";
+        const inventory = await inventoryOf(absolute, integrationRoot).catch(() => null);
+        if (inventory === null) return "its files outside history could not be read again after the archive";
+        const digests = await materialDigests(absolute, inventory);
+        return stillArchivedState(archive, { commitId: commit, inventory, inventoryDigests: digests })
+          ? null : "the checkout changed while it was being archived";
+      };
+      const stale = await fresh();
+      if (stale) return await refused(stale);
+
+      // The intent is durable before anything is removed: a crash from here on is reconcilable.
+      await mkdir(retirementsHome(), { recursive: true, mode: 0o700 });
+      await writeWorkspaceJson(retirementResultPath(operationId), {
+        state: "retiring", operationId, workspacePath: absolute, workspaceName: workspace.name,
+        archiveId: archive.id, commitId: archive.commitId, at,
+      } satisfies ReleaseIntent);
+      syncPath(retirementResultPath(operationId));
+      syncPath(retirementsHome());
+
+      let changed: string | null = null;
+      try {
+        await retireWorkspace(integrationRoot, { name: workspace.name, root: absolute }, {
+          // Both hooks run inside retirement: after the teardown, and again as the very last
+          // look before the forget, so a file written between them still keeps the checkout.
+          afterEvidence: async () => {
+            const reason = await fresh();
+            if (reason) {
+              changed = reason;
+              throw new WorkingCopyChangedError(workspace.name);
+            }
+          },
+          beforeForget: async () => {
+            const reason = await fresh();
+            if (reason) {
+              changed = reason;
+              throw new WorkingCopyChangedError(workspace.name);
+            }
+          },
+        }, { expectedCommitId: archive.commitId });
+      } catch (error) {
+        if (error instanceof WorkingCopyChangedError) {
+          return await refused(changed ?? "the checkout changed between the archive and the removal");
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        // Nothing was removed if the checkout and its registration are both still here: that
+        // is a refusal of the removal, not an uncertainty about it.
+        const intact = existsSync(absolute) && await workspaceMetadata(workspace.name).then((metadata) => metadata !== null, () => false);
+        if (intact) return await refused(reason);
+        return await record({ state: "uncertain", operationId, workspacePath: absolute, archiveId: archive.id,
+          workspaceName: workspace.name, reason, at });
+      }
+      return await record({ state: "retired", operationId, workspacePath: absolute, workspaceName: workspace.name,
+        archiveId: archive.id, commitId: archive.commitId, at });
+    }, { waitMs: 120_000 }), { waitMs: 120_000 });
 }
