@@ -9,16 +9,17 @@ import type { StartSteps } from "./start-steps.ts";
 import { runWorkspaceCommand as run } from "../infra/workspace-command.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 
-/** Package-manager installation is the standalone Pi readiness authority. It is
- *  intentionally workspace-local and lockfile-frozen: package managers may reuse
- *  their immutable caches, but JJ workspaces never share mutable node_modules. */
-async function workspaceDependencyCommand(workspacePath: string): Promise<{ command: string; args: string[] } | null> {
-  const raw = await readFile(join(workspacePath, "package.json"), "utf8").catch(() => null);
-  if (!raw) return null;
-  const packageManager: unknown = JSON.parse(raw).packageManager;
-  if (typeof packageManager !== "string") {
-    throw new Error(`Workspace dependency provisioning requires a declared packageManager in ${workspacePath}.`);
-  }
+/**
+ * How a workspace gets its dependencies, for a given platform.
+ *
+ * The install is workspace-local and lockfile-frozen — a checkout never shares a mutable
+ * `node_modules` — but the *bytes* need not be private. On APFS a clone costs nothing, so
+ * `clone-or-copy` keeps full isolation for free; on a filesystem without reflinks the
+ * same flag silently copies every package into the checkout, which is where a 4 GB
+ * workspace comes from when the shared store holds 9 GB for everything. Hard links give
+ * the same isolation for the filesystem's block cost instead.
+ */
+export function dependencyInstallCommand(packageManager: string, platform: NodeJS.Platform): { command: string; args: string[] } | null {
   if (packageManager === "bun" || packageManager.startsWith("bun@")) {
     return {
       command: "bun",
@@ -26,16 +27,30 @@ async function workspaceDependencyCommand(workspacePath: string): Promise<{ comm
     };
   }
   if (packageManager === "pnpm" || packageManager.startsWith("pnpm@")) {
-    // pnpm 12 refuses plain `clone` where the filesystem has no reflinks (ext4 runners).
+    // pnpm 12 refuses plain `clone` where the filesystem has no reflinks (ext4 runners),
+    // and `clone-or-copy` there means copy: hardlink shares the store's blocks instead.
     return {
       command: "pnpm",
-      args: ["install", "--frozen-lockfile", "--prefer-offline", "--package-import-method=clone-or-copy"],
+      args: ["install", "--frozen-lockfile", "--prefer-offline",
+        `--package-import-method=${platform === "darwin" ? "clone-or-copy" : "hardlink"}`],
     };
   }
   if (packageManager === "npm" || packageManager.startsWith("npm@")) {
     return { command: "npm", args: ["ci", "--prefer-offline"] };
   }
-  throw new Error(`Workspace dependency provisioning does not support package manager '${packageManager}'.`);
+  return null;
+}
+
+async function workspaceDependencyCommand(workspacePath: string): Promise<{ command: string; args: string[] } | null> {
+  const raw = await readFile(join(workspacePath, "package.json"), "utf8").catch(() => null);
+  if (!raw) return null;
+  const packageManager: unknown = JSON.parse(raw).packageManager;
+  if (typeof packageManager !== "string") {
+    throw new Error(`Workspace dependency provisioning requires a declared packageManager in ${workspacePath}.`);
+  }
+  const command = dependencyInstallCommand(packageManager, process.platform);
+  if (!command) throw new Error(`Workspace dependency provisioning does not support package manager '${packageManager}'.`);
+  return command;
 }
 
 /** The workspace's tracked `package.json` paths, relative to its root, or null when JJ cannot list them. */
@@ -97,8 +112,20 @@ export async function bunStoreDamage(workspacePath: string, env: NodeJS.ProcessE
  * which `cp -P` keeps verbatim, so a copied tree resolves inside its new checkout. Returns the
  * trees created, or null (having removed any partial copy) when cloning is unavailable or fails.
  */
+/**
+ * The command that copies a `node_modules` tree, cheaply where the filesystem allows it.
+ * A clone costs nothing on APFS; elsewhere `--reflink=auto` quietly degrades to a full
+ * copy, so the entries are hard-linked instead — the install is immutable once written,
+ * which is what makes sharing them safe.
+ */
+export function cloneNodeModulesCommand(platform: NodeJS.Platform): string[] | null {
+  if (platform === "darwin") return ["cp", "-cRP"];
+  if (platform === "linux") return ["cp", "-al"];
+  return null;
+}
+
 async function cloneNodeModules(source: string, workspacePath: string): Promise<string[] | null> {
-  const clone = process.platform === "darwin" ? ["cp", "-cRP"] : process.platform === "linux" ? ["cp", "-RP", "--reflink=auto"] : null;
+  const clone = cloneNodeModulesCommand(process.platform);
   if (!clone) return null;
   const manifests = await trackedManifests(workspacePath);
   if (!manifests) return null;
@@ -107,7 +134,12 @@ async function cloneNodeModules(source: string, workspacePath: string): Promise<
     const from = join(source, dirname(manifest), "node_modules");
     const to = join(workspacePath, dirname(manifest), "node_modules");
     if (!existsSync(from) || existsSync(to)) continue;
-    const copied = await run(clone[0]!, [...clone.slice(1), from, to], { cwd: workspacePath, timeoutMs: 10 * 60_000 });
+    let copied = await run(clone[0]!, [...clone.slice(1), from, to], { cwd: workspacePath, timeoutMs: 10 * 60_000 });
+    if (copied.code !== 0 && clone.includes("-al")) {
+      // Different filesystems cannot share inodes: copy, having removed the partial tree.
+      await rm(to, { recursive: true, force: true });
+      copied = await run("cp", ["-RP", from, to], { cwd: workspacePath, timeoutMs: 10 * 60_000 });
+    }
     created.push(to);
     if (copied.code !== 0) {
       await Promise.all(created.map((path) => rm(path, { recursive: true, force: true })));
