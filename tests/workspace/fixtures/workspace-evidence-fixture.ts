@@ -1,9 +1,7 @@
 import { jj, project } from "../../support/workspace-project.ts";
-import { landThroughTestRunner } from "../../support/test-runner.ts";
-import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createWorkspace } from "../../../src/lib/workspace/workspace-create.ts";
+import { landedState } from "./landed-state.ts";
 import { EMPTY_IDLE_MS } from "../../../src/lib/workspace/workspace-sweep.ts";
 
 type Fixture = Awaited<ReturnType<typeof project>>;
@@ -16,12 +14,8 @@ export const names = (repo: string) => jj(repo, ["workspace", "list", "-T", 'nam
 export const declared = { ignore: ".t3/\nnotes/\n", generatedPaths: [".t3/userdata"], policy: { evidencePaths: [".t3/review"] } };
 
 export async function landedWorkspace(f: Fixture, task: string) {
-  const workspace = await createWorkspace(task, f.repo);
-  await writeFile(join(workspace.workspacePath, `${task}.txt`), `${task}\n`);
-  jj(workspace.workspacePath, ["describe", "-m", `Add ${task}`]);
-  const landed = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
-  assert.equal(landed.ok, true, landed.lines.join("\n"));
-  return workspace;
+  // Evidence retirement starts after delivery; see landedState's coverage contract.
+  return landedState(f, task);
 }
 
 export async function previewOutput(root: string) {

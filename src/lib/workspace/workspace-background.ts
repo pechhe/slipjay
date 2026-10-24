@@ -15,12 +15,13 @@ const BACKGROUND_LOG_LIMIT = 1024 * 1024;
  * appending its output to the background-work log in the state home. `started`
  * means the child spawned; its outcome is only in the log. `command` replaces the
  * spawned runner (tests); `args` come before the integration root, which is always the last argument.
+ * A caller that just resolved a workspace context can supply its integration root without rereading policy.
  */
-export async function startBackgroundEntry(cwd: string, entry: string, options: { command?: string[]; args?: string[] } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
-  const context = await workspaceContext(cwd);
-  if (!context) return { started: false, reason: "not-jj" };
+export async function startBackgroundEntry(cwd: string, entry: string, options: { command?: string[]; args?: string[]; integrationRoot?: string } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
+  const root = options.integrationRoot ?? (await workspaceContext(cwd))?.integration.root;
+  if (!root) return { started: false, reason: "not-jj" };
   const command = options.command ?? ["nice", "-n", "10", process.execPath, fileURLToPath(new URL(entry, import.meta.url))];
-  return await spawnDetached([...command, ...options.args ?? [], context.integration.root], context.integration.root);
+  return await spawnDetached([...command, ...options.args ?? [], root], root);
 }
 
 /** Spawn `command` detached in `cwd`, appending its output to the background-work log. */

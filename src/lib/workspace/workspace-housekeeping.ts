@@ -59,7 +59,7 @@ export async function startHousekeeping(cwd: string = process.cwd(), options: { 
   // A sweep that ran recently needs no child, so frequent allocations cost one small read.
   // The stamp is keyed by the integration root, which is what the child sweeps.
   if (await recentlySwept(context.integration.root, Date.now(), HOUSEKEEPING_INTERVAL_MS)) return { started: false, reason: "recent" };
-  return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", options);
+  return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", { ...options, integrationRoot: context.integration.root });
 }
 
 /**
@@ -72,5 +72,5 @@ export async function startHousekeeping(cwd: string = process.cwd(), options: { 
  */
 export async function startLandedHousekeeping(context: WorkspaceContext, ignore: Iterable<number>, options: { command?: string[] } = {}): ReturnType<typeof startBackgroundEntry> {
   const args = ["--landing", "--ignore", [...ignore].join(","), ...context.current.name === "default" ? [] : ["--release", context.current.root]];
-  return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", { ...options, args });
+  return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", { ...options, args, integrationRoot: context.integration.root });
 }

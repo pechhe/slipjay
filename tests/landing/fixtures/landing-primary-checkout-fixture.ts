@@ -1,5 +1,5 @@
 import { jj, project } from "../../support/workspace-project.ts";
-import { landThroughTestRunner } from "../../support/test-runner.ts";
+import { landOnTestRunner, landThroughTestRunner, type TestRunner } from "../../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -18,11 +18,13 @@ export const primary = (f: Fixture) => ({
   conflict: jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "conflict"]) === "true",
 });
 
-export async function land(f: Fixture, file: string) {
+export async function land(f: Fixture, file: string, runner?: TestRunner) {
   const workspace = await createWorkspace(file, f.repo);
   await writeFile(join(workspace.workspacePath, file), `${file}\n`);
   // Kept, so its landing record (where the primary checkout outcome lives) stays readable.
-  const landed = await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
+  const landed = runner
+    ? await landOnTestRunner(runner, workspace.workspacePath, { keep: true })
+    : await landThroughTestRunner(f, workspace.workspacePath, { keep: true });
   assert.equal(landed.ok, true, landed.lines.join("\n"));
   assert.equal(f.remoteFile(file), `${file}\n`);
   const result = (await readLandingState(workspace.current.name, { readOnly: true }))! as { artifactCommitId: string; cleanupPending?: boolean; primaryCheckout?: PrimaryCheckoutOutcome };

@@ -7,7 +7,8 @@ import { test } from "vite-plus/test";
 import { cleanupLandedWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
-import { later, land } from "./fixtures/workspace-sweep-fixture.ts";
+import { later } from "./fixtures/workspace-sweep-fixture.ts";
+import { landedState } from "./fixtures/landed-state.ts";
 
 /** Advance `main` in the primary checkout and move `workspace`'s change onto it from there, so its checkout goes stale. */
 async function rewriteUnder(repo: string, workspace: string) {
@@ -42,9 +43,9 @@ test("a stale idle workspace is updated and swept, but one holding edits is kept
 test("cleanup updates a landed workspace whose working copy went stale, then releases it", async () => {
   const f = await project();
   try {
-    const landed = await createWorkspace("landed", f.repo);
-    await land(f, landed.workspacePath, "landed.txt", { keep: true });
-    assert.ok(existsSync(landed.workspacePath), "held while it landed");
+    // Only the later stale-checkout transition is under test; see landedState's coverage contract.
+    const landed = await landedState(f, "landed");
+    assert.ok(existsSync(landed.workspacePath), "the seeded delivered checkout is available for cleanup");
     await rewriteUnder(f.repo, landed.current.name);
     assert.deepEqual(await cleanupLandedWorkspace(landed.workspacePath), { cleaned: true });
     assert.equal(existsSync(landed.workspacePath), false);

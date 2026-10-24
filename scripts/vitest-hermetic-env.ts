@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vite-plus/test";
 import { assertHermeticHome } from "./hermetic-home-guard.ts";
+import { FIXTURE_GIT_IDENTITY } from "./fixture-git-config.ts";
 
 // Fixture repositories are written, synced and deleted within one test, and on a disk JJ's
 // syncs take most of their time (nearly half of a landing test on the runner). Where Linux
@@ -34,6 +35,9 @@ if (process.platform === "linux" && existsSync(SHM) && executable(SHM)) {
 
 const home = realpathSync(mkdtempSync(join(tmpdir(), "peach-test-home-")));
 process.env.HOME = home;
+// JJ otherwise spawns `tput cols` and `tput lines` on every raw fixture call.
+// Match jjEnvironment's noninteractive fallback without changing an explicit width.
+process.env.COLUMNS ||= "80";
 // Every detached worker (including workers spawned by a worker) can be joined
 // before a fixture closes its runner or deletes a repository it still uses.
 process.env.SLIPJAY_BACKGROUND_WORKERS = join(home, "background-workers");
@@ -56,7 +60,7 @@ for (const key of Object.keys(process.env)) {
 
 // Fixture repositories live for one test: Git's automatic gc and maintenance after
 // commits, fetches and pushes only cost time there. Real checkouts keep them.
-writeFileSync(join(home, ".gitconfig"), "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n");
+writeFileSync(join(home, ".gitconfig"), FIXTURE_GIT_IDENTITY + "[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n", { mode: 0o600 });
 
 // A fixture allocating a workspace must not race its own sweeps with a background one.
 process.env.SLIPJAY_AUTO_HOUSEKEEPING = "0";

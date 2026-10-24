@@ -3,9 +3,10 @@
 // does for Vitest. Bun resolves homedir() at startup, so the isolated value must be
 // set before the test runtime launches rather than inside the test file.
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { FIXTURE_GIT_IDENTITY } from "./fixture-git-config.ts";
 
 const [command, ...args] = process.argv.slice(2);
 if (!command) {
@@ -19,6 +20,7 @@ for (const key of Object.keys(env)) {
   if (/^(CMUX_|SLIPJAY_COMMAND_|XDG_(CONFIG|STATE|DATA)_HOME$|JJ_CONFIG$|GIT_CONFIG_(GLOBAL|SYSTEM)$)/.test(key) || key === "PI_CODING_AGENT_DIR") delete env[key];
 }
 try {
+  writeFileSync(join(home, ".gitconfig"), FIXTURE_GIT_IDENTITY, { mode: 0o600 });
   const result = spawnSync(command, args, { stdio: "inherit", env });
   if (result.error) throw result.error;
   process.exitCode = result.status ?? 1;

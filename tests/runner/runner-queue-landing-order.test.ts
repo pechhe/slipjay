@@ -33,6 +33,9 @@ test("queued candidates land in arrival order on the previous candidate, with ru
       assert.equal(operation.runs[0]!.timeoutMs, f.requestedTimeouts.find((request) => request.command === command)!.timeoutMs);
       assert.equal(operation.runs[0]!.exitCode, 0);
       const evidence = f.log.events({ operationId: id }).map((row) => row.event);
+      const shapes = evidence.filter((event) => event.type === "change_shape");
+      assert.equal(shapes.length, 3, "submission, dependency preparation and verification each retain their shape event");
+      assert.deepEqual(shapes.at(-2), shapes.at(-1), "the unchanged prepared candidate has the same shape at verification");
       const shape = evidence.findLast((event) => event.type === "change_shape");
       assert.ok(shape?.type === "change_shape");
       assert.equal(shape.files, 1);

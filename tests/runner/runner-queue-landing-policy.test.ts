@@ -6,7 +6,8 @@ import type { PolicyPatch } from "../../src/lib/policy/policy-settings.ts";
 import { gate, command, test, jj, fixture, generate } from "./fixtures/runner-queue-fixture.ts";
 
 test("a rebase conflict in the policy returns the runner to integration before an independent landing", async () => {
-  const f = await fixture();
+  // Its verdict's candidate bookmark is asserted, so this fixture observes it; nothing else here reads that map.
+  const f = await fixture(false, false, undefined, false, { observeCandidateAtVerdict: true });
   try {
     const makePolicyCandidate = async (projectCode: string) => {
       jj(f.author, ["new", "main"]);

@@ -21,21 +21,19 @@ export function artifactBookmark(artifact: LandingArtifact): string {
   return `slipjay-private/artifacts/${createHash("sha256").update(JSON.stringify([artifact.operationId, artifact.attempt])).digest("hex")}`;
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
-  const root = await jj(cwd, ["--ignore-working-copy", "git", "root"]);
+async function git(cwd: string, root: string, args: string[]): Promise<string> {
   const result = await runWorkspaceCommand("git", ["--git-dir", root, ...args], { cwd });
   if (result.code !== 0) throw new Error(result.stderr || result.stdout || "Artifact transport failed");
   return result.stdout.trim();
 }
 
-async function assertArtifact(cwd: string, artifact: LandingArtifact): Promise<void> {
-  artifactBookmark(artifact);
-  const parents = (await git(cwd, ["show", "-s", "--format=%P", artifact.candidate])).split(" ");
+async function assertArtifact(cwd: string, root: string, artifact: LandingArtifact): Promise<void> {
+  const parents = (await git(cwd, root, ["show", "-s", "--format=%P", artifact.candidate])).split(" ");
   // The first parent is the exact frozen predecessor. Other parents may only
   // preserve history already present in the immutable submitted source.
   if (parents[0] !== artifact.base) throw new Error(`Landing artifact does not extend its exact expected base: expected ${artifact.base}, observed ${parents.join(" ")}`);
   for (const parent of parents.slice(1))
-    await git(cwd, ["merge-base", "--is-ancestor", parent, artifact.source]).catch(() => {
+    await git(cwd, root, ["merge-base", "--is-ancestor", parent, artifact.source]).catch(() => {
       throw new Error("Landing artifact adds a parent outside submitted source ancestry");
     });
 }
@@ -43,24 +41,28 @@ async function assertArtifact(cwd: string, artifact: LandingArtifact): Promise<v
 /** Pin author evidence as soon as it is fetched, including attempts that fail preparation. */
 export async function retainLandingSource(cwd: string, operationId: string, attempt: number, source: string): Promise<void> {
   const name = `${artifactBookmark({ operationId, attempt, source, base: source, candidate: source })}-source`;
+  const root = await jj(cwd, ["--ignore-working-copy", "git", "root"]);
   for (const ref of [`refs/slipjay/${name}`, `refs/heads/${name}`]) {
-    const existing = await git(cwd, ["for-each-ref", "--format=%(objectname)", ref]);
+    const existing = await git(cwd, root, ["for-each-ref", "--format=%(objectname)", ref]);
     if (existing && existing !== source) throw new Error("Retained landing source was changed");
-    if (!existing) await git(cwd, ["update-ref", ref, source, "0".repeat(40)]);
+    if (!existing) await git(cwd, root, ["update-ref", ref, source, "0".repeat(40)]);
   }
   await jj(cwd, ["git", "import"]);
 }
 
 /** Retain the artifact independently of working-copy changes and slot reuse. */
 export async function retainLandingArtifact(cwd: string, artifact: LandingArtifact): Promise<void> {
-  await assertArtifact(cwd, artifact);
   const bookmark = artifactBookmark(artifact);
+  // The object store does not change while this attempt is pinned. Reuse its
+  // location, while still checking every existing ref and parent independently.
+  const root = await jj(cwd, ["--ignore-working-copy", "git", "root"]);
+  await assertArtifact(cwd, root, artifact);
   for (const [name, commit] of [[bookmark, artifact.candidate], [`${bookmark}-source`, artifact.source]]) {
     // Custom refs remain pinned even if JJ rewrites a visible bookmark after a bad gate.
     for (const ref of [`refs/slipjay/${name}`, `refs/heads/${name}`]) {
-      const existing = await git(cwd, ["for-each-ref", "--format=%(objectname)", ref]);
+      const existing = await git(cwd, root, ["for-each-ref", "--format=%(objectname)", ref]);
       if (existing && existing !== commit) throw new Error("Retained landing artifact was changed");
-      if (!existing) await git(cwd, ["update-ref", ref, commit!, "0".repeat(40)]);
+      if (!existing) await git(cwd, root, ["update-ref", ref, commit!, "0".repeat(40)]);
     }
   }
   await jj(cwd, ["git", "import"]);
@@ -116,11 +118,12 @@ export async function importLandingArtifact(cwd: string, producer: string, artif
   const producerRoot = await jj(producer, ["--ignore-working-copy", "git", "root"]);
   const assertProducer = async () => {
     for (const [name, commit] of [[bookmark, artifact.candidate], [`${bookmark}-source`, artifact.source]])
-      if (await git(producer, ["rev-parse", `refs/slipjay/${name}`]) !== commit) throw new Error("Producer attempt ref differs from the requested artifact");
+      if (await git(producer, producerRoot, ["rev-parse", `refs/slipjay/${name}`]) !== commit) throw new Error("Producer attempt ref differs from the requested artifact");
   };
   await assertProducer();
   // Fetch into objects only first: never overwrite a consumer's existing attempt ref.
-  await git(cwd, ["fetch", "--no-tags", "--no-write-fetch-head", producerRoot, `refs/slipjay/${bookmark}`, `refs/slipjay/${bookmark}-source`]);
+  const root = await jj(cwd, ["--ignore-working-copy", "git", "root"]);
+  await git(cwd, root, ["fetch", "--no-tags", "--no-write-fetch-head", producerRoot, `refs/slipjay/${bookmark}`, `refs/slipjay/${bookmark}-source`]);
   await assertProducer();
   await jj(cwd, ["git", "import"]);
   await retainLandingArtifact(cwd, artifact);

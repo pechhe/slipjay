@@ -48,7 +48,8 @@ test("a missing renamed integration bookmark names the local and remote failure"
 }, 120_000);
 
 test("the candidate bookmark is gone from origin before any landing verdict, including after a restart or a queued cancel", async () => {
-  const f = await fixture();
+  // The only fixture user that reads `candidateAtVerdict` here, so it asks for the observation it asserts.
+  const f = await fixture(false, false, undefined, false, { observeCandidateAtVerdict: true });
   try {
     const landed = f.submit(await f.candidate("landed.txt"));
     assert.equal((await f.land(landed))?.type, "landed");

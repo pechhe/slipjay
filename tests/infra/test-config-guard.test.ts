@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 
 // A test that writes the developer's own jj or git configuration replaces their identity with the
-// fixture's. Fixtures set identity per repository (`--repo`) or through JJ_CONFIG / JJ_USER / JJ_EMAIL
-// / GIT_CONFIG_GLOBAL in a child's environment (see tests/support/jj-user-config.ts).
+// fixture's. Fixtures set identity per repository (`--repo`), through JJ_CONFIG / JJ_USER / JJ_EMAIL,
+// or in the disposable HOME's Git config (see scripts/fixture-git-config.ts).
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const self = fileURLToPath(import.meta.url);
 

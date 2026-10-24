@@ -15,6 +15,7 @@ import { workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts
 import { jj, project } from "../support/workspace-project.ts";
 import { landedHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { isolateAdoptionFixtures, runCli, freezeLead, contribution, publishSource } from "./fixtures/workspace-adopt-fixture.ts";
+import { seedWorkspace } from "./fixtures/workspace-generation.ts";
 
 isolateAdoptionFixtures();
 
@@ -22,7 +23,8 @@ for (const archival of ["cleanup", "prune"] as const) {
   test(`${archival} archives operation-bound adoption and source after publication without client follow-up`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const { lead, helper, base, revision } = await contribution(f);
+      // Only archive proof is under test; seedWorkspace names the retained start-to-retirement E2E.
+      const { lead, helper, base, revision } = await contribution(f, seedWorkspace);
       await adoptWorkspace(lead.workspacePath, helper.workspacePath);
       const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
       await freezeLead(lead.workspacePath, source);
@@ -51,7 +53,8 @@ for (const path of ["remove", "prune", "cleanup", "new-work"] as const) {
   test(`archived coverage judges original helper revisions after author state is pruned: ${path}`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const { lead, helper } = await contribution(f);
+      // Keep real issue attachment and lifecycle checks on seeded, genuine JJ generations.
+      const { lead, helper } = await contribution(f, seedWorkspace);
       await attachWorkspaceIssue(helper.workspacePath, 123);
       await adoptWorkspace(lead.workspacePath, helper.workspacePath);
       await writeFile(join(lead.workspacePath, "helper.txt"), "reworked\n");
@@ -83,7 +86,8 @@ for (const path of ["remove", "prune", "cleanup", "new-work"] as const) {
 test("historical handoff helpers without archived adoption coverage never authorise deletion", async () => {
   const f = await project({ policy: { spares: 0 } });
   try {
-    const { lead, helper, base, revision } = await contribution(f);
+    // The absent archive proof is the subject; see seedWorkspace's coverage contract.
+    const { lead, helper, base, revision } = await contribution(f, seedWorkspace);
     const artifactCommitId = jj(lead.workspacePath, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
     jj(f.repo, ["bookmark", "set", "main", "-r", artifactCommitId]);
     const state = { version: 1, workspaceName: lead.current.name, workspacePath: lead.workspacePath, integrationRoot: f.repo,

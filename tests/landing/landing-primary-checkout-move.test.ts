@@ -4,6 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { readLandingState } from "../../src/lib/workspace/workspace-state.ts";
+import { withTestRunner } from "../support/test-runner.ts";
 import { primary, land } from "./fixtures/landing-primary-checkout-fixture.ts";
 
 test("an empty primary checkout moves onto the new integration", async () => {
@@ -25,8 +26,10 @@ test("uncommitted primary edits are carried onto the new integration unchanged",
   try {
     await writeFile(join(f.repo, "local.txt"), "unlanded\n");
     const before = primary(f);
-    await land(f, "first.txt");
-    const { result } = await land(f, "second.txt");
+    const { result } = await withTestRunner(f, async (runner) => {
+      await land(f, "first.txt", runner);
+      return land(f, "second.txt", runner);
+    });
     assert.deepEqual(result.primaryCheckout, { action: "moved", reason: "carried-edits" });
     const after = primary(f);
     assert.equal(after.change, before.change);

@@ -14,6 +14,7 @@ import { emptyTrash } from "../../../src/lib/workspace/workspace-trash.ts";
 import { workspaceTransactionLocks } from "../../../src/lib/infra/workspace-transaction.ts";
 import { drainFixtureWorkers } from "../../support/fixture-workers.ts";
 import { jj, project } from "../../support/workspace-project.ts";
+import type { SeededWorkspace } from "./workspace-generation.ts";
 
 // Shared by the workspace-adopt-*.test.ts files, split by area so they run in parallel workers.
 export function isolateAdoptionFixtures() {
@@ -48,13 +49,15 @@ export async function freezeLead(root: string, source: string, key = "fixture") 
   return handoff;
 }
 
-export async function contribution(f: Awaited<ReturnType<typeof project>>) {
-  const lead = await createWorkspace("adopting lead", f.repo);
+type WorkspaceFactory = (task: string, repo: string, options?: { base?: string }) => Promise<SeededWorkspace>;
+
+export async function contribution(f: Awaited<ReturnType<typeof project>>, create: WorkspaceFactory = createWorkspace) {
+  const lead = await create("adopting lead", f.repo);
   await writeFile(join(lead.workspacePath, "lead.txt"), "lead\n");
   jj(lead.workspacePath, ["describe", "-m", "Lead base"]);
   jj(lead.workspacePath, ["new"]);
   const base = jj(lead.workspacePath, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
-  const helper = await createWorkspace("helper", f.repo, { base });
+  const helper = await create("helper", f.repo, { base });
   await writeFile(join(helper.workspacePath, "helper.txt"), "helper\n");
   jj(helper.workspacePath, ["describe", "-m", "Helper contribution"]);
   const revision = jj(helper.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
@@ -62,7 +65,7 @@ export async function contribution(f: Awaited<ReturnType<typeof project>>) {
   return { lead, helper, revision, base };
 }
 
-export async function publishSource(f: Awaited<ReturnType<typeof project>>, lead: Awaited<ReturnType<typeof createWorkspace>>, source: string, operationId: string) {
+export async function publishSource(f: Awaited<ReturnType<typeof project>>, lead: SeededWorkspace, source: string, operationId: string) {
   jj(f.repo, ["new", "main"]);
   jj(f.repo, ["restore", "--from", source]);
   jj(f.repo, ["describe", "-m", "Published fixture"]);

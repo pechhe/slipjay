@@ -227,15 +227,15 @@ export function createRunnerQueue(input: {
     }
   }
   /** What a landing records of the environments its commit declares; nothing when the policy cannot be read. */
-  async function declaredEnvironments(repo: string, commitId: string): Promise<{ repo: string; declaredEnvironments: string[] } | Record<string, never>> {
+  async function declaredEnvironments(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<{ repo: string; declaredEnvironments: string[] } | Record<string, never>> {
     try {
-      const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
+      const { configuration } = await readPolicy(join(repoCheckout(repo), ".git"), commitId);
       return configuration ? { repo, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).sort() } : {};
     } catch { return {}; }
   }
   /** Ask the schedulers about every environment and the reset the commit declares; they decide whether one is due. */
-  async function schedule(repo: string, commitId: string): Promise<void> {
-    const { configuration } = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId);
+  async function schedule(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<void> {
+    const { configuration } = await readPolicy(join(repoCheckout(repo), ".git"), commitId);
     if (configuration?.deployments) scheduler.consider(repo, configuration.deployments.environments);
     resetScheduler.consider(repo, configuration?.reset ?? null);
     auditScheduler.consider(repo, configuration?.audit ?? null);
@@ -647,6 +647,16 @@ export function createRunnerQueue(input: {
     // The audit policy the audited head declared; null when it declares none, undefined until read.
     let auditPolicy: import("../policy/audit-policy.ts").AuditPolicy | null | undefined;
     const checkout = prefix ? join(home, "verifiers", operation.repo, String(prefix.slot)) : checkoutPath(operation);
+    // Only this attempt shares successful immutable observations. A failed read
+    // is retried by the next caller, and a rebuilt prefix starts a fresh scope.
+    let landedPolicy: { directory: string; commit: string; value: Awaited<ReturnType<typeof readExactExecutionPolicy>> } | undefined;
+    const readLandedPolicy: typeof readExactExecutionPolicy = async (directory, commit) => {
+      if (landedPolicy?.directory === directory && landedPolicy.commit === commit) return landedPolicy.value;
+      const value = await readExactExecutionPolicy(directory, commit);
+      landedPolicy = { directory, commit, value };
+      return value;
+    };
+    const shapes = new Map<string, Extract<OperationEvent, { type: "change_shape" }>>();
     const scratch = scratchOf(checkout);
     let remote: string | undefined;
     let integrationBranch: string | undefined;
@@ -1062,13 +1072,13 @@ export function createRunnerQueue(input: {
           if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
         }
       }
-      if (verdict?.type === "landed") verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId) };
+      if (verdict?.type === "landed") verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy) };
       if (verdict) append(operation.id, verdict);
       // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
       if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo);
       if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
       if (verdict?.type === "landed")
-        await schedule(operation.repo, verdict.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
+        await schedule(operation.repo, verdict.commitId, readLandedPolicy).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
       // A reset, whatever its verdict, starts the next interval.
       if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
       // An audit with a verdict waits for the next scheduled time; one without is due again now. What its head declared decides.
@@ -1082,20 +1092,28 @@ export function createRunnerQueue(input: {
       await processOperation(operation, prefix);
     }
     async function recordShape(cwd: string, branch: string, commit: string, migration: import("../policy/execution-policy.ts").MigrationFinalizationPolicy | null | undefined): Promise<void> {
-      const diff = await jj(cwd, ["diff", "--from", branch, "--to", commit, "--git"]);
+      // Resolve the moving bookmark on every observation; only the diff between
+      // exact objects is reusable, even if a gate changes the checkout or base.
+      const base = await jj(cwd, ["--ignore-working-copy", "log", "-r", branch, "--no-graph", "-T", "commit_id"]);
+      const migrationPaths = [...migration?.triggerPaths ?? [], ...migration?.artifactPaths ?? []];
+      const key = JSON.stringify([cwd, base, commit, migrationPaths]);
+      const cached = shapes.get(key);
+      if (cached) { append(operation.id, cached); return; }
+      const diff = await jj(cwd, ["diff", "--from", base, "--to", commit, "--git"]);
       const paths = [...new Set([...diff.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map((match) => match[2]!))];
       const insertions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
       const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
       const roots = (prefix: string) => [...new Set(paths.flatMap((path) => path.startsWith(`${prefix}/`) ? [path.split("/")[1]!] : []))];
-      const migrationPaths = [...migration?.triggerPaths ?? [], ...migration?.artifactPaths ?? []];
       const gitDirectory = await jj(cwd, ["git", "root"]);
       const tree = await workspaceRun("git", ["--git-dir", gitDirectory, "rev-parse", `${commit}^{tree}`], { cwd });
       if (tree.code !== 0) throw new Error("Could not observe candidate tree for change shape");
-      append(operation.id, { type: "change_shape", files: paths.length, insertions, deletions, packages: roots("packages"), apps: roots("apps"),
+      const shape: Extract<OperationEvent, { type: "change_shape" }> = { type: "change_shape", files: paths.length, insertions, deletions, packages: roots("packages"), apps: roots("apps"),
         migrationBearing: paths.some((path) => migrationPaths.some((root) => path === root || path.startsWith(`${root}/`))),
         testFiles: paths.filter((path) => /(?:test|spec)\.[cm]?[jt]sx?$/.test(path)),
         fileSet: createHash("sha256").update(tree.stdout.trim()).digest("hex"),
-        sizeBucket: insertions + deletions <= 100 ? "small" : insertions + deletions <= 1000 ? "medium" : "large" });
+        sizeBucket: insertions + deletions <= 100 ? "small" : insertions + deletions <= 1000 ? "medium" : "large" };
+      shapes.set(key, shape);
+      append(operation.id, shape);
     }
     /**
      * Audit the integration branch's published head: resolve its exact commit, record it, check it out and run the

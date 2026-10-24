@@ -15,6 +15,7 @@ import { revisionFacts, workspaceContext } from "../../src/lib/infra/workspace-j
 import { workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { isolateAdoptionFixtures, runCli, freezeLead, contribution } from "./fixtures/workspace-adopt-fixture.ts";
+import { seedWorkspace } from "./fixtures/workspace-generation.ts";
 
 isolateAdoptionFixtures();
 
@@ -22,7 +23,8 @@ for (const path of ["remove", "prune", "sweep", "new-work", "continuation", "sha
   test(`publication cleanup preserves the helper's pinned identity and archived coverage: ${path}`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const { lead, helper, revision } = await contribution(f);
+      // Allocation-to-publication coverage remains in seedWorkspace's named runner test.
+      const { lead, helper, revision } = await contribution(f, seedWorkspace);
       await attachWorkspaceIssue(helper.workspacePath, 123);
       await adoptWorkspace(lead.workspacePath, helper.workspacePath);
       await writeFile(join(lead.workspacePath, "helper.txt"), "reworked for publication\n");

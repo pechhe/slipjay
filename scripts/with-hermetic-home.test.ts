@@ -27,3 +27,23 @@ test("propagates the command's failure", () => {
   const result = spawnSync(process.execPath, [wrapper, process.execPath, "-e", "process.exit(3)"]);
   expect(result.status).toBe(3);
 });
+
+test("workspace fixtures commit with the disposable HOME's Git identity", () => {
+  const fixture = new URL("../tests/support/workspace-project.ts", import.meta.url).href;
+  const script = `
+    import { execFileSync } from 'node:child_process';
+    import { homedir } from 'node:os';
+    import { join } from 'node:path';
+    process.env.SLIPJAY_BACKGROUND_WORKERS = join(homedir(), 'background-workers');
+    const { project } = await import(${JSON.stringify(fixture)});
+    const f = await project();
+    try {
+      execFileSync('git', ['commit', '--quiet', '--allow-empty', '-m', 'Identity probe'], { cwd: f.repo });
+      const author = (args) => execFileSync('git', [...args, 'log', '-1', '--format=%an <%ae>'], { encoding: 'utf8' }).trim();
+      console.log(JSON.stringify([author(['--git-dir', f.remote]), author(['-C', f.repo])]));
+    } finally { await f.dispose(); }
+  `;
+  const result = spawnSync(process.execPath, [wrapper, "node", "--input-type=module", "--eval", script], { encoding: "utf8" });
+  expect(result.status).toBe(0);
+  expect(result.stdout.trim()).toBe(JSON.stringify(["Fixture <fixture@example.com>", "Fixture <fixture@example.com>"]));
+});

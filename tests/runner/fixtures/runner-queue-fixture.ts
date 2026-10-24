@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, TERMINAL_EVENT_TYPES } from "../../../src/lib/runner/runner-contract.ts";
 import type { Executor, OperationLogProjections, RunnerConfig, StoredEvent, SubmitRequest } from "../../../src/lib/runner/runner-types.ts";
@@ -104,7 +104,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, projections = {} }: { process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; projections?: OperationLogProjections } = {}) {
+  { workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {} }: { process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -113,9 +113,19 @@ export async function fixture(migrations = false, release = false, deployments?:
   await mkdir(seed);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
   git(["init", "--bare", "-b", branch, origin]);
+  // The seed only supplies origin's first commit, so an ordinary Git commit avoids a throwaway
+  // jj initialisation and snapshot. The author clone and everything the runner operates on are
+  // still real jj repositories.
+  const commitSeed = (dir: string, remote: string, seedBranch = branch) => {
+    git(["-C", dir, "add", "."]);
+    // A host without a global Git identity must not fail the seed commit.
+    git(["-C", dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "Seed policy"]);
+    git(["-C", dir, "remote", "add", "origin", remote]);
+    git(["-C", dir, "push", "-q", "origin", seedBranch]);
+  };
   // Both clone and later bounded jj commands read the private fixture identity, never the developer's jj config.
   fixtureJjConfig();
-  jj(seed, ["git", "init"]);
+  git(["init", "-q", "-b", branch, seed]);
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: branch,
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
@@ -159,10 +169,8 @@ export async function fixture(migrations = false, release = false, deployments?:
       },
     } : {}),
   }));
-  jj(seed, ["describe", "-m", "Seed policy"]);
-  jj(seed, ["git", "remote", "add", "origin", origin]);
-  jj(seed, ["git", "push", "--remote", "origin", "--named", `${branch}=@`]);
-  if (release) jj(seed, ["git", "push", "--remote", "origin", "--named", "release=main"]);
+  commitSeed(seed, origin);
+  if (release) git(["-C", seed, "push", "-q", "origin", `${branch}:refs/heads/release`]);
   jj(root, ["git", "clone", origin, author]);
   const otherOrigin = join(root, "other.git");
   const otherAuthor = join(root, "other-author");
@@ -170,11 +178,9 @@ export async function fixture(migrations = false, release = false, deployments?:
     const repositorySeed = join(root, `${name}-seed`);
     await mkdir(repositorySeed);
     git(["init", "--bare", "-b", "main", repositoryOrigin]);
-    jj(repositorySeed, ["git", "init"]);
+    git(["init", "-q", "-b", "main", repositorySeed]);
     await writeFile(join(repositorySeed, "slipjay.json"), await readFile(join(seed, "slipjay.json"), "utf8"));
-    jj(repositorySeed, ["describe", "-m", "Seed policy"]);
-    jj(repositorySeed, ["git", "remote", "add", "origin", repositoryOrigin]);
-    jj(repositorySeed, ["git", "push", "--remote", "origin", "--named", "main=@"]);
+    commitSeed(repositorySeed, repositoryOrigin, "main");
     jj(root, ["git", "clone", repositoryOrigin, repositoryAuthor]);
   }
   if (other) await seedRepository("other", otherOrigin, otherAuthor);
@@ -209,6 +215,9 @@ export async function fixture(migrations = false, release = false, deployments?:
   const log = openOperationLog(logPath, runnerLogOptions(config, executor), { classify: classifyEvent, landingOutcome, ...projections });
   const unsubscribe = log.subscribe((event) => {
     if (event.event.type !== "submitted") published.push(event);
+    // Seeing the candidate bookmark at each verdict costs a read of origin of every terminal event, so only the
+    // cases that assert it ask for it: `candidateAtVerdict` stays empty everywhere else.
+    if (!observeCandidateAtVerdict) return;
     const operation = log.operation(event.operationId);
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
@@ -217,14 +226,54 @@ export async function fixture(migrations = false, release = false, deployments?:
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
+  /**
+   * Seed a prerequisite: publish a genuine commit straight onto origin's integration branch,
+   * bypassing the landing, the way a landing leaves it — parented on the branch's current tip
+   * and on top of its tree, so each seed's tree is everything published before it. Seed only
+   * setup no assertion reads. The end-to-end landings it stands in for stay covered, in the two
+   * files that seed, by these cases:
+   *
+   * `runner-queue-automatic-promotion.test.ts`
+   * - "a verified commit is promoted while a newer green commit has no passed verification, as long as it is the newest that has one"
+   * - "a newer commit that passes replaces the verified older one a release was queued for"
+   * - "a queued automatic release of a verified commit survives a newer staged commit whose verification then fails"
+   *
+   * `runner-queue-staging.test.ts`
+   * - "a landing deploys staging from an exact view of the landed commit and records it; the next records the changes since"
+   * - "a green staging deploy pre-verifies its commit, a landing that arrives neither stops it nor waits for it, and a confirm of it publishes without verifying again"
+   */
+  async function seedMain(files: Record<string, string>, message = `Add ${Object.keys(files).join(", ")}`): Promise<string> {
+    // A landing publishes with the runner's identity; a seed publishes with the fixture's, never the developer's.
+    const env = { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.com",
+      GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.com", GIT_INDEX_FILE: join(root, "seed-index") };
+    const seed = (args: string[]) => execFileSync("git", ["--git-dir", origin, ...args], { encoding: "utf8", env }).trim();
+    // The index starts from the branch's own tree; nothing of the checkout or the seed commit's working copy is reused.
+    await rm(join(root, "seed-index"), { force: true });
+    const parent = seed(["rev-parse", `refs/heads/${branch}`]);
+    seed(["read-tree", parent]);
+    for (const [file, content] of Object.entries(files)) {
+      const blob = execFileSync("git", ["--git-dir", origin, "hash-object", "-w", "--stdin"], { encoding: "utf8", env, input: content }).trim();
+      seed(["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`]);
+    }
+    const commit = seed(["commit-tree", seed(["write-tree"]), "-p", parent, "-m", message]);
+    // A compare-and-swap, as any other publish: a branch that moved is never overwritten.
+    seed(["update-ref", `refs/heads/${branch}`, commit, parent]);
+    // A landing also leaves the runner a warm checkout of the repository, which the deploy lane reads.
+    const checkout = join(home, "repos", "fixture/repo");
+    if (!await stat(checkout).then(() => true, () => false)) {
+      await mkdir(dirname(checkout), { recursive: true });
+      jj(dirname(checkout), ["git", "clone", origin, checkout]);
+    }
+    return commit;
+  }
   const parents = (commit: string) => git(["--git-dir", origin, "log", "-1", "--format=%P", commit]).split(" ");
   const remoteFile = (file: string) => git(["--git-dir", origin, "show", `main:${file}`]);
   const authorRoot = author;
   async function push(author = authorRoot, repo = "fixture/repo"): Promise<SubmitRequest> {
     // The runner deletes candidate bookmarks when it closes an operation.
     jj(author, ["git", "fetch", "--remote", "origin"]);
-    const changeId = jj(author, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
-    const commitId = jj(author, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    // One read carries the candidate's whole identity; a second jj launch per push only repeats it.
+    const [changeId = "", commitId = ""] = jj(author, ["log", "-r", "@", "--no-graph", "-T", 'change_id ++ " " ++ commit_id']).split(" ");
     const bookmark = candidateBookmark(changeId);
     const existing = jj(author, ["log", "-r", `bookmarks("${bookmark}")`, "--no-graph", "-T", "commit_id"]);
     if (existing) {
@@ -234,10 +283,10 @@ export async function fixture(migrations = false, release = false, deployments?:
     return { repo, changeId, commitId, bookmark, submittedBy: "test" };
   }
   async function candidate(file: string, author = authorRoot, repo = "fixture/repo"): Promise<SubmitRequest> {
-    jj(author, ["new", `${branch}@origin`]);
+    // `new -m` describes the change before its file is written; push's snapshot keeps that description.
+    jj(author, ["new", "-m", `Add ${file}`, `${branch}@origin`]);
     await mkdir(join(author, file, ".."), { recursive: true });
     await writeFile(join(author, file), `${file}\n`);
-    jj(author, ["describe", "-m", `Add ${file}`]);
     return push(author, repo);
   }
   function submit(request: SubmitRequest) {
@@ -259,8 +308,16 @@ export async function fixture(migrations = false, release = false, deployments?:
   const result = (id: string) => log.operation(id)!.result;
   const development = async () => (await readFile(join(root, "development.jsonl"), "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as { commit: string; migrations: string[] });
   const land = async (id: string) => { queue.wake(); await queue.idle(); return log.operation(id)!.result; };
+  /** Deploy `commitId` through the queue, as `slipjay deploy` submits one, and wait for it and what it queues to end. */
+  async function deploy(commitId: string, environment = "staging"): Promise<string> {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment, commitId, submittedBy: "test" });
+    queue.wake();
+    await queue.idle();
+    return id;
+  }
   const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
-  return { root, logPath, authors, requestedTimeouts, candidateAtVerdict, development, land, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, push, candidate, submit, submitRelease, submitReset, lines, result,
+  return { root, logPath, authors, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, seedMain, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;

@@ -131,11 +131,20 @@ const queuedAutomatic = (f: Awaited<ReturnType<typeof fixture>>, commitId: strin
 test("a queued automatic release of an older candidate never ships; the newer green candidate is submitted and released", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, { process: "development" });
   try {
-    // A is green but its pre-verification failed, so it stays unpromoted.
+    // A is green but its pre-verification failed, so it stays unpromoted. Its landing is setup no assertion
+    // reads, so seed the commit and deploy it for real; the landings it bypasses are covered by the cases
+    // `seedMain` lists.
     await writeFile(join(f.root, "fail-release"), "");
-    await f.land(f.submit(await f.candidate("a.txt")));
+    const seeded = await f.seedMain({ "a.txt": "a.txt\n" });
+    const staged = await f.deploy(seeded);
+    const deployed = f.result(staged);
+    assert.ok(deployed?.type === "deployed", JSON.stringify(deployed));
+    assert.equal(deployed.record.commitId, seeded, "the queue deployed the seeded commit");
     await settle(f);
     const older = f.main();
+    const [failed] = f.log.verifications(REPO);
+    assert.equal(failed?.commitId, seeded, "the seeded commit's staging deploy was pre-verified");
+    assert.equal(failed?.status, "failed", JSON.stringify(failed?.result));
     assert.deepEqual(f.log.releases(REPO), []);
     await rm(join(f.root, "fail-release"));
     // An automatic release of A is still in the queue when B turns green.
@@ -155,11 +164,23 @@ test("a queued automatic release of an older candidate never ships; the newer gr
 test("an automatic release refuses once its commit is no longer the newest green candidate", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, { process: "development" });
   try {
+    // Both commits are setup: seed them in turn and deploy each for real, so both staging deploys and both
+    // failed pre-verifications still run. The landings they bypass are covered by the cases `seedMain` lists.
     await writeFile(join(f.root, "fail-release"), "");
-    await f.land(f.submit(await f.candidate("a.txt")));
+    const a = await f.seedMain({ "a.txt": "a.txt\n" });
+    const stagedA = await f.deploy(a);
     const older = f.main();
-    await f.land(f.submit(await f.candidate("b.txt")));
+    const b = await f.seedMain({ "b.txt": "b.txt\n" });
+    const stagedB = await f.deploy(b);
     await settle(f);
+    const deployedA = f.result(stagedA);
+    assert.ok(deployedA?.type === "deployed", JSON.stringify(deployedA));
+    assert.equal(deployedA.record.commitId, a, "the queue deployed A's seeded commit");
+    const deployedB = f.result(stagedB);
+    assert.ok(deployedB?.type === "deployed", JSON.stringify(deployedB));
+    assert.equal(deployedB.record.commitId, b, "the queue deployed B's seeded commit");
+    assert.deepEqual(f.log.verifications(REPO).map((entry) => [entry.commitId, entry.status]), [[b, "failed"], [a, "failed"]],
+      "both seeded staging deploys were pre-verified, and both pre-verifications failed");
     await rm(join(f.root, "fail-release"));
     const stale = queuedAutomatic(f, older);
     await settle(f);

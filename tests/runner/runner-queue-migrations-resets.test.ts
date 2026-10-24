@@ -16,6 +16,9 @@ test("a migration-bearing change lands with one generated migration, finalized b
     assert.equal(f.main(), landed.commitId);
     const shape = f.log.events({ operationId: id }).findLast((row) => row.event.type === "change_shape")?.event;
     assert.ok(shape?.type === "change_shape");
+    const shapes = f.log.events({ operationId: id }).flatMap((row) => row.event.type === "change_shape" ? [row.event] : []);
+    assert.equal(shapes.length, 3, "migration generation preserves every shape observation");
+    assert.notEqual(shapes.at(-2)!.fileSet, shape.fileSet, "generated artifacts require a fresh tree observation");
     const verifiedTree = execFileSync("git", ["--git-dir", f.origin, "rev-parse", `${landed.commitId}^{tree}`], { encoding: "utf8" }).trim();
     assert.equal(shape.fileSet, createHash("sha256").update(verifiedTree).digest("hex"), "source evidence includes generated migration artifacts verified by the gate");
     assert.equal(shape.migrationBearing, true);

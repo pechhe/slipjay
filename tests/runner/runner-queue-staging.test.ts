@@ -114,9 +114,18 @@ test("a green staging deploy pre-verifies its commit, a landing that arrives nei
 test("a confirm of a commit waits for its running pre-verification and reuses its pass, and one that passed is verified again when staging redeploys it", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });
   try {
-    await f.land(f.submit(await f.candidate("a.txt")));
+    // A's landing is setup no assertion reads: seed the commit, then deploy it for real so staging is green on it
+    // and its pre-verification passes. The landings it bypasses are covered by the cases `seedMain` lists; C still
+    // lands end to end below.
+    const seeded = await f.seedMain({ "a.txt": "a.txt\n" });
+    const staged = await f.deploy(seeded);
+    const deployed = f.result(staged);
+    assert.ok(deployed?.type === "deployed", JSON.stringify(deployed));
+    assert.equal(deployed.record.commitId, seeded, "staging deployed the seeded commit");
     await f.queue.idle();
     const a = f.main();
+    const [preverified] = f.log.verifications("fixture/repo");
+    assert.equal(preverified?.commitId, a, "the seeded staging deploy was pre-verified");
     assert.equal(f.log.verifications("fixture/repo")[0]?.status, "verified");
     // Staging deploys a again: its pass may be against a release base that has moved, so it is verified again.
     const redeploy = newOperationId();
@@ -148,8 +157,17 @@ test("a confirm of a commit waits for its running pre-verification and reuses it
 test("a pre-verification holds its worker until it ends, and another repository's landing waits for it instead of stopping it", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, { workers: 1, other: true });
   try {
-    await f.land(f.submit(await f.candidate("a.txt")));
+    // A is setup: seed it and deploy it for real, so its staging deploy and pre-verification still run. B and the
+    // other repository land for real below; the landings `seedMain` lists stay end to end.
+    const seeded = await f.seedMain({ "a.txt": "a.txt\n" });
+    const staged = await f.deploy(seeded);
+    const deployed = f.result(staged);
+    assert.ok(deployed?.type === "deployed", JSON.stringify(deployed));
+    assert.equal(deployed.record.commitId, seeded, "staging deployed the seeded commit");
     await f.queue.idle();
+    const [preverified] = f.log.verifications("fixture/repo");
+    assert.equal(preverified?.commitId, seeded, "the seeded staging deploy was pre-verified");
+    assert.equal(preverified?.status, "verified", JSON.stringify(preverified?.result));
     await rm(join(f.root, "release-started"));
     await writeFile(join(f.root, "hold-release"), "");
     f.submit(await f.candidate("b.txt"));
@@ -172,16 +190,31 @@ test("a pre-verification holds its worker until it ends, and another repository'
 test("recovery queues the pre-verification a green staging deploy recorded just before a restart never queued", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });
   try {
-    await f.land(f.submit(await f.candidate("a.txt")));
+    // A is setup no assertion of its landing reads: seed it and deploy it for real, so its staging deploy is green
+    // and its pre-verification passes. The landings it bypasses are covered by the cases `seedMain` lists.
+    const seededA = await f.seedMain({ "a.txt": "a.txt\n" });
+    const stagedA = await f.deploy(seededA);
+    const deployed = f.result(stagedA);
+    assert.ok(deployed?.type === "deployed", JSON.stringify(deployed));
+    assert.equal(deployed.record.commitId, seededA, "staging deployed the seeded commit");
     await f.queue.idle();
     const [green] = f.log.deployments("fixture/repo", "staging");
     assert.ok(green?.result?.type === "deployed");
-    // b's staging deploy fails, so nothing pre-verifies it; then the log is made to say it went green, as a deploy recorded just before a restart would.
+    assert.equal(green?.commitId, seededA);
+    // b is setup too: seed it and deploy it for real, so its staging deploy fails and nothing pre-verifies it; then the
+    // log is made to say it went green, as a deploy recorded just before a restart would.
     await writeFile(join(f.root, "fail-deploy-app"), "");
-    await f.land(f.submit(await f.candidate("b.txt")));
+    const seededB = await f.seedMain({ "b.txt": "b.txt\n" });
+    const stagedB = await f.deploy(seededB);
+    const failed = f.result(stagedB);
+    assert.ok(failed?.type === "failed" && failed.stage === "deploying", JSON.stringify(failed));
+    assert.equal(failed.deployment?.commitId, seededB, "its staging deploy ran in the seeded commit");
+    assert.equal(failed.reason, "deploy failed: app (exited 5: app build failed)", "the deploy reached its projects");
+    assert.deepEqual(failed.deployment?.projects.map((project) => [project.name, project.ok]), [["app", false], ["hq", true]]);
     await f.queue.idle();
     await rm(join(f.root, "fail-deploy-app"));
     const b = f.main();
+    assert.equal(b, seededB);
     assert.deepEqual(f.log.verifications("fixture/repo").map((entry) => entry.commitId), [green.commitId]);
     const recorded = newOperationId();
     f.log.append(recorded, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "staging", commitId: b, submittedBy: "test" });

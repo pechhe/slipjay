@@ -37,14 +37,12 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   await mkdir(join(repo, dirname(options.policyPath ?? "slipjay.json")), { recursive: true });
   const git = (args: string[], cwd = repo) => execFileSync("git", args, { cwd, stdio: "pipe" });
   git(["init", "-q", "--bare", "-b", "main", remote], root);
-  // Tests write commits straight into the remote; a host without a global git identity must not fail them.
-  git(["--git-dir", remote, "config", "user.name", "Fixture"], root);
-  git(["--git-dir", remote, "config", "user.email", "fixture@example.com"], root);
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "user.name", "Fixture"]);
-  git(["config", "user.email", "fixture@example.com"]);
+  // Both supported test entry points give Git children the Fixture identity in
+  // their disposable HOME, including commits written directly into this origin.
+  // Seed the real origin directly instead of pushing from a throwaway checkout.
+  const seed = (args: string[]) => git(["--git-dir", remote, "--work-tree", repo, ...args]);
   // A shallow primary needs history below its boundary.
-  if (options.shallow) git(["commit", "-q", "--allow-empty", "-m", "Before the shallow boundary"]);
+  if (options.shallow) seed(["commit", "-q", "--allow-empty", "-m", "Before the shallow boundary"]);
   await writeFile(join(repo, "README.md"), "fixture\n");
   if (options.ignore) await writeFile(join(repo, ".gitignore"), options.ignore);
   await writeFile(join(repo, options.policyPath ?? "slipjay.json"), JSON.stringify({
@@ -55,16 +53,12 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
     ...(options.postIntegration === undefined ? {} : { postIntegration: options.postIntegration }),
     ...options.policy,
   }));
-  git(["add", "."]);
-  git(["commit", "-qm", "Initial"]);
-  git(["remote", "add", "origin", remote]);
-  git(["push", "-q", "origin", "main"]);
-  if (options.shallow) {
-    await rm(repo, { recursive: true, force: true });
-    git(["clone", "-q", "--depth", "1", `file://${remote}`, repo], root);
-    git(["config", "user.name", "Fixture"]);
-    git(["config", "user.email", "fixture@example.com"]);
-  }
+  seed(["add", "."]);
+  seed(["commit", "-qm", "Initial"]);
+  await rm(repo, { recursive: true, force: true });
+  // Plain Git commits in fixture consumers must advance main. JJ clone detaches
+  // HEAD, so retain Git clone + JJ init for both normal and shallow checkouts.
+  git(["clone", "-q", ...options.shallow ? ["--depth", "1", `file://${remote}`] : [remote], repo], root);
   jj(repo, ["git", "init", "--colocate"]);
   // Workspace commands do not see JJ_USER/JJ_EMAIL, so the author lives in repository config.
   jj(repo, ["config", "set", "--repo", "user.name", "Fixture"]);
@@ -87,7 +81,9 @@ async function stopFixtureProcesses(root: string): Promise<void> {
   };
   const stop = (pid: number, signal: NodeJS.Signals) => { try { process.kill(-pid, signal); } catch { try { process.kill(pid, signal); } catch { /* already gone */ } } };
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
-    for (const pid of running()) stop(pid, signal);
+    const processes = running();
+    if (!processes.length) return;
+    for (const pid of processes) stop(pid, signal);
     const deadline = Date.now() + 5_000;
     while (running().length && Date.now() < deadline) await new Promise((settle) => setTimeout(settle, 50));
     if (!running().length) return;
