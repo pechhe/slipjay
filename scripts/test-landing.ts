@@ -188,7 +188,7 @@ if (import.meta.main) {
     console.log("Landing quarantine exclusions:", JSON.stringify(quarantine));
     let reportDir = process.env.SLIPJAY_TEST_REPORT_DIR ? path.resolve(process.env.SLIPJAY_TEST_REPORT_DIR) : undefined;
     if (reportDir) try { mkdirSync(reportDir, { recursive: true }); } catch (error) { console.warn("Reports unavailable:", error); reportDir = undefined; }
-    if (reportDir) try { writeFileSync(path.join(reportDir, "slipjay-test-reports.json"), JSON.stringify({ version: 1, reports: landingCommands(plan, quarantine, reportDir).flatMap((entry) => entry.report ? [entry.report] : []) })); } catch (error) { console.warn("Report manifest unavailable:", error); reportDir = undefined; }
+    if (reportDir) try { writeFileSync(path.join(reportDir, "slipjay-test-reports.json"), JSON.stringify({ version: 1, selection: { kind: plan.kind }, reports: landingCommands(plan, quarantine, reportDir).flatMap((entry) => entry.report ? [entry.report] : []) })); } catch (error) { console.warn("Report manifest unavailable:", error); reportDir = undefined; }
     const commands = landingCommands(plan, quarantine, reportDir);
     let exit = 0;
     for (const { command } of commands) {

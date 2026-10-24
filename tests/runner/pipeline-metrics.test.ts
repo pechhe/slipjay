@@ -270,27 +270,65 @@ test("judges a repository's verify time against its budgets only on enough execu
   assert.equal(pipelineMetrics(undeclared, at(0), { now: NOW }).repositories[0]!.budget.status, "undeclared");
 });
 
-test("ranks test files from recorded reports, finds growing ones and those over budget on enough landings, and never counts a malformed report", () => {
+test("ranks test files from recorded reports, finds growing ones, and judges the per-file budget on serial file-cost runs over their own window", () => {
   const report = (runId: string, files: [string, number][]): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: files.map(([file, ms]) => ({ file, suite: "vitest", ms, status: "passed" })) });
-  const landings = [1_000, 1_100, 1_000, 1_050, 1_000, 3_000, 3_100, 3_000, 3_050, 3_000].map((ms, index) => verifiedLanding(`run-${index}`, index + 1, 3_600_000 - index * 1_000, 60_000,
+  const cost = (runId: string, files: [string, number][]): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: files.map(([file, ms]) => ({ file, suite: "file-cost", ms, status: "passed" })) });
+  const landings = [1_000, 1_100, 1_000, 1_050, 1_000, 3_000, 3_100, 3_000, 3_050, 3_000].map((ms, index) => verifiedLanding(`run-${index}`, index + 1, 3_600_000, 60_000,
     [report(`r${index}`, [["tests/growing.test.ts", ms], ["tests/slow.test.ts", 40_000], ["tests/steady.test.ts", 500]])]));
+  // Five nightly file-cost runs, older than tonight's report window and inside the budget window.
+  const costs = Array.from({ length: 5 }, (_, index) => [
+    { type: "submitted", kind: "audit", repo: "acme/app", commitId: "", slot: at(0), submittedBy: "runner:schedule" } as OperationEvent,
+    cost(`cost-${index}`, [["tests/slow.test.ts", 31_000], ["tests/steady.test.ts", 500]]),
+  ].map((event, offset) => row(200 + index * 10 + offset, `cost-op-${index}`, NOW - (index + 1) * 86_400_000, event)));
   const events = [
     ...landings.flat(),
+    ...costs.flat(),
     ...verifiedLanding("broken", 20, 1_000, 60_000, [{ type: "test_report", runId: "bad", status: "malformed", reason: "no testResults" }]),
     ...verifiedLanding("install", 21, 1_000, 60_000, [{ type: "test_report", runId: "install", status: "missing" }]),
   ];
-  const repo = pipelineMetrics(events, at(0), { now: NOW }).repositories[0]!;
+  const since = at(NOW - 3_600_000);
+  const repo = pipelineMetrics(events, since, { now: NOW }).repositories[0]!;
   assert.deepEqual(repo.reports, { recorded: 10, malformed: 1, missing: 1 });
-  assert.match(formatPipelineMetrics(pipelineMetrics(events, at(0), { now: NOW })), /Test reports: 10 recorded, 1 malformed, 1 missing/);
-  assert.deepEqual(repo.slowestTestFiles.map((file) => [file.file, file.samples]), [["tests/slow.test.ts", 10], ["tests/growing.test.ts", 10], ["tests/steady.test.ts", 10]]);
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, since, { now: NOW })), /Test reports: 10 recorded, 1 malformed, 1 missing/);
+  // Tonight's listing is this report window's runs; a 40 s landing median is contention and judges nothing.
+  assert.deepEqual(repo.slowestTestFiles.map((file) => [file.file, file.suite]), [["tests/slow.test.ts", "vitest"], ["tests/growing.test.ts", "vitest"], ["tests/steady.test.ts", "vitest"]]);
   assert.deepEqual(repo.growingTestFiles.map((file) => [file.file, file.earlierMedianMs, file.laterMedianMs]), [["tests/growing.test.ts", 1_000, 3_000]]);
-  assert.deepEqual(repo.testFilesOverBudget.map((file) => file.file), ["tests/slow.test.ts"]);
+  // Only the serial measurement, from five nights inside the budget window, is over the 30 s budget.
+  assert.deepEqual(repo.testFilesOverBudget.map((file) => [file.suite, file.file, file.samples, file.medianMs]), [["file-cost", "tests/slow.test.ts", 5, 31_000]]);
   assert.deepEqual(repo.budget.over, ["testFileSeconds"]);
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, since, { now: NOW })), /Test files over budget: file-cost tests\/slow.test.ts 31.0s/);
+  // The parallel medians rank what the nightly run should measure: anything past half the ceiling.
+  assert.deepEqual(repo.costCandidates.map((file) => file.file), ["tests/slow.test.ts"]);
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, since, { now: NOW })), /Cost candidates: 1 file\(s\), slowest tests\/slow\.test\.ts 40\.0s/);
 
-  // Nine landings are too few to judge either budget: the slow file is listed, not over.
-  const few = pipelineMetrics(landings.slice(0, 9).flat(), at(0), { now: NOW }).repositories[0]!;
-  assert.equal(few.slowestTestFiles[0]?.file, "tests/slow.test.ts");
-  assert.deepEqual([few.testFilesOverBudget, few.budget], [[], { status: "insufficient-samples", over: [] }]);
+  // Four serial samples are too few to judge: the file is a candidate, not over.
+  const early = pipelineMetrics([...landings.flat(), ...costs.slice(0, 4).flat()], since, { now: NOW }).repositories[0]!;
+  assert.deepEqual([early.testFilesOverBudget, early.budget.over], [[], []]);
+  assert.deepEqual(early.costCandidates.map((file) => file.file), ["tests/slow.test.ts"]);
+});
+
+test("lists at most forty files for the nightly file-cost run, however many are past half the ceiling", () => {
+  const report = (runId: string, file: string): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: [{ file, suite: "vitest", ms: 20_000, status: "passed" }] });
+  const events = Array.from({ length: 45 }, (_, index) => verifiedLanding(`candidate-${index}`, index + 1, 3_600_000, 60_000, [report(`c${index}`, `tests/candidate-${index}.test.ts`)])).flat();
+  const repo = pipelineMetrics(events, at(0), { now: NOW }).repositories[0]!;
+  assert.equal(repo.costCandidates.length, 40);
+  assert.deepEqual(repo.testFilesOverBudget, [], "a parallel 20 s median is a candidate, never over the 30 s ceiling");
+});
+
+test("splits a landing's verify time by how the gate selected its tests, so a representative run is judged alone", () => {
+  const selection = (runId: string, kind: "related" | "complete"): OperationEvent => ({ type: "test_report", runId, status: "recorded", selection: kind, files: [{ file: "tests/a.test.ts", suite: "vitest", ms: 1_000, status: "passed" }] });
+  const events = [
+    ...[60_000, 70_000, 80_000, 90_000].flatMap((ms, index) => verifiedLanding(`related-${index}`, index + 1, 3_600_000, ms, [selection(`s${index}`, "related")])),
+    ...[300_000, 320_000, 340_000, 360_000].flatMap((ms, index) => verifiedLanding(`complete-${index}`, index + 10, 3_600_000, ms, [selection(`c${index}`, "complete")])),
+    // A version-1 report names no selection, so it lands in neither split while still counting in the whole.
+    ...verifiedLanding("unknown", 20, 3_600_000, 200_000, [{ type: "test_report", runId: "plain", status: "recorded", files: [{ file: "tests/b.test.ts", suite: "vitest", ms: 1_000, status: "passed" }] }]),
+  ];
+  const repo = pipelineMetrics(events, at(0), { now: NOW }).repositories[0]!;
+  assert.deepEqual(repo.verifyBySelection.related, { samples: 4, medianMs: 75_000, p90Ms: 90_000 });
+  assert.deepEqual(repo.verifyBySelection.complete, { samples: 4, medianMs: 330_000, p90Ms: 360_000 });
+  assert.deepEqual([repo.verify?.samples, repo.verify?.medianMs], [9, 200_000]);
+  const text = formatPipelineMetrics(pipelineMetrics(events, at(0), { now: NOW }));
+  assert.match(text, /Verify by selection: related 4 samples, median 75000ms, p90 90000ms; complete 4 samples, median 330000ms, p90 360000ms/);
 });
 
 test("a test file's samples are its executed runs in one operation kind: skipped rows and the audit's runs are kept out of a landing's, and its budget", () => {

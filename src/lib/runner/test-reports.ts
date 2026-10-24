@@ -4,8 +4,15 @@
  * command that wants per-file timings recorded writes its reports there, with a manifest
  * `slipjay-test-reports.json`:
  *
- *   { "version": 1, "reports": [{ "format": "vitest-json" | "bun-junit", "path": "<file in the directory>",
+ *   { "version": 1, "selection": { "kind": "complete" | "related" | "none" },
+ *     "reports": [{ "format": "vitest-json" | "bun-junit", "path": "<file in the directory>",
  *     "suite": "<name>", "cwd": "<repository-relative directory the runner ran in>" }] }
+ *
+ * `selection` is optional and additive: a writer that omits it, and a reader that predates it,
+ * keep working exactly as before, so a new gate can describe itself without the runner that
+ * reads it having to land first. `suite` separates measurements that must never pool: a
+ * landing's selected run, an audit's complete one, and the file-cost run that measures one
+ * file at a time are three different suites.
  *
  * The runner reads them into `{ file, ms, status }` rows, files relative to the repository.
  * The command's exit status stays the verdict: a report never passes or fails a run, and a
@@ -21,9 +28,12 @@ const MAX_FILES = 5_000;
 
 export type TestReportFormat = "vitest-json" | "bun-junit";
 export type TestFileRow = { file: string; suite: string; ms: number; status: "passed" | "failed" | "skipped" };
+/** How the gate chose the tests a landing verified: the whole suite, the import graph, or nothing. */
+export const TEST_SELECTION_KINDS = ["complete", "related", "none"] as const;
+export type TestSelectionKind = (typeof TEST_SELECTION_KINDS)[number];
 /** What one run's reports said. */
 export type TestReportReading =
-  | { status: "recorded"; files: TestFileRow[]; truncated?: boolean }
+  | { status: "recorded"; files: TestFileRow[]; truncated?: boolean; selection?: TestSelectionKind }
   /** The command wrote no manifest, as an install or a type check does: no rows, and no zero-duration samples. */
   | { status: "missing" }
   /** A malformed report keeps no rows, so a partial one never reads as a complete run. */
@@ -81,9 +91,17 @@ export async function readTestReports(directory: string, root: string): Promise<
     return { status: "malformed", reason: `manifest unreadable: ${(error as Error).message}` };
   }
   const files: TestFileRow[] = [];
+  let selection: TestSelectionKind | undefined;
   try {
-    const manifest = JSON.parse(manifestText) as { version?: unknown; reports?: unknown };
-    if (manifest.version !== 1 || !Array.isArray(manifest.reports)) throw new Error("manifest is not version 1 with a reports list");
+    const manifest = JSON.parse(manifestText) as { version?: unknown; selection?: unknown; reports?: unknown };
+    if (manifest.version !== 1) throw new Error("manifest is not version 1");
+    if (!Array.isArray(manifest.reports)) throw new Error("manifest is not versioned with a reports list");
+    // `selection` is additive to version 1, so a reader that predates it ignores it. A kind the contract
+    // does not name is dropped rather than kept as a fourth one.
+    if (manifest.selection !== undefined) {
+      const kind = (manifest.selection as { kind?: unknown } | null)?.kind;
+      if (typeof kind === "string" && (TEST_SELECTION_KINDS as readonly string[]).includes(kind)) selection = kind as TestSelectionKind;
+    }
     for (const [index, entry] of manifest.reports.entries()) {
       const report = entry as { format?: unknown; path?: unknown; suite?: unknown; cwd?: unknown };
       const label = `report ${index + 1}`;
@@ -102,5 +120,6 @@ export async function readTestReports(directory: string, root: string): Promise<
   } catch (error) {
     return { status: "malformed", reason: (error as Error).message };
   }
-  return files.length > MAX_FILES ? { status: "recorded", files: files.slice(0, MAX_FILES), truncated: true } : { status: "recorded", files };
+  if (files.length > MAX_FILES) return { status: "recorded", files: files.slice(0, MAX_FILES), truncated: true, ...(selection ? { selection } : {}) };
+  return { status: "recorded", files, ...(selection ? { selection } : {}) };
 }

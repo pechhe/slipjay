@@ -76,6 +76,13 @@
           "run",
           "test:audit"
         ]
+      },
+      {
+        "executable": "bun",
+        "args": [
+          "run",
+          "test:file-cost"
+        ]
       }
     ],
     "timeOfDay": "02:00",

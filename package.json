@@ -28,10 +28,11 @@
     "check": "vp lint --quiet && bun scripts/check-architecture.ts",
     "typecheck": "tsc --noEmit",
     "test": "vp test && bun run test:runtimes",
-    "test:runtimes": "bun test scripts/check-architecture.test.ts scripts/with-hermetic-home.test.ts scripts/test-landing.test.ts",
+    "test:runtimes": "bun test scripts/check-architecture.test.ts scripts/with-hermetic-home.test.ts scripts/test-landing.test.ts scripts/test-file-cost.test.ts",
     "verify:release": "bun scripts/verify-release.ts",
     "test:landing": "bun scripts/test-landing.ts",
-    "test:audit": "bun scripts/test-landing.ts --audit"
+    "test:audit": "bun scripts/test-landing.ts --audit",
+    "test:file-cost": "bun scripts/test-file-cost.ts"
   },
   "dependencies": {
     "effect": "4.0.3",

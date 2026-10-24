@@ -44,11 +44,15 @@ export type RepositoryMetrics = {
   budgets: TimeBudgets | null;
   /** Wall-clock verifying stage of landings whose checks ran, over the budget window ending now. */
   verify: MetricTiming | null;
+  /** The same verify stage split by how the gate chose its tests: a related run is a representative landing. */
+  verifyBySelection: { related: MetricTiming | null; complete: MetricTiming | null };
   budget: BudgetStatus;
   /** Gate and audit commands by what their reports said; `missing` counts those that wrote none. */
   reports: { recorded: number; malformed: number; missing: number };
   slowestTestFiles: TestFileMetric[];
   growingTestFiles: TestFileGrowth[];
+  /** The files the nightly file-cost run should measure: parallel runs cannot judge their cost, only rank it. */
+  costCandidates: TestFileMetric[];
   testFilesOverBudget: TestFileMetric[];
   /** Its nightly audits (see `audit-ledger.ts`); null when it has none. */
   audit: AuditSummary | null;
@@ -78,6 +82,10 @@ type OperationHistory = {
 /** The window a budget is judged over, and the fewest samples it is judged on. */
 export const BUDGET_WINDOW_MS = 7 * 24 * 3_600_000;
 export const BUDGET_MIN_SAMPLES = 10;
+/** A file-cost sample is expensive and nightly, so the per-file ceiling is judged on fewer of them. */
+export const FILE_COST_MIN_SAMPLES = 5;
+/** How many files the file-cost run may be asked to measure: the slowest ones, over half the ceiling first. */
+const COST_CANDIDATES = 40;
 const LISTED_FILES = 10;
 /** A file is growing when its later median is this much over its earlier one, each from enough samples. */
 const GROWTH_RATIO = 1.2;
@@ -249,11 +257,11 @@ function budgetStatus(budgets: TimeBudgets | null, verify: MetricTiming | null, 
 
 /** Each repository's verify time against its latest recorded budgets, and its test files from executed reports. */
 function repositoryMetrics(histories: Map<string, OperationHistory>, since: number, now: number, audits: Map<string, AuditSummary>): RepositoryMetrics[] {
-  type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }> };
+  type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
   const repos = new Map<string, Repo>();
   const repoOf = (name: string): Repo => {
     let repo = repos.get(name);
-    if (!repo) { repo = { budgets: null, budgetSeq: -1, verify: [], recorded: 0, malformed: 0, missing: 0, files: new Map() }; repos.set(name, repo); }
+    if (!repo) { repo = { budgets: null, budgetSeq: -1, verify: [], verifyRelated: [], verifyComplete: [], recorded: 0, malformed: 0, missing: 0, files: new Map(), cost: new Map() }; repos.set(name, repo); }
     return repo;
   };
   for (const op of [...histories.values()].sort((a, b) => (a.submittedEvent?.seq ?? 0) - (b.submittedEvent?.seq ?? 0))) {
@@ -265,7 +273,15 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
     }
     const submittedAt = eventTime(op.submittedEvent);
     const verify = executedVerify(op);
-    if (verify !== undefined && submittedAt >= now - BUDGET_WINDOW_MS && submittedAt <= now) repo.verify.push(verify);
+    if (verify !== undefined && submittedAt >= now - BUDGET_WINDOW_MS && submittedAt <= now) {
+      repo.verify.push(verify);
+      // A landing's selection is what the gate recorded; a v1 report says nothing, so it counts in no split.
+      const selection = op.events.find((row) => row.event.type === "test_report" && row.event.status === "recorded" && row.event.selection !== undefined);
+      if (selection?.event.type === "test_report" && selection.event.status === "recorded") {
+        if (selection.event.selection === "related") repo.verifyRelated.push(verify);
+        else if (selection.event.selection === "complete") repo.verifyComplete.push(verify);
+      }
+    }
     if (!(submittedAt >= since)) continue;
     const kind = operationKind(op.submitted);
     for (const row of op.events) {
@@ -282,6 +298,23 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
       }
     }
   }
+  // The per-file budget, like the verify budget, spans its own window: a nightly file-cost run is one sample,
+  // and a report window that started this morning would never gather the five a judgement needs.
+  for (const op of histories.values()) {
+    if (!op.submitted || !op.submittedEvent) continue;
+    const repo = repoOf(op.submitted.repo);
+    const submittedAt = eventTime(op.submittedEvent);
+    if (!(submittedAt >= now - BUDGET_WINDOW_MS && submittedAt <= now)) continue;
+    for (const row of op.events) {
+      if (row.event.type !== "test_report" || row.event.status !== "recorded") continue;
+      for (const file of row.event.files) {
+        if (file.suite !== FILE_COST_SUITE || file.status === "skipped") continue;
+        const entry = repo.cost.get(file.file) ?? { file: file.file, suite: file.suite, samples: [] };
+        entry.samples.push(file.ms);
+        repo.cost.set(file.file, entry);
+      }
+    }
+  }
   return [...repos].map(([name, repo]): RepositoryMetrics => {
     const files = [...repo.files.values()].map((entry) => ({ kind: entry.kind, file: entry.file, suite: entry.suite, ...timing(entry.samples)! }));
     const growing = [...repo.files.values()].flatMap((entry): TestFileGrowth[] => {
@@ -292,20 +325,28 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
       return later > earlier * GROWTH_RATIO ? [{ kind: entry.kind, file: entry.file, suite: entry.suite, earlierMedianMs: earlier, laterMedianMs: later, samples: entry.samples.length }] : [];
     }).sort((a, b) => (b.laterMedianMs - b.earlierMedianMs) - (a.laterMedianMs - a.earlierMedianMs)).slice(0, LISTED_FILES);
     const limit = repo.budgets?.testFileSeconds;
-    // The file budget is a landing budget, judged per file on its own landing samples: an audit's complete run, and
-    // a file with fewer than BUDGET_MIN_SAMPLES landings, is listed but never judged against it.
-    const overBudget = limit === undefined ? [] : files.filter((file) => file.kind === "landing" && file.samples >= BUDGET_MIN_SAMPLES && file.medianMs > limit * 1000).sort((a, b) => b.medianMs - a.medianMs);
+    // The per-file budget is judged on the file-cost measurement, where one file runs at a time: a landing's
+    // or audit's parallel run is contention, not the file's cost. Its samples span the budget window.
+    const costFiles = [...repo.cost.values()].map((entry) => ({ kind: "audit" as const, file: entry.file, suite: entry.suite, ...timing(entry.samples)! }));
+    const overBudget = limit === undefined ? [] : costFiles.filter((file) => file.samples >= FILE_COST_MIN_SAMPLES && file.medianMs > limit * 1000).sort((a, b) => b.medianMs - a.medianMs);
+    // What to measure next: a file whose parallel median is already past half the ceiling is almost certainly the
+    // one to check, and no other listing reaches past the ten slowest.
+    const costCandidates = limit === undefined ? [] : files.filter((file) => file.suite !== FILE_COST_SUITE && file.medianMs > (limit * 1000) / 2).sort((a, b) => b.medianMs - a.medianMs).slice(0, COST_CANDIDATES);
     const verify = timing(repo.verify);
     return {
-      repo: name, budgets: repo.budgets, verify, budget: budgetStatus(repo.budgets, verify, overBudget.length),
+      repo: name, budgets: repo.budgets, verify, verifyBySelection: { related: timing(repo.verifyRelated), complete: timing(repo.verifyComplete) }, budget: budgetStatus(repo.budgets, verify, overBudget.length),
       reports: { recorded: repo.recorded, malformed: repo.malformed, missing: repo.missing },
       slowestTestFiles: [...files].sort((a, b) => b.medianMs - a.medianMs).slice(0, LISTED_FILES),
       growingTestFiles: growing,
+      costCandidates,
       testFilesOverBudget: overBudget,
       audit: [...audits].find(([repo]) => repositoryKey(repo) === repositoryKey(name))?.[1] ?? null,
     };
   }).sort((a, b) => a.repo.localeCompare(b.repo));
 }
+
+/** The suite a file-cost measurement writes: one test file at a time, so its durations are the file's own cost. */
+export const FILE_COST_SUITE = "file-cost";
 
 /** Project terminal pipeline metrics from runner evidence, per repository and operation kind; `repo` narrows to one. */
 export function pipelineMetrics(events: readonly StoredEvent[], since: string, options: { repo?: string; now?: number } = {}): PipelineMetrics {
@@ -427,6 +468,7 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
   }
   for (const repo of metrics.repositories) {
     lines.push(`${repo.repo} budget: ${repo.budget.status}${repo.budget.over.length ? ` (${repo.budget.over.join(", ")})` : ""}; landing verify over 7 days ${formatTiming(repo.verify)}${repo.budgets ? `; budgets ${JSON.stringify(repo.budgets)}` : ""}`);
+    lines.push(`  Verify by selection: related ${formatTiming(repo.verifyBySelection.related)}; complete ${formatTiming(repo.verifyBySelection.complete)}`);
     lines.push(`  Test reports: ${repo.reports.recorded} recorded, ${repo.reports.malformed} malformed, ${repo.reports.missing} missing`);
     if (repo.audit) {
       const { lastGreen, overdue, openFailure, escapes } = repo.audit;
@@ -434,7 +476,8 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     }
     if (repo.slowestTestFiles.length) lines.push(`  Slowest test files: ${repo.slowestTestFiles.map((file) => `${file.kind} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
     if (repo.growingTestFiles.length) lines.push(`  Growing test files: ${repo.growingTestFiles.map((file) => `${file.kind} ${file.file} ${seconds(file.earlierMedianMs)} → ${seconds(file.laterMedianMs)}`).join("; ")}`);
-    if (repo.testFilesOverBudget.length) lines.push(`  Test files over budget: ${repo.testFilesOverBudget.map((file) => `${file.kind} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
+    if (repo.testFilesOverBudget.length) lines.push(`  Test files over budget: ${repo.testFilesOverBudget.map((file) => `${file.suite} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
+    if (repo.costCandidates.length) lines.push(`  Cost candidates: ${repo.costCandidates.length} file(s), slowest ${repo.costCandidates.slice(0, 5).map((file) => `${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
   }
   lines.push(`Flake candidates: ${metrics.flakes.length ? metrics.flakes.map((candidate) => `${candidate.test} (${candidate.confirmed ? "confirmed" : "candidate"}; ${candidate.changes.length} changes; ${candidate.command}${candidate.fileSet ? `; fileSet ${candidate.fileSet}` : ""}${candidate.retriedPass ? `; passed on retry ${candidate.retriedPass.operationId}` : ""})`).join("; ") : "none"}`);
   lines.push(`Attempts: ${metrics.attempts.length ? metrics.attempts.map((attempt) => `${attempt.repo}/${attempt.changeId} ${attempt.attempts}${attempt.landed ? " until landed" : " open"}`).join("; ") : "none"}`);

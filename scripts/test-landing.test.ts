@@ -199,7 +199,7 @@ test("gate writes opt-in manifest, tolerates missing reports and preserves test 
     assert.ok(!existsSync(reportDir));
     assert.equal(invoke(true).status, 0, "missing reporter outputs cannot invalidate successful commands");
     const manifest = JSON.parse(readFileSync(path.join(reportDir, "slipjay-test-reports.json"), "utf8"));
-    assert.deepEqual(manifest, { version: 1, reports: [
+    assert.deepEqual(manifest, { version: 1, selection: { kind: "related" }, reports: [
       { format: "vitest-json", path: "vitest.json", suite: "vitest", cwd: "." },
       { format: "bun-junit", path: "bun-junit.xml", suite: "runtimes", cwd: "." },
     ] });

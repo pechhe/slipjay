@@ -1002,7 +1002,8 @@ machine's own work after the verdict (recording the landing, sweeping other work
 classes, and for each repository and operation kind (landing, release, verification,
 deploy, reset) its median and p90 stage and command durations and active and paused
 queue waits; kinds and repositories are never pooled. For each repository it then
-gives its landing verify time against its budgets, and its test files; then
+gives its landing verify time against its budgets and split by how the gate selected tests,
+its test files, and the files the nightly file-cost run should measure; then
 held integrations, attempts per change, flake candidates, and workspace starts (per
 repository and machine: starts, how many came from the spare pool, median and p90 claim time, and
 median spares available, and the median of each start step that recorded `steps`, as in `start --json`). The claim time is the allocation itself, not `slipjay`'s own startup. The default range
@@ -1010,26 +1011,40 @@ starts at midnight UTC today. `--json` prints the same as JSON; `--repo` keeps o
 
 **Budgets.** A repository declares `budgets` in `slipjay.json`, a settings field
 (`slipjay policy set`): `verifyP50Seconds` and `verifyP90Seconds` for its landings'
-verifying stage, and `testFileSeconds` for any one test file's median at landing (an audit's
-complete run is listed, not judged against it). The runner records them
-with each landing's verification, so metrics judge a repository by its latest. A
-verify sample is a landing whose checks ran (not a settings landing, not cancelled),
+verifying stage, and `testFileSeconds` for any one test file's cost, measured one file at a
+ time by the nightly `file-cost` run (see Test reports). A landing's or an audit's parallel
+run is listed, never judged against it: 196 files sharing one host inflate every file's
+time, and the same file measured 27.6 s alone and 74 s inside a complete run. The runner
+records the budgets with each landing's verification, so metrics judge a repository by its
+latest. A verify sample is a landing whose checks ran (not a settings landing, not cancelled),
 timed by its verifying stage, over the 7 days ending now; each retry is its own sample.
-A budget with fewer than 10 samples reports `insufficient-samples`, never pass or fail;
-a test file is judged on its own landings, so one with fewer than 10 is listed but never over.
+A budget with fewer than 10 verify samples reports `insufficient-samples`, never pass or fail;
+a test file's cost is judged on its own `file-cost` samples over the same 7 days, at 5 or more
+of them, so a file over the ceiling with too few samples is listed but never over.
 
 **Test reports.** Each gate command runs with `SLIPJAY_TEST_REPORT_DIR`, an empty
 directory of its own. A command that writes reports there, with a manifest
-`slipjay-test-reports.json` (`{"version":1,"reports":[{"format":"vitest-json"|"bun-junit","path":"<file in the directory>","suite":"<name>","cwd":"<repository-relative directory>"}]}`),
-gets one `{file, suite, ms, status}` row per test file in its run's evidence. A test
-file's samples are its executed (not skipped) rows within one operation kind, so a
-landing's related run and the audit's complete one are listed apart. A test
+`slipjay-test-reports.json` (`{"version":1,"selection":{"kind":"complete"|"related"|"none"},"reports":[{"format":"vitest-json"|"bun-junit","path":"<file in the directory>","suite":"<name>","cwd":"<repository-relative directory>"}]}`),
+gets one `{file, suite, ms, status}` row per test file in its run's evidence. `selection` is
+optional and additive, so a writer can name how the gate chose its tests without the runner
+that reads it having landed first; the gate writes it, and metrics report landing verify
+time split into related-selection (representative) and complete-selection runs. A test
+file's samples are its executed (not skipped) rows within one operation kind and suite, so a
+landing's related run, the audit's complete one and the `file-cost` measurement are listed
+apart and never pooled. A test
 file is growing when the later half of its samples has a median over 1.2 times the
 earlier half's, from at least 3 each. The command's exit status stays its verdict; a
 command that wrote no manifest is recorded as `missing` and a malformed report as
 `malformed`, and neither contributes rows. Each stage also
 records the runner's load average, memory and running operations as it began, and
 the queue snapshot gives each operation's `startedAt`, when it left the queue.
+
+**The file-cost run.** `bun run test:file-cost` runs in the nightly audit: it takes the
+files metrics list as `costCandidates` (parallel medians past half the per-file ceiling)
+and runs each one in its own process (`--maxWorkers=1 --no-file-parallelism`), Vitest
+files through `vp test run` and the runtime lane's Bun files through `bun test`, then
+writes them under the `file-cost` suite. It fails the audit when the list cannot be read
+or a measured file fails, and writes nothing when no file is near the ceiling.
 
 **Flake candidates** are a test failing for two different changes, or a test that
 failed and then passed on a retry of the same source commit verified on the same candidate (the
@@ -1582,8 +1597,8 @@ including retries that started on an empty continuation child.
   `bun run test` (release) and `bun run test:audit` (the nightly audit's complete
   suite, which writes the same reports). Remove entries when their Issue closes.
   With `SLIPJAY_TEST_REPORT_DIR`, the gate writes Vitest JSON, Bun JUnit and a
-  version-1 `slipjay-test-reports.json` manifest there; command exit status remains
-  authoritative when a report is missing. `bun scripts/test-landing.ts --replay`
+  version-1 `slipjay-test-reports.json` manifest there, naming the selection it made;
+  command exit status remains authoritative when a report is missing. `bun scripts/test-landing.ts --replay`
   replays selection for the last 30 main commits using their exact parent diffs
   and historical import graphs in disposable scratch trees, without running test bodies.
 - **At release**, `bun run verify:release` runs the complete suite again

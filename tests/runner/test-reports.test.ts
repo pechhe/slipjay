@@ -72,3 +72,26 @@ test("no manifest is a missing report; a malformed or escaping one is malformed 
     } finally { await fixture.dispose(); }
   }
 });
+
+test("a manifest's optional selection is kept, and a kind the contract does not name is dropped", async () => {
+  const manifest = (selection: unknown) => JSON.stringify({ version: 1, ...(selection === undefined ? {} : { selection }), reports: [{ format: "vitest-json", path: "vitest.json", suite: "vitest", cwd: "." }] });
+  const cases: [string, unknown, string | undefined][] = [
+    ["related", { kind: "related" }, "related"],
+    ["complete", { kind: "complete" }, "complete"],
+    ["none", { kind: "none" }, "none"],
+    ["absent", undefined, undefined],
+    ["unknown kind", { kind: "everything" }, undefined],
+  ];
+  for (const [name, selection, expected] of cases) {
+    const fixture = await reportDir(async (directory, root) => {
+      await writeFile(join(directory, "vitest.json"), JSON.stringify({ testResults: [{ name: join(root, "tests/x.test.ts"), startTime: 0, endTime: 5, status: "passed" }] }));
+      await writeFile(join(directory, TEST_REPORT_MANIFEST), manifest(selection));
+    });
+    try {
+      const reading = await readTestReports(fixture.directory, fixture.root);
+      assert.equal(reading.status, "recorded", name);
+      assert.deepEqual(reading.status === "recorded" ? reading.files : [], [{ file: "tests/x.test.ts", suite: "vitest", ms: 5, status: "passed" }], name);
+      assert.equal(reading.status === "recorded" ? reading.selection : "missing", expected, name);
+    } finally { await fixture.dispose(); }
+  }
+});
