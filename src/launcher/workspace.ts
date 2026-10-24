@@ -29,6 +29,9 @@ import {
   archiveWorkspace,
   listArchives,
   restoreArchive,
+  releaseWorkspace,
+  readReleaseResult,
+  listReleaseResults,
   processArchiveRequests,
   readWorkspaceMode,
   workspaceContext,
@@ -608,6 +611,27 @@ try {
       for (const skipped of outcome.skipped) if (!/used within|pool spare|no activity recorded/.test(skipped.reason)) console.error(`kept\t${skipped.name}\t${skipped.reason}`);
       if (!outcomes.length && !outcome.results.length) console.log("Nothing to archive or evict.");
     }
+  } else if (command === "retire") {
+    const operationIndex = rest.indexOf("--operation");
+    const operationId = operationIndex >= 0 ? rest[operationIndex + 1] : undefined;
+    const positional = rest.filter((arg, index) => !arg.startsWith("--") && index !== operationIndex + 1);
+    if (!operationId || positional.length > 1 || rest.length !== positional.length + 2 || operationId.startsWith("-")) {
+      throw new Error("Usage: slipjay retire <path> --operation <id>");
+    }
+    const result = await releaseWorkspace(positional[0] ?? process.cwd(), { operationId });
+    console.log(JSON.stringify(result));
+    if (result.state === "uncertain") process.exitCode = 2;
+    else if (result.state === "refused") process.exitCode = 1;
+  } else if (command === "retire-result") {
+    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay retire-result <operation-id>");
+    const result = await readReleaseResult(rest[0]!);
+    console.log(JSON.stringify(result));
+    if (!result) process.exitCode = 1;
+  } else if (command === "retirements") {
+    if (rest.length) throw new Error("Usage: slipjay retirements");
+    const results = await listReleaseResults();
+    if (!results.length) console.log("No releases recorded.");
+    for (const result of results) console.log(`${result.operationId}\t${result.state}\t${result.at}\t${result.workspacePath}`);
   } else if (command === "pool") {
     if (rest[0] === "refill") await refillPool(process.cwd(), (outcome) => console.log(JSON.stringify(outcome)));
     else if (rest.length === 0) {
@@ -874,7 +898,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id>|archives|maintain [--json]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

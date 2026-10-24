@@ -27,6 +27,7 @@ export { runHousekeeping, startHousekeeping } from "./workspace/workspace-housek
 export { planDisposableWorkspaces, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace/workspace-sweep.ts";
 export { evictIdleWorkspaces, EVICTION_IDLE_MS } from "./workspace/workspace-eviction.ts";
 export { archiveWorkspace, archiveRefusal, listArchives, processArchiveRequests, readArchive, restoreArchive } from "./workspace/workspace-archive.ts";
+export { listReleaseResults, readReleaseResult, releaseWorkspace, stillArchivedState } from "./workspace/workspace-release.ts";
 export type { PlannedWorkspace } from "./workspace/workspace-sweep.ts";
 export { withWorkspaceTransaction } from "./infra/workspace-transaction.ts";
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace/workspace-delivery-lifecycle.ts";

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync } from "node:fs";
-import { appendFile, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readdir, readFile, readlink, rm, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { jj } from "../infra/workspace-jj.ts";
@@ -42,6 +42,8 @@ export type WorkspaceArchive = {
   reason: string;
   /** Files outside history, repository-relative. */
   inventory: string[];
+  /** What each of those files was: bytes, mode and link target, hashed. */
+  inventoryDigests: Record<string, string>;
   payload: { file: string; sha256: string; bytes: number } | null;
   bookmark: string;
 };
@@ -54,7 +56,7 @@ const archivesHome = () => join(stateHome(), "archives");
  * Flush a file or directory entry to disk. A host that cannot sync gets a refusal
  * rather than an "archived" that a crash could take back.
  */
-function syncPath(path: string): void {
+export function syncPath(path: string): void {
   const descriptor = openSync(path, "r");
   try {
     fsyncSync(descriptor);
@@ -134,7 +136,7 @@ async function nestedRepositories(root: string, integrationRoot: string, limit: 
   return { found, deep };
 }
 
-async function inventoryOf(root: string, integrationRoot: string): Promise<string[]> {
+export async function inventoryOf(root: string, integrationRoot: string): Promise<string[]> {
   // The repository's own `generatedPaths` say what it can rebuild, and the Spec keeps
   // those out of an archive. No primary root, though: a link pointing into the
   // integration checkout is still this workspace's own material, and skipping it would
@@ -183,6 +185,7 @@ export async function archiveWorkspace(root: string, options: {
   const changeId = (await jj(root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "change_id"])).trim();
   const baseCommitId = (await jj(root, ["--ignore-working-copy", "log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
   const inventory = await inventoryOf(root, integrationRoot);
+  const inventoryDigests = await materialDigests(root, inventory);
   const id = createHash("sha256").update(`${integrationRoot}\n${workspaceName}\n${commitId}\n${createdAt.toISOString()}`).digest("hex").slice(0, 16);
   const bookmark = `slipjay-archive-${id}`;
 
@@ -217,7 +220,7 @@ export async function archiveWorkspace(root: string, options: {
   const archive: WorkspaceArchive = {
     version: ARCHIVE_VERSION, id, workspaceName, workspacePath: resolve(root), repository: integrationRoot,
     commitId, changeId, baseCommitId, createdAt: createdAt.toISOString(),
-    reason: options.reason ?? "archived", inventory, payload, bookmark,
+    reason: options.reason ?? "archived", inventory, inventoryDigests, payload, bookmark,
   };
   await mkdir(archivesHome(), { recursive: true, mode: 0o700 });
   // The manifest is written last: an archive a reader can find is one whose payload is complete.
@@ -226,6 +229,35 @@ export async function archiveWorkspace(root: string, options: {
   syncPath(archivePath(id));
   syncPath(archivesHome());
   return { archive };
+}
+
+/**
+ * What a set of files outside history actually is: their bytes, their mode and, for a
+ * link, where it points. An archive that recorded only names could not tell a changed
+ * file from the one it holds, and a release would then delete material it never kept.
+ */
+export async function materialDigests(root: string, inventory: string[]): Promise<Record<string, string>> {
+  const digests: Record<string, string> = {};
+  for (const path of inventory) {
+    const facts = await lstat(join(root, path)).catch(() => null);
+    if (!facts) continue;
+    const hash = createHash("sha256");
+    if (facts.isSymbolicLink()) {
+      hash.update(`link:${await readlink(join(root, path)).catch(() => "unreadable")}`);
+    } else if (facts.isFile()) {
+      // Raw bytes, not a decoded string: two different byte sequences must never hash alike.
+      const bytes = await readFile(join(root, path)).catch(() => null);
+      if (bytes === null) {
+        // Unreadable is not empty: record something no archive of a real file can match.
+        digests[path] = "unreadable";
+        continue;
+      }
+      hash.update(`file:${(facts.mode & 0o777).toString(8)}:`);
+      hash.update(bytes);
+    } else hash.update(`other:${(facts.mode & 0o777).toString(8)}`);
+    digests[path] = hash.digest("hex");
+  }
+  return digests;
 }
 
 export async function readArchive(id: string): Promise<WorkspaceArchive | null> {
