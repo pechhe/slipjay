@@ -28,20 +28,25 @@ test("propagates the command's failure", () => {
   expect(result.status).toBe(3);
 });
 
-test("workspace fixtures commit with the disposable HOME's Git identity", () => {
-  const fixture = new URL("../tests/support/workspace-project.ts", import.meta.url).href;
+test("bare and cloned repositories commit with the disposable HOME's Git identity", () => {
   const script = `
     import { execFileSync } from 'node:child_process';
+    import { mkdirSync, writeFileSync } from 'node:fs';
     import { homedir } from 'node:os';
     import { join } from 'node:path';
-    process.env.SLIPJAY_BACKGROUND_WORKERS = join(homedir(), 'background-workers');
-    const { project } = await import(${JSON.stringify(fixture)});
-    const f = await project();
-    try {
-      execFileSync('git', ['commit', '--quiet', '--allow-empty', '-m', 'Identity probe'], { cwd: f.repo });
-      const author = (args) => execFileSync('git', [...args, 'log', '-1', '--format=%an <%ae>'], { encoding: 'utf8' }).trim();
-      console.log(JSON.stringify([author(['--git-dir', f.remote]), author(['-C', f.repo])]));
-    } finally { await f.dispose(); }
+    const remote = join(homedir(), 'remote.git');
+    const seed = join(homedir(), 'seed');
+    const repo = join(homedir(), 'primary');
+    mkdirSync(seed);
+    writeFileSync(join(seed, 'seed.txt'), 'identity probe');
+    const git = (args, cwd = seed) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: 'pipe' }).trim();
+    git(['init', '--bare', '--initial-branch=main', remote]);
+    git(['--git-dir', remote, '--work-tree', seed, 'add', '.']);
+    git(['--git-dir', remote, '--work-tree', seed, 'commit', '--quiet', '-m', 'Seed identity']);
+    git(['clone', '--quiet', remote, repo]);
+    git(['commit', '--quiet', '--allow-empty', '-m', 'Primary identity'], repo);
+    const author = (args) => git([...args, 'log', '-1', '--format=%an <%ae>']);
+    console.log(JSON.stringify([author(['--git-dir', remote]), author(['-C', repo])]));
   `;
   const result = spawnSync(process.execPath, [wrapper, "node", "--input-type=module", "--eval", script], { encoding: "utf8" });
   expect(result.status).toBe(0);
