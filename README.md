@@ -746,7 +746,8 @@ never runs at promotion:
   plus `environmentKeys` (from the runner's environment), `SLIPJAY_RESET_TARGET`,
   `SLIPJAY_RESET_SOURCE` (the tip) and `SLIPJAY_RESET_REASON_FILE`. `targetProbe`
   must print `{"target": …}` equal to `target` within 30 seconds, or the command does
-  not run. The command must finish within `timeoutMs` (at most 15 minutes).
+  not run. The command must finish within `timeoutMs` (at most an hour: a whole-database
+  reset runs its migrations and then two seeders).
   `runner kill` stops a reset at once: it moves no branch, and the target's script is
   built to survive a kill.
 - **Records.** A reset ends `reset` with its `target` and `source`, or `failed`. The

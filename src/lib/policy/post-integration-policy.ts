@@ -84,14 +84,14 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
  * on demand (`slipjay reset`), in the integration branch's exact source (the target
  * follows it), alone in the serial queue. It rebuilds the target from scratch, so it
  * declares no approval mode or idempotency contract. A reset of a whole database
- * takes longer than a migration, so its deadline may run to 15 minutes; it runs at
+ * takes longer than a migration, so its deadline may run to an hour; it runs at
  * most hourly and at least monthly.
  */
 export function resetPolicy(value: unknown): ResetPolicy | null {
   if (value === undefined)
     return null;
   const row = object(value, "Reset");
-  if (row.version !== 1 || typeof row.target !== "string" || !TARGET.test(row.target) || !Number.isInteger(row.timeoutMs) || Number(row.timeoutMs) < 1 || Number(row.timeoutMs) > 900000
+  if (row.version !== 1 || typeof row.target !== "string" || !TARGET.test(row.target) || !Number.isInteger(row.timeoutMs) || Number(row.timeoutMs) < 1 || Number(row.timeoutMs) > 3_600_000
     || !Number.isInteger(row.intervalMs) || Number(row.intervalMs) < 3_600_000 || Number(row.intervalMs) > 30 * 86_400_000) {
     throw new Error("Invalid reset identity, deadline or interval");
   }

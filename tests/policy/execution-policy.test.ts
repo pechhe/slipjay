@@ -113,7 +113,10 @@ test("a reset declares its target, deadline and an interval of an hour to 30 day
   assert.deepEqual(parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, intervalMs: 3_600_000 } })).reset?.intervalMs, 3_600_000);
   for (const intervalMs of [3_599_999, 30 * 86_400_000 + 1, undefined, 1.5 * 3_600_000 + 0.5])
     assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, intervalMs } })), /Invalid reset identity, deadline or interval/, String(intervalMs));
-  assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, timeoutMs: 900001 } })), /Invalid reset/);
+  // A whole-database reset runs two seeders after its migrations, so the deadline may run to an hour.
+  assert.deepEqual(parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, timeoutMs: 2_700_000 } })).reset?.timeoutMs, 2_700_000);
+  assert.deepEqual(parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, timeoutMs: 3_600_000 } })).reset?.timeoutMs, 3_600_000);
+  assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, timeoutMs: 3_600_001 } })), /Invalid reset/);
   assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", reset: { ...reset, environmentKeys: ["SLIPJAY_RESET_TARGET"] } })), /Invalid reset environment declaration/);
   assert.throws(() => parseExecutionPolicy(policy({ reset })), /declares reset without an integrationBranch/);
   assert.throws(() => parseExecutionPolicy(policy({ integrationBranch: "develop", releaseBranch: "master", postRelease: reset })),
