@@ -26,6 +26,10 @@ import {
   pruneEmptyWorkspaces,
   evictIdleWorkspaces,
   EVICTION_IDLE_MS,
+  archiveWorkspace,
+  listArchives,
+  restoreArchive,
+  processArchiveRequests,
   readWorkspaceMode,
   workspaceContext,
   writeWorkspaceMode,
@@ -571,6 +575,39 @@ try {
       for (const skipped of outcome.skipped) console.error(`Kept ${skipped.name}: ${skipped.reason}`);
       if (!outcome.results.length) console.log("No idle workspace to evict.");
     }
+  } else if (command === "archive") {
+    const args = rest.filter((arg) => !arg.startsWith("-"));
+    if (rest.length !== args.length || args.length > 1) throw new Error("Usage: slipjay archive [path]");
+    const target = args[0] ?? process.cwd();
+    const outcome = await archiveWorkspace(target, { reason: "archived by hand" });
+    if ("refusal" in outcome) throw new Error(`Cannot archive ${target}: ${outcome.refusal}`);
+    const { archive } = outcome;
+    const kept = archive.payload ? `${archive.inventory.length} files outside history, ${(archive.payload.bytes / 1024 / 1024).toFixed(1)} MB` : "no files outside history";
+    console.log(`Archived ${archive.workspaceName} as ${archive.id}: commit ${archive.commitId.slice(0, 12)} kept as bookmark ${archive.bookmark}, ${kept}.`);
+  } else if (command === "restore") {
+    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay restore <archive-id>");
+    const outcome = await restoreArchive(rest[0]!);
+    if ("refusal" in outcome) throw new Error(`Cannot restore ${rest[0]}: ${outcome.refusal}`);
+    console.log(`Restored ${outcome.archive.workspaceName} from ${outcome.archive.id} at ${outcome.workspacePath}. Its first use installs dependencies.`);
+  } else if (command === "archives") {
+    if (rest.length) throw new Error("Usage: slipjay archives");
+    const archives = await listArchives();
+    if (!archives.length) console.log("No archived workspaces.");
+    for (const archive of archives) console.log(`${archive.id}\t${archive.createdAt}\t${archive.workspaceName}\t${archive.commitId.slice(0, 12)}\t${archive.inventory.length} files`);
+  } else if (command === "maintain") {
+    // The hourly pass: honour release requests first, then shed idle dependency trees.
+    const json = rest.includes("--json");
+    const args = rest.filter((arg) => arg !== "--json");
+    if (args.length) throw new Error("Usage: slipjay maintain [--json]");
+    const outcomes = await processArchiveRequests();
+    const { outcome } = await evictIdleWorkspaces(process.cwd());
+    if (json) console.log(JSON.stringify({ requests: outcomes, evictions: outcome }, null, 2));
+    else {
+      for (const entry of outcomes) console.log(`${entry.outcome}\t${entry.workspacePath}\t${entry.reason}`);
+      for (const result of outcome.results) console.log(`evicted\t${result.name}\t${result.removedPaths.join(", ")}`);
+      for (const skipped of outcome.skipped) if (!/used within|pool spare|no activity recorded/.test(skipped.reason)) console.error(`kept\t${skipped.name}\t${skipped.reason}`);
+      if (!outcomes.length && !outcome.results.length) console.log("Nothing to archive or evict.");
+    }
   } else if (command === "pool") {
     if (rest[0] === "refill") await refillPool(process.cwd(), (outcome) => console.log(JSON.stringify(outcome)));
     else if (rest.length === 0) {
@@ -837,7 +874,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id>|archives|maintain [--json]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
