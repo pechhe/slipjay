@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync } from "node:fs";
-import { appendFile, lstat, mkdir, readdir, readFile, readlink, rm, stat } from "node:fs/promises";
+import { appendFile, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { jj } from "../infra/workspace-jj.ts";
@@ -217,8 +218,20 @@ export async function archiveWorkspace(root: string, options: {
     const bytes = readFileSync(file);
     syncPath(file);
     payload = { file, sha256: createHash("sha256").update(bytes).digest("hex"), bytes: bytes.byteLength };
-    // Now that the payload holds its bytes, describe exactly those.
-    inventoryDigests = await materialDigests(root, inventory);
+    // The payload is the authority: describe what it holds, not the checkout it came from.
+    // A file rewritten while tar read it would otherwise leave old bytes in the payload and
+    // new bytes in the manifest, and a restore would hand back the old ones.
+    const extracted = await mkdtemp(join(tmpdir(), "slipjay-archive-"));
+    try {
+      const unpacked = await run("tar", ["-xzf", file, "-C", extracted], { cwd: root });
+      if (unpacked.code !== 0) {
+        await rm(file, { force: true });
+        return { refusal: `its payload could not be read back to describe it: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
+      }
+      inventoryDigests = await materialDigests(extracted, inventory);
+    } finally {
+      await rm(extracted, { recursive: true, force: true });
+    }
   }
 
   const archive: WorkspaceArchive = {

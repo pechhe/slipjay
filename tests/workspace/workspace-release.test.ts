@@ -72,14 +72,19 @@ test("an operation id that is not a plain name is refused before anything happen
 
 test("an archive and a checkout that disagree on the commit, the names or the bytes are not the same state", () => {
   const archive = { commitId: "a".repeat(40), inventory: [".env", "notes.md"], inventoryDigests: { ".env": "h1", "notes.md": "h2" } };
-  assert.equal(stillArchivedState(archive, { commitId: "a".repeat(40), inventory: ["notes.md", ".env"] }), true, "order does not matter");
-  assert.equal(stillArchivedState(archive, { commitId: "b".repeat(40), inventory: [".env", "notes.md"] }), false, "a moved commit is not covered");
-  assert.equal(stillArchivedState(archive, { commitId: "a".repeat(40), inventory: [".env"] }), false, "a lost ignored file is not covered");
-  assert.equal(stillArchivedState(archive, { commitId: "a".repeat(40), inventory: [".env", "notes.md", "new.txt"] }), false, "a gained file is not covered");
+  assert.equal(stillArchivedState(archive, { commitId: "a".repeat(40), inventory: ["notes.md", ".env"], inventoryDigests: { ".env": "h1", "notes.md": "h2" } }), true, "order does not matter");
+  assert.equal(stillArchivedState(archive, { commitId: "b".repeat(40), inventory: [".env", "notes.md"], inventoryDigests: { ".env": "h1", "notes.md": "h2" } }), false, "a moved commit is not covered");
+  assert.equal(stillArchivedState(archive, { commitId: "a".repeat(40), inventory: [".env"], inventoryDigests: { ".env": "h1" } }), false, "a lost ignored file is not covered");
+  assert.equal(stillArchivedState(archive, { commitId: "a".repeat(40), inventory: [".env", "notes.md", "new.txt"], inventoryDigests: { ".env": "h1", "notes.md": "h2", "new.txt": "h3" } }), false, "a gained file is not covered");
   assert.equal(
     stillArchivedState(archive, { commitId: "a".repeat(40), inventory: [".env", "notes.md"], inventoryDigests: { ".env": "rewritten", "notes.md": "h2" } }),
     false,
     "a rewritten ignored file is not covered",
+  );
+  assert.equal(
+    stillArchivedState(archive, { commitId: "a".repeat(40), inventory: [".env", "notes.md"] }),
+    false,
+    "without digests there is no proof, so the state is not equal",
   );
 });
 

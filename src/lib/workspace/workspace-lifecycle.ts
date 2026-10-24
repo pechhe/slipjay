@@ -623,9 +623,12 @@ async function evidenceUnchanged(integrationRoot: string, root: string, inventor
  * the workspace — so any failure here is thrown, not swallowed.
  */
 export async function finishMissingRetirement(integrationRoot: string, workspaceName: string, workspacePath: string): Promise<void> {
-  const listed = await listWorkspaces(integrationRoot).catch(() => null);
-  if (listed === null) throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}`);
-  if (listed.some((entry) => entry.name === workspaceName)) {
+  // Read the registration directly: `listWorkspaces` answers [] when jj fails, which would
+  // read as "nothing to forget" and let a retirement claim a checkout it never forgot.
+  const listed = await jj(integrationRoot, ["--ignore-working-copy", "workspace", "list", "-T", 'name ++ "\\t" ++ root ++ "\\n"'])
+    .catch((error: unknown) => { throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}: ${error instanceof Error ? error.message : String(error)}`); });
+  const registered = listed.split("\n").map((line) => line.split("\t")).some(([name, root]) => name === workspaceName && (!root || resolve(root) === resolve(workspacePath)));
+  if (registered) {
     await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
   }
   await rm(metadataPath(workspaceName), { force: true });
@@ -687,7 +690,6 @@ export async function retireWorkspace(integrationRoot: string, workspace: { name
         throw new WorkingCopyChangedError(workspace.name);
       }
       if (preserved && !await evidenceUnchanged(integrationRoot, workspace.root, preserved.inventory)) throw new WorkingCopyChangedError(workspace.name);
-      await hooks.beforeForget?.();
     } catch (error) {
       // The checkout is kept, evidence and all: a later retirement copies it afresh.
       if (preserved) await rm(preserved.directory, { recursive: true, force: true });
@@ -697,6 +699,8 @@ export async function retireWorkspace(integrationRoot: string, workspace: { name
     const moved = handover ? await moveNodeModules(workspace.root, handover.path, handover.manifests) : [];
     const moveMs = Math.round(performance.now() - moveStarted);
     try {
+      // The last look there is: after the dependency handover, immediately before the forget.
+      await hooks.beforeForget?.();
       await forgetWorkspace(integrationRoot, workspace.name, workspace.root, hooks);
       // Recorded once the checkout is gone, before the refill that adopts the spare starts: it names
       // the spare's source `handover`, and the log shows the move itself.

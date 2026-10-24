@@ -89,10 +89,10 @@ export function stillArchivedState(
   const now = new Set(current.inventory);
   if (archived.size !== now.size) return false;
   for (const path of archived) if (!now.has(path)) return false;
-  if (archive.inventoryDigests && current.inventoryDigests) {
-    for (const path of archived) {
-      if (archive.inventoryDigests[path] !== current.inventoryDigests[path]) return false;
-    }
+  // Names alone cannot prove the bytes are the ones preserved: fail closed instead.
+  if (!archive.inventoryDigests || !current.inventoryDigests) return false;
+  for (const path of archived) {
+    if (archive.inventoryDigests[path] !== current.inventoryDigests[path]) return false;
   }
   return true;
 }
@@ -134,7 +134,13 @@ export async function releaseWorkspace(workspacePath: string, options: {
     // answer did not. Reconcile the registration and sidecars it left, under the lock, and
     // only then call it retired.
     const unfinished = known && (known.state === "retiring" || known.state === "uncertain") ? known : null;
-    if (!unfinished?.archiveId) return await refused("the checkout is not on disk");
+    if (!unfinished?.archiveId) {
+      // Another call with this id may have finished between our read and now: its answer wins.
+      const settled = await withWorkspaceTransaction(`retirements:${operationId}`, () => readReleaseResult(operationId), { waitMs: 30_000 })
+        .catch(() => null);
+      if (settled && settled.state !== "retiring" && resolve(settled.workspacePath) === absolute) return settled;
+      return await refused("the checkout is not on disk");
+    }
     const archiveId: string = unfinished.archiveId;
     const archive = await readArchive(archiveId);
     if (!archive) {
@@ -143,11 +149,11 @@ export async function releaseWorkspace(workspacePath: string, options: {
     }
     return await withWorkspaceTransaction(`allocate:${archive.repository}`, async (): Promise<ReleaseResult> => {
       const latest = await readReleaseResult(operationId);
-      if (latest && latest.state === "retired") return latest;
       if (latest && resolve(latest.workspacePath) !== absolute) {
         return { state: "refused", operationId, workspacePath: absolute,
           reason: `operation ${operationId} already names ${latest.workspacePath}`, at };
       }
+      if (latest && (latest.state === "retired" || latest.state === "refused")) return latest;
       if (existsSync(absolute)) {
         // Something occupies the path again: forget nothing, and do not claim a retirement.
         return { state: "uncertain", operationId, workspacePath: absolute, archiveId,
