@@ -42,8 +42,9 @@ export type ReleaseIntent = {
   at: string;
 };
 
-const releasesHome = () => join(stateHome(), "releases");
-export const releaseResultPath = (operationId: string) => join(releasesHome(), `${operationId}.json`);
+/** Its own directory: `state/releases` already holds SlipJay's promotion records. */
+const retirementsHome = () => join(stateHome(), "retirements");
+export const retirementResultPath = (operationId: string) => join(retirementsHome(), `${operationId}.json`);
 
 /**
  * An operation id names one record under the state home, so it must be a name and
@@ -56,21 +57,22 @@ export function validOperationId(operationId: string): boolean {
 export async function readReleaseResult(operationId: string): Promise<ReleaseResult | ReleaseIntent | null> {
   if (!validOperationId(operationId)) return null;
   try {
-    return JSON.parse(await readFile(releaseResultPath(operationId), "utf8")) as ReleaseResult | ReleaseIntent;
+    return JSON.parse(await readFile(retirementResultPath(operationId), "utf8")) as ReleaseResult | ReleaseIntent;
   } catch {
     return null;
   }
 }
 
 export async function listReleaseResults(): Promise<Array<ReleaseResult | ReleaseIntent>> {
-  const entries = await readdir(releasesHome()).catch(() => [] as string[]);
+  const entries = await readdir(retirementsHome()).catch(() => [] as string[]);
   const results: Array<ReleaseResult | ReleaseIntent> = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
     const result = await readReleaseResult(entry.slice(0, -".json".length));
-    if (result) results.push(result);
+    // Only this operation's own records: anything else that lands here is not a result.
+    if (result && ["retired", "refused", "uncertain", "retiring"].includes(result.state)) results.push(result);
   }
-  return results.sort((a, b) => a.at.localeCompare(b.at));
+  return results.sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
 }
 
 /**
@@ -102,10 +104,10 @@ export async function releaseWorkspace(workspacePath: string, options: {
   const absolute = resolve(workspacePath);
   const operationId = options.operationId;
   const record = async (result: ReleaseResult): Promise<ReleaseResult> => {
-    await mkdir(releasesHome(), { recursive: true, mode: 0o700 });
-    await writeWorkspaceJson(releaseResultPath(operationId), result);
-    syncPath(releaseResultPath(operationId));
-    syncPath(releasesHome());
+    await mkdir(retirementsHome(), { recursive: true, mode: 0o700 });
+    await writeWorkspaceJson(retirementResultPath(operationId), result);
+    syncPath(retirementResultPath(operationId));
+    syncPath(retirementsHome());
     return result;
   };
   const refused = async (reason: string) =>
@@ -187,13 +189,13 @@ export async function releaseWorkspace(workspacePath: string, options: {
     if (stale) return await refused(stale);
 
     // The intent is durable before anything is removed: a crash from here on is reconcilable.
-    await mkdir(releasesHome(), { recursive: true, mode: 0o700 });
-    await writeWorkspaceJson(releaseResultPath(operationId), {
+    await mkdir(retirementsHome(), { recursive: true, mode: 0o700 });
+    await writeWorkspaceJson(retirementResultPath(operationId), {
       state: "retiring", operationId, workspacePath: absolute, workspaceName: workspace.name,
       archiveId: archive.id, commitId: archive.commitId, at,
     } satisfies ReleaseIntent);
-    syncPath(releaseResultPath(operationId));
-    syncPath(releasesHome());
+    syncPath(retirementResultPath(operationId));
+    syncPath(retirementsHome());
 
     let changedAfterTeardown: string | null = null;
     try {
