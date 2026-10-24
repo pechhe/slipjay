@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { jj } from "../infra/workspace-jj.ts";
-import { writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { stateHome, workspaceHome } from "./workspace-paths.ts";
 import { readIntegrationPolicy } from "../policy/execution-policy.ts";
 import { generatedPathMatchers } from "../policy/execution-policy.ts";
@@ -223,7 +223,7 @@ export async function archiveWorkspace(root: string, options: {
     // new bytes in the manifest, and a restore would hand back the old ones.
     const extracted = await mkdtemp(join(tmpdir(), "slipjay-archive-"));
     try {
-      const unpacked = await run("tar", ["-xzf", file, "-C", extracted], { cwd: root });
+      const unpacked = await run("tar", ["-xpzf", file, "-C", extracted], { cwd: root });
       if (unpacked.code !== 0) {
         await rm(file, { force: true });
         return { refusal: `its payload could not be read back to describe it: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
@@ -332,9 +332,11 @@ export async function restoreArchive(id: string, options: { name?: string; path?
     if (digest !== archive.payload.sha256) return { refusal: `archive ${id} has a payload that no longer matches its manifest` };
   }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  await jj(archive.repository, ["workspace", "add", "--name", name, "--revision", archive.commitId, path]);
+  await withWorkspaceTransaction(`allocate:${archive.repository}`, async () => {
+    await jj(archive.repository, ["workspace", "add", "--name", name, "--revision", archive.commitId, path]);
+  }, { waitMs: 120_000 });
   if (archive.payload) {
-    const unpacked = await run("tar", ["-xzf", archive.payload.file], { cwd: path });
+    const unpacked = await run("tar", ["-xpzf", archive.payload.file], { cwd: path });
     if (unpacked.code !== 0) return { refusal: `restored ${path}, but its files outside history did not unpack: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
   }
   return { workspacePath: path, workspaceName: name, archive };

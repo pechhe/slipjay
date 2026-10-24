@@ -213,3 +213,20 @@ test("the newest archive of a path is the one a resume restores", async () => {
   assert.equal(newest?.id, second.archive.id, "the newest archive of that path wins");
   assert.equal(await latestArchiveFor("/nowhere/at/all"), null);
 });
+
+test("a group-writable ignored file keeps its mode through archive and restore", async () => {
+  const f = await project();
+  const workspace = await createWorkspace("mode-preserved", f.repo);
+  await writeFile(join(workspace.workspacePath, ".gitignore"), ".env\n");
+  await writeFile(join(workspace.workspacePath, ".env"), "TOKEN=one\n");
+  await chmod(join(workspace.workspacePath, ".env"), 0o664);
+  const archived = await archiveWorkspace(workspace.workspacePath, { reason: "modes" });
+  assert.ok("archive" in archived, JSON.stringify(archived));
+
+  const target = join(tmpdir(), `slipjay-modes-${Date.now()}`);
+  const restored = await restoreArchive(archived.archive.id, { name: "mode-preserved-restored", path: target });
+  assert.ok("workspacePath" in restored, JSON.stringify(restored));
+  const mode = (await stat(join(target, ".env"))).mode & 0o777;
+  assert.equal(mode, 0o664, "the restored file carries the mode it had, not the umask's");
+  await rm(target, { recursive: true, force: true });
+});

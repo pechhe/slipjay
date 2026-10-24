@@ -97,7 +97,22 @@ export function stillArchivedState(
   return true;
 }
 
+/**
+ * One operation, one lock. Every call for this id — a first attempt, a replay, a
+ * reconciliation — is serialised here, so no two can read each other's half-finished
+ * record, and the key is taken before the workspace's own keys.
+ */
 export async function releaseWorkspace(workspacePath: string, options: {
+  operationId: string; now?: number; processes?: ProcessWorkingDirectory[] | null;
+}): Promise<ReleaseResult> {
+  if (!validOperationId(options.operationId)) {
+    return { state: "refused", operationId: options.operationId, workspacePath: resolve(workspacePath),
+      reason: "the operation id is not a name SlipJay can record", at: new Date(options.now ?? Date.now()).toISOString() };
+  }
+  return await withWorkspaceTransaction(`retire:${options.operationId}`, () => releaseOperation(workspacePath, options), { waitMs: 120_000 });
+}
+
+async function releaseOperation(workspacePath: string, options: {
   operationId: string; now?: number; processes?: ProcessWorkingDirectory[] | null;
 }): Promise<ReleaseResult> {
   const at = new Date(options.now ?? Date.now()).toISOString();
@@ -113,10 +128,6 @@ export async function releaseWorkspace(workspacePath: string, options: {
   const refused = async (reason: string) =>
     await record({ state: "refused", operationId, workspacePath: absolute, reason, at });
 
-  // An invalid id has no place to be recorded, so this answer is returned, not stored.
-  if (!validOperationId(operationId)) {
-    return { state: "refused", operationId, workspacePath: absolute, reason: "the operation id is not a name SlipJay can record", at };
-  }
   const known = await readReleaseResult(operationId);
   if (known && resolve(known.workspacePath) !== absolute) {
     // An id names one workspace for ever. Answering without recording keeps the original
@@ -135,9 +146,8 @@ export async function releaseWorkspace(workspacePath: string, options: {
     // only then call it retired.
     const unfinished = known && (known.state === "retiring" || known.state === "uncertain") ? known : null;
     if (!unfinished?.archiveId) {
-      // Another call with this id may have finished between our read and now: its answer wins.
-      const settled = await withWorkspaceTransaction(`retirements:${operationId}`, () => readReleaseResult(operationId), { waitMs: 30_000 })
-        .catch(() => null);
+      // Inside the operation lock, so this read cannot race another call for the same id.
+      const settled = await readReleaseResult(operationId);
       if (settled && settled.state !== "retiring" && resolve(settled.workspacePath) === absolute) return settled;
       return await refused("the checkout is not on disk");
     }
@@ -200,11 +210,11 @@ export async function releaseWorkspace(workspacePath: string, options: {
     withWorkspaceTransaction(`writer:${workspace.name}`, async (): Promise<ReleaseResult> => {
       // Re-read under both locks: a concurrent call with the same id may have finished.
       const raced = await readReleaseResult(operationId);
-      if (raced && (raced.state === "retired" || raced.state === "refused")) return raced;
       if (raced && resolve(raced.workspacePath) !== absolute) {
         return { state: "refused", operationId, workspacePath: absolute,
           reason: `operation ${operationId} already names ${raced.workspacePath}`, at };
       }
+      if (raced && (raced.state === "retired" || raced.state === "refused")) return raced;
       // The holder and spare checks were made before the lock: make them again inside it.
       const held = await workspaceHolders(absolute, { processes: options.processes ?? null, ignore }).catch(() => null);
       if (held === null) return await refused("the processes using it cannot be read");
@@ -219,7 +229,9 @@ export async function releaseWorkspace(workspacePath: string, options: {
       const archive = archived.archive;
 
       const fresh = async (): Promise<string | null> => {
-        const commit = (await jj(absolute, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"]).catch(() => null))?.trim();
+        // No `--ignore-working-copy`: a tracked edit made during the handover snapshots into a
+        // new commit here, which is exactly the change that must keep the checkout.
+        const commit = (await jj(absolute, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]).catch(() => null))?.trim();
         if (!commit) return "its working copy could not be read again after the archive";
         const inventory = await inventoryOf(absolute, integrationRoot).catch(() => null);
         if (inventory === null) return "its files outside history could not be read again after the archive";
