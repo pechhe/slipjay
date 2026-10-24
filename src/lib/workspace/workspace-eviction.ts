@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { rm, stat } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { readdir, rm, stat } from "node:fs/promises";
+import { dirname, join, relative, resolve } from "node:path";
 import type { WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { trackedManifests } from "./workspace-dependencies.ts";
@@ -9,6 +9,7 @@ import type { ProcessWorkingDirectory } from "./workspace-holders.ts";
 import { listWorkspaces, metadataPath, workspaceMetadata } from "./workspace-state.ts";
 
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { generatedPathMatchers, readIntegrationPolicy } from "../policy/execution-policy.ts";
 
 /**
  * Idle eviction: a checkout nobody is using keeps its commits and its binding but
@@ -35,6 +36,8 @@ export type EvictionPlan = {
   reason: string;
   /** Dependency trees the checkout would shed, relative to its root. */
   dependencyPaths: string[];
+  /** Declared generated output it would shed too, relative to its root. */
+  generatedPaths: string[];
   sizeBytes: number | null;
 };
 
@@ -66,6 +69,47 @@ export async function dependencyTrees(root: string, manifests?: string[] | null)
   return [...candidates]
     .filter((path) => existsSync(join(root, path)))
     .sort();
+}
+
+/**
+ * Directories the repository itself calls generated output: `.svelte-kit`, `dist`,
+ * `coverage`, a vitest cache. An idle checkout may shed these too — they are rebuilt
+ * from source — but a path it calls evidence is never touched, because that is material
+ * a person keeps.
+ *
+ * The walk is bounded: a repository that nests deeper than this keeps what is below,
+ * which is the safe direction for a deletion.
+ */
+export async function generatedPathsIn(root: string, integrationRoot: string, options: { depth?: number } = {}): Promise<string[]> {
+  const { policy } = await readIntegrationPolicy(integrationRoot, { hintRoot: integrationRoot }).catch(() => ({ policy: null }));
+  const generated = generatedPathMatchers(policy?.generatedPaths);
+  if (!generated.length) return [];
+  const evidence = generatedPathMatchers(policy?.evidencePaths, "evidencePaths");
+  const limit = options.depth ?? 6;
+  const found: string[] = [];
+  const walk = async (directory: string, depth: number): Promise<void> => {
+    if (depth > limit) return;
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === "node_modules" || entry.name === ".jj" || entry.name === ".git") continue;
+      const full = join(directory, entry.name);
+      const relative = relativeTo(root, full);
+      if (evidence.some((matcher) => matcher.test(`${relative}/`))) continue;
+      if (generated.some((matcher) => matcher.test(`${relative}/`))) {
+        found.push(relative);
+        continue;
+      }
+      await walk(full, depth + 1);
+    }
+  };
+  await walk(root, 1);
+  return found.sort();
+}
+
+/** Repository-relative path with forward slashes, as the declared matchers expect. */
+function relativeTo(root: string, full: string): string {
+  return relative(root, full).split("\\").join("/");
 }
 
 const HOUR_MS = 60 * 60_000;
@@ -145,9 +189,10 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
     const decision = await decide(workspace, root, integrationRoot, now, options);
     const dependencyPaths = decision.evict || decision.reason === "no dependency trees installed"
       ? await dependencyTrees(root) : [];
+    const generatedPaths = decision.evict ? await generatedPathsIn(root, integrationRoot).catch(() => []) : [];
     plans.push({
       name: workspace.name, root, action: decision.evict ? "evict" : "keep", reason: decision.reason,
-      dependencyPaths, sizeBytes: await diskBytes(root),
+      dependencyPaths, generatedPaths, sizeBytes: await diskBytes(root),
     });
     if (!decision.evict) { outcome.skipped.push({ name: workspace.name, reason: decision.reason }); continue; }
     if (options.plan) continue;
@@ -182,7 +227,8 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
         }
         const removed: string[] = [];
         const failed: string[] = [];
-        for (const path of dependencyPaths) {
+        const generated = await generatedPathsIn(root, integrationRoot).catch(() => [] as string[]);
+        for (const path of [...dependencyPaths, ...generated]) {
           await rm(join(root, path), { recursive: true, force: true }).then(() => removed.push(path), () => failed.push(path));
         }
         if (removed.length !== dependencyPaths.length) {

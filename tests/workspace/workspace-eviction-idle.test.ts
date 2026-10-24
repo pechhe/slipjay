@@ -79,3 +79,30 @@ test("a checkout used within the idle window keeps its dependencies", async () =
   assert.match(outcome.skipped.find((entry) => entry.name === workspace.name)?.reason ?? "", /used within 24h/);
   assert.equal(existsSync(join(workspace.workspacePath, "node_modules")), true);
 });
+
+test("an idle checkout sheds declared generated output and keeps evidence and source", async () => {
+  const f = await project({ policy: { generatedPaths: ["**/build", "**/.svelte-kit"], evidencePaths: ["artifacts/**"] } });
+  const created = await createWorkspace("generated-evicts", f.repo);
+  const root = created.workspacePath;
+  const name = created.current.name;
+  await mkdir(join(root, "build", "cache"), { recursive: true });
+  await writeFile(join(root, "build", "cache", "out.js"), "generated\n");
+  await mkdir(join(root, "apps", "web", ".svelte-kit"), { recursive: true });
+  await writeFile(join(root, "apps", "web", ".svelte-kit", "env.js"), "generated\n");
+  await mkdir(join(root, "artifacts"), { recursive: true });
+  await writeFile(join(root, "artifacts", "review.md"), "a person wrote this\n");
+  await writeFile(join(root, "src.js"), "source\n");
+  await writeFile(join(root, "package.json"), JSON.stringify({ name: "fixture" }));
+  await mkdir(join(root, "node_modules", "dep"), { recursive: true });
+  await recordWorkspaceActivity(name, Date.now() - 30 * HOUR);
+
+  const { outcome } = await evictIdleWorkspaces(root);
+  const result = outcome.results.find((entry) => entry.name === name);
+
+  assert.deepEqual(result?.removedPaths.sort(), ["apps/web/.svelte-kit", "build", "node_modules"].sort());
+  assert.equal(existsSync(join(root, "build")), false, "declared generated output goes");
+  assert.equal(existsSync(join(root, "apps", "web", ".svelte-kit")), false);
+  assert.equal(existsSync(join(root, "node_modules")), false, "dependencies go as before");
+  assert.equal(existsSync(join(root, "src.js")), true, "source stays");
+  assert.equal(existsSync(join(root, "artifacts", "review.md")), true, "evidence a person keeps stays");
+});
