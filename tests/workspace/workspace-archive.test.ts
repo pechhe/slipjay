@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { chmod, lstat, mkdir, readFile, readlink, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { test } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
@@ -181,4 +182,19 @@ test("an archive whose payload no longer matches is refused rather than restored
 
   const restored = await restoreArchive(archived.archive.id);
   assert.match(("refusal" in restored && restored.refusal) || "", /no longer matches its manifest/);
+});
+
+test("restoring at a chosen name and path puts the checkout where a resume expects it", async () => {
+  const f = await project();
+  const workspace = await createWorkspace("restore-in-place", f.repo);
+  await writeFile(join(workspace.workspacePath, "notes.md"), "in place\n");
+  const archived = await archiveWorkspace(workspace.workspacePath, { reason: "test" });
+  assert.ok("archive" in archived, JSON.stringify(archived));
+
+  const target = join(tmpdir(), `slipjay-restored-${Date.now()}`);
+  const restored = await restoreArchive(archived.archive.id, { name: "t3-resume-check", path: target });
+  assert.ok("workspacePath" in restored, JSON.stringify(restored));
+  assert.equal(restored.workspacePath, target);
+  assert.equal(await readFile(join(target, "notes.md"), "utf8"), "in place\n");
+  await rm(target, { recursive: true, force: true });
 });

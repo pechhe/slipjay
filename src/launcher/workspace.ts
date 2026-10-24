@@ -588,10 +588,25 @@ try {
     const kept = archive.payload ? `${archive.inventory.length} files outside history, ${(archive.payload.bytes / 1024 / 1024).toFixed(1)} MB` : "no files outside history";
     console.log(`Archived ${archive.workspaceName} as ${archive.id}: commit ${archive.commitId.slice(0, 12)} kept as bookmark ${archive.bookmark}, ${kept}.`);
   } else if (command === "restore") {
-    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay restore <archive-id>");
-    const outcome = await restoreArchive(rest[0]!);
-    if ("refusal" in outcome) throw new Error(`Cannot restore ${rest[0]}: ${outcome.refusal}`);
-    console.log(`Restored ${outcome.archive.workspaceName} from ${outcome.archive.id} at ${outcome.workspacePath}. Its first use installs dependencies.`);
+    // `--name` and `--path` let a harness put the checkout back exactly where its thread
+    // expects it, which is what a resume needs.
+    let archiveId: string | undefined;
+    let name: string | undefined;
+    let path: string | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const arg = rest[index]!;
+      if (arg === "--name" || arg === "--path") {
+        const value = rest[++index];
+        if (!value || value.startsWith("-")) throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
+        if (arg === "--name") name = value; else path = value;
+      } else if (arg.startsWith("-") || archiveId !== undefined) {
+        throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
+      } else archiveId = arg;
+    }
+    if (!archiveId) throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
+    const outcome = await restoreArchive(archiveId, { name, path });
+    if ("refusal" in outcome) throw new Error(`Cannot restore ${archiveId}: ${outcome.refusal}`);
+    console.log(JSON.stringify({ state: "restored", archiveId: outcome.archive.id, workspacePath: outcome.workspacePath, workspaceName: outcome.archive.workspaceName }));
   } else if (command === "archives") {
     if (rest.length) throw new Error("Usage: slipjay archives");
     const archives = await listArchives();
@@ -898,7 +913,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
