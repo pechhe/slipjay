@@ -204,6 +204,7 @@ export async function archiveWorkspace(root: string, options: {
     const packed = await run("tar", ["-czf", file, "--files-from", "-"], { cwd: root, input: listing });
     if (packed.code !== 0) {
       await rm(file, { force: true });
+      await jj(integrationRoot, ["bookmark", "delete", bookmark]).catch(() => undefined);
       return { refusal: `its files outside history could not be packed: ${packed.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
     }
     // The payload must hold exactly what the inventory names: a packer that quietly dropped
@@ -213,6 +214,7 @@ export async function archiveWorkspace(root: string, options: {
     const missing = inventory.filter((path) => !packedFiles.has(path));
     if (listed.code !== 0 || missing.length) {
       await rm(file, { force: true });
+      await jj(integrationRoot, ["bookmark", "delete", bookmark]).catch(() => undefined);
       return { refusal: `its payload does not hold every file its inventory names (missing ${missing.slice(0, 3).join(", ") || "members unreadable"})` };
     }
     const bytes = readFileSync(file);
@@ -226,6 +228,7 @@ export async function archiveWorkspace(root: string, options: {
       const unpacked = await run("tar", ["-xpzf", file, "-C", extracted], { cwd: root });
       if (unpacked.code !== 0) {
         await rm(file, { force: true });
+        await jj(integrationRoot, ["bookmark", "delete", bookmark]).catch(() => undefined);
         return { refusal: `its payload could not be read back to describe it: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}` };
       }
       inventoryDigests = await materialDigests(extracted, inventory);
@@ -341,6 +344,12 @@ export async function restoreArchive(id: string, options: { name?: string; path?
     return unpacked.code === 0 ? null : `restored ${path}, but its files outside history did not unpack: ${unpacked.stderr.trim().split("\n").slice(-1)[0] ?? "unknown error"}`;
   }, { waitMs: 120_000 });
   if (failure) return { refusal: failure };
+  // The pass's own record says a workspace came back, not only that one went away.
+  await mkdir(stateHome(), { recursive: true, mode: 0o700 }).catch(() => undefined);
+  await appendFile(archiveOutcomesPath(), `${JSON.stringify({
+    requestId: archive.id, workspacePath: path, at: new Date().toISOString(),
+    outcome: "restored", reason: `restored from ${archive.id}`, archiveId: archive.id,
+  } satisfies ArchiveOutcome)}\n`).catch(() => undefined);
   return { workspacePath: path, workspaceName: name, archive };
 }
 
@@ -371,7 +380,7 @@ export type ArchiveOutcome = {
   requestId: string;
   workspacePath: string;
   at: string;
-  outcome: "archived" | "retired" | "failed" | "skipped";
+  outcome: "archived" | "retired" | "restored" | "failed" | "skipped";
   reason: string;
   archiveId?: string;
 };
@@ -387,8 +396,13 @@ async function readRequests(): Promise<Array<{ file: string; request: ArchiveReq
     const file = join(archiveRequestsHome(), entry);
     try {
       requests.push({ file, request: JSON.parse(await readFile(file, "utf8")) as ArchiveRequest });
-    } catch {
-      // An unreadable request is left alone: a later pass reports it rather than guessing.
+    } catch (error) {
+      // An unreadable request is reported and left in place: dropping it silently is the
+      // failure the retry exists to prevent.
+      await appendFile(archiveOutcomesPath(), `${JSON.stringify({
+        requestId: entry.slice(0, -".json".length), workspacePath: "", at: new Date().toISOString(),
+        outcome: "failed", reason: `the request file could not be read: ${error instanceof Error ? error.message : String(error)}`,
+      } satisfies ArchiveOutcome)}\n`).catch(() => undefined);
     }
   }
   return requests;
