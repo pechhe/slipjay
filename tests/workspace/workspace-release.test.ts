@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { readReleaseResult, releaseWorkspace, stillArchivedState } from "../../src/lib/workspace/workspace-release.ts";
-import { restoreArchive } from "../../src/lib/workspace/workspace-archive.ts";
+import { archiveWorkspace, restoreArchive } from "../../src/lib/workspace/workspace-archive.ts";
 
 async function checkoutWithWork(f: Awaited<ReturnType<typeof project>>, task: string) {
   const created = await createWorkspace(task, f.repo);
@@ -102,4 +102,63 @@ test("a teardown that writes an ignored file refuses the release and keeps the c
   assert.match((result as { reason: string }).reason, /changed/);
   assert.equal(existsSync(workspace.root), true, "the checkout stays");
   assert.match(await readFile(join(workspace.root, ".env"), "utf8"), /written-by-teardown/, "with the file the teardown wrote");
+});
+
+test("an interrupted retirement reconciles from its intent instead of being lost", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-interrupted");
+  // The archive a crash would have left behind, and the intent written before the removal.
+  const archived = await archiveWorkspace(workspace.root, { reason: "interrupted" });
+  assert.ok("archive" in archived, JSON.stringify(archived));
+  const { retirementResultPath } = await import("../../src/lib/workspace/workspace-release.ts");
+  const { mkdir, writeFile: write } = await import("node:fs/promises");
+  await mkdir(dirname(retirementResultPath("op-interrupted")), { recursive: true });
+  await write(retirementResultPath("op-interrupted"), JSON.stringify({
+    state: "retiring", operationId: "op-interrupted", workspacePath: workspace.root,
+    workspaceName: workspace.name, archiveId: archived.archive.id, commitId: archived.archive.commitId,
+    at: new Date().toISOString(),
+  }));
+  // The removal happened; the result never did.
+  await rm(workspace.root, { recursive: true, force: true });
+
+  const result = await releaseWorkspace(workspace.root, { operationId: "op-interrupted" });
+
+  assert.equal(result.state, "retired", JSON.stringify(result));
+  assert.equal((result as { archiveId: string }).archiveId, archived.archive.id);
+  const restored = await restoreArchive(archived.archive.id, { name: "release-interrupted-restored" });
+  assert.ok("workspacePath" in restored, JSON.stringify(restored));
+});
+
+test("an intent whose checkout still exists acts on nothing and says to reconcile", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-pending");
+  const { retirementResultPath } = await import("../../src/lib/workspace/workspace-release.ts");
+  const { mkdir, writeFile: write } = await import("node:fs/promises");
+  await mkdir(dirname(retirementResultPath("op-pending")), { recursive: true });
+  await write(retirementResultPath("op-pending"), JSON.stringify({
+    state: "retiring", operationId: "op-pending", workspacePath: workspace.root,
+    workspaceName: workspace.name, archiveId: "missing-archive", commitId: "0".repeat(40),
+    at: new Date().toISOString(),
+  }));
+
+  const result = await releaseWorkspace(workspace.root, { operationId: "op-pending" });
+
+  assert.equal(result.state, "uncertain", JSON.stringify(result));
+  assert.equal(existsSync(workspace.root), true, "nothing is removed while an attempt is unresolved");
+});
+
+test("an operation id already naming another workspace is answered without overwriting its record", async () => {
+  const f = await project();
+  const first = await checkoutWithWork(f, "release-first");
+  const other = await checkoutWithWork(f, "release-other");
+  const retired = await releaseWorkspace(first.root, { operationId: "op-one" });
+  assert.equal(retired.state, "retired");
+
+  const second = await releaseWorkspace(other.root, { operationId: "op-one" });
+
+  assert.equal(second.state, "refused");
+  assert.match((second as { reason: string }).reason, /already names/);
+  const stillRecorded = await readReleaseResult("op-one");
+  assert.equal(stillRecorded?.state, "retired", "the first result stays authoritative");
+  assert.equal(existsSync(other.root), true, "the other checkout is untouched");
 });
