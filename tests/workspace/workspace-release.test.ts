@@ -256,3 +256,25 @@ test("a record that cannot be read is not an absent one", async () => {
   assert.match((result as { reason: string }).reason, /unreadable/);
   assert.equal(existsSync(metadataPath(workspace.name)), true, "the record is left for someone to repair");
 });
+
+test("a resumed thread finds an unfinished release by its path", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-by-path");
+  // An attempt that stopped half-way, recorded under an id nobody can recompute.
+  const archived = await archiveWorkspace(workspace.root, { reason: "interrupted" });
+  assert.ok("archive" in archived);
+  const { retirementResultPath, latestReleaseFor } = await import("../../src/lib/workspace/workspace-release.ts");
+  const { mkdir, writeFile: write } = await import("node:fs/promises");
+  await mkdir(dirname(retirementResultPath("op-by-path")), { recursive: true });
+  await write(retirementResultPath("op-by-path"), JSON.stringify({
+    state: "uncertain", operationId: "op-by-path", workspacePath: workspace.root,
+    workspaceName: workspace.name, archiveId: archived.archive.id, reason: "removal may have half-finished",
+    at: new Date().toISOString(),
+  }));
+
+  const found = await latestReleaseFor(workspace.root);
+
+  assert.equal(found?.state, "uncertain");
+  assert.equal(found?.operationId, "op-by-path");
+  assert.equal(await latestReleaseFor("/nowhere/at/all"), null);
+});

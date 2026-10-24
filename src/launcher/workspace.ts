@@ -32,6 +32,7 @@ import {
   restoreArchive,
   releaseWorkspace,
   readReleaseResult,
+  latestReleaseFor,
   listReleaseResults,
   processArchiveRequests,
   readWorkspaceMode,
@@ -651,8 +652,16 @@ try {
     if (result.state === "uncertain") process.exitCode = 2;
     else if (result.state === "refused") process.exitCode = 1;
   } else if (command === "retire-result") {
-    if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay retire-result <operation-id>");
-    const result = await readReleaseResult(rest[0]!);
+    // `--path` answers with the newest record for a checkout, which is what a harness
+    // resuming a thread can name; `retire-result <id>` answers for one operation.
+    let result;
+    if (rest[0] === "--path") {
+      if (rest.length !== 2 || rest[1]!.startsWith("-")) throw new Error("Usage: slipjay retire-result --path <path> | retire-result <operation-id>");
+      result = await latestReleaseFor(rest[1]!);
+    } else {
+      if (rest.length !== 1 || rest[0]!.startsWith("-")) throw new Error("Usage: slipjay retire-result --path <path> | retire-result <operation-id>");
+      result = await readReleaseResult(rest[0]!);
+    }
     console.log(JSON.stringify(result));
     // A harness reads this status: only a retirement is a success, and an unfinished
     // attempt is its own answer rather than something to mistake for one.
@@ -930,7 +939,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|restore --latest --path <p>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|restore --latest --path <p>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id> | retire-result --path <path>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {

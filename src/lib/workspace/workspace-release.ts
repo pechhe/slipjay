@@ -63,6 +63,17 @@ export async function readReleaseResult(operationId: string): Promise<ReleaseRes
   }
 }
 
+/**
+ * The newest release record for a checkout path. A harness resuming a thread knows where
+ * its checkout was, not the operation id a previous attempt used, so this is how it finds
+ * an unfinished attempt without having carried the id across a restart.
+ */
+export async function latestReleaseFor(workspacePath: string): Promise<ReleaseResult | ReleaseIntent | null> {
+  const absolute = resolve(workspacePath);
+  const records = (await listReleaseResults()).filter((record) => resolve(record.workspacePath) === absolute);
+  return records.at(-1) ?? null;
+}
+
 export async function listReleaseResults(): Promise<Array<ReleaseResult | ReleaseIntent>> {
   const entries = await readdir(retirementsHome()).catch(() => [] as string[]);
   const results: Array<ReleaseResult | ReleaseIntent> = [];
