@@ -205,3 +205,29 @@ test("reconciling an interrupted retirement also clears the workspace's own reco
   assert.equal(result.state, "retired", JSON.stringify(result));
   assert.equal(existsSync(metadataPath(workspace.name)), false, "the workspace record does not outlive the checkout");
 });
+
+test("a name reused by another checkout is never stripped by a stale replay", async () => {
+  const f = await project();
+  const workspace = await checkoutWithWork(f, "release-name-reuse");
+  const archived = await archiveWorkspace(workspace.root, { reason: "crashed" });
+  assert.ok("archive" in archived);
+  const { retirementResultPath } = await import("../../src/lib/workspace/workspace-release.ts");
+  const { metadataPath } = await import("../../src/lib/workspace/workspace-state.ts");
+  const { mkdir, readFile: read, writeFile: write } = await import("node:fs/promises");
+  await mkdir(dirname(retirementResultPath("op-reuse")), { recursive: true });
+  await write(retirementResultPath("op-reuse"), JSON.stringify({
+    state: "retiring", operationId: "op-reuse", workspacePath: workspace.root,
+    workspaceName: workspace.name, archiveId: archived.archive.id, commitId: archived.archive.commitId,
+    at: new Date().toISOString(),
+  }));
+  // The checkout goes, and the name is taken over by a different checkout.
+  await rm(workspace.root, { recursive: true, force: true });
+  const record = JSON.parse(await read(metadataPath(workspace.name), "utf8"));
+  await write(metadataPath(workspace.name), JSON.stringify({ ...record, workspacePath: "/somewhere/else" }));
+
+  const result = await releaseWorkspace(workspace.root, { operationId: "op-reuse" });
+
+  assert.equal(result.state, "uncertain", JSON.stringify(result));
+  assert.match((result as { reason: string }).reason, /now belongs to/);
+  assert.equal(existsSync(metadataPath(workspace.name)), true, "the live workspace keeps its record");
+});

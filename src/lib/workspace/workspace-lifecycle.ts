@@ -631,6 +631,14 @@ export async function finishMissingRetirement(integrationRoot: string, workspace
   if (registered) {
     await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
   }
+  // The name may have been reused by another checkout since (`renameWorkspace` moves it
+  // with its sidecars). Clearing them then would strip a live workspace, so a record that
+  // names a different path is a refusal, not something to tidy up.
+  const metadata = await workspaceMetadata(workspaceName);
+  const recordedPath = typeof metadata?.workspacePath === "string" ? resolve(metadata.workspacePath) : null;
+  if (recordedPath !== null && recordedPath !== resolve(workspacePath)) {
+    throw new Error(`the name ${workspaceName} now belongs to ${recordedPath}; refusing to clear its record`);
+  }
   await rm(metadataPath(workspaceName), { force: true });
   for (const candidate of landingStatePaths(workspaceName)) await rm(candidate, { force: true });
   await rm(lockPath(workspaceName), { force: true });
