@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "../support/workspace-project.ts";
-import { landThroughTestRunner } from "../support/test-runner.ts";
+import { landedState } from "./fixtures/landed-state.ts";
 import { cleanupLandedWorkspace, removeWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
@@ -20,12 +20,6 @@ const recording = (log: string) => ({
     args: ["-e", `const fs=require("node:fs");fs.appendFileSync(${JSON.stringify(log)},process.cwd()+" "+fs.existsSync("README.md")+"\\n")`],
   },
 });
-
-async function landed(f: { root: string; repo: string; remote: string }, cwd: string, file: string) {
-  await writeFile(join(cwd, file), `${file}\n`);
-  // Kept after landing, so the cleanup under test is what removes it.
-  assert.equal((await landThroughTestRunner(f, cwd, { keep: true })).ok, true);
-}
 
 test("pending transport facts keep a workspace until delivery is acknowledged", async () => {
   const f = await project();
@@ -46,9 +40,11 @@ test("cleanup runs the declared teardown in the workspace before deleting it", a
   const f = await project();
   const log = join(f.root, "teardown.log");
   try {
+    // See landedState's coverage contract: cleanup is the subject here; the retained
+    // runner/CLI cleanup tests cover the landing that produces this state.
+    const ws = await landedState(f, "landed");
+    // After the seed: its restore rewrites the integration checkout's working copy.
     await writeFile(join(f.repo, "slipjay.json"), JSON.stringify({ ...JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8")), ...recording(log) }));
-    const ws = await createWorkspace("landed", f.repo);
-    await landed(f, ws.workspacePath, "landed.txt");
     const result = await cleanupLandedWorkspace(ws.workspacePath);
     assert.equal(result.cleaned, true);
     assert.equal(await readFile(log, "utf8"), `${ws.workspacePath} true\n`);

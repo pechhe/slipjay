@@ -12,7 +12,7 @@ import { revisionFacts, workspaceContext } from "../../src/lib/infra/workspace-j
 import { workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../../src/lib/landing/submission-adoptions.ts";
-import { land } from "./fixtures/workspace-sweep-fixture.ts";
+import { landedState } from "./fixtures/landed-state.ts";
 import { isolateAdoptionFixtures, runCli, publishSource } from "./fixtures/workspace-adopt-fixture.ts";
 
 isolateAdoptionFixtures();
@@ -102,9 +102,10 @@ for (const kind of ["unbound", "issue", "landed"] as const) {
   test(`remove --discard explicitly removes ${kind} unlanded work`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const workspace = await createWorkspace(`discard ${kind}`, f.repo);
+      // A live landing's detached housekeeping holds the directory, so the landed
+      // case seeds that state directly (see landedState's coverage contract).
+      const workspace = kind === "landed" ? await landedState(f, `discard ${kind}`) : await createWorkspace(`discard ${kind}`, f.repo);
       if (kind === "issue") await attachWorkspaceIssue(workspace.workspacePath, 123);
-      if (kind === "landed") await land(f, workspace.workspacePath, "delivered.txt", { keep: true });
       await writeFile(join(workspace.workspacePath, "new.txt"), "unlanded\n");
       jj(workspace.workspacePath, ["describe", "-m", "Unlanded work"]);
       await assert.rejects(runCli(f.repo, "remove", workspace.workspacePath), /Kept/);
