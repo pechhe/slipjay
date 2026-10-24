@@ -284,6 +284,20 @@ export async function listArchives(): Promise<WorkspaceArchive[]> {
  * with the payload unpacked on top. Dependencies are not archived; the first use
  * installs them, exactly as for a claimed spare.
  */
+/**
+ * The newest archive made for a checkout path. A harness resuming a released thread
+ * knows the path, not which attempt archived it, so this is how it finds what to
+ * restore without having to have kept the operation id.
+ */
+export async function latestArchiveFor(workspacePath: string): Promise<WorkspaceArchive | null> {
+  const absolute = resolve(workspacePath);
+  const archives = (await listArchives()).filter((archive) => resolve(archive.workspacePath) === absolute);
+  for (const archive of archives.slice().reverse()) {
+    if (archive.payload === null || existsSync(archive.payload.file)) return archive;
+  }
+  return null;
+}
+
 export async function restoreArchive(id: string, options: { name?: string; path?: string } = {}): Promise<{ workspacePath: string; archive: WorkspaceArchive } | { refusal: string }> {
   const archive = await readArchive(id);
   if (!archive) return { refusal: `no archive ${id}` };

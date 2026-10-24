@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { test } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
-import { archiveOutcomesPath, archiveRefusal, archiveRequestsHome, archiveWorkspace, listArchives, processArchiveRequests, restoreArchive } from "../../src/lib/workspace/workspace-archive.ts";
+import { archiveOutcomesPath, archiveRefusal, archiveRequestsHome, archiveWorkspace, latestArchiveFor, listArchives, processArchiveRequests, restoreArchive } from "../../src/lib/workspace/workspace-archive.ts";
 import { mkdir as makeDir, writeFile as write } from "node:fs/promises";
 
 async function request(entry: Record<string, unknown>) {
@@ -197,4 +197,19 @@ test("restoring at a chosen name and path puts the checkout where a resume expec
   assert.equal(restored.workspacePath, target);
   assert.equal(await readFile(join(target, "notes.md"), "utf8"), "in place\n");
   await rm(target, { recursive: true, force: true });
+});
+
+test("the newest archive of a path is the one a resume restores", async () => {
+  const f = await project();
+  const workspace = await createWorkspace("resume-latest", f.repo);
+  await writeFile(join(workspace.workspacePath, "notes.md"), "first\n");
+  const first = await archiveWorkspace(workspace.workspacePath, { reason: "first" });
+  assert.ok("archive" in first);
+  await writeFile(join(workspace.workspacePath, "notes.md"), "second\n");
+  const second = await archiveWorkspace(workspace.workspacePath, { reason: "second" });
+  assert.ok("archive" in second);
+
+  const newest = await latestArchiveFor(workspace.workspacePath);
+  assert.equal(newest?.id, second.archive.id, "the newest archive of that path wins");
+  assert.equal(await latestArchiveFor("/nowhere/at/all"), null);
 });

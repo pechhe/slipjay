@@ -27,6 +27,7 @@ import {
   evictIdleWorkspaces,
   EVICTION_IDLE_MS,
   archiveWorkspace,
+  latestArchiveFor,
   listArchives,
   restoreArchive,
   releaseWorkspace,
@@ -593,8 +594,13 @@ try {
     let archiveId: string | undefined;
     let name: string | undefined;
     let path: string | undefined;
+    let latest = false;
     for (let index = 0; index < rest.length; index += 1) {
       const arg = rest[index]!;
+      if (arg === "--latest") {
+        latest = true;
+        continue;
+      }
       if (arg === "--name" || arg === "--path") {
         const value = rest[++index];
         if (!value || value.startsWith("-")) throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
@@ -602,6 +608,13 @@ try {
       } else if (arg.startsWith("-") || archiveId !== undefined) {
         throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
       } else archiveId = arg;
+    }
+    if (latest) {
+      // A resumed thread knows where its checkout was, not which attempt archived it.
+      if (!path) throw new Error("Usage: slipjay restore --latest --path <path> [--name <name>]");
+      const newest = await latestArchiveFor(path);
+      if (!newest) throw new Error(`No archive of ${path} to restore.`);
+      archiveId = newest.id;
     }
     if (!archiveId) throw new Error("Usage: slipjay restore <archive-id> [--name <name>] [--path <path>]");
     const outcome = await restoreArchive(archiveId, { name, path });
@@ -913,7 +926,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|restore --latest --path <p>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
