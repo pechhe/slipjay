@@ -25,6 +25,7 @@ export { provisionSpare, readySpares, refillPool, refreshSpares } from "./worksp
 export { spareAllowance, startSpareRefill } from "./workspace/workspace-spares.ts";
 export { runHousekeeping, startHousekeeping } from "./workspace/workspace-housekeeping.ts";
 export { planDisposableWorkspaces, pruneEmptyWorkspaces, sweepDisposableWorkspaces } from "./workspace/workspace-sweep.ts";
+export { evictIdleWorkspaces, EVICTION_IDLE_MS } from "./workspace/workspace-eviction.ts";
 export type { PlannedWorkspace } from "./workspace/workspace-sweep.ts";
 export { withWorkspaceTransaction } from "./infra/workspace-transaction.ts";
 export { LANDED_WORKSPACE_REFUSAL, assertWorkspaceNotRetired, cleanupRetentionReason, workspaceContinuationDisposition } from "./workspace/workspace-delivery-lifecycle.ts";

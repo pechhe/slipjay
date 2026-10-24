@@ -44,6 +44,13 @@ export type CreatedWorkspace<Readiness = unknown> = WorkspaceContext & {
   steps: StartSteps;
 };
 
+/** A start or a resume is use: the checkout's idle clock (see workspace-eviction) starts here. */
+async function touchActivity(name: string): Promise<void> {
+  const existing = await workspaceMetadata(name);
+  if (!existing) return;
+  await writeWorkspaceJson(metadataPath(name), { ...existing, lastActivityAt: new Date().toISOString() });
+}
+
 /** `base` is the commit a new workspace starts from instead of the integration head (see `resolveStartBase`). */
 /** `attemptId` makes the start durable and recoverable as that allocation attempt (see workspace-attempts). */
 type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; attemptId?: string; hooks?: WorkspaceCreationHooks<Readiness>; steps?: StartSteps };
@@ -501,6 +508,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   if (context.current.name !== "default") {
     await assertWorkspaceMutationAllowed(context);
     await assignAttempt(options.attemptId, context.current.name, context.current.root, false);
+    await touchActivity(context.current.name);
     return assigned(hooks, context, task, { steps,  issueNumber, created: false, reused: false });
   }
   if (issueNumber) {
@@ -510,6 +518,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
       if (!resumed) throw new Error(`Issue #${issueNumber} workspace disappeared during resume`);
       await assertWorkspaceMutationAllowed(resumed);
       await assignAttempt(options.attemptId, resumed.current.name, existing.root, false);
+      await touchActivity(resumed.current.name);
       return assigned(hooks, resumed, task, { steps,  issueNumber, attach: false, created: false, reused: true, workspacePath: existing.root });
     }
   }
@@ -544,6 +553,8 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   await writeWorkspaceJson(metadataPath(name), {
     ...await workspaceMetadata(name),
     adoptionBase: await jj(workspacePath, ["--ignore-working-copy", "log", "-r", "@-", "--no-graph", "-T", "commit_id"]),
+    // A new checkout is in use now: its idle clock starts here, not at eviction's first look.
+    lastActivityAt: new Date().toISOString(),
   });
   // After the new generation's metadata: until then an interrupted attempt still owns the unmarked checkout.
   await assignAttempt(options.attemptId, name, workspacePath, true);

@@ -367,7 +367,13 @@ async function claimReadySpare(context: WorkspaceContext, name: string, base?: s
   const dependencies = reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | null | undefined, installInputs);
   const { spare: _released, prepared: _prepared, preparedAt: _preparedAt, preparedDependencies: _dependencies, createdAt: _created, ...metadata } =
     (await workspaceMetadata(assigned)) ?? {};
-  await writeWorkspaceJson(metadataPath(assigned), { ...metadata, workspaceName: assigned, claimedAt: new Date().toISOString() });
+  // A claim is use: the checkout's idle clock measures from here, not from when it was first seen.
+  const claimedAt = new Date().toISOString();
+  await writeWorkspaceJson(metadataPath(assigned), {
+    ...metadata, workspaceName: assigned, claimedAt, lastActivityAt: claimedAt,
+    // A claimed checkout's own install is authoritative again, not a leftover eviction mark.
+    ...{ evictedAt: undefined, evictedPaths: undefined },
+  });
   return { root: spare.root, name: assigned, dependencies, installInputs };
 }
 

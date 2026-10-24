@@ -24,6 +24,8 @@ import {
   releaseIntegration,
   planDisposableWorkspaces,
   pruneEmptyWorkspaces,
+  evictIdleWorkspaces,
+  EVICTION_IDLE_MS,
   readWorkspaceMode,
   workspaceContext,
   writeWorkspaceMode,
@@ -544,6 +546,31 @@ try {
       for (const skipped of result.skipped) console.error(`Skipped ${skipped.name}: ${skipped.reason}`);
       if (result.removed.length === 0 && result.skipped.length === 0 && result.pruned.length === 0 && result.orphans.length === 0) console.log("No empty workspaces to prune.");
     }
+  } else if (command === "evict") {
+    const flags = new Set(rest);
+    const plan = flags.delete("--plan"), json = flags.delete("--json");
+    let idleHours = 24;
+    const idleIndex = rest.indexOf("--idle-hours");
+    if (idleIndex >= 0) {
+      const value = rest[idleIndex + 1];
+      flags.delete("--idle-hours");
+      if (value) flags.delete(value);
+      idleHours = Number(value);
+      if (!Number.isFinite(idleHours) || idleHours <= 0) throw new Error("Usage: slipjay evict [--plan] [--json] [--idle-hours <n>]");
+    }
+    if (flags.size) throw new Error("Usage: slipjay evict [--plan] [--json] [--idle-hours <n>]");
+    const idleMs = idleHours === 24 ? EVICTION_IDLE_MS : idleHours * 60 * 60_000;
+    const { plans, outcome } = await evictIdleWorkspaces(process.cwd(), { idleMs, plan });
+    if (plan || json) {
+      console.log(JSON.stringify(plan ? plans : outcome, null, 2));
+    } else {
+      for (const result of outcome.results) {
+        const freed = result.freedBytes === null ? "" : `, freed ${(result.freedBytes / 1024 / 1024).toFixed(0)} MB`;
+        console.log(`Evicted ${result.name}: ${result.removedPaths.join(", ")}${freed}`);
+      }
+      for (const skipped of outcome.skipped) console.error(`Kept ${skipped.name}: ${skipped.reason}`);
+      if (!outcome.results.length) console.log("No idle workspace to evict.");
+    }
   } else if (command === "pool") {
     if (rest[0] === "refill") await refillPool(process.cwd(), (outcome) => console.log(JSON.stringify(outcome)));
     else if (rest.length === 0) {
@@ -810,7 +837,7 @@ try {
     if (paths.length !== 1 || paths[0]!.startsWith("-")) throw new Error("Usage: slipjay remove [--discard] <path>");
     process.exitCode = await removeWorkspaceAt(resolve(paths[0]!), rest.includes("--discard"));
   } else {
-    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
+    console.error("Usage: slipjay <--version|status|config|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|start|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume>>");
     process.exitCode = 2;
   }
 } catch (error) {
