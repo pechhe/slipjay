@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.14
+
+- **An admission reads its items a few at a time (YS-468):** the runner read the Spec and every named Ticket from Build at
+  once. Build answered 8 concurrent reads in under a second but held 11 for about 12 s, past the 10 s admission budget, so an
+  admission naming 10 Tickets was refused as "Build did not answer in time" on every retry. `readAdmittedItems` now has at
+  most 3 reads in flight and keeps the Spec and Ticket order; one failing read still fails the admission.
+
 ## v3.46.13
 
 - **A restart no longer waits for the runner's whole ledger (SJ-90):** the runner serves its API before it recovers what a

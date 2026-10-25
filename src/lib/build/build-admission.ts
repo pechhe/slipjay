@@ -20,14 +20,30 @@ export type BuildAdmissionRequest = {
 /** The numbers of the Spec and Tickets an admission names, read from Build by their ids. */
 export type BuildAdmittedItems = { specNumber: number; ticketNumbers: number[] };
 
-/** `items` for `specId` and `ticketIds`; throws unless Build answers for every one. */
+/**
+ * How many item reads one admission has in flight at once. Build served 8 concurrent reads in well under a second but
+ * held 11 for about 12 s, over this module's `BUILD_ADMISSION_TIMEOUT_MS`, so an admission naming 10 Tickets never completed.
+ */
+export const BUILD_ADMISSION_READ_CONCURRENCY = 3;
+
+/** `items` for `specId` and `ticketIds`, read at most `BUILD_ADMISSION_READ_CONCURRENCY` at a time; throws unless Build answers for every one. */
 export async function readAdmittedItems(read: BuildReader, specId: string, ticketIds: readonly string[]): Promise<BuildAdmittedItems> {
   const number = async (itemId: string) => {
     const item = await readBuildItem(read, { itemId });
     if (!item || !Number.isSafeInteger(item.number)) throw new Error(`Build has no item ${itemId}, which the admission names`);
     return item.number;
   };
-  return { specNumber: await number(specId), ticketNumbers: await Promise.all(ticketIds.map(number)) };
+  const ids = [specId, ...ticketIds];
+  const numbers: number[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length) {
+      const index = next++;
+      numbers[index] = await number(ids[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(BUILD_ADMISSION_READ_CONCURRENCY, ids.length) }, worker));
+  return { specNumber: numbers[0]!, ticketNumbers: numbers.slice(1) };
 }
 
 /**

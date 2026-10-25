@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "vite-plus/test";
-import { buildAdmitter, buildRoute } from "../../src/lib/build/build-admission.ts";
+import { BUILD_ADMISSION_READ_CONCURRENCY, buildAdmitter, buildRoute, readAdmittedItems } from "../../src/lib/build/build-admission.ts";
 import type { BuildAdmission, BuildAdmissionRequest } from "../../src/lib/build/build-admission.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { candidateBookmark, RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
@@ -239,4 +239,29 @@ test("a declared chore is queued without admission and keeps its title for the c
   const g = fixture(null);
   assert.equal((await g.submit(submission(undefined, { handoff: chore }))).status, 400);
   f.log.close(); g.log.close();
+});
+
+test("an admission reads its Spec and Tickets a few at a time and keeps their order", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const read = async (_action: string, input: Record<string, unknown>) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    inFlight--;
+    return { id: input.itemId, number: Number(String(input.itemId).slice(1)), kind: "spec", status: "ready", parentId: null, title: "t" };
+  };
+  const tickets = Array.from({ length: 10 }, (_, index) => `t${index + 2}`);
+  const items = await readAdmittedItems(read as never, "s1", tickets);
+  assert.equal(items.specNumber, 1);
+  assert.deepEqual(items.ticketNumbers, [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+  assert.equal(peak, BUILD_ADMISSION_READ_CONCURRENCY);
+});
+
+test("an admission read that fails fails the whole admission read", async () => {
+  const read = async (_action: string, input: Record<string, unknown>) => {
+    if (input.itemId === "t3") throw new Error("Build did not answer");
+    return { id: input.itemId, number: 1, kind: "ticket", status: "ready", parentId: null, title: "t" };
+  };
+  await assert.rejects(readAdmittedItems(read as never, "s1", ["t2", "t3", "t4"]), /Build did not answer/);
 });
