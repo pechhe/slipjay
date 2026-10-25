@@ -40,6 +40,9 @@ import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, E
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
   Boolean(configuration?.deployments?.environments.production && configuration.releaseBranch && configuration.requiredReleaseVerification);
 
+/** Whether a commit's policy skips staging: `process: "development"` releases a verified landing straight to production. */
+const skipsStaging = (configuration: { process?: string } | null | undefined): boolean => configuration?.process === "development";
+
 /** How long after the remote could not be read to learn a repository's audit policy the runner tries again. */
 const AUDIT_DISCOVERY_RETRY_MS = 600_000;
 /** How long after a recovery of a held integration fails the runner queues another, doubling per failure up to the cap. */
@@ -226,17 +229,35 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${message(error)}` });
     }
   }
+  /** The release branch's policy: at the base a pre-verification ran against, never the candidate's; else at the branch's head. */
+  async function releasePolicy(repo: string, commitId: string, ranAgainst?: string) {
+    const candidate = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId).then((exact) => exact.configuration, () => null);
+    // The release checkout exists once a first pre-verification or release ran; before that the landing checkout holds the branch.
+    const releases = join(home, "releases", repo);
+    const checkout = await stat(releases).then(() => releases, () => repoCheckout(repo));
+    const releaseBase = ranAgainst ?? (candidate?.releaseBranch
+      ? await jj(checkout, ["log", "-r", `${candidate.releaseBranch}@${candidate.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "") : "");
+    return releaseBase ? readExactExecutionPolicy(join(checkout, ".git"), releaseBase).then((exact) => exact.configuration, () => null) : null;
+  }
+  /** Whether the release branch's policy skips staging for this commit: a candidate cannot switch the mode on for itself. */
+  const stagingSkipped = async (repo: string, commitId: string): Promise<boolean> => skipsStaging(await releasePolicy(repo, commitId));
   /** What a landing records of the environments its commit declares; nothing when the policy cannot be read. */
   async function declaredEnvironments(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<{ repo: string; declaredEnvironments: string[] } | Record<string, never>> {
     try {
       const { configuration } = await readPolicy(join(repoCheckout(repo), ".git"), commitId);
-      return configuration ? { repo, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).sort() } : {};
+      if (!configuration) return {};
+      const skipped = await stagingSkipped(repo, commitId);
+      return { repo, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).filter((name) => name !== "staging" || !skipped).sort() };
     } catch { return {}; }
   }
   /** Ask the schedulers about every environment and the reset the commit declares; they decide whether one is due. */
   async function schedule(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<void> {
     const { configuration } = await readPolicy(join(repoCheckout(repo), ".git"), commitId);
-    if (configuration?.deployments) scheduler.consider(repo, configuration.deployments.environments);
+    const skipped = await stagingSkipped(repo, commitId);
+    if (configuration?.deployments) scheduler.consider(repo, skipped
+      ? Object.fromEntries(Object.entries(configuration.deployments.environments).filter(([name]) => name !== "staging")) : configuration.deployments.environments);
+    // Without a staging deploy to follow, the landing itself is what gets pre-verified.
+    if (skipped && promotesFrom(configuration) && !log.verifications(repo).some((entry) => entry.commitId === commitId)) queueVerification(repo, commitId);
     resetScheduler.consider(repo, configuration?.reset ?? null);
     auditScheduler.consider(repo, configuration?.audit ?? null);
   }
@@ -443,15 +464,14 @@ export function createRunnerQueue(input: {
   }
   const automaticPromotions = new Map<string, Promise<void>>();
   /**
-   * The commit `process: "development"` promotes: the newest green staging commit whose pre-verification passed,
+   * The commit `process: "development"` promotes: the newest landed commit whose pre-verification passed,
    * looking back no further than the newest commit already released or tried (`except` names a release that does not
-   * count, the one asking). A newer green commit that is still verifying, or whose verification failed, does not hold it
+   * count, the one asking). A newer landing that is still verifying, or whose verification failed, does not hold it
    * back, so a stream of landings cannot keep every verified commit from being promoted.
    */
   function promotionCandidate(repo: string, except?: string): { commitId: string; verification: ReturnType<typeof log.verifications>[number] } | undefined {
     const verifications = log.verifications(repo);
-    for (const entry of log.deployments(repo, "staging")) {
-      if (entry.result?.type !== "deployed") continue;
+    for (const entry of log.landings(repo).reverse()) {
       if (log.releases(repo).some((release) => release.commitId === entry.commitId && release.id !== except)
         || log.deployments(repo, "production").some((deploy) => deploy.commitId === entry.commitId)) return undefined;
       const verification = verifications.find((other) => other.commitId === entry.commitId && other.result?.type === "verified");
@@ -474,8 +494,8 @@ export function createRunnerQueue(input: {
     return next;
   }
   async function considerAutomaticPromotion(repo: string): Promise<void> {
-    const newestGreen = log.deployments(repo, "staging").find((entry) => entry.result?.type === "deployed");
-    if (!newestGreen) return;
+    const newest = log.lastLanded(repo);
+    if (!newest) return;
     const note = (commitId: string, verificationId: string, reason: string): void => {
       const line = `Not promoting ${commitId.slice(0, 12)} automatically: ${reason}`;
       if (!log.events({ operationId: verificationId }).some((stored) => stored.event.type === "progress" && stored.event.line === line)) {
@@ -483,17 +503,10 @@ export function createRunnerQueue(input: {
         console.error(`[runner] ${repo}: ${line}`);
       }
     };
-    /** The release branch's policy: at the base a pre-verification ran against, never the candidate's; else at the branch's head. */
-    const releasePolicy = async (commitId: string, ranAgainst?: string) => {
-      const candidate = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId).then((exact) => exact.configuration, () => null);
-      const releaseBase = ranAgainst ?? (candidate?.releaseBranch
-        ? await jj(join(home, "releases", repo), ["log", "-r", `${candidate.releaseBranch}@${candidate.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "") : "");
-      return releaseBase ? readExactExecutionPolicy(join(home, "releases", repo, ".git"), releaseBase).then((exact) => exact.configuration, () => null) : null;
-    };
     const choice = promotionCandidate(repo);
-    // A newest green commit whose verification failed is left behind, and says why.
-    const failed = log.verifications(repo).find((entry) => entry.commitId === newestGreen.commitId && entry.status === "failed");
-    if (failed && !log.releases(repo).some((entry) => entry.commitId === failed.commitId) && (await releasePolicy(failed.commitId))?.process === "development")
+    // A newest landing whose verification failed is left behind, and says why.
+    const failed = log.verifications(repo).find((entry) => entry.commitId === newest.commitId && entry.status === "failed");
+    if (failed && !log.releases(repo).some((entry) => entry.commitId === failed.commitId) && (await releasePolicy(repo, failed.commitId))?.process === "development")
       note(failed.commitId, failed.id, "its pre-verification failed");
     if (!choice) return;
     const { commitId, verification } = choice;
@@ -505,7 +518,7 @@ export function createRunnerQueue(input: {
     const open = log.openOperations(repo);
     if (open.some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
     const withheld = (reason: string): void => note(commitId, verification.id, reason);
-    const base = await releasePolicy(commitId, verified.base);
+    const base = await releasePolicy(repo, commitId, verified.base);
     if (base?.process !== "development") return;
     if (verified.nonAdditiveMigrations === undefined || verified.nonAdditiveMigrations.length)
       return withheld(verified.nonAdditiveMigrations ? `it carries non-additive migrations (${verified.nonAdditiveMigrations.join(", ")}): the owner decides` : "its migrations were not assessed");
@@ -1193,7 +1206,7 @@ export function createRunnerQueue(input: {
         return;
       }
       const promotes = Boolean(configuration?.deployments?.environments.production);
-      if (promotes && !log.deployments(operation.repo, "staging").some((entry) => entry.commitId === operation.commitId && entry.result?.type === "deployed")) {
+      if (promotes && !(operation.automatic && skipsStaging(configuration)) && !log.deployments(operation.repo, "staging").some((entry) => entry.commitId === operation.commitId && entry.result?.type === "deployed")) {
         append(operation.id, { type: "failed", stage, reason: `Staging is not green on ${operation.commitId.slice(0, 12)}: production promotes only a commit staging deployed` });
         return;
       }

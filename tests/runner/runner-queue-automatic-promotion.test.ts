@@ -27,6 +27,9 @@ test("process development promotes a green, pre-verified commit by itself and re
     assert.ok(production?.result?.type === "deployed", JSON.stringify(production?.result));
     assert.deepEqual(production.promotion?.automatic, { setting: "process", value: "development" });
     assert.equal(f.log.verifications(REPO)[0]?.status, "verified", "it reused the pre-verification");
+    assert.deepEqual(f.log.deployments(REPO, "staging"), [], "development has no staging deploy");
+    const landed = f.log.events({}).map((stored) => stored.event).find((event) => event.type === "landed");
+    assert.ok(landed?.type === "landed" && landed.declaredEnvironments && !landed.declaredEnvironments.includes("staging"), JSON.stringify(landed));
 
     // Idempotent: asking again, or a restart, releases nothing twice.
     await f.queue.recover();
@@ -52,6 +55,7 @@ for (const level of [undefined, "standard", "light"]) {
       assert.equal(f.log.verifications(REPO)[0]?.status, "verified", "pre-verification still passes");
       assert.deepEqual(f.log.releases(REPO), []);
       assert.deepEqual(f.log.deployments(REPO, "production"), []);
+      assert.ok(f.log.deployments(REPO, "staging").length > 0, "outside development a landing still deploys staging");
       assert.equal(f.releaseRef(), before);
       const confirm = f.submitRelease(f.main());
       await f.land(confirm);
@@ -93,6 +97,13 @@ test("development leaves a candidate with non-additive migrations for the owner"
     assert.equal(f.releaseRef(), before);
     assert.deepEqual(f.log.deployments(REPO, "production"), []);
     assert.ok(f.log.events({ operationId: f.log.verifications(REPO)[0]!.id }).some((stored) => stored.event.type === "progress" && /non-additive migrations/.test(stored.event.line)));
+    assert.deepEqual(f.log.deployments(REPO, "staging"), [], "it was never rehearsed on staging");
+    // A human's confirm is not the runner's own promotion: it still needs the staging deploy that development mode skipped.
+    const confirm = f.submitRelease(f.main());
+    await f.land(confirm);
+    await f.queue.idle();
+    const outcome = f.result(confirm);
+    assert.ok(outcome?.type === "failed" && /Staging is not green/.test(outcome.reason), JSON.stringify(outcome));
   } finally { await f.dispose(); }
 }, 240_000);
 

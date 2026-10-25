@@ -62,7 +62,7 @@ rather than by hand, and this machine's own settings with `slipjay config`.
 - **`process`.** `"standard"` (the default when absent), `"light"` or `"development"`: how much
   process agents apply to the repository's work. Agents read it through `slipjay policy show`;
   `development` implies everything `light` does. Only `development` changes SlipJay: the runner
-  then promotes by itself (see [Release](#release)). Any other value is refused, and an unreadable
+  then skips staging and promotes by itself (see [Release](#release)). Any other value is refused, and an unreadable
   policy is an error, never `light` or `development`.
 - **Retired fields.** `parallelExecution` and `unattendedMergeToIntegration` drive nothing. A
   policy that still declares them loads; `land` and `policy show` print a one-line warning to
@@ -926,9 +926,11 @@ Both fields appear on promotion plans that have commits to release.
 
 **Automatic promotion (`process: "development"`).** When the policy committed on the release
 branch, at the base the pre-verification ran against (never the candidate's policy), has
-`process: "development"`, the runner queues a release by itself of the newest green candidate
-whose pre-verification passed, looking back no further than the newest commit already released or
-tried. A newer green commit that is still verifying, or whose verification failed, does not hold it
+`process: "development"`, the runner skips staging: a landing is pre-verified as soon as it
+publishes (the landing gate was its evidence), its `declaredEnvironments` omit `staging`, and no
+scheduled staging deploy follows it (`slipjay deploy staging` still deploys by hand). The setting is read from the release branch, never the candidate, and a human `slipjay promote --confirm` still needs a staging-green commit; switching to `standard` restores the whole staging flow. It queues a
+release by itself of the newest landed candidate whose pre-verification passed, looking back no further than the newest commit already released or
+tried. A newer landing that is still verifying, or whose verification failed, does not hold it
 back, so a stream of landings cannot keep every verified commit from shipping; the newer commit
 ships in turn once its own verification passes. It is the release `slipjay promote --confirm`
 submits, in the same release queue, so landings, resets and releases keep their order, and it reuses
@@ -941,7 +943,7 @@ above. Such a candidate stays unpromoted, with the reason (`Not promoting <commi
 …`) on its pre-verification's log. A candidate with a release, or a production deploy, on record, or
 any release or production deploy in flight, is never released again; a newer verified candidate
 replaces a queued automatic release of an older one, and an automatic release that starts after one
-has passed fails as superseded. one. Under `standard` and `light` nothing promotes without a human `--confirm`.
+has passed fails as superseded. Under `standard` and `light` nothing promotes without a human `--confirm`.
 
 When recovery can be proven, a failed production promotion is rolled back
 automatically: production

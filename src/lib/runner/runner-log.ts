@@ -232,7 +232,11 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   }
   function stagingDue(repo: string): boolean {
     const latest = lastLanded(repo);
-    return latest !== null && !projectIds((deployIds.all(repo, "staging", "staging") as { operation_id: string }[]).map((row) => row.operation_id))
+    // A landing that declares no staging (a development-mode repository's) has no staging deploy to wait for.
+    if (latest === null) return false;
+    const declared = (JSON.parse((landed.get(repo) as { data: string }).data) as { declaredEnvironments?: string[] }).declaredEnvironments;
+    if (declared && !declared.includes("staging")) return false;
+    return !projectIds((deployIds.all(repo, "staging", "staging") as { operation_id: string }[]).map((row) => row.operation_id))
       .some((entry) => entry.commitId === latest.commitId && entry.result !== undefined);
   }
   /** The lane an operation queues in: its admission lane, or the deploys. */
