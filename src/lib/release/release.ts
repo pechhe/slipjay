@@ -642,6 +642,9 @@ function requireMigrationsReady(plan: ReleasePlan, migrationsReady: boolean): vo
   }
 }
 
+/** Appended to the staging refusals: a human promotion needs staging, a development-mode repository's runner does not. */
+const DEVELOPMENT_HINT = ' In `process: "development"` the runner skips staging and promotes by itself.';
+
 /** Every commit staging is green on, newest first. */
 const greenCommits = ({ stagingGreen, stagingGreenCommits }: PromotionState): string[] =>
   stagingGreenCommits?.length ? stagingGreenCommits : stagingGreen ? [stagingGreen] : [];
@@ -652,7 +655,7 @@ function requestedGreen(green: string[], requested: string, listed: boolean): st
   const matches = green.filter((commit) => commit.startsWith(requested));
   if (matches.length > 1) refuse(`${requested} matches more than one commit staging is green on`);
   if (!matches[0] && !listed) refuse(`Staging recorded no green deploy of ${requested.slice(0, 12)} among the commits this runner lists: it is too old to list older green commits, so only the newest (${short(green[0]!)}) can be chosen`);
-  if (!matches[0]) refuse(`Staging recorded no green deploy of ${requested.slice(0, 12)}: production promotes only a commit staging deployed`);
+  if (!matches[0]) refuse(`Staging recorded no green deploy of ${requested.slice(0, 12)}: production promotes only a commit staging deployed.${DEVELOPMENT_HINT}`);
   return matches[0];
 }
 
@@ -698,7 +701,7 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
       let state = await readPromotion();
       const green = greenCommits(state);
-      if (!green.length) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed");
+      if (!green.length) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed." + DEVELOPMENT_HINT);
       let candidateSource: NonNullable<PromotionPlan["candidateSource"]> = "newest_green";
       if (requested === undefined) {
         if (green[0] !== plan.candidate) plan = await planRelease(cwd, { candidate: green[0] });
