@@ -23,7 +23,8 @@ import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "../b
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
 import { RequiredVerificationError, runRequiredVerification, type RequiredVerificationFailureEvidence } from "../landing/required-verification.ts";
 import { readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
-import { readPolicyTextAtCommit } from "../policy/execution-policy.ts";
+import { postIntegrationPolicy } from "../policy/post-integration-policy.ts";
+import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
 import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
@@ -670,7 +671,7 @@ export function createRunnerQueue(input: {
       landedPolicy = { directory, commit, value };
       return value;
     };
-    const shapes = new Map<string, Extract<OperationEvent, { type: "change_shape" }>>();
+    const shapes = new Map<string, { shape: Extract<OperationEvent, { type: "change_shape" }>; touched: string[] }>();
     const scratch = scratchOf(checkout);
     let remote: string | undefined;
     let integrationBranch: string | undefined;
@@ -873,14 +874,6 @@ export function createRunnerQueue(input: {
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
       tracker = context.configuration.tracker;
-      const submittedPolicy = prefix && operation.kind === "landing"
-        ? (await readExactExecutionPolicy(await jj(checkout, ["git", "root"]), operation.commitId)).configuration : null;
-      const hasBarrier = (policy: { migrationFinalization?: unknown; postIntegration?: unknown; reset?: unknown } | null) =>
-        Boolean(policy?.migrationFinalization || policy?.postIntegration || policy?.reset);
-      if (prefix?.predecessor && (hasBarrier(context.configuration) || hasBarrier(submittedPolicy))) {
-        setStage("waiting-for-predecessor");
-        if (!await withAuthority(prefix.predecessor.completed.promise)) throw new Error("Barrier predecessor did not publish");
-      }
       if (operation.kind === "reset") {
         verdict = await reset(branch);
         return;
@@ -981,7 +974,13 @@ export function createRunnerQueue(input: {
         const artifact: LandingArtifact = { operationId: operation.id, attempt: prefix!.attempt, source: operation.commitId,
           base: prepared.base, candidate: prepared.artifact.commitId };
         const policy = candidateContext.configuration;
-        const overlap = !hasBarrier(policy) && !hasBarrier(submittedPolicy);
+        // Reuse verification's exact-base observation after rebase and generation.
+        // Submitted paths can disappear or change when the prefix is prepared.
+        // Diff against the exact prepared base, not the bookmark, so a move cannot change what decides overlap.
+        const paths = await recordShape(checkout, artifact.base, artifact.candidate, policy.migrationFinalization);
+        const triggersMigration = paths.some((path) => policy.migrationFinalization?.triggerPaths.some((root) => path === root || path.startsWith(`${root}/`)));
+        const overlap = !paths.includes(EXECUTION_POLICY_PATH) && !triggersMigration
+          && !postIntegrationPolicy(policy.postIntegration)?.readByGate;
         await retainLandingArtifact(checkout, artifact);
         append(operation.id, { type: "attempt_prepared", ...artifact, checkout, overlap,
           ...(predecessor ? { predecessor: { operationId: predecessor.artifact.operationId, attempt: predecessor.artifact.attempt, candidate: predecessor.artifact.candidate } } : {}) });
@@ -1107,16 +1106,19 @@ export function createRunnerQueue(input: {
       // A fresh immutable attempt, never an owner kill, hold, source replacement or paused rebuild.
       await processOperation(operation, prefix);
     }
-    async function recordShape(cwd: string, branch: string, commit: string, migration: import("../policy/execution-policy.ts").MigrationFinalizationPolicy | null | undefined): Promise<void> {
-      // Resolve the moving bookmark on every observation; only the diff between
+    async function recordShape(cwd: string, revision: string, commit: string, migration: import("../policy/execution-policy.ts").MigrationFinalizationPolicy | null | undefined): Promise<string[]> {
+      // Resolve the revision (a moving bookmark or an exact base) on every observation; only the diff between
       // exact objects is reusable, even if a gate changes the checkout or base.
-      const base = await jj(cwd, ["--ignore-working-copy", "log", "-r", branch, "--no-graph", "-T", "commit_id"]);
+      const base = await jj(cwd, ["--ignore-working-copy", "log", "-r", revision, "--no-graph", "-T", "commit_id"]);
       const migrationPaths = [...migration?.triggerPaths ?? [], ...migration?.artifactPaths ?? []];
       const key = JSON.stringify([cwd, base, commit, migrationPaths]);
       const cached = shapes.get(key);
-      if (cached) { append(operation.id, cached); return; }
+      if (cached) { append(operation.id, cached.shape); return cached.touched; }
       const diff = await jj(cwd, ["diff", "--from", base, "--to", commit, "--git"]);
-      const paths = [...new Set([...diff.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map((match) => match[2]!))];
+      const headers = [...diff.matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)];
+      const paths = [...new Set(headers.map((match) => match[2]!))];
+      // A rename touches both sides: moving a file out of a trigger path still changes that path.
+      const touched = [...new Set(headers.flatMap((match) => [match[1]!, match[2]!]))];
       const insertions = diff.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).length;
       const deletions = diff.split("\n").filter((line) => line.startsWith("-") && !line.startsWith("---")).length;
       const roots = (prefix: string) => [...new Set(paths.flatMap((path) => path.startsWith(`${prefix}/`) ? [path.split("/")[1]!] : []))];
@@ -1128,8 +1130,9 @@ export function createRunnerQueue(input: {
         testFiles: paths.filter((path) => /(?:test|spec)\.[cm]?[jt]sx?$/.test(path)),
         fileSet: createHash("sha256").update(tree.stdout.trim()).digest("hex"),
         sizeBucket: insertions + deletions <= 100 ? "small" : insertions + deletions <= 1000 ? "medium" : "large" };
-      shapes.set(key, shape);
+      shapes.set(key, { shape, touched });
       append(operation.id, shape);
+      return touched;
     }
     /**
      * Audit the integration branch's published head: resolve its exact commit, record it, check it out and run the

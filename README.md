@@ -461,8 +461,14 @@ stops the rebuild. A remote move before canonical integration permits a head one
 fresh attempt of its own, including when a held predecessor publishes under it; a
 second move fails. If a held integration still cannot publish, the attempt fails
 behind it. An operation's own failure or owner kill, changed author source, or a
-paused runner never starts a rebuild. Migration policies, post-integration mutation and reset policies are
-conservative preparation barriers, including when introduced by submitted source.
+paused runner never starts a rebuild. A successor waits for publication when the
+predecessor's prepared, rebased candidate changes `slipjay.json` or a
+`migrationFinalization.triggerPaths` path. Declaring migration finalization or reset
+alone does not prevent overlap. A declared `postIntegration` step also blocks overlap
+when its external target is read by the gate: its optional boolean `readByGate`
+flag defaults to `true`. Set `postIntegration.readByGate: false` only when gates do
+not read that target; the step still runs after integration, and migration-triggering
+predecessors still block overlap. The policy parser rejects non-boolean values.
 Queued resets and releases fence later prefix admission. Restart retains artifacts,
 ends interrupted verifier attempts, and reconciles canonical publication intent
 and held state through the existing recovery path.

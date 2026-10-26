@@ -13,6 +13,7 @@ import {
   parseExecutionPolicy, readExecutionPolicy, readExecutionPolicyAtCommit, readIntegrationPolicy, resolveIntegrationBranch,
 } from "../../src/lib/policy/execution-policy.ts";
 import { readExactExecutionPolicy } from "../../src/lib/release/post-integration-source.ts";
+import { postIntegrationPolicy } from "../../src/lib/policy/post-integration-policy.ts";
 import { workspaceContext } from "../../src/lib/infra/workspace-jj.ts";
 
 // peach-pi's policy as extracted (pechhe/peach-pi 37a32367): its landing records
@@ -63,6 +64,18 @@ const yardsmithPolicy = {
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const policy = (overrides: Record<string, unknown>) => JSON.stringify({ version: 1, ...overrides });
 const check = (executable: string, extra: Record<string, unknown> = {}) => ({ executable, args: ["run", "test"], ...extra });
+
+test("postIntegration readByGate defaults true and accepts only booleans", () => {
+  assert.equal(postIntegrationPolicy(yardsmithPolicy.postIntegration)?.readByGate, true);
+  for (const readByGate of [false, true]) {
+    const declaration = { ...yardsmithPolicy.postIntegration, readByGate };
+    parseExecutionPolicy(policy({ postIntegration: declaration }));
+    assert.equal(postIntegrationPolicy(declaration)?.readByGate, readByGate);
+  }
+  for (const readByGate of [null, "false", 0, {}, []]) {
+    assert.throws(() => parseExecutionPolicy(policy({ postIntegration: { ...yardsmithPolicy.postIntegration, readByGate } })), /readByGate/);
+  }
+});
 
 test("peach-pi's policy parses with its landing shape and verification digest unchanged", () => {
   const parsed = parseExecutionPolicy(peachPolicy);

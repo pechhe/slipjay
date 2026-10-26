@@ -9,6 +9,8 @@ export type PostIntegrationPolicy = {
   timeoutMs: number;
   environmentKeys: string[];
   approvalMode: "explicit-human" | "automatic-development";
+  /** Whether landing gates read the external target; defaults to true. */
+  readByGate: boolean;
 };
 
 export type ResetPolicy = {
@@ -62,6 +64,8 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
   if (row.version !== 1 || row.idempotency !== "artifact-key" || typeof row.target !== "string" || !TARGET.test(row.target) || !Number.isInteger(row.timeoutMs) || Number(row.timeoutMs) < 1 || Number(row.timeoutMs) > 600000) {
     throw new Error("Invalid post-integration identity, idempotency contract or deadline");
   }
+  if (row.readByGate !== undefined && typeof row.readByGate !== "boolean")
+    throw new Error("Invalid post-integration readByGate flag");
   const keys = environmentKeys(row, "Post-integration");
   const approvalMode = row.approvalMode ?? "explicit-human";
   const approvalModes: readonly unknown[] = ["explicit-human", "automatic-development"];
@@ -72,6 +76,7 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
     version: 1,
     target: row.target,
     idempotency: "artifact-key",
+    readByGate: row.readByGate ?? true,
     command: command(row.command),
     targetProbe: command(row.targetProbe),
     timeoutMs: Number(row.timeoutMs),
