@@ -22,7 +22,7 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
   const uncertain = Boolean(integrated || intent || events.some((event) => event.type === "integration_held")
     || (result?.type === "failed" && ["integrating", "finalizing", "publishing"].includes(result.stage)));
   const publication: LandingOutcome["publication"] = landed
-    ? { state: "published", base: landed.base, commitId: landed.commitId }
+    ? { state: "published", base: landed.base, commitId: landed.commitId, ...landed.process ? { process: landed.process } : {} }
     : { state: uncertain ? "unconfirmed" : "not-attempted", ...(integrated ? { base: integrated.base, commitId: integrated.commitId }
       : intent ? { base: intent.base, commitId: intent.candidate } : {}) };
   const invalidated = new Set(events.filter((event) => event.type === "attempt_invalidated").map((event) => event.attempt));

@@ -237,23 +237,36 @@ export function createRunnerQueue(input: {
   }
   /** The release branch's policy: at the base a pre-verification ran against, never the candidate's; else at the branch's head. */
   async function releasePolicy(repo: string, commitId: string, ranAgainst?: string) {
-    const candidate = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), commitId).then((exact) => exact.configuration, () => null);
+    const directory = repoCheckout(repo);
+    const candidate = await readExactExecutionPolicy(join(directory, ".git"), commitId).then((exact) => exact.configuration, () => null);
     // The release checkout exists once a first pre-verification or release ran; before that the landing checkout holds the branch.
     const releases = join(home, "releases", repo);
-    const checkout = await stat(releases).then(() => releases, () => repoCheckout(repo));
-    const releaseBase = ranAgainst ?? (candidate?.releaseBranch
-      ? await jj(checkout, ["log", "-r", `${candidate.releaseBranch}@${candidate.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "") : "");
+    const checkout = await stat(releases).then(() => releases, () => directory);
+    if (ranAgainst) return readExactExecutionPolicy(join(checkout, ".git"), ranAgainst).then((exact) => exact.configuration, () => null);
+    let policy = candidate;
+    if (!policy?.releaseBranch) {
+      // A candidate removing the release branch must still use the release policy of the integration
+      // parent it extended. Only a repository already without a release branch uses its own policy.
+      const parents = (await jj(directory, ["log", "-r", `${commitId}-`, "--no-graph", "-T", 'commit_id ++ "\\n"']).catch(() => "")).trim().split("\n").filter(Boolean);
+      if (parents.length !== 1) return null;
+      const previous = await readExactExecutionPolicy(join(directory, ".git"), parents[0]!).then((exact) => exact.configuration, () => null);
+      if (!previous) return null;
+      if (!previous.releaseBranch) return candidate;
+      policy = previous;
+    }
+    const releaseBase = await jj(checkout, ["log", "-r", `${policy.releaseBranch}@${policy.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "");
     return releaseBase ? readExactExecutionPolicy(join(checkout, ".git"), releaseBase).then((exact) => exact.configuration, () => null) : null;
   }
   /** Whether the release branch's policy skips staging for this commit: a candidate cannot switch the mode on for itself. */
   const stagingSkipped = async (repo: string, commitId: string): Promise<boolean> => skipsStaging(await releasePolicy(repo, commitId));
   /** What a landing records of the environments its commit declares; nothing when the policy cannot be read. */
-  async function declaredEnvironments(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<{ repo: string; declaredEnvironments: string[] } | Record<string, never>> {
+  async function declaredEnvironments(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<{ repo: string; declaredEnvironments: string[]; process?: "development" | "standard" } | Record<string, never>> {
     try {
       const { configuration } = await readPolicy(join(repoCheckout(repo), ".git"), commitId);
       if (!configuration) return {};
-      const skipped = await stagingSkipped(repo, commitId);
-      return { repo, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).filter((name) => name !== "staging" || !skipped).sort() };
+      const applied = await releasePolicy(repo, commitId);
+      const skipped = skipsStaging(applied);
+      return { repo, ...applied ? { process: skipped ? "development" as const : "standard" as const } : {}, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).filter((name) => name !== "staging" || !skipped).sort() };
     } catch { return {}; }
   }
   /** Ask the schedulers about every environment and the reset the commit declares; they decide whether one is due. */
@@ -998,7 +1011,7 @@ export function createRunnerQueue(input: {
         verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
         return;
       }
-      append(operation.id, { type: "integrated", base, commitId: artifact.commitId });
+      append(operation.id, { type: "integrated", base, commitId: artifact.commitId, process: (await declaredEnvironments(operation.repo, artifact.commitId, readLandedPolicy)).process });
       await finishIntegration(candidateContext, artifact.commitId);
       verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
       async function integratePrefix(prepared: PreparedLandingCandidate) {
@@ -1052,7 +1065,7 @@ export function createRunnerQueue(input: {
           await jj(publisher, ["new", artifact.candidate]);
           append(operation.id, { type: "publication_intent", attempt: artifact.attempt, base: artifact.base, candidate: artifact.candidate });
           const result = await integratePreparedCandidate(publisher, { ...verified, context: canonical }, candidateOptions, landingIO);
-          append(operation.id, { type: "integrated", base: artifact.base, commitId: artifact.candidate });
+          append(operation.id, { type: "integrated", base: artifact.base, commitId: artifact.candidate, process: (await declaredEnvironments(operation.repo, artifact.candidate, readLandedPolicy)).process });
           await finishIntegration(canonical, artifact.candidate, publisher, artifact.base);
           return result;
         });
@@ -1118,7 +1131,12 @@ export function createRunnerQueue(input: {
           if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
         }
       }
-      if (verdict?.type === "landed") verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy) };
+      if (verdict?.type === "landed") {
+        const publishedCommit = verdict.commitId;
+        const integrated = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "integrated" && event.commitId === publishedCommit);
+        verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy),
+          ...integrated?.type === "integrated" && integrated.process ? { process: integrated.process } : {} };
+      }
       if (verdict) append(operation.id, verdict);
       // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
       if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo);

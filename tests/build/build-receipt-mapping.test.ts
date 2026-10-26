@@ -42,7 +42,7 @@ test("held, unknown publication and its later confirmation keep one source tuple
   const id = operation(log, { admission: record() }, [
     { type: "stage", stage: "verifying" }, { type: "verification_base", base: "b".repeat(40), candidate: "c".repeat(40) },
     ...run("gate", "vp test", {}), { type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
-    { type: "integrated", base: "b".repeat(40), commitId: "d".repeat(40) },
+    { type: "integrated", base: "b".repeat(40), commitId: "d".repeat(40), process: "development" },
     { type: "integration_held", repo: "owner/repo", commitId: "d".repeat(40), reason: "push refused" },
     { type: "integration_held", repo: "owner/repo", commitId: "d".repeat(40), reason: "push refused again" },
     { type: "failed", stage: "publishing", reason: "Integration publication failed" },
@@ -52,6 +52,7 @@ test("held, unknown publication and its later confirmation keep one source tuple
   const facts = attempts(owed(log, id));
   assert.deepEqual(facts.map((fact) => fact.event), ["held", "failed", "published"]);
   assert.equal(facts[1]!.failure!.recovery, "publication_unknown");
+  assert.equal(facts[2]!.process, "development", "late confirmation keeps the process from its own integration, never current policy");
   assert.deepEqual(facts.map((fact) => [fact.verifiedRevision, fact.publishedRevision]), [["c".repeat(40), null], ["c".repeat(40), null], ["c".repeat(40), "d".repeat(40)]]);
   // The author's source stays the candidate revision; the verified candidate and base are reported apart from it.
   for (const fact of facts) assert.deepEqual(tuple(fact), tuple(facts[0]!));
@@ -239,3 +240,18 @@ test("the drain delivers runs only after their attempt fact, and a parked fact s
   assert.deepEqual((runs(owed(log, id))[0] as BuildRunInput).outcome, "failed");
   drain.close(); log.close();
 });
+
+for (const process of ["development", "standard"] as const) {
+  test(`a ${process} publication keeps its process in Spec and chore receipts and its outcome`, () => {
+    const log = openLog();
+    try {
+      for (const submitted of [{ admission: record() }, { chore: { title: "Maintenance", helperRevisions: [] } }]) {
+        const id = operation(log, submitted, [{ type: "landed", base: "b".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin", process }]);
+        const receipt = owed(log, id)[0]!;
+        assert.ok(receipt.action !== "recordAttemptRun");
+        assert.equal(receipt.input.process, process);
+        assert.equal((log.operation(id) as LandingOperation).outcome?.publication.process, process);
+      }
+    } finally { log.close(); }
+  });
+}

@@ -20,7 +20,7 @@ export type BuildReceiptInput = {
   repository: string; operationId: string; sequence: number; occurredAt: string;
   specId: string; ticketIds: string[]; specBodyRevision: number | null; specBodyHash: string | null;
   candidateRevision: string; baseRevision: string | null; helperRevisions: string[]; repairsOperationId: string | null;
-  event: "held" | "failed" | "published"; bindGeneration: number; verifiedRevision: string | null; publishedRevision: string | null; failure: AttemptFailure | null;
+  event: "held" | "failed" | "published"; bindGeneration: number; verifiedRevision: string | null; publishedRevision: string | null; process?: "development" | "standard"; failure: AttemptFailure | null;
 };
 type RunOutcome = "passed" | "failed" | "incomplete" | "cancelled";
 /** Build's `recordAttemptRun` input: one command, attached to the attempt fact at `sequence`, whose source Build reads. */
@@ -31,7 +31,7 @@ export type BuildRunInput = {
 /** Build's `recordChoreLanding` input: published work its author declared as belonging to no Spec. */
 export type BuildChoreInput = {
   unassociated: true; repository: string; operationId: string; sequence: number; occurredAt: string; candidateRevision: string;
-  baseRevision: string | null; verifiedRevision: string | null; helperRevisions: string[]; publishedRevision: string; title: string;
+  baseRevision: string | null; verifiedRevision: string | null; helperRevisions: string[]; publishedRevision: string; process?: "development" | "standard"; title: string;
 };
 
 /**
@@ -85,7 +85,7 @@ function confirmedLate(operation: LandingOperation, events: readonly StoredEvent
   const integrated = events.findLast((row) => row.event.type === "integrated")?.event;
   if (integrated?.type !== "integrated") return undefined;
   const confirmed = settledAfter(settlements, operation.repo, integrated.commitId, terminal.seq, "integration_recovered");
-  return confirmed && { confirmed, base: integrated.base, commitId: integrated.commitId };
+  return confirmed && { confirmed, base: integrated.base, commitId: integrated.commitId, ...integrated.process ? { process: integrated.process } : {} };
 }
 
 /**
@@ -122,11 +122,12 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
     return [{ operationId: operation.id, key: row.seq, occurredAt: row.at, action: "recordChoreLanding", input: { unassociated: true, repository: operation.repo,
       operationId: operation.id, sequence: row.seq, occurredAt: row.at, candidateRevision: operation.commitId, baseRevision: base,
       verifiedRevision: verifiedBefore(events, terminal.seq), helperRevisions: submitted.chore.helperRevisions, publishedRevision: commitId,
+      ...row.event.type === "landed" && row.event.process ? { process: row.event.process } : late?.process ? { process: late.process } : {},
       title: submitted.chore.title.slice(0, 2000) } }];
   }
   if (!submitted.admission || !events.some((row) => row.event.type === "build_admitted")) return [];
   const record: BuildAdmissionRecord = submitted.admission;
-  const attempt = (row: StoredEvent, fields: Pick<BuildReceiptInput, "event" | "baseRevision" | "verifiedRevision" | "publishedRevision" | "failure">): BuildReceipt => ({
+  const attempt = (row: StoredEvent, fields: Pick<BuildReceiptInput, "event" | "baseRevision" | "verifiedRevision" | "publishedRevision" | "failure" | "process">): BuildReceipt => ({
     operationId: operation.id, key: row.seq, occurredAt: row.at, action: "recordAttempt", input: fit({
       repository: operation.repo, operationId: operation.id, sequence: row.seq, occurredAt: row.at,
       specId: record.binding.specId, ticketIds: record.binding.ticketIds, specBodyRevision: record.binding.bodyRevision, specBodyHash: record.specBodyHash,
@@ -137,7 +138,7 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
   if (held?.event.type === "integration_held")
     receipts.push(attempt(held, { event: "held", baseRevision: integratedBase(events, held.event.commitId), verifiedRevision: verifiedBefore(events, held.seq), publishedRevision: null, failure: null }));
   if (terminal?.event.type === "landed")
-    receipts.push(attempt(terminal, { event: "published", baseRevision: terminal.event.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: terminal.event.commitId, failure: null }));
+    receipts.push(attempt(terminal, { event: "published", baseRevision: terminal.event.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: terminal.event.commitId, ...terminal.event.process ? { process: terminal.event.process } : {}, failure: null }));
   else if (terminal) {
     const revisions = { baseRevision: verification(events, terminal.seq)?.base ?? null,
       verifiedRevision: skippedVerification(events, terminal.seq) ? null : verification(events, terminal.seq)?.candidate ?? null };
@@ -146,7 +147,7 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
     // or, once released unpublished, failed with how it recovers: either ends Build's custody of the attempt.
     const late = confirmedLate(operation, events, terminal, settlements);
     const released = late || terminal.event.type !== "failed" ? undefined : releasedLate(operation, events, terminal, settlements);
-    if (late) receipts.push(attempt(late.confirmed, { event: "published", baseRevision: late.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: late.commitId, failure: null }));
+    if (late) receipts.push(attempt(late.confirmed, { event: "published", baseRevision: late.base, verifiedRevision: verifiedBefore(events, terminal.seq), publishedRevision: late.commitId, ...late.process ? { process: late.process } : {}, failure: null }));
     else if (released?.event.type === "integration_released") {
       const failure = failureOf(operation, events, terminal, true);
       receipts.push({ ...attempt(released, { event: "failed", ...revisions, publishedRevision: null,

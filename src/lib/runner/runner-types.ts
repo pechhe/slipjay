@@ -196,14 +196,16 @@ export type OperationEvent =
   | ({ type: "test_report"; runId: string } & TestReportReading)
   | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact }
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
-  | { type: "integrated"; base: string; commitId: string }
+  | { type: "integrated"; base: string; commitId: string; process?: "development" | "standard" }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string;
       /**
        * The repository and the deployment environments the landed commit's `slipjay.json` declares, so Build can
        * tell a repository with no staging from one whose deploy has not reached it. Absent when the policy could
        * not be read, and on landings from before 3.39.0: unknown, never "none".
        */
-      repo?: string; declaredEnvironments?: string[] }
+      repo?: string; declaredEnvironments?: string[];
+      /** Release process applied at publication; light uses the standard release path. Unknown on older events. */
+      process?: "development" | "standard" }
   /** A release's outcome. A promotion names `deploy`, the production deploy of its candidate, which the deploy lane runs. */
   | { type: "released"; result: CompletedRelease; deploy?: string }
   /** A pre-verification passed: `checks` ran against `candidate`'s tree while the release branch was at `base`. */
@@ -285,7 +287,7 @@ export type LandingOutcome = {
   /** When set, retained source, manifest and artifacts no longer exist; the ledger's own record remains. */
   evidenceExpired?: { at: string; policy: "published" | "unadopted" };
   attempt?: Extract<OperationEvent, { type: "attempt_prepared" }>;
-  publication: { state: "not-attempted" | "unconfirmed" | "published"; base?: string; commitId?: string };
+  publication: { state: "not-attempted" | "unconfirmed" | "published"; base?: string; commitId?: string; process?: "development" | "standard" };
   failure?: { reason: string; stage?: RunnerStage; command?: string; excerpt?: string; excerptTruncated: boolean };
   classification?: ClassifiedFact;
   runs: (RunRecord & { outcome: "passed" | "failed" | "incomplete" | "killed"; invalidated: boolean })[];

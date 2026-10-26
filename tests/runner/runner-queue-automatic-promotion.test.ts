@@ -29,7 +29,7 @@ test("process development promotes a green, pre-verified commit by itself and re
     assert.equal(f.log.verifications(REPO)[0]?.status, "verified", "it reused the pre-verification");
     assert.deepEqual(f.log.deployments(REPO, "staging"), [], "development has no staging deploy");
     const landed = f.log.events({}).map((stored) => stored.event).find((event) => event.type === "landed");
-    assert.ok(landed?.type === "landed" && landed.declaredEnvironments && !landed.declaredEnvironments.includes("staging"), JSON.stringify(landed));
+    assert.ok(landed?.type === "landed" && landed.process === "development" && landed.declaredEnvironments && !landed.declaredEnvironments.includes("staging"), JSON.stringify(landed));
 
     // Idempotent: asking again, or a restart, releases nothing twice.
     await f.queue.recover();
@@ -50,7 +50,8 @@ for (const level of [undefined, "standard", "light"]) {
     const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, level ? { process: level } : {});
     try {
       const before = f.releaseRef();
-      await f.land(f.submit(await f.candidate("a.txt")));
+      const landed = await f.land(f.submit(await f.candidate("a.txt")));
+      assert.ok(landed?.type === "landed" && landed.process === "standard");
       await settle(f);
       assert.equal(f.log.verifications(REPO)[0]?.status, "verified", "pre-verification still passes");
       assert.deepEqual(f.log.releases(REPO), []);
@@ -268,3 +269,34 @@ test("a queued automatic release of a verified commit survives a newer staged co
     assert.deepEqual(f.log.deployments(REPO, "production").map((entry) => entry.commitId), [a]);
   } finally { await f.dispose(); }
 }, 240_000);
+
+test("development without a release branch records and applies the same no-staging path", async () => {
+  const f = await fixture(false, false, { minIntervalMs: 0 }, false, { process: "development" });
+  try {
+    const landed = await f.land(f.submit(await f.candidate("source-only.txt")));
+    await settle(f);
+    assert.ok(landed?.type === "landed" && landed.process === "development");
+    assert.deepEqual(landed.declaredEnvironments, []);
+    assert.deepEqual(f.log.deployments(REPO, "staging"), []);
+    assert.deepEqual(f.log.releases(REPO), []);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a candidate cannot select development mode by dropping the repository release branch", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  try {
+    await f.candidate("keep-staging.txt");
+    const path = join(f.author, "slipjay.json");
+    const policy = JSON.parse(await readFile(path, "utf8"));
+    delete policy.releaseBranch;
+    delete policy.requiredReleaseVerification;
+    policy.process = "development";
+    await writeFile(path, JSON.stringify(policy));
+    const landed = await f.land(f.submit(await f.push()));
+    await settle(f);
+    assert.ok(landed?.type === "landed" && landed.process === "standard", JSON.stringify(landed));
+    assert.ok(landed.declaredEnvironments?.includes("staging"));
+    assert.ok(f.log.deployments(REPO, "staging").length > 0);
+    assert.deepEqual(f.log.releases(REPO), []);
+  } finally { await f.dispose(); }
+}, 120_000);

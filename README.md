@@ -973,6 +973,8 @@ approval covers the candidate:
 
 Both fields appear on promotion plans that have commits to release.
 
+**Publication process (YS-565).** Every readable landing policy stamps the `landed` event, landing outcome and Forge publication receipt with `process: "development" | "standard"`. The stamp names the release policy actually applied (the release branch policy for a release repository; otherwise the landed repository policy), with `light` recorded as `standard`. Forge keeps it as publication evidence: later policy changes cannot change that publication's acceptance path. Older or unreadable policy evidence remains unstamped and Forge treats it as standard unless the same publication's runner history explicitly records its process. Deploy Forge's optional receipt field before installing this runner.
+
 **Automatic promotion (`process: "development"`).** When the policy committed on the release
 branch, at the base the pre-verification ran against (never the candidate's policy), has
 `process: "development"`, the runner skips staging: a landing is pre-verified as soon as it
