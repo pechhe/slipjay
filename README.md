@@ -428,12 +428,14 @@ Each admitted operation holds one place until its terminal outcome: the head of 
 short repository may take the short place, and its successor always counts as long, so
 it waits for a worker (`a worker (…)`) even when its own queue could take it. An older
 reset, release or audit of its repository holds a depth-two head or successor back, and it names that
-operation. Of the repositories SlipJay itself lands, only T3 Code is a candidate: it
-runs at depth one until its gates are shown safe in independent checkouts on
-`t3peach`, including a controlled pair through its upstream-receipt check.
-YardSmith's gates share the Development database, SlipJay's real-systemd tests are not
-yet shown safe in parallel, and agent-config's and splay's landings are too short to
-gain from it.
+operation. Of the repositories SlipJay itself lands, YardSmith runs at depth two: its
+gates take free ports, run database tests in disposable containers, and never read
+Preview, so its `postIntegration` step declares `readByGate: false`; its heavy checks
+share host-wide slots on purpose (YardSmith's `docs/agents/tooling.md` lists the shared
+state). T3 Code is a candidate: it runs at depth one until its gates are shown safe in
+independent checkouts on `t3peach`, including a controlled pair through its
+upstream-receipt check. SlipJay's real-systemd tests are not yet shown safe in
+parallel, and agent-config's and splay's landings are too short to gain from it.
 
 For integration D and submissions A then B, the queue prepares immutable CA on D
 and CB on that exact CA, in two independent warm verifier repositories. B can
