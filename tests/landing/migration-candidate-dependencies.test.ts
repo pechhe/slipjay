@@ -6,10 +6,12 @@ import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { advance, write, fixture, append } from "./fixtures/migration-candidate-fixture.ts";
 
+const bunVersion = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
+
 test("the runner prepares dependency drift from final rebase before generating and verifying", async () => {
   const f = await fixture('import { marker } from "fixture-dependency"; if(marker!==42)throw Error("dependency wrong");' + append);
   try {
-    await write(f.repo, "package.json", JSON.stringify({ name: "fixture", private: true, packageManager: "bun@1.4.2", workspaces: ["packages/*"], dependencies: { "fixture-dependency": "workspace:*" } }));
+    await write(f.repo, "package.json", JSON.stringify({ name: "fixture", private: true, packageManager: `bun@${bunVersion}`, workspaces: ["packages/*"], dependencies: { "fixture-dependency": "workspace:*" } }));
     await write(f.repo, "packages/dependency/package.json", JSON.stringify({ name: "fixture-dependency", version: "1.0.0", type: "module", exports: "./index.js" }));
     await write(f.repo, "packages/dependency/index.js", "export const marker=42;");
     execFileSync("bun", ["install"], { cwd: f.repo, stdio: "pipe" });
@@ -27,7 +29,7 @@ test("the runner prepares dependency drift from final rebase before generating a
 test("a frozen preparation failure prevents generation and integration and retains semantic source", async () => {
   const f = await fixture(append);
   try {
-    await write(f.repo, "package.json", JSON.stringify({ name: "fixture", packageManager: "bun@1.4.2", dependencies: { missing: "file:./does-not-exist" } }));
+    await write(f.repo, "package.json", JSON.stringify({ name: "fixture", packageManager: `bun@${bunVersion}`, dependencies: { missing: "file:./does-not-exist" } }));
     advance(f.repo, "Uninstallable final graph");
     const base = f.remoteMain();
     const result = await f.land();
@@ -43,7 +45,7 @@ test("a frozen preparation failure prevents generation and integration and retai
 test("installation source drift is fenced before generation and restored without integration", async () => {
   const f = await fixture(append);
   try {
-    await write(f.repo, "package.json", JSON.stringify({ name: "fixture", packageManager: "bun@1.4.2", scripts: { postinstall: 'node -e \"require(\\\"node:fs\\\").writeFileSync(\\\"schema/source\\\",\\\"tampered\\\")\"' } }));
+    await write(f.repo, "package.json", JSON.stringify({ name: "fixture", packageManager: `bun@${bunVersion}`, scripts: { postinstall: 'node -e \"require(\\\"node:fs\\\").writeFileSync(\\\"schema/source\\\",\\\"tampered\\\")\"' } }));
     execFileSync("bun", ["install"], { cwd: f.repo, stdio: "pipe" });
     await write(f.repo, "schema/source", "old");
     advance(f.repo, "Install script changes source");

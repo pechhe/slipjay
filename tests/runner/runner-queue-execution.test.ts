@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
@@ -11,6 +11,44 @@ import { runnerWorkers } from "../../src/lib/runner/runner-queue.ts";
 import { TEST_SLICE, testExecutor } from "../support/executor.ts";
 import { gateFailureOutput, gate, command, test, fixture, until, alive, cgroupOf, hanging, started, systemdTest } from "./fixtures/runner-queue-fixture.ts";
 import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
+
+test("candidate Bun runtimes isolate dependency installs, gates and nested commands", async () => {
+  const script = `const fs=require('node:fs');const cp=require('node:child_process');
+    const wanted=JSON.parse(fs.readFileSync('package.json','utf8')).packageManager.slice(4);
+    if(cp.execFileSync('bun',['--version'],{encoding:'utf8'}).trim()!==wanted)process.exit(2);`;
+  const f = await fixture(false, false, undefined, false, { other: true, workers: 2, gates: () => [script] });
+  try {
+    const cases = [
+      { version: "1.2.3", author: f.author, repo: "fixture/repo" },
+      { version: "1.2.4", author: f.otherAuthor, repo: "fixture/other" },
+    ];
+    const operations: { id: string; version: string }[] = [];
+    for (const { version, author, repo } of cases) {
+      const bin = join(f.home, "toolchains", "bun", version, "bin");
+      await mkdir(bin, { recursive: true });
+      await writeFile(join(bin, "bun"), `#!${process.execPath}\nconsole.log(${JSON.stringify(version)});\n`);
+      await chmod(join(bin, "bun"), 0o755);
+      await symlink("bun", join(bin, "bunx"));
+      await f.candidate(`bun-${version}`, author, repo);
+      await writeFile(join(author, "package.json"), JSON.stringify({ name: "fixture", packageManager: `bun@${version}` }));
+      operations.push({ id: f.submit(await f.push(author, repo)), version });
+    }
+    f.queue.wake();
+    await f.queue.idle();
+    for (const { id, version } of operations) {
+      assert.equal(f.result(id)?.type, "landed", JSON.stringify(f.result(id)));
+      const runs = f.log.operation(id)!.runs;
+      assert.ok(runs.some((run) => run.purpose === "dependencies"));
+      assert.ok(runs.some((run) => run.purpose === "gate"));
+      for (const run of runs) {
+        assert.equal(run.commandEvidence?.status, "recorded");
+        if (run.commandEvidence?.status !== "recorded") throw new Error("Missing command provenance");
+        assert.equal(run.commandEvidence.runtime?.version, version);
+        assert.match(run.commandEvidence.runtime!.sha256, /^[a-f0-9]{64}$/);
+      }
+    }
+  } finally { await f.dispose(); }
+}, 120_000);
 
 test("gate failure preserves main and verbatim evidence; an amended change can land again", async () => {
   const f = await fixture();

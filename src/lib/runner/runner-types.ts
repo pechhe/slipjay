@@ -98,9 +98,13 @@ export type AuditCause = { kind: "culprits"; landings: string[] } | { kind: "fla
 
 export type RunPurpose = "gate" | "dependencies" | "finalization" | "migration_generate" | "migration_verify" | "deploy" | "reset";
 
+/** The exact preinstalled runtime selected for a candidate command and its children. */
+export type RuntimeIdentity = { name: "bun"; version: string; path: string; sha256: string };
+
 export type CommandEvidence = { status: "unavailable"; reason: "capacity" } | {
   status: "recorded"; executable: string; args: string[]; cwd: string | null; environmentNames: string[];
   redacted: boolean; configurationSha256: string;
+  runtime?: RuntimeIdentity;
 };
 
 export type CommandArtifact = { status: "unavailable"; reason: "private-output" | "capture-failed" } | {

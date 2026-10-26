@@ -648,6 +648,18 @@ and held state through the existing recovery path.
   reboot. Logs: `journalctl --user -u slipjay-runner`. The unit's PATH starts with corepack shims
   for pnpm, so each repository installs with the pnpm its `packageManager` pins, whatever pnpm
   is installed globally; re-run the script to add them to an existing unit.
+- **Candidate Bun runtime.** For an exact stable `packageManager: "bun@x.y.z"`, each
+  dependency and verification command selects that version independently. Provision the
+  trusted Bun executable at `<runner-home>/toolchains/bun/x.y.z/bin/bun` (and its `bunx`
+  alias in that directory) before submitting the upgrade. Verify the release checksum,
+  keep each version immutable, and put no other tools in that directory. The runner
+  never downloads a runtime named by a candidate. Without a provisioned version it uses
+  the Bun already on PATH only if its version matches exactly; otherwise the operation
+  fails with the required path. Its per-command PATH also reaches nested `bun` calls,
+  leaving the global executable and other operations untouched. Command evidence records
+  the selected version, resolved binary path and SHA-256 in its configuration identity.
+  This does not replace dependency fingerprints or reuse an install: runner candidates
+  still receive their own frozen install, and packageManager remains a tracked install input.
 - **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
   releases (submit), deploys (submit, list) and changes by jj change ID.
 

@@ -33,6 +33,17 @@ test("credential arguments and known environment values are redacted before pers
   assert.equal(context.executable, "[CHECKOUT]/bin/tool");
 });
 
+test("selected runtime identity changes command provenance without retaining environment values", () => {
+  const runtime = { name: "bun" as const, version: "1.4.4", path: "/runner/toolchains/bun/1.4.4/bin/bun", sha256: "a".repeat(64) };
+  const selected = commandEvidence(request, "/fixture", runtime);
+  assert.equal(selected.status, "recorded");
+  if (selected.status !== "recorded") throw new Error("missing context");
+  assert.deepEqual(selected.runtime, runtime);
+  assert.notEqual(selected.configurationSha256, (commandEvidence(request, "/fixture") as typeof selected).configurationSha256);
+  assert.notEqual(selected.configurationSha256, (commandEvidence(request, "/fixture", { ...runtime, sha256: "b".repeat(64) }) as typeof selected).configurationSha256);
+  assert.doesNotMatch(JSON.stringify(selected), /super-secret-value/);
+});
+
 test("outside paths and excessive context are explicit without persisting large or partial arguments", () => {
   const context = commandEvidence({ ...request, cwd: "/other/private" }, "/fixture");
   assert.equal(context.status === "recorded" && context.cwd, null);

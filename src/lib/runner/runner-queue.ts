@@ -3,6 +3,7 @@ import { stat, mkdir, realpath, rm } from "node:fs/promises";
 import { availableParallelism, freemem, loadavg, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { sanitizedProcessEnv } from "../infra/bounded-process.ts";
+import { candidateBun } from "./candidate-bun.ts";
 import { integrateLandingCandidate, prepareLandingCandidate, rollbackFailure, verifyPreparedCandidate, integratePreparedCandidate } from "../landing/landing-candidate.ts";
 import type { PreparedLandingCandidate } from "../landing/landing-candidate.ts";
 import { importSubmissionSource } from "../landing/submission-source.ts";
@@ -711,7 +712,9 @@ export function createRunnerQueue(input: {
     async function run(request: BoundedProcessRequest, purpose?: RunPurpose): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
-      const context = commandEvidence(request, checkout);
+      const selected = await candidateBun(checkout, request.env, home);
+      request = { ...request, env: selected.environment };
+      const context = commandEvidence(request, checkout, selected.runtime);
       const runPurpose = purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate");
       const build = ["gate", "migration_generate", "migration_verify"].includes(runPurpose) ? await buildCheckEnvironment() : {};
       append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs,
