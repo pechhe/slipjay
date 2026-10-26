@@ -392,7 +392,8 @@ the runner's `limits` bound concurrent runs together.
   never adds a place beyond them.
 - **Short landings.** With a combined budget, a landing of a short repository may start
   while other operations hold every worker: at most `workers` operations other than
-  short landings run at once, and at most `workers + 1` in all. A repository is short
+  short landings run at once, and at most `workers + 1` in the worker pool.
+  Deploys use the separate `deployWorkers` budget (see [Deploys](#deploys)). A repository is short
   when its landings' verify-stage p90 over the last 7 days, from at least 10 landings
   (the `slipjay metrics` budget projection), is at or below `shortLandingP90Seconds` in
   the runner config (default 180); with fewer landings it is not. The class only
@@ -671,6 +672,16 @@ and held state through the existing recovery path.
 
 ### Deploys
 
+Deploy records add `startedAt` (ISO timestamp) and `durationMs` for overall elapsed
+execution, measured by the runner from admission through any release-branch
+compensation, including source preparation and cleanup. Each project's optional
+`timings` maps `build` (build/prepare), `migrate`, `health`, `activate` and `rollback`
+to `{ startedAt, durationMs, outcome }`, where outcome is `passed` or `failed`.
+Only steps whose commands ran have intervals; a shared migration runs once and its same interval
+appears on every project. Activation and rollback retain their serial order.
+`slipjay deploys` prints these intervals and outcomes, and `--json` carries the
+fields in `record`. Older records without timings remain readable and printable.
+
 A repository can declare environments the runner deploys. `staging` follows the
 integration branch; `production` deploys only through a promotion (see
 [Release](#release)), never on a schedule or by `slipjay deploy`:
@@ -691,7 +702,14 @@ integration branch; `production` deploys only through a promotion (see
   a newer landing follows the normal interval. Cancelling a queued deployment
   prevents scheduled retries of that commit. Scheduling is rebuilt from the log
   at startup.
-- **Where.** Deploys take turns in their own lane, so a deploy waiting minutes on its
+- **Where.** Deploys use their own admission budget, outside `workers`: at most one
+  per repository and `deployWorkers` across the runner (default 1, a whole number
+  of at least 1 in the runner config). Raising it allows different repositories to
+  deploy together. Landings, releases, resets and pre-verifications keep their
+  existing worker rules. All commands still share `slipjay.slice` CPU and memory
+  limits; without enforced combined limits the runner serializes commands and
+  refuses multiple deploy workers. Queue reasons name the operation holding a
+  needed place. Deploys take turns within each repository, so a deploy waiting minutes on its
   build never holds a landing. Each project's command runs, all side by side, in an
   exact source view of the commit (a detached git checkout that borrows the warm
   checkout's objects). It gets the declared `environmentKeys`,

@@ -27,7 +27,7 @@ import { postIntegrationPolicy } from "../policy/post-integration-policy.ts";
 import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
-import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
 import { label, newOperationId } from "./runner-log.ts";
 import type { OperationLogOptions } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
@@ -93,7 +93,7 @@ export function runnerWorkers(config: Pick<RunnerConfig, "workers">, executor: P
 
 /** What the log projects waits by: the queue's workers, lanes, depths and short-landing threshold, from the same config. */
 export function runnerLogOptions(config: RunnerConfig, executor: Pick<Executor, "combinedLimits">): OperationLogOptions {
-  return { workers: runnerWorkers(config, executor), lane: (repo) => repositoryLane(config, repo),
+  return { workers: runnerWorkers(config, executor), deployWorkers: config.deployWorkers ?? RUNNER_DEFAULT_DEPLOY_WORKERS, separateDeploys: Boolean(executor.combinedLimits), lane: (repo) => repositoryLane(config, repo),
     depth: (repo) => configuredRepository(config, repo)?.verificationDepth ?? 1,
     ...executor.combinedLimits ? { shortLandingP90Ms: (config.shortLandingP90Seconds ?? RUNNER_DEFAULT_SHORT_LANDING_SECONDS) * 1000 } : {} };
 }
@@ -105,7 +105,7 @@ export function runnerLogOptions(config: RunnerConfig, executor: Pick<Executor, 
  * A release verifies its pinned candidate first, in a release lane with a checkout of
  * its own, beside the repository's landings (but never beside its reset, nor in a shared
  * lane: see `admissionLane`), and joins the repository lane only to publish. Different repositories share no checkout, branch, target or environment, so
- * their lanes run at once. At most `workers` operations run at once, a release counting
+ * their lanes run at once. At most `workers` non-deploy operations run at once, a release counting
  * as one until it has published, besides one more short landing (`admits`); operations
  * that can start are admitted oldest first. Deploys take turns in a separate lane that only reads the warm store, so a
  * deploy that waits minutes on its build never holds a landing.
@@ -156,6 +156,9 @@ export function createRunnerQueue(input: {
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   const workers = runnerWorkers(config, executor);
+  const deployWorkers = config.deployWorkers ?? RUNNER_DEFAULT_DEPLOY_WORKERS;
+  if (!executor.combinedLimits && deployWorkers > 1) throw new Error("Multiple deploy workers require an executor with enforced combined resource limits");
+  const activeDeploys = new Map<string, { repo: string; pending: Promise<void> }>();
   /** Each lane's work holding its checkouts now, and any chained behind it, by `admissionLane`. */
   const lanes = new Map<string, Promise<void>>();
   const laneOf = (repo: string) => repositoryLane(config, repo);
@@ -164,7 +167,8 @@ export function createRunnerQueue(input: {
   /** The admitted landings that were short when admitted: they count toward `workers + 1` only, until they finish. */
   const shortAdmitted = new Set<string>();
   const shortPlace = Boolean(executor.combinedLimits);
-  const places = () => [...admitted.keys()].map((id) => ({ short: shortAdmitted.has(id) }));
+  const places = () => [...[...admitted.keys()].map((id) => ({ short: shortAdmitted.has(id) })),
+    ...(executor.combinedLimits ? [] : [...activeDeploys.values()].map(() => ({ short: false })))];
   /** Whether `operation`, not a depth-two successor, would be admitted as a short landing. */
   const isShort = (operation: Operation) => shortPlace && operation.kind === "landing" && log.shortRepository(operation.repo);
   // Queue-owned runtime attempts; their immutable evidence lives in the existing log.
@@ -334,24 +338,45 @@ export function createRunnerQueue(input: {
   let deploying: Promise<void> = Promise.resolve();
   let deployPending = false;
   function wakeDeploys(): void {
+    // Without a shared resource budget, deploys compete in the same arrival-ordered queue.
+    if (!executor.combinedLimits) { wakeMain(); return; }
     if (deployPending) return;
     deployPending = true;
     deploying = deploying.then(() => { deployPending = false; return deployLoop(); });
   }
-  async function deployLoop(): Promise<void> {
+  function deployLoop(): void {
     for (;;) {
       // Recovery settles the commands a previous process left, deploys included: they wait for it as landings do.
       if (log.paused() || draining || recovering || heldStart) return;
-      const operation = log.openOperations().find((entry): entry is DeployOperation => entry.kind === "deploy" && entry.status === "queued");
-      if (!operation) return;
-      await processDeploy(operation);
+      const operation = activeDeploys.size < deployWorkers
+        ? log.openOperations().find((entry): entry is DeployOperation => entry.kind === "deploy" && entry.status === "queued"
+          && ![...activeDeploys.values()].some((active) => repositoryKey(active.repo) === repositoryKey(entry.repo))) : undefined;
+      if (operation) {
+        admitDeploy(operation);
+        continue;
+      }
+      return;
     }
+  }
+  function admitDeploy(operation: DeployOperation): void {
+    const pending = processDeploy(operation).catch((error: unknown) => {
+      // Preserve an existing verdict if only its follow-up scheduling failed.
+      try {
+        append(operation.id, log.operation(operation.id)?.result
+          ? { type: "progress", line: message(error) }
+          : { type: "failed", stage: "deploying", reason: message(error) });
+      } catch (reportError) {
+        console.error(`[runner] deploy ${operation.id}: ${message(error)}; could not record failure: ${message(reportError)}`);
+      }
+    }).finally(() => { activeDeploys.delete(operation.id); wakeMain(); wakeDeploys(); });
+    activeDeploys.set(operation.id, { repo: operation.repo, pending });
   }
   async function processDeploy(operation: DeployOperation): Promise<void> {
     const progress = (line: string) => append(operation.id, { type: "progress", line });
     let verdict: OperationEvent;
     append(operation.id, { type: "stage", stage: "deploying" });
     let promotes = false;
+    const deployStartedAt = new Date().toISOString(), deployStarted = performance.now();
     try {
       const repository = configuredRepository(config, operation.repo);
       if (!repository) throw new Error(`Repository ${operation.repo} is not configured on this runner`);
@@ -396,9 +421,11 @@ export function createRunnerQueue(input: {
           return result;
         },
       });
-      const failed = [...record.migrations?.reason ? [{ name: "migrations", reason: record.migrations.reason }] : [],
-        ...record.projects.filter((project) => !project.ok)];
+      const failed = record.migrations?.reason ? [{ name: "migrations", reason: record.migrations.reason }]
+        : record.projects.filter((project) => !project.ok);
       if (failed.length && operation.promotion) record.rollback = await rollBack(operation, operation.promotion, record, policy.migrations !== undefined, earlierSchemaChange);
+      record.startedAt = deployStartedAt;
+      record.durationMs = Math.max(0, performance.now() - deployStarted);
       verdict = failed.length
         ? { type: "failed", stage: "deploying", deployment: record,
           reason: `deploy failed: ${failed.map((project) => `${project.name} (${project.reason})`).join(", ")}${record.rollback ? `; ${record.rollback.reason}` : ""}` }
@@ -413,8 +440,7 @@ export function createRunnerQueue(input: {
     }
     // A newer green candidate may have waited for this production deploy.
     if (operation.environment === "production") void promoteAutomatically(operation.repo);
-    // Landings that arrived while this deploy ran were told to wait for it; a deploy that
-    // never reached its projects is retried once the interval passes.
+    // A deploy that never reached its projects is retried once the interval passes.
     await scheduleLatest(operation.repo, progress);
   }
   /**
@@ -581,7 +607,11 @@ export function createRunnerQueue(input: {
     const behind = new Set<string>();
     for (const operation of open) {
       if (!admits(true, places(), workers, shortPlace)) break;
-      if (operation.kind === "deploy" || behind.has(laneOf(operation.repo))) continue;
+      if (operation.kind === "deploy") {
+        if (!executor.combinedLimits && operation.status === "queued" && !activeDeploys.has(operation.id)) admitDeploy(operation);
+        continue;
+      }
+      if (behind.has(laneOf(operation.repo))) continue;
       const start = startable(operation, open);
       if (!start) continue;
       // A pre-verification waits for its place without holding back the landings behind it.
@@ -600,7 +630,7 @@ export function createRunnerQueue(input: {
         turn.prepared.resolve(null);
         turn.completed.resolve(log.operation(operation.id)?.status === "landed");
         prefixes.set(operation.repo, (prefixes.get(operation.repo) ?? []).filter((entry) => entry !== turn));
-        admitted.delete(operation.id); shortAdmitted.delete(operation.id); attempts.delete(pending); wakeMain();
+        admitted.delete(operation.id); shortAdmitted.delete(operation.id); attempts.delete(pending); wakeMain(); wakeDeploys();
       });
       attempts.add(pending);
     }
@@ -609,7 +639,7 @@ export function createRunnerQueue(input: {
     admitted.set(operation.id, operation);
     if (short) shortAdmitted.add(operation.id);
     void inLane(lane, () => processOperation(operation))
-      .finally(() => { admitted.delete(operation.id); shortAdmitted.delete(operation.id); wakeMain(); });
+      .finally(() => { admitted.delete(operation.id); shortAdmitted.delete(operation.id); wakeMain(); wakeDeploys(); });
   }
   /**
    * How queued `operation` would be admitted now, places aside: as a short or long place, and
@@ -1461,6 +1491,7 @@ export function createRunnerQueue(input: {
     async drain() {
       draining = true;
       await deploying;
+      await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));
       while (log.openOperations().some(inTail)) {
         await new Promise<void>((resolve) => { const stop = log.subscribe(() => { stop(); resolve(); }); });
       }
@@ -1471,7 +1502,8 @@ export function createRunnerQueue(input: {
         await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values()]);
         const lane = deploying;
         await lane;
-        if (!recovering && !lanes.size && !attempts.size && !discoveries.size && lane === deploying) return;
+        await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));
+        if (!recovering && !lanes.size && !attempts.size && !discoveries.size && !activeDeploys.size && lane === deploying) return;
       }
     },
     close() {

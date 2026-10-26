@@ -85,6 +85,13 @@ test("a promotion that fails its health check activates nothing and returns the 
       { project: "app", allowed: "1", restore: null }, { project: "hq", allowed: "1", restore: null }, { project: "www", allowed: "1", restore: null },
       { project: "app", allowed: "1", restore: "1" }, { project: "hq", allowed: "1", restore: "1" }, { project: "www", allowed: "1", restore: "1" },
     ], "ordinary activation and compensation receive runner permission, with restore separately marked");
+    assert.equal(moved.deployment.projects[0]!.timings?.activate?.outcome, "passed");
+    assert.equal(moved.deployment.projects[1]!.timings?.activate?.outcome, "passed");
+    assert.equal(moved.deployment.projects[2]!.timings?.activate?.outcome, "failed");
+    for (const project of moved.deployment.projects) {
+      assert.equal(project.timings?.rollback?.outcome, "passed");
+      assert.ok(project.timings!.rollback!.durationMs >= 0);
+    }
     assert.deepEqual(moved.deployment.projects.map(({ name, activated, restored }) => [name, activated, restored ?? false]),
       [["app", false, true], ["hq", false, true], ["www", false, true]]);
     assert.equal(moved.deployment.rollback?.automatic, true);

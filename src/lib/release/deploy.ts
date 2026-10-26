@@ -5,7 +5,7 @@ import { withFinalizationSource } from "./post-integration-source.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { DeploymentEnvironment } from "../policy/deployment-policy.ts";
 import type { FinalizationCommand } from "../policy/post-integration-policy.ts";
-import type { DeployMigrations, DeployProjectOutcome, DeployRecord } from "../runner/runner-types.ts";
+import type { DeployMigrations, DeployProjectOutcome, DeployRecord, DeployStepTiming } from "../runner/runner-types.ts";
 import { firstError, outputLines } from "../infra/verification-failure.ts";
 
 /** How many commits a deploy record lists; a longer range says how many it left out. */
@@ -106,8 +106,18 @@ export async function runDeploy(input: {
     Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
     const step = (command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}) => input.run({ executable: command.executable, args: command.args,
       cwd: path.join(root, command.cwd), env: { ...env, ...url ? { SLIPJAY_DEPLOY_URL: url } : {}, ...extra }, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
+    // A shared migration runs once; each project's record references the same interval.
+    const timings = policy.projects.map((): NonNullable<DeployProjectOutcome["timings"]> => ({}));
+    const timed = async <T>(save: (timing: DeployStepTiming) => void, work: () => Promise<T>, passed: (value: T) => boolean): Promise<T> => {
+      const startedAt = new Date().toISOString(), start = performance.now();
+      let outcome: DeployStepTiming["outcome"] = "failed";
+      try { const value = await work(); outcome = passed(value) ? "passed" : "failed"; return value; }
+      finally { save({ startedAt, durationMs: Math.max(0, performance.now() - start), outcome }); }
+    };
+    const projectStep = (index: number, name: "build" | "health" | "activate" | "rollback", command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}, missing?: string) =>
+      missing ? Promise.resolve(missing) : timed((timing) => { timings[index]![name] = timing; }, async () => failure(await step(command, url, extra), policy.timeoutMs), (reason) => reason === null);
     // Brings the database to the commit and records how; false when it could not.
-    const migrate = async (): Promise<boolean> => {
+    const migrateCommands = async (): Promise<boolean> => {
       if (!policy.migrations) return true;
       const { verify, apply } = policy.migrations;
       // A connection error can print the database URL: redact whole streams before clipping them.
@@ -129,6 +139,9 @@ export async function runDeploy(input: {
       input.onProgress(`[migrations] ${migrations.status}${migrations.reason ? `: ${migrations.reason}` : ""}`);
       return !migrations.reason;
     };
+    const migrate = () => !policy.migrations ? Promise.resolve(true) : timed((timing) => {
+      for (const project of timings) project.migrate = timing;
+    }, migrateCommands, (ok) => ok);
     const holdBack = () => input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);
     const activates = policy.projects.some((project) => project.activate);
     // Additive migrations go first, so the health checks run the new code on its own schema;
@@ -140,28 +153,29 @@ export async function runDeploy(input: {
     const migrateFirst = activates && !nonAdditive && artifacts.length > 0;
     if (migrateFirst && !await migrate()) {
       holdBack();
-      return [];
+      return policy.projects.map((project, index) => ({ name: project.name, ok: false, activated: false, reason: `migrations failed: ${migrations?.reason}`, timings: timings[index] }));
     }
     // Projects deploy side by side: none takes traffic from another's deploy, and where the
     // environment activates, nothing moves until every one has passed. A command that throws
     // fails the deploy only once the others have stopped, since they share this source view.
-    const settled = await Promise.allSettled(policy.projects.map(async (project): Promise<DeployProjectOutcome> => {
+    const settled = await Promise.allSettled(policy.projects.map(async (project, index): Promise<DeployProjectOutcome> => {
       input.onProgress(`[deploy ${project.name}] deploying ${commitId.slice(0, 12)} to ${environment}`);
-      const result = await step(project.command);
-      const url = result.stdout.split("\n").map((line) => line.trim()).findLast((line) => URL_LINE.test(line));
+      const result = await timed((timing) => { timings[index]!.build = timing; }, () => step(project.command),
+        (result) => failure(result, policy.timeoutMs) === null);
       const failed = failure(result, policy.timeoutMs);
+      const url = result.stdout.split("\n").map((line) => line.trim()).findLast((line) => URL_LINE.test(line));
       if (failed) {
         input.onProgress(`[deploy ${project.name}] failed: ${failed}`);
-        return { name: project.name, ok: false, reason: failed };
+        return { name: project.name, ok: false, reason: failed, timings: timings[index] };
       }
       input.onProgress(`[deploy ${project.name}] deployed${url ? ` ${url}` : ""}`);
-      const unhealthy = project.healthCheck ? url ? failure(await step(project.healthCheck, url), policy.timeoutMs) : "printed no deployment URL to check" : null;
+      const unhealthy = project.healthCheck ? await projectStep(index, "health", project.healthCheck, url, {}, url ? undefined : "printed no deployment URL to check") : null;
       if (unhealthy) {
         input.onProgress(`[deploy ${project.name}] health check failed: ${unhealthy}`);
-        return { name: project.name, ok: false, ...(url ? { url } : {}), reason: `health check failed: ${unhealthy}` };
+        return { name: project.name, ok: false, ...(url ? { url } : {}), reason: `health check failed: ${unhealthy}`, timings: timings[index] };
       }
       if (project.healthCheck) input.onProgress(`[deploy ${project.name}] healthy`);
-      return { name: project.name, ok: true, ...(url ? { url } : {}) };
+      return { name: project.name, ok: true, ...(url ? { url } : {}), timings: timings[index] };
     }));
     const thrown = settled.find((result) => result.status === "rejected");
     if (thrown) throw thrown.reason;
@@ -177,7 +191,7 @@ export async function runDeploy(input: {
     for (const [index, project] of policy.projects.entries()) {
       const outcome = outcomes[index]!;
       // Local service recovery follows the runner's migration compatibility decision too.
-      const failed = outcome.url ? failure(await step(project.activate!, outcome.url, { SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: restore ? "1" : "0" }), policy.timeoutMs) : "printed no deployment URL to activate";
+      const failed = await projectStep(index, "activate", project.activate!, outcome.url, { SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: restore ? "1" : "0" }, outcome.url ? undefined : "printed no deployment URL to activate");
       if (!failed) {
         outcome.activated = true;
         input.onProgress(`[deploy ${project.name}] activated ${outcome.url}`);
@@ -192,7 +206,7 @@ export async function runDeploy(input: {
         if (!restore || activated.activated === false) continue;
         const before = previousUrls[moved.name];
         // A deployment that served before may need another call than a first activation (Vercel: rollback, not promote).
-        const unrestored = before ? failure(await step(moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "1" }), policy.timeoutMs) : "no earlier deployment is recorded";
+        const unrestored = await projectStep(earlier, "rollback", moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "1" }, before ? undefined : "no earlier deployment is recorded");
         // An unsuccessful recovery cannot prove the earlier deployment serves.
         if (unrestored) {
           if (before) activated.activated = "unknown";

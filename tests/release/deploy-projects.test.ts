@@ -51,6 +51,25 @@ test("an environment's projects deploy side by side, and the record keeps their 
   });
 });
 
+test("successful and failed builds record exact elapsed intervals", async () => {
+  let now = 0;
+  const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+  try {
+    await deployHeld(["app", "hq"], async (running, pending) => {
+      now = 250;
+      running.get("app")!.resolve(exited(0, "https://app.example.test"));
+      running.get("hq")!.resolve(exited(1, "build failed"));
+      const record = await pending as Awaited<ReturnType<typeof runDeploy>>;
+      for (const [index, project] of record.projects.entries()) {
+        assert.equal(project.timings?.build?.durationMs, 250);
+        assert.equal(project.timings?.build?.outcome, index === 0 ? "passed" : "failed");
+        assert.ok(Number.isFinite(Date.parse(project.timings!.build!.startedAt)));
+        assert.equal(project.timings?.activate, undefined, "unreached steps have no invented interval");
+      }
+    });
+  } finally { clock.mockRestore(); }
+});
+
 test("a command that throws fails the deploy only after the other projects stop, keeping their source view", async () => {
   await deployHeld(["app", "hq"], async (running, record) => {
     let settled = false;
@@ -80,7 +99,7 @@ test("migrations go before the projects deploy only when the promotion's known f
     const order = async (migrationArtifacts: string[] | undefined, nonAdditive = false) => {
       const steps: string[] = [];
       let applied = false;
-      await runDeploy({
+      const record = await runDeploy({
         gitDirectory: path.join(repo, ".git"), environment: "production", commitId: git("rev-parse", "HEAD"), previous: null, policy,
         nonAdditive, ...migrationArtifacts ? { migrationArtifacts } : {}, readEnvironment: () => ({}), onProgress: () => {},
         run: async ({ executable }) => {
@@ -89,6 +108,12 @@ test("migrations go before the projects deploy only when the promotion's known f
           return exited(executable === "verify" && !applied ? 2 : 0, executable === "deploy" ? "https://app.example.test" : "");
         },
       });
+      for (const name of ["build", "migrate", "health", "activate"] as const) {
+        const timing = record.projects[0]!.timings?.[name];
+        assert.equal(timing?.outcome, "passed", name);
+        assert.ok(timing!.durationMs >= 0, name);
+        assert.ok(Number.isFinite(Date.parse(timing!.startedAt)), name);
+      }
       return steps.join(" ");
     };
     const early = "verify apply verify deploy health activate";

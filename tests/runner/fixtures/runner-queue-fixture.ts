@@ -104,7 +104,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { postIntegrationReadByGate, workers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {} }: { postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
+  { postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {} }: { postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -211,7 +211,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     return run(request);
   } };
   const config: RunnerConfig = { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {}, ...extraRepos },
-    ...workers === undefined ? {} : { workers },
+    ...workers === undefined ? {} : { workers }, ...deployWorkers === undefined ? {} : { deployWorkers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } };
   const log = openOperationLog(logPath, runnerLogOptions(config, executor), { classify: classifyEvent, landingOutcome, ...projections });
   const unsubscribe = log.subscribe((event) => {

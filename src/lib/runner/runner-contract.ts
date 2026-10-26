@@ -64,8 +64,11 @@ export const recoveryKey = (repo: string, commitId: string) => `${repo}\n${commi
 /** How many landings, releases and resets of different repositories run at once, unless the config sets `workers`. */
 export const RUNNER_DEFAULT_WORKERS = 2;
 
+/** Deploys have a separate runner-wide budget and always serialize within a repository. */
+export const RUNNER_DEFAULT_DEPLOY_WORKERS = 1;
+
 /**
- * The admission rule: at most `workers` operations other than short landings run at once, and with the short place
+ * The worker admission rule (deploys use their own budget): at most `workers` operations other than short landings run at once, and with the short place
  * (enforced combined limits) at most `workers + 1` in all, so a short landing may start while long operations hold
  * every worker. Whether an operation, short or not, may start beside `running`, each marked short or not.
  */
@@ -96,6 +99,7 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   const missing = ["user.name", "user.email"].filter((key) => !config.jj?.[key]?.trim());
   if (missing.length) return `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity`;
   if (config.workers !== undefined && !(Number.isSafeInteger(config.workers) && config.workers >= 1)) return `The runner config's "workers" must be a whole number of at least 1`;
+  if (config.deployWorkers !== undefined && !(Number.isSafeInteger(config.deployWorkers) && config.deployWorkers >= 1)) return `The runner config's "deployWorkers" must be a whole number of at least 1`;
   if (config.shortLandingP90Seconds !== undefined && !(typeof config.shortLandingP90Seconds === "number" && Number.isFinite(config.shortLandingP90Seconds) && config.shortLandingP90Seconds > 0))
     return `The runner config's "shortLandingP90Seconds" must be a number of seconds above 0`;
   const limits = Object.entries(config.limits ?? {});

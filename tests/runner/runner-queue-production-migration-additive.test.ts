@@ -32,7 +32,7 @@ test("additive production migrations that fail leave nothing deployed", async ()
     const refused = (await promote(first)).result;
     assert.ok(refused?.type === "failed" && refused.deployment, JSON.stringify(refused));
     assert.equal(refused.deployment.migrations?.status, "verify_failed");
-    assert.deepEqual(refused.deployment.projects, []);
+    assert.ok(refused.deployment.projects.every((project) => project.timings?.migrate?.outcome === "failed" && project.timings?.build === undefined));
     assert.equal(refused.deployment.rollback?.automatic, true, JSON.stringify(refused.deployment.rollback));
     assert.equal(f.releaseRef(), before, "nothing was applied, so the release branch returns");
     assert.deepEqual(await order(), ["verify"]);
@@ -41,7 +41,7 @@ test("additive production migrations that fail leave nothing deployed", async ()
     await writeFile(join(f.root, "fail-apply"), "");
     const partial = (await promote(first)).result;
     assert.ok(partial?.type === "failed" && partial.deployment?.migrations?.status === "apply_failed", JSON.stringify(partial));
-    assert.deepEqual(partial.deployment.projects, []);
+    assert.ok(partial.deployment.projects.every((project) => project.timings?.migrate?.outcome === "failed" && project.timings?.build === undefined));
     assert.equal(partial.deployment.rollback?.automatic, false, "a part-migrated database is the owner's to decide");
     assert.deepEqual(await order(), ["verify", "apply"]);
   } finally { await f.dispose(); }

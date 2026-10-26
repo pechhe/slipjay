@@ -18,7 +18,7 @@ test("a landing deploys staging from an exact view of the landed commit and reco
     assert.equal(firstRecord.commitId, f.main());
     assert.equal(firstRecord.previous, null);
     assert.deepEqual(firstRecord.changes.map((change) => change.subject), ["Add a.txt"]);
-    assert.deepEqual(firstRecord.projects, ["app", "hq"].map((name) => ({ name, ok: true, url: `https://${name}-${f.main().slice(0, 7)}.example` })));
+    assert.deepEqual(firstRecord.projects.map(({ timings, ...project }) => project), ["app", "hq"].map((name) => ({ name, ok: true, url: `https://${name}-${f.main().slice(0, 7)}.example` })));
     assert.deepEqual(byProject((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line))), ["app", "hq"].map((project) =>
       ({ project, environment: "staging", commit: f.main(), key: "from-runner", head: f.main() })), "each project ran in the exact commit with the declared key");
     assert.deepEqual(first.runs.map((run) => run.exitCode), [0, 0]);

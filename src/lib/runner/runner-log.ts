@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { admissionLane, admits, awaitingReplacement, recoveryKey, RECEIPT_KEY_EVENT_TYPES, RECEIPT_SETTLEMENT_EVENT_TYPES, repositoryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { admissionLane, admits, awaitingReplacement, recoveryKey, RECEIPT_KEY_EVENT_TYPES, RECEIPT_SETTLEMENT_EVENT_TYPES, repositoryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { AuditOperation, DeployOperation, HeldIntegrationState, LandingOperation, Operation, OperationEvent, OperationLog, OperationLogProjections, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, VerificationOperation, WatchOperation } from "./runner-types.ts";
 
 export function newOperationId(): string {
@@ -14,7 +14,7 @@ const SHORT_CLASS_REFRESH_MS = 600_000;
 
 /** What the queue admits by, so a queued operation names what it really waits for: `runnerLogOptions` derives it from the runner config. */
 export type OperationLogOptions = {
-  workers?: number; lane?: (repo: string) => string; depth?: (repo: string) => 1 | 2;
+  workers?: number; deployWorkers?: number; separateDeploys?: boolean; lane?: (repo: string) => string; depth?: (repo: string) => 1 | 2;
   /** The verify-stage p90 at or below which a repository's landings are short; absent, there is no short place. */
   shortLandingP90Ms?: number;
 };
@@ -53,7 +53,7 @@ const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEve
  * store imports none of them; a runner composes the ones it reports (see `runner-service`), and a caller that
  * reads only the ledger gets the bare facts.
  */
-export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, lane = (repo: string) => repo, depth = () => 1, shortLandingP90Ms }: OperationLogOptions = {}, projections: OperationLogProjections = {}): OperationLog {
+export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, deployWorkers = RUNNER_DEFAULT_DEPLOY_WORKERS, separateDeploys = true, lane = (repo: string) => repo, depth = () => 1, shortLandingP90Ms }: OperationLogOptions = {}, projections: OperationLogProjections = {}): OperationLog {
   const db = new DatabaseSync(path);
   if (path !== ":memory:") {
     db.exec("PRAGMA journal_mode = WAL");
@@ -161,7 +161,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const replaced = open.filter((operation) => awaitingReplacement(operation, open));
     for (const operation of replaced) operation.waitingFor = "Build admission of a newer candidate";
     const serial = open.filter((operation) => operation.kind !== "deploy" && !(operation.kind === "landing" && operation.admission === "pending") && !replaced.includes(operation));
-    const busy = serial.filter((operation) => operation.status === "running");
+    const deploys = open.filter((operation) => operation.kind === "deploy");
+    const runningDeploys = deploys.filter((operation) => operation.status === "running");
+    const busy = (separateDeploys ? serial : open).filter((operation) => operation.status === "running");
     const admittedTo = (operation: Operation) => admissionLane(lane(operation.repo), operation.repo, operation.kind);
     const holding = (first: Operation | undefined) => first && first.kind !== "deploy" ? busy.find((operation) => lane(operation.repo) === lane(first.repo) && (
       first.kind === "release" || first.kind === "verification" ? operation.kind === "reset"
@@ -178,7 +180,15 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       const long = busy.filter((entry) => !entry.shortLanding);
       return !short && long.length >= workers ? `a worker (${long.map(label).join(", ")})` : `every place (${busy.map(label).join(", ")})`;
     };
-    for (const entries of [...lanes, open.filter((operation) => operation.kind === "deploy")]) {
+    for (const operation of deploys) {
+      operation.position = deploys.indexOf(operation) + 1;
+      if (operation.status !== "queued") continue;
+      if (held) operation.stage = "paused";
+      const same = runningDeploys.find((other) => repositoryKey(other.repo) === repositoryKey(operation.repo));
+      const blockers = same ? [same] : runningDeploys.length >= deployWorkers ? runningDeploys : !separateDeploys ? busy : [];
+      if (blockers.length) operation.waitingFor = blockers.map(label).join(", ");
+    }
+    for (const entries of lanes) {
       const running = entries.find((operation) => operation.status === "running") ?? holding(entries[0]);
       entries.forEach((operation, index) => {
         operation.position = index + 1;

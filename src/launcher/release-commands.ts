@@ -157,7 +157,12 @@ export async function runDeploys(args: string[]): Promise<number> {
   for (const operation of deploys) {
     const record = operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
     console.log(`${operation.submittedAt}  ${operation.environment}  ${operation.commitId.slice(0, 12)}  ${operation.status}${operation.result?.type === "failed" ? `: ${operation.result.reason}` : ""}${automaticNote(operation.promotion?.automatic)}`);
-    for (const project of record?.projects ?? []) console.log(`  ${project.name}: ${project.ok ? project.url ?? "deployed" : `failed: ${project.reason}`}`);
+    if (record?.durationMs !== undefined) console.log(`  elapsed: ${record.durationMs.toFixed(0)} ms${record.startedAt ? ` (started ${record.startedAt})` : ""}`);
+    for (const project of record?.projects ?? []) {
+      console.log(`  ${project.name}: ${project.ok ? project.url ?? "deployed" : `failed: ${project.reason}`}`);
+      for (const [step, timing] of Object.entries(project.timings ?? {}))
+        console.log(`    ${step}: ${timing.outcome}, ${timing.durationMs.toFixed(0)} ms (started ${timing.startedAt})`);
+    }
     if (record) {
       console.log(`  ${record.changes.length} change${record.changes.length === 1 ? "" : "s"} since ${record.previous?.slice(0, 12) ?? "the first deploy"}`);
       for (const change of record.changes) console.log(`    ${change.commitId.slice(0, 12)} ${change.subject}`);

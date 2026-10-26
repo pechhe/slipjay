@@ -24,6 +24,10 @@ export type OperationStatus = "queued" | "running" | "landed" | "released" | "ve
 /** A release the runner verified and published, or found already published. */
 export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "released_by" }>;
 
+/** A reached deploy step; elapsed time uses a monotonic clock. Absent from older records. */
+export type DeployStepTiming = { startedAt: string; durationMs: number; outcome: "passed" | "failed" };
+export type DeployStep = "build" | "migrate" | "health" | "activate" | "rollback";
+
 /**
  * One project's outcome in a deploy: `url` is the deployment its command reported, and
  * `ok` that it deployed and passed its health check. In an environment that activates,
@@ -31,7 +35,7 @@ export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "re
  * activation or recovery command failed and the runner cannot establish what serves.
  * A project proved moved back after activation failed is `restored`.
  */
-export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string; activated?: boolean | "unknown"; restored?: boolean };
+export type DeployProjectOutcome = { name: string; ok: boolean; url?: string; reason?: string; activated?: boolean | "unknown"; restored?: boolean; timings?: Partial<Record<DeployStep, DeployStepTiming>> };
 
 /**
  * What one deploy put in an environment: the commit, the commit the environment
@@ -42,6 +46,9 @@ export type DeployRecord = {
   environment: string; commitId: string; previous: string | null;
   changes: { commitId: string; subject: string }[];
   projects: DeployProjectOutcome[];
+  /** Absent on older records; elapsed time includes source preparation and cleanup. */
+  startedAt?: string;
+  durationMs?: number;
   /**
    * A promotion that does not serve: `automatic` when production stays on what it served
    * before and the release branch returns to the commit before the release merge
@@ -550,6 +557,8 @@ export type RunnerConfig = {
    * still runs one landing, release or reset at a time. 1 is the single serial lane.
    */
   workers?: number;
+  /** Runner-wide deploy concurrency, separate from workers; default 1, always one per repository. */
+  deployWorkers?: number;
   /**
    * A repository whose landings' verify-stage p90 over the budget window (`pipeline-metrics.ts`) is at or below this
    * many seconds is short (RUNNER_DEFAULT_SHORT_LANDING_SECONDS): its landings may start while other operations hold
