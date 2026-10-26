@@ -104,7 +104,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {} }: { postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
+  { buildChecks, postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {} }: { buildChecks?: import("../../../src/lib/build/build-check-access.ts").BuildCheckAccess; postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -199,6 +199,7 @@ export async function fixture(migrations = false, release = false, deployments?:
   const published: StoredEvent[] = [];
   // Whether each landing's candidate bookmark was still on origin when its verdict was published.
   const candidateAtVerdict = new Map<string, boolean>();
+  const requestedEnvironments: { executable: string; args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
   const requestedTimeouts: { command: string; timeoutMs: number; migrationContext?: string }[] = [];
   // Only a test of containment (`scopes`) runs commands in the production executor's systemd scopes, where
   // the host has them. Otherwise the fixture stands in for an enforced combined budget, so concurrent paths
@@ -206,6 +207,7 @@ export async function fixture(migrations = false, release = false, deployments?:
   const local = scopes ? testExecutor({ home }) : directExecutor(hostname());
   const run = local.combinedLimits ? local.run : runBoundedProcess;
   const executor: Executor = { ...local, combinedLimits, run: (request) => {
+    requestedEnvironments.push({ executable: request.executable, args: request.args, env: { ...request.env } });
     requestedTimeouts.push({ command: [request.executable, ...request.args].join(" "), timeoutMs: request.timeoutMs,
       ...(request.env?.SLIPJAY_MIGRATION_CONTEXT ? { migrationContext: request.env.SLIPJAY_MIGRATION_CONTEXT } : {}) });
     return run(request);
@@ -223,7 +225,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
   });
-  const queue = createRunnerQueue({ log, executor, home, config, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs },
+  const queue = createRunnerQueue({ log, executor, home, config, buildChecks, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs },
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
@@ -318,7 +320,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     return id;
   }
   const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
-  return { root, logPath, authors, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, seedMain, push, candidate, submit, submitRelease, submitReset, lines, result,
+  return { root, logPath, authors, requestedEnvironments, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, seedMain, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;

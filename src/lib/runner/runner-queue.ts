@@ -756,13 +756,10 @@ export function createRunnerQueue(input: {
     async function run(request: BoundedProcessRequest, purpose?: RunPurpose): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
+      const runPurpose = purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate");
       const selected = await candidateBun(checkout, request.env, home);
       request = { ...request, env: selected.environment };
-      const context = commandEvidence(request, checkout, selected.runtime);
-      const runPurpose = purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate");
       const build = ["gate", "migration_generate", "migration_verify"].includes(runPurpose) ? await buildCheckEnvironment() : {};
-      append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs,
-        purpose: runPurpose, ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
       const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : [], ...request.abortSignal ? [request.abortSignal] : []]);
       const privateRun = stage === "resetting" || stage === "finalizing";
       const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
@@ -776,7 +773,12 @@ export function createRunnerQueue(input: {
       }
       const redact = privateRun ? request.redactOutput ?? ((value: string) => value) : (value: string) => redactVerificationOutput(value, checkout);
       const token = build[BUILD_READ_TOKEN_ENV];
-      const result = await executor.run({ ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment,
+      // Evidence describes the final execution environment, including runner-provided variables.
+      const executionRequest = { ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment };
+      const context = commandEvidence(executionRequest, checkout, selected.runtime);
+      append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs,
+        purpose: runPurpose, ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
+      const result = await executor.run({ ...executionRequest,
         redactOutput: token ? (value) => redact(value.split(token).join("[REDACTED]")) : redact, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
         throw error;
