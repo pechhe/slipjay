@@ -521,6 +521,19 @@ and held state through the existing recovery path.
   comes first; later commits' titles and bodies follow in order, separated by blank
   lines. Review fixes therefore keep the feature title, and all bodies and trailers
   remain in the published description. A single commit keeps its description.
+- **Renames over integration edits.** Before rebasing or verification, the runner
+  checks the original submitted source's diff from its common bases with integration
+  using Git rename detection at 50% similarity. A runner duplicate is never the
+  source of this check. With multiple merge bases, history reachable from any base
+  is excluded. If later integration history
+  touched a renamed file's old path, landing fails as a `conflict`, naming the old
+  and new paths and the integration commit IDs and landing titles. Carry those
+  edits into the new paths, rebase the repaired candidate onto integration, review
+  the result, and land again. A rename whose old path integration did not touch
+  proceeds normally. A deletion without a similar added file keeps JJ's existing
+  rebase behaviour (including any modify/delete conflict). The submission dry-run
+  uses the same detector to report these path conflicts before admission; the
+  runner checks again against its exact preparation tip before verification.
 - **Migrations and finalization.** Within a change's turn, the runner generates its
   `migrationFinalization` artifacts on the rebased candidate (generation and its
   verification are recorded runs, like the gate), runs the gate, integrates, runs the

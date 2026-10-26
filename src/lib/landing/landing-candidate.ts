@@ -27,6 +27,8 @@ export type CandidateOptions = {
   operationId?: string;
   /** Runner slot already edits the exact submitted commit; retained earlier rewrites may share its change id. */
   pinnedSource?: boolean;
+  /** Submitted source before runner duplication can merge its delete/add diff onto integration. */
+  originalSource?: string;
   environment?: () => NodeJS.ProcessEnv;
   /** Runs migration generation and verification commands (default: a bounded local process). */
   runCommand?: (request: import("../infra/bounded-process.ts").BoundedProcessRequest, purpose?: import("./migration-candidate.ts").MigrationRunPurpose) => Promise<import("../infra/bounded-process.ts").BoundedProcessResult>;
@@ -50,6 +52,7 @@ export type LandingIO = {
 /** The runner's landing candidate transition: rebase, finalize, verify, integrate. */
 import { migrationCandidate } from "./migration-candidate.ts";
 import { writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { assertRenameSafety } from "./rename-safety.ts";
 
 /** A prepared immutable candidate. Verification and publication retain its exact parent. */
 export type PreparedLandingCandidate = {
@@ -95,10 +98,12 @@ export async function prepareLandingCandidate(cwd: string, options: CandidateOpt
   const migration = await migrationCandidate(cwd, context, io, options);
   try {
     options.onStage?.("rebasing");
-    await rebaseOntoIntegration(cwd, options.pinnedSource ? target.commitId : target.changeId, context.integrationBranch, jj);
+    const originalTip = await revisionFacts(cwd, context.integrationBranch);
+    await assertRenameSafety(cwd, options.originalSource ?? target.commitId, originalTip.commitId, jj);
+    await rebaseOntoIntegration(cwd, options.pinnedSource ? target.commitId : target.changeId, originalTip.commitId, jj);
     const rebased = options.pinnedSource ? await revisionFacts(cwd, "@") : await revisionFacts(cwd, target.changeId);
     await assertStackConflictFree(cwd, context.integrationBranch, rebased.commitId);
-    const base = await revisionFacts(cwd, context.integrationBranch);
+    const base = originalTip;
     let candidate = rebased;
     await prepareCandidateDependencies(cwd, context, candidate, options.onProgress, options.runCommand);
     candidate = await (adapter.finalizeCandidate?.(candidate, base) ?? migration.finalize(candidate, base));

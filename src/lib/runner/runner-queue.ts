@@ -932,6 +932,7 @@ export function createRunnerQueue(input: {
       await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
       const candidateOptions = {
+        originalSource: operation.commitId,
         pinnedSource: Boolean(prefix || retainedSource),
         environment, onProgress: progress,
         onStage: (next) => { if (next !== "cleaning") setStage(next); },

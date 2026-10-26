@@ -53,6 +53,8 @@ test("classifies terminal precedence, rebase conflicts, verification infrastruct
   assert.equal(classify({ type: "superseded", by: "newer" }).cause, "superseded");
   assert.equal(classify(failed("rebasing", "Rebase produced conflicts" )).cause, "conflict");
   assert.equal(classify(failed("rebasing", "Rebase command failed")).cause, "infrastructure");
+  assert.equal(classify(failed("rebasing", "Landing rename conflict: integration changed a renamed path after the candidate's original base")).cause, "conflict");
+  assert.equal(classify(failed("rebasing", "Could not check landing rename safety: diagnostic mentions conflict.ts. Repair the check and land again")).cause, "infrastructure");
   assert.equal(classify(failed("verifying", "Timed out"), { paused: false, held: false }).cause, "infrastructure");
   assert.equal(classifyFailure(failed("verifying", "Timed out"), {
     paused: false, held: false, run: { runId: "r", command: "bun test", host: "runner", startedAt: "now", testBodyRan: true },

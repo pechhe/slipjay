@@ -27,6 +27,7 @@ function fixture(direct = false, emptyChild = false) {
       : cwd === "/repo" && revision === "@" ? { ...candidate, commitId: "primary", empty: true }
       : revision === "@" && emptyChild ? { ...liveCandidate, commitId: "empty-child", empty: true } : liveCandidate,
     jj: async (_cwd: string, args: string[]) => {
+      if (args[0] === "log" && args[2]?.startsWith("heads(")) return liveBase;
       if (args[0] === "diff" || args[0] === "log") return "";
       steps.push(args[0]!);
       if (args[0] === "edit") { assert.equal(args[1], liveCandidate.commitId); emptyChild = false; }
@@ -125,5 +126,20 @@ test("source rewritten between preparation and verification starts no gate and m
   f.rewrite();
   await assert.rejects(verifyPreparedCandidate("/task", prepared, f.options, f.io), /Verification checkout differs/);
   assert.deepEqual(f.steps, ["rebase", "deps", "generate"]);
+  assert.deepEqual(f.state, {});
+});
+
+test("rebase uses the checked commit even if the integration bookmark moves before rebase", async () => {
+  const f = fixture();
+  const jj = f.io.jj;
+  f.io.jj = async (cwd, args) => {
+    if (args[0] === "rebase") {
+      assert.equal(args.at(-1), "base", "rebase must use the immutable checked tip");
+      f.drift();
+    }
+    return jj(cwd, args);
+  };
+  await assert.rejects(prepareLandingCandidate("/task", f.options, f.io), /Integration bookmark moved/);
+  assert.ok(!f.steps.includes("verify"));
   assert.deepEqual(f.state, {});
 });

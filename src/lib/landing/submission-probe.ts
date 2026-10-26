@@ -10,6 +10,7 @@ import { rebaseOntoIntegration } from "./landing-candidate.ts";
 import { conflictedPaths } from "./landing-steps.ts";
 import { importSubmissionSource } from "./submission-source.ts";
 import type { RetainedSubmission } from "./submission-source.ts";
+import { assertRenameSafety, LandingRenameConflict } from "./rename-safety.ts";
 
 /** A landing queued ahead of a submission in its repository, with the source the runner retained for it. */
 export type QueuedLanding = { operationId: string; changeId: string; commitId: string; retained: RetainedSubmission };
@@ -56,6 +57,11 @@ export async function probeSubmission(input: { home: string; url: string; jjConf
     throw new Error("Candidate bookmark differs from the submitted commit");
   // The runner's own transition for a retained source: copy it, then move it onto the base (a merge keeps its parents until then).
   const conflicts = async (source: string, base: string) => {
+    try { await assertRenameSafety(checkout, source, base, jj); }
+    catch (error) {
+      if (error instanceof LandingRenameConflict) return { copy: source, paths: error.paths };
+      throw error;
+    }
     await rebaseOntoIntegration(checkout, await duplicateLandingSource(checkout, source, base), base, jj);
     const copy = (await revisionFacts(checkout, "@")).commitId;
     return { copy, paths: await conflictedPaths(checkout, copy) };

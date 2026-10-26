@@ -70,6 +70,7 @@ export function classifyFailure(
     return fact(context.paused ? "paused_out" : "cancelled");
   }
   if (event.reason === OWNER_KILL_REASON) return fact("killed");
+  if (event.stage === "rebasing" && event.reason.startsWith("Could not check landing rename safety:")) return fact("infrastructure");
   if (/^(?:late-bound migration artifacts must be generated during landing|declined paths?:)/i.test(event.reason)) return fact("policy");
   if (context.held && ["integrating", "finalizing", "publishing"].includes(event.stage)) return fact("held");
   const verification = event.stage === "verifying" || context.run?.purpose === "migration_verify";
