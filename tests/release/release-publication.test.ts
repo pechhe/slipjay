@@ -1,14 +1,17 @@
 import { jj } from "../support/workspace-project.ts";
 import { landFile, releaseProject, remoteParents, remoteRef, remoteTree } from "../support/release-project.ts";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFile, realpath } from "node:fs/promises";
 import { test } from "vite-plus/test";
 import { confirmRelease, releaseIntegration } from "../../src/lib/release/release.ts";
 
+const bunVersion = execFileSync("bun", ["--version"], { encoding: "utf8" }).trim();
+
 test("release dependency preparation uses its runner executor and cannot bypass a refused install", async () => {
   const f = await releaseProject();
   try {
-    const candidate = await landFile(f, "package.json", JSON.stringify({ name: "fixture-release", private: true, packageManager: "bun@1.4.3" }));
+    const candidate = await landFile(f, "package.json", JSON.stringify({ name: "fixture-release", private: true, packageManager: `bun@${bunVersion}` }));
     const before = remoteRef(f, "release");
     const commands: string[][] = [];
     await assert.rejects(confirmRelease(f.repo, { candidate, run: async (request) => {
