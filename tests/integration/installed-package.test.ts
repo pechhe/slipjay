@@ -25,6 +25,19 @@ test("the installed binary reports the package version and starts a workspace as
     assert.equal(started.status, 0, started.stderr);
     const receipt = JSON.parse(started.stdout) as { workspacePath: string };
     assert.ok(existsSync(receipt.workspacePath), "the receipt names a real checkout");
+
+    // A caller importing the handler has a different argv[1]; JSON start must still spawn the package binary.
+    const invoke = await installed.script("invoke-start.mjs", `
+      import { runStart } from ${JSON.stringify(`${installed.packageUrl}/src/launcher/start-commands.ts`)};
+      await runStart(["--integration", "--json", "imported handler task"]);
+    `);
+    const imported = spawnSync("bun", [invoke], { cwd: f.repo, encoding: "utf8", env: process.env, timeout: 120_000 });
+    assert.equal(imported.status, 0, imported.stderr);
+    const second = JSON.parse(imported.stdout) as { workspacePath: string; integrationRoot: string };
+    assert.equal(imported.stdout, `${JSON.stringify(second)}\n`);
+    assert.equal(second.integrationRoot, f.repo);
+    assert.notEqual(second.workspacePath, receipt.workspacePath);
+    assert.ok(existsSync(second.workspacePath));
   } finally {
     await f.dispose();
     await installed.dispose();

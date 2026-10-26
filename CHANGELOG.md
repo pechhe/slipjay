@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.46.16
+
+- **The command line is split by feature (SJ-4):** `src/launcher/workspace.ts` is now the bootstrap and a static dispatcher
+  (the shared cutover gate, `--version`, usage and the top-level error handling) and every command lives in a handler
+  module for its feature: workspaces, retention, start, landing, release and deploy, policy and config, cutover,
+  observation, runner administration and the guard hook. A handler module sets no signal listener and reads no stdin until
+  it is invoked, and the installed-package check now covers `--version`, the exit-2 usage error and `start --json`
+  resolving its own executable from a different caller. No flag, alias, exit code or output changes.
+
 ## v3.46.15
 
 - **The runner connection is its own module (SJ-3):** token lookup, authenticated requests, refusals and the SSH forward
