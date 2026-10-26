@@ -18,7 +18,7 @@ async function fakeBitwarden(list = '[{"key":"SLIPJAY_RUNNER_TOKEN","value":"fro
 
 test("one command asks Bitwarden for the runner token once", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const bws = await fakeBitwarden();
   try {
     assert.deepEqual(await Promise.all([runnerToken(bws.env), runnerToken(bws.env)]), ["from-bitwarden", "from-bitwarden"]);
@@ -30,7 +30,7 @@ test("one command asks Bitwarden for the runner token once", async () => {
 
 test("a failed Bitwarden lookup is asked again on the next call", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const bws = await fakeBitwarden();
   try {
     await writeFile(bws.fail, "");
@@ -43,7 +43,7 @@ test("a failed Bitwarden lookup is asked again on the next call", async () => {
 
 test("a transient Bitwarden failure does not fail the lookup", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const bws = await fakeBitwarden();
   try {
     // Fails on the first attempt only: the script removes its own failure marker after the first call.
@@ -56,7 +56,7 @@ test("a transient Bitwarden failure does not fail the lookup", async () => {
 
 test("a persistent failure stops after a finite number of attempts and names the cause without bws output", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const bws = await fakeBitwarden();
   try {
     await writeFile(bws.fail, "");
@@ -82,14 +82,14 @@ test("a lookup that times out says so", async () => {
     runBoundedProcess: async () => ({ exitCode: null, signal: "SIGTERM", timedOut: true, stdout: "", stderr: "" }),
   }));
   try {
-    const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+    const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
     await assert.rejects(runnerToken({ ...process.env, SLIPJAY_RUNNER_TOKEN: "" }), /after 3 attempts \(bws timed out\)/);
   } finally { vi.doUnmock("../../src/lib/infra/bounded-process.ts"); vi.resetModules(); }
 });
 
 test("an unrelated secret holding a raw newline or tab does not hide the token", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const bws = await fakeBitwarden(`[{"key":"OTHER","value":"line one\nline\ttwo \\"quoted\\""},{"key":"SLIPJAY_RUNNER_TOKEN","value":"from-bitwarden"}]`);
   try {
     assert.equal(await runnerToken(bws.env), "from-bitwarden");
@@ -99,7 +99,7 @@ test("an unrelated secret holding a raw newline or tab does not hide the token",
 
 test("a truly absent key keeps the missing-key message and shows no output", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const bws = await fakeBitwarden('[{"key":"OTHER","value":"hidden-value"}]');
   try {
     await assert.rejects(runnerToken(bws.env), (error: Error) => {
@@ -112,7 +112,7 @@ test("a truly absent key keeps the missing-key message and shows no output", asy
 
 test("a bws that cannot be started is named as such", async () => {
   vi.resetModules();
-  const { runnerToken } = await import("../../src/lib/runner/runner-client.ts");
+  const { runnerToken } = await import("../../src/lib/runner/runner-transport.ts");
   const dir = await mkdtemp(join(tmpdir(), "slipjay-nobws-"));
   try {
     await assert.rejects(runnerToken({ ...process.env, PATH: dir, SLIPJAY_RUNNER_TOKEN: "" }), /after 3 attempts \(bws could not be started\)/);

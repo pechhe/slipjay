@@ -2,7 +2,9 @@ import { admissionSettled, buildAdmitter, buildReader, settleAdmission } from ".
 import type { BuildAdmissionRecord, BuildRoute } from "./build-admission.ts";
 import { BuildRefusal, readBuildItem } from "./tracker.ts";
 import { recoveryKey, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent, OperationLog, StoredEvent } from "../runner/runner-types.ts";
+import type { BuildDeliveryState, LandingOperation, OperationEvent, OperationLog, StoredEvent } from "../runner/runner-types.ts";
+
+export type { BuildDeliveryState } from "../runner/runner-types.ts";
 
 /** Build's `failed` bundle (pechhe/slipjay#57), bounded: references to retained logs, never their content. */
 type AttemptFailure = {
@@ -41,12 +43,6 @@ export type BuildReceipt = { operationId: string; key: number; occurredAt: strin
   | { action: "recordAttempt"; input: BuildReceiptInput }
   | { action: "recordAttemptRun"; input: BuildRunInput }
   | { action: "recordChoreLanding"; input: BuildChoreInput });
-
-/** Delivery as the runner snapshot reports it: receipts still owed, and whether Build is answering. */
-export type BuildDeliveryState = {
-  state: "available" | "unavailable"; since: string | null; reason: string | null;
-  pending: number; oldestPendingAt: string | null; parked: number;
-};
 
 /** Build refuses a body over 256 KiB, and a refusal that size is permanent: keep every receipt well inside it. */
 export const RECEIPT_MAX_BYTES = 200_000;

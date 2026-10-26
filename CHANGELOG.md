@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.46.15
+
+- **The runner connection is its own module (SJ-3):** token lookup, authenticated requests, refusals and the SSH forward
+  moved from `runner-client.ts` into `runner-transport.ts`, which imports nothing from workspace, landing, release or Build
+  implementations. The client keeps its durable request, handoff and telemetry state and passes the transport two awaited
+  hooks, so an SSH-forward failure is still recorded before the original error is rethrown and a healthy connection still
+  flushes pending facts. The runner and release wire types the contract imported from implementations now live in
+  `release-types.ts` and `verification-evidence.ts`, which removes the contract-to-release type cycle, and the architecture
+  check rejects any new dependency, runtime or type-only, from the transport or the contracts back into a delivery
+  implementation. No behaviour changes.
+
 ## v3.46.14
 
 - **An admission reads its items a few at a time (YS-468):** the runner read the Spec and every named Ticket from Build at

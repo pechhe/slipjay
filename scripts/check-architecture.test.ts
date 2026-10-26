@@ -271,3 +271,39 @@ test("parse failure identifies the source module", () => {
     return true;
   });
 });
+
+test("runner transport and contracts reject direct and transitive workflow dependencies, including erased types", () => {
+  const root = fixture({
+    "src/lib/runner/runner-transport.ts": 'import type { T } from "../infra/helper.ts"; import { run } from "../landing/run.ts"; export { run };',
+    "src/lib/runner/runner-types.ts": 'export type { T } from "../release/release.ts";',
+    "src/lib/runner/runner-contract.ts": 'export type T = import("../workspace/state.ts").T;',
+    "src/lib/release/release-types.ts": 'export type { T } from "../infra/helper.ts";',
+    "src/lib/infra/helper.ts": 'export type { T } from "../build/admission.ts";',
+    "src/lib/build/admission.ts": 'export type T = {};',
+    "src/lib/landing/run.ts": 'export const run = 1;',
+    "src/lib/release/release.ts": 'export type T = {};',
+    "src/lib/workspace/state.ts": 'export type T = {};',
+  });
+  try {
+    assert.deepEqual(architectureViolations(root).sort(), [
+      "runner-transport-imports-workflow|src/lib/release/release-types.ts|src/lib/build/admission.ts",
+      "runner-transport-imports-workflow|src/lib/runner/runner-contract.ts|src/lib/workspace/state.ts",
+      "runner-transport-imports-workflow|src/lib/runner/runner-transport.ts|src/lib/build/admission.ts",
+      "runner-transport-imports-workflow|src/lib/runner/runner-transport.ts|src/lib/landing/run.ts",
+      "runner-transport-imports-workflow|src/lib/runner/runner-types.ts|src/lib/release/release.ts",
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("higher-level workflows compose neutral contracts and transport with shared primitives", () => {
+  const root = fixture({
+    "src/lib/landing/run.ts": 'import { connect } from "../runner/runner-transport.ts"; export { connect };',
+    "src/lib/runner/runner-transport.ts": 'import { run } from "../infra/process.ts"; export const connect = run;',
+    "src/lib/infra/process.ts": 'export const run = 1;',
+    "src/lib/runner/runner-types.ts": 'export type { StartSteps } from "../workspace/start-steps.ts"; export type { Result } from "../release/release-types.ts";',
+    "src/lib/workspace/start-steps.ts": 'export type StartSteps = {};',
+    "src/lib/release/release-types.ts": 'export type Result = {};',
+  });
+  try { assert.deepEqual(architectureViolations(root), []); }
+  finally { rmSync(root, { recursive: true, force: true }); }
+});

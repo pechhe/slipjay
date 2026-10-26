@@ -147,3 +147,15 @@ test("acknowledgement removes only its entry and preserves metadata and concurre
     assert.equal(f.log.events().filter((event) => event.event.type === "client").length, 1);
   } finally { await f.dispose(); }
 }, 60_000);
+
+test("a forward failure that cannot be recorded reports its diagnostic and still surfaces the original error", async () => {
+  const f = await fixture();
+  const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    vi.stubEnv("FIXTURE_SSH_FAIL", "1");
+    // The default checkout has no isolated workspace metadata to hold the fact.
+    await assert.rejects(connectRunner(f.location, f.env, f.repo), /SSH runner connection failed: forward refused/);
+    assert.deepEqual(diagnostic.mock.calls, [["SSH forwarding failure could not be durably recorded in existing isolated workspace metadata."]]);
+    assert.deepEqual(await f.pending(), []);
+  } finally { diagnostic.mockRestore(); await f.dispose(); }
+}, 60_000);

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { posix } from "node:path";
+import type { BuildBinding, BuildUnassociated, SubmissionHandoff } from "../runner/runner-types.ts";
+export type { BuildBinding, BuildUnassociated, SubmissionHandoff } from "../runner/runner-types.ts";
 
 /** Bound helper scope without omitting paths: replace files with enclosing directories as needed. */
 export function helperScope(paths: string[]): string {
@@ -12,26 +14,8 @@ export function helperScope(paths: string[]): string {
   return scope.join("\n") || ".";
 }
 
-/**
- * The author's Build binding, retained as supplied. `bodyRevision` is the numeric HQ Docs revision and is
- * unrelated to the Spec's `bodySha256`; `null` says the author does not know it. An empty `ticketIds` is Spec
- * work with no Tickets. A handoff with no `build` key makes no claim about Build at all.
- */
-export type BuildBinding = { specId: string; ticketIds: string[]; bodyRevision: number | null; bindGeneration: number; sessionId: string };
-/** The author's explicit statement that this work belongs to no Spec: once published, Build records it as a chore. */
-export type BuildUnassociated = { unassociated: true };
 export const isBuildBinding = (build: BuildBinding | BuildUnassociated | undefined): build is BuildBinding => build !== undefined && !("unassociated" in build);
 
-/** Author reports are provenance, never runner verification or repair authority. */
-export type SubmissionHandoff = {
-  version: 1; source: string; intent: string; scope: string[];
-  spec: { ref: string; bodySha256: string; snapshot: string } | null;
-  build?: BuildBinding | BuildUnassociated;
-  helpers: { revision: string; base: string; scope: string }[];
-  checks: { revision: string; command: string; result: "passed" | "failed" | "not-run"; detail: string }[];
-  reviews: { revision: string; reference: string; result: "complete" | "incomplete"; detail: string }[];
-  toolchain: { name: string; version: string }[]; gaps: string[];
-};
 export const HANDOFF_MAX_BYTES = 65536;
 const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)])) : value;

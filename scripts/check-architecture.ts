@@ -29,6 +29,17 @@ export const RUNNER_PROJECTIONS = new Set([
   "src/lib/landing/landing-outcome.ts", "src/lib/build/build-receipts.ts",
 ]);
 
+/** Transport and wire contracts may compose primitives, never delivery implementations, even through erased imports. */
+export const RUNNER_NEUTRAL_MODULES = new Set([
+  "src/lib/runner/runner-transport.ts", "src/lib/runner/runner-contract.ts", "src/lib/runner/runner-types.ts",
+  "src/lib/release/release-types.ts",
+]);
+const sharedPrimitives = new Set(["src/lib/workspace/start-steps.ts", "src/lib/release/release-types.ts"]);
+const deliveryImplementation = (file: string): boolean => !sharedPrimitives.has(file) && (
+  ["src/lib/workspace/", "src/lib/landing/", "src/lib/release/", "src/lib/build/"].some((area) => file.startsWith(area))
+  || file === "src/lib/runner/runner-client.ts" || file === "src/lib/infra/workspace-jj.ts"
+);
+
 const transpiler = new Bun.Transpiler({ loader: "ts" });
 
 /** Runtime import specifiers of a module's source: static and literal dynamic, without type-only imports. */
@@ -104,8 +115,10 @@ export function architectureViolations(root = ROOT): string[] {
   const known = new Set(files);
   const violations: string[] = [];
   const edges = new Map<string, Set<string>>();
+  const declaredEdges = new Map<string, Set<string>>();
   for (const file of files) {
     edges.set(file, new Set());
+    declaredEdges.set(file, new Set());
     const code = readFileSync(path.join(root, file), "utf8");
     const runtime = new Set(importSpecifiers(code));
     for (const specifier of new Set([...runtime, ...declaredSpecifiers(code, file)])) {
@@ -113,6 +126,7 @@ export function architectureViolations(root = ROOT): string[] {
         const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
         if (!known.has(target)) violations.push(`external-import|${file}|${specifier}`);
         else {
+          declaredEdges.get(file)!.add(target);
           if (runtime.has(specifier)) {
             if (file === RUNNER_EVENT_STORE && RUNNER_PROJECTIONS.has(target)) violations.push(`store-imports-projection|${file}|${target}`);
             edges.get(file)!.add(target);
@@ -124,6 +138,18 @@ export function architectureViolations(root = ROOT): string[] {
       }
     }
   }
+  for (const owner of RUNNER_NEUTRAL_MODULES) {
+    const seen = new Set<string>([owner]);
+    const visit = (file: string) => {
+      for (const target of [...(declaredEdges.get(file) ?? [])].sort()) {
+        if (seen.has(target)) continue;
+        seen.add(target);
+        if (deliveryImplementation(target)) violations.push(`runner-transport-imports-workflow|${owner}|${target}`);
+        else visit(target);
+      }
+    };
+    visit(owner);
+  }
   for (const members of cycles(edges)) violations.push(`cycle|${members}|${members}`);
   return violations;
 }
@@ -132,5 +158,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const violations = architectureViolations();
   for (const violation of violations) console.error(violation);
   if (violations.length) process.exitCode = 1;
-  else console.log("check:architecture: the src/ closure is self-contained, library code does not import executables, the runner event store composes no projection, and the runtime graph is acyclic");
+  else console.log("check:architecture: the src/ closure is self-contained, library code does not import executables, the runner event store composes no projection, runner transport and contracts depend on no delivery implementation, and the runtime graph is acyclic");
 }

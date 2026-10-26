@@ -1,5 +1,5 @@
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { ReleaseResult } from "../release/release.ts";
+import type { ReleaseResult } from "../release/release-types.ts";
 import type { VerificationDeclaration } from "../policy/verification-policy.ts";
 import type { StartSteps } from "../workspace/start-steps.ts";
 import type { TestReportReading } from "./test-reports.ts";
@@ -141,13 +141,13 @@ export type OperationEvent =
   /** A landing of one change; rows from before releases existed carry no `kind`. */
   | { type: "submitted"; kind?: "landing"; handoffSha256?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string;
       /** Build-bound: the queue starts it only after `build_admitted`. `supersedes` is the admitted operation it replaces in Build's custody. */
-      admission?: import("../build/build-admission.ts").BuildAdmissionRecord;
+      admission?: BuildAdmissionRecord;
       /** Declared by its author as belonging to no Spec: once published, reported to Build as a chore landing. */
       chore?: { title: string; helperRevisions: string[] } }
   /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
   | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null;
       /** The admitted Spec's and Tickets' numbers; absent on admissions recorded before they were read. */
-      items?: import("../build/build-admission.ts").BuildAdmittedItems }
+      items?: BuildAdmittedItems }
   /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`.
       A delivered chore landing names the Build item Build created for it, read by the id Build's answer gave. */
   | { type: "build_receipt"; sequence: number; state: "delivered" | "parked"; code?: string; chore?: { number: number } }
@@ -407,7 +407,7 @@ export interface OperationLog {
  * Optional requestId binds a transport retry to one operation, even after it finishes.
  * It acknowledges request identity only, not a durable source handoff.
  */
-export type SubmitRequest = { repair?: import("../landing/repair-claim.ts").RepairProof; handoff?: import("../landing/submission-handoff.ts").SubmissionHandoff; requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
+export type SubmitRequest = { repair?: RepairProof; handoff?: SubmissionHandoff; requestId?: string; repo: string; changeId: string; commitId: string; bookmark: string; submittedBy: string; identity?: Extract<OperationEvent, { type: "identity" }> };
 
 /**
  * POST /v1/releases body: the full id of a candidate already published on the
@@ -598,5 +598,42 @@ export type QueueSnapshot = {
   recentReleases: Omit<ReleaseOperation, "runs">[]; recentProductionDeploys: Omit<DeployOperation, "runs">[]; lastStagingDeploys: Omit<DeployOperation, "runs">[];
   lastSuite: { status: "unavailable" };
   /** Receipt delivery to Build; null while the runner has never admitted a Build-bound landing. */
-  build: import("../build/build-receipts.ts").BuildDeliveryState | null;
+  build: BuildDeliveryState | null;
+};
+
+export type RepairProof = { operationId: string; claimId: string; token: string };
+/**
+ * The author's Build binding, retained as supplied. `bodyRevision` is the numeric HQ Docs revision and is
+ * unrelated to the Spec's `bodySha256`; `null` says the author does not know it. An empty `ticketIds` is Spec
+ * work with no Tickets. A handoff with no `build` key makes no claim about Build at all.
+ */
+export type BuildBinding = { specId: string; ticketIds: string[]; bodyRevision: number | null; bindGeneration: number; sessionId: string };
+/** The author's explicit statement that this work belongs to no Spec: once published, Build records it as a chore. */
+export type BuildUnassociated = { unassociated: true };
+
+/** Author reports are provenance, never runner verification or repair authority. */
+export type SubmissionHandoff = {
+  version: 1; source: string; intent: string; scope: string[];
+  spec: { ref: string; bodySha256: string; snapshot: string } | null;
+  build?: BuildBinding | BuildUnassociated;
+  helpers: { revision: string; base: string; scope: string }[];
+  checks: { revision: string; command: string; result: "passed" | "failed" | "not-run"; detail: string }[];
+  reviews: { revision: string; reference: string; result: "complete" | "incomplete"; detail: string }[];
+  toolchain: { name: string; version: string }[]; gaps: string[];
+};
+/** The numbers of the Spec and Tickets an admission names, read from Build by their ids. */
+export type BuildAdmittedItems = { specNumber: number; ticketNumbers: number[] };
+
+/**
+ * What a Build-bound `submitted` record keeps so its admission can be resent from the ledger alone, byte for
+ * byte, by the handler or a later reconciliation. `supersedes` is the admitted operation it replaces in Build's custody.
+ */
+export type BuildAdmissionRecord = {
+  binding: BuildBinding; specBodyHash: string | null; helperRevisions: string[]; repairsOperationId: string | null; supersedes: string | null;
+};
+
+/** Delivery as the runner snapshot reports it: receipts still owed, and whether Build is answering. */
+export type BuildDeliveryState = {
+  state: "available" | "unavailable"; since: string | null; reason: string | null;
+  pending: number; oldestPendingAt: string | null; parked: number;
 };

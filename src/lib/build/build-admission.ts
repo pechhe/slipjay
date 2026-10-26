@@ -1,8 +1,9 @@
 import type { BuildBinding, SubmissionHandoff } from "../landing/submission-handoff.ts";
 import { isLandingSubmission } from "../runner/runner-contract.ts";
-import type { OperationLog, StoredEvent } from "../runner/runner-types.ts";
+import type { BuildAdmittedItems, BuildAdmissionRecord, OperationLog, StoredEvent } from "../runner/runner-types.ts";
 import { BUILD_ITEM_UNAVAILABLE, BuildRefusal, readBuildItem } from "./tracker.ts";
 import type { BuildReadAction, BuildReader } from "./tracker.ts";
+export type { BuildAdmittedItems, BuildAdmissionRecord } from "../runner/runner-types.ts";
 
 /** The runner's dedicated credential for Build's runner route, from its `bws run` environment. */
 export const BUILD_TOKEN_ENV = "YARDSMITH_SLIPJAY_BUILD_TOKEN";
@@ -16,9 +17,6 @@ export type BuildAdmissionRequest = {
   candidateRevision: string; baseRevision: null; helperRevisions: string[]; repairsOperationId: string | null;
   bindGeneration: number; sessionId: string; supersedesOperationId: string | null;
 };
-
-/** The numbers of the Spec and Tickets an admission names, read from Build by their ids. */
-export type BuildAdmittedItems = { specNumber: number; ticketNumbers: number[] };
 
 /**
  * How many item reads one admission has in flight at once. Build served 8 concurrent reads in well under a second but
@@ -56,14 +54,6 @@ export type BuildAdmission =
   | { outcome: "unavailable"; reason: string };
 
 export type BuildAdmitter = (request: BuildAdmissionRequest) => Promise<BuildAdmission>;
-
-/**
- * What a Build-bound `submitted` record keeps so its admission can be resent from the ledger alone, byte for
- * byte, by the handler or a later reconciliation. `supersedes` is the admitted operation it replaces in Build's custody.
- */
-export type BuildAdmissionRecord = {
-  binding: BuildBinding; specBodyHash: string | null; helperRevisions: string[]; repairsOperationId: string | null; supersedes: string | null;
-};
 
 /** Built only from what the author supplied: nothing about Build is inferred. */
 export const admissionRecord = (handoff: SubmissionHandoff & { build: BuildBinding }, repairsOperationId: string | null, supersedes: string | null): BuildAdmissionRecord => ({
