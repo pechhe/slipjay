@@ -91,7 +91,8 @@ export async function runStart(rest: string[]): Promise<void> {
     const root = options.integration ? await integrationRoot(process.cwd()) : process.cwd();
     const startedAt = new Date().toISOString();
     const started = Date.now();
-    const spareCount = (await readySpares(root)).length;
+    // A metric only: a host whose processes cannot be read still starts, from a fresh workspace.
+    const spareCount = (await readySpares(root).catch(() => [])).length;
     const task = options.task || `Issue #${options.issueNumber}`;
     const result = await createWorkspace(task, root, {
       ...options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {},

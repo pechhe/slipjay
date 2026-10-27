@@ -9,7 +9,7 @@ import { repositoryProjectCode, run, workspaceContext } from "../infra/workspace
 import type { WorkspaceContext, WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { metadataHome, workspaceHome } from "./workspace-paths.ts";
 import { listWorkspaces, metadataPath, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
-import { countsTowardPool, spareAllowance, spareRecords } from "./workspace-spares.ts";
+import { countsTowardPool, occupiedPaths, poolSpares, ProcessesUnreadableError, spareAllowance } from "./workspace-spares.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { removeWorkspace, withinWorkspaceStorage } from "./workspace-lifecycle.ts";
@@ -55,9 +55,15 @@ async function jj(cwd: string, args: string[]): Promise<string> {
 const isReadySpare = (workspace: WorkspaceEntry): boolean =>
   workspace.metadata?.spare === true && workspace.metadata?.prepared === true && Boolean(workspace.root) && existsSync(workspace.root);
 
-/** Prepared spares for this repository. A spare still being prepared is never one. */
+/** Prepared spares for this repository. A spare still being prepared is never one, nor one a live process is working in. */
 export async function readySpares(cwd: string): Promise<WorkspaceEntry[]> {
-  return (await listWorkspaces(cwd)).filter(isReadySpare);
+  return await unoccupied((await listWorkspaces(cwd)).filter(isReadySpare));
+}
+
+/** `spares` but those a live process is working in (see `occupiedPaths`). */
+async function unoccupied(spares: WorkspaceEntry[]): Promise<WorkspaceEntry[]> {
+  const occupied = await occupiedPaths(spares.map((spare) => spare.root));
+  return spares.filter((spare) => !occupied.has(spare.root));
 }
 
 
@@ -165,7 +171,7 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<Provi
   const root = context.integration.root;
   const wanted = (await spareAllowance(context)).spares;
   const registration: SpareRegistration = await withWorkspaceTransaction(`pool:${root}`, async (): Promise<SpareRegistration> => {
-    const records = await spareRecords(root);
+    const { spares: records } = await poolSpares(root);
     // A ready spare, or one a live process is preparing, counts toward the pool.
     if (records.filter(countsTowardPool).length >= wanted) {
       return { reason: wanted === 0 ? "pool-disabled" : "spare-exists" };
@@ -291,7 +297,7 @@ export async function retireExcessSpares(cwd: string): Promise<string[]> {
   const root = context.integration.root;
   const { spares: allowed } = await spareAllowance(context);
   const excess = await withWorkspaceTransaction(`pool:${root}`, async () => {
-    const records = await spareRecords(root);
+    const { spares: records } = await poolSpares(root);
     const counted = records.filter(countsTowardPool).length;
     const retiring = records.filter((record) => record.prepared === true).slice(0, Math.max(0, counted - allowed));
     for (const record of retiring) {
@@ -316,6 +322,8 @@ const REFILL_WAIT_MS = 60 * 60_000;
 export async function refillPool(root: string, report: (outcome: object) => void): Promise<void> {
   const integrationRoot = (await workspaceContext(root))?.integration.root ?? root;
   await withWorkspaceTransaction(`refill:${resolve(integrationRoot)}`, async () => {
+    // Named so a spare-marked checkout a thread is using is visible, not silently left out.
+    for (const { workspaceName, holders } of (await poolSpares(integrationRoot)).held) report({ held: workspaceName, holders });
     for (const retired of await retireExcessSpares(root)) report({ retired });
     for (;;) {
       const outcome = await provisionSpare(root);
@@ -351,7 +359,11 @@ function reusableDependencies(root: string, prepared: PreparedDependencies | nul
 export async function claimSpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
   // The pool is held only briefly (a claim, or a refill registering a name), so a short wait suffices.
   return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base, steps), { waitMs: 3000 })
-    .catch((error: unknown) => { if ((error as { code?: string } | null | undefined)?.code === "ELOCKED") return null; throw error; });
+    // Busy, or unable to tell a free spare from a held checkout: the caller provisions a fresh workspace.
+    .catch((error: unknown) => {
+      if ((error as { code?: string } | null | undefined)?.code === "ELOCKED" || error instanceof ProcessesUnreadableError) return null;
+      throw error;
+    });
 }
 
 /** A claimed spare's checkout, its new name and what its dependencies need (see `claimSpare`). */
@@ -359,7 +371,7 @@ type ClaimedSpare = { root: string; name: string; dependencies: ReusedDependenci
 
 async function claimReadySpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
   const workspaces = await listWorkspaces(context.integration.root);
-  const [spare] = newestFirst(workspaces.filter(isReadySpare));
+  const [spare] = newestFirst(await unoccupied(workspaces.filter(isReadySpare)));
   if (!spare) return null;
   const { name: assigned } = await renameListedWorkspace(spare, workspaces, name);
   await timed(steps, "jjNew", () => jj(spare.root, ["new", base ?? context.integrationBranch]));

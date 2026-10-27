@@ -7,7 +7,7 @@ import { repositoryProjectCode, run, workspaceContext } from "../infra/workspace
 import type { WorkspaceContext } from "../infra/workspace-jj.ts";
 import { metadataHome, workspaceHome } from "./workspace-paths.ts";
 import { listWorkspaces, metadataPath, readJsonOptional, workspaceMetadata } from "./workspace-state.ts";
-import { processAlive } from "./workspace-holders.ts";
+import { describeHolders, processAlive, processWorkingDirectories, workspaceHolders } from "./workspace-holders.ts";
 import { startBackgroundEntry } from "./workspace-background.ts";
 import { DEFAULT_SPARES } from "../policy/execution-policy.ts";
 import { machineSpareLimit } from "../policy/machine-config.ts";
@@ -96,6 +96,42 @@ export async function startSpareRefill(cwd: string = process.cwd(), options: { c
   return await startBackgroundEntry(cwd, "../../launcher/spare-refill.ts", options);
 }
 
+/** The host's processes could not be read, so the pool cannot tell a free spare from a held checkout, and takes none. */
+export class ProcessesUnreadableError extends Error {
+  constructor() { super("The processes on this host cannot be read, so the pool cannot tell a free spare from a held checkout"); }
+}
+
+/**
+ * Which of `paths` a live process other than this one is working in, each with its holders. A checkout
+ * one names is held by a thread whatever its record says, so the pool neither counts, adopts, refreshes,
+ * claims nor retires it (SJ-118), as sweeps and release already refuse it. Throws
+ * `ProcessesUnreadableError` when processes cannot be read.
+ */
+export async function occupiedPaths(paths: string[]): Promise<Map<string, string>> {
+  if (!paths.length) return new Map();
+  const processes = await processWorkingDirectories();
+  if (!processes) throw new ProcessesUnreadableError();
+  const occupied = new Map<string, string>();
+  for (const path of paths) {
+    const holders = await workspaceHolders(path, { processes, ignore: new Set([process.pid]) });
+    if (holders?.length) occupied.set(path, describeHolders(holders));
+  }
+  return occupied;
+}
+
+/**
+ * The pool's spares (`spareRecords`) apart from those a live process is working in, which are `held`
+ * with who holds them. A spare a live refill is preparing is the pool's own work, never held.
+ */
+export async function poolSpares(integrationRoot: string): Promise<{ spares: SpareRecord[]; held: { workspaceName: string; holders: string }[] }> {
+  const records = await spareRecords(integrationRoot);
+  const occupied = await occupiedPaths(records.filter((record) => !processAlive(record.preparingPid)).map((record) => record.workspacePath));
+  return {
+    spares: records.filter((record) => !occupied.has(record.workspacePath)),
+    held: records.flatMap((record) => occupied.has(record.workspacePath) ? [{ workspaceName: record.workspaceName, holders: occupied.get(record.workspacePath)! }] : []),
+  };
+}
+
 /** Whether a spare counts toward the pool: ready, or being prepared by a live process. One neither is abandoned, for a refill to adopt. */
 export const countsTowardPool = (record: SpareRecord): boolean => record.prepared === true || processAlive(record.preparingPid);
 
@@ -118,7 +154,7 @@ export async function reserveSpareForHandover(integrationRoot: string, retiringR
   const root = context.integration.root;
   const wanted = (await spareAllowance(context)).spares;
   const name = await withWorkspaceTransaction(`pool:${root}`, async () => {
-    const records = await spareRecords(root);
+    const { spares: records } = await poolSpares(root);
     if (records.filter(countsTowardPool).length >= wanted || records.some((record) => !countsTowardPool(record))) return null;
     const name = `${await repositoryProjectCode(root)}-spare-${randomUUID().slice(0, 6)}`;
     await mkdir(metadataHome(), { recursive: true, mode: 0o700 });

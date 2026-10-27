@@ -210,7 +210,10 @@ wait behind another repository's refill is not counted. A foreground `slipjay po
 instead. The log starts afresh when background work starts with it over 1 MiB, so its counts cover the time since then. When a retiring checkout's trees move to a
 new spare, that move is its own line, `{"handover":true,"project","integrationRoot","from","workspacePath","name","trees","moveMs"}`,
 before the spare's provisioning line. A claim that keeps its spare's dependencies because the install inputs are
-unchanged provisions nothing, so it logs nothing here.
+unchanged provisions nothing, so it logs nothing here. A spare-marked checkout a live process is working in is held, not
+a spare: the pool neither counts, adopts, refreshes, claims nor retires it, and each refill names it,
+`{"held","holders"}`, until its holders exit. When the host's processes cannot be read, the pool takes no spare: a claim
+installs a fresh workspace and the refill fails, saying why.
 
 The install-input fingerprint covers what a frozen install reads: lockfiles,
 package-manager configuration, patches, the files install lifecycle scripts reach,
