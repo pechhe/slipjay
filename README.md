@@ -680,8 +680,9 @@ and held state through the existing recovery path.
   fails with the required path. Its per-command PATH also reaches nested `bun` calls,
   leaving the global executable and other operations untouched. Command evidence records
   the selected version, resolved binary path and SHA-256 in its configuration identity.
-  Command evidence lists exactly the environment names passed to the executed process,
-  including runner-provided variables, without recording their values.
+  Command evidence lists the environment names the runner passes to the command,
+  including runner-provided variables, without recording their values. A systemd
+  containment scope then adds only `XDG_RUNTIME_DIR` and `SLIPJAY_SYSTEMD_SLICE`.
   This does not replace dependency fingerprints or reuse an install: runner candidates
   still receive their own frozen install, and packageManager remains a tracked install input.
 - **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
