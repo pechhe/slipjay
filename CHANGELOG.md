@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.46.17
+
+- **SlipJay answers to the Weave names (YS-393):** `slipjay land` takes the lead session from `--session` or `WEAVE_FORGE_SESSION_ID`, and still
+  reads `HQ_FORGE_SESSION_ID` and `HQ_BUILD_SESSION_ID` when it is unset, so a workspace holding only the old names lands as before.
+  Guidance in `land`, `attach-issue` and the chore-landing output now names the `weave_forge_*` MCP tools instead of `hq_forge_*`.
+
 ## v3.46.16
 
 - **The command line is split by feature (SJ-4):** `src/launcher/workspace.ts` is now the bootstrap and a static dispatcher

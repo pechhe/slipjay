@@ -72,9 +72,9 @@ test("a landing from a Landed Spec's own workspace lands as a chore, reaching Bu
     assert.equal(chore.unassociated, true);
     assert.equal(chore.title, "The Spec that landed");
     const said = landed.lines.join("\n");
-    assert.match(said, /\[build\] Build #96620's Spec #\d+ is landed, so Build takes no delivery of this landing: dispose the finding with hq_build_dispose_finding \(decision fix\)/);
+    assert.match(said, /\[build\] Build #96620's Spec #\d+ is landed, so Build takes no delivery of this landing: dispose the finding with weave_forge_dispose_finding \(decision fix\)/);
     // The chore note still names the association, so the fix is attached to the Spec from Build's own item.
-    assert.match(said, /as a chore.*attach it with hq_build_associate_landing/);
+    assert.match(said, /as a chore.*attach it with weave_forge_associate_landing/);
     const message = execFileSync("git", ["--git-dir", f.remote, "log", "-1", "--format=%B", "main"], { encoding: "utf8" }).trim();
     assert.equal(message, "The Spec that landed\n\nBuild: #96620", "the workspace's own item still names the landing");
   } finally {

@@ -557,7 +557,7 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
 
 /**
  * `session` and `tickets` shape the handoff a Build-tracked landing writes itself when none is supplied
- * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`) and further Tickets it completes.
+ * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`, after `WEAVE_FORGE_SESSION_ID`) and further Tickets it completes.
  */
 type LandOptions = { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
   location: string; env?: NodeJS.ProcessEnv; resubmitAfterOutcome?: boolean;
