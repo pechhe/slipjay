@@ -368,9 +368,11 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       const bound = new Set((db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
         AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL)`).all() as { operation_id: string }[])
         .map((row) => row.operation_id));
-      const settled = (operation: string, sequence: number) => delivered.has(`${operation}\n${sequence}`);
-      const delivered = new Set((db.prepare("SELECT operation_id, json_extract(data, '$.sequence') AS sequence FROM events WHERE type = 'build_receipt'").all() as
-        { operation_id: string; sequence: number }[]).map((row) => `${row.operation_id}\n${row.sequence}`));
+      const settled = (operation: string, sequence: number) => latest.get(`${operation}\n${sequence}`) === true;
+      // The latest settlement of each receipt stands: one an operator requeued is owed again.
+      const latest = new Map<string, boolean>();
+      for (const row of db.prepare("SELECT operation_id, json_extract(data, '$.sequence') AS sequence, json_extract(data, '$.state') AS state FROM events WHERE type = 'build_receipt' ORDER BY seq").all() as
+        { operation_id: string; sequence: number; state: string }[]) latest.set(`${row.operation_id}\n${row.sequence}`, row.state !== "requeued");
       const ids = new Set<string>();
       for (const row of db.prepare(`SELECT operation_id, seq FROM events WHERE type IN (${types(RECEIPT_KEY_EVENT_TYPES)})`).all() as { operation_id: string; seq: number }[])
         if (bound.has(row.operation_id) && !settled(row.operation_id, row.seq)) ids.add(row.operation_id);

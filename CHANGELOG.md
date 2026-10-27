@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.46.18
+
+- **Resend a parked Forge receipt (SJ-129):** `slipjay runner resend <operation>` requeues an operation's parked receipts,
+  recorded as a `build_receipt` `requeued` event naming who asked, once Forge can accept what it refused through its own
+  fault. The receipt drain sends each as a first delivery, which Forge replays; one refused again is parked with its new
+  code and holds back no other receipt. A refused admission is never resent, and an operation with nothing parked
+  answers 409 and exits 1.
+
 ## v3.46.17
 
 - **SlipJay answers to the Weave names (YS-393):** `slipjay land` takes the lead session from `--session` or `WEAVE_FORGE_SESSION_ID`, and still

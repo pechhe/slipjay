@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test, vi } from "vite-plus/test";
 import type { BuildAdmissionRequest, BuildRoute, BuildRouteAnswer } from "../../src/lib/build/build-admission.ts";
-import { createReceiptDrain } from "../../src/lib/build/build-receipts.ts";
+import { createReceiptDrain, requeueParked } from "../../src/lib/build/build-receipts.ts";
 import type { BuildChoreInput, BuildReceiptInput, BuildRunInput } from "../../src/lib/build/build-receipts.ts";
 import { candidateBookmark, RECEIPT_KEY_EVENT_TYPES, RECEIPT_SETTLEMENT_EVENT_TYPES, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import type { OperationLog } from "../../src/lib/runner/runner-types.ts";
@@ -159,6 +159,57 @@ test("a receipt Build refuses is parked with its code and does not hold back ano
   drain.wake(); await drain.idle();
   assert.equal(build.sent.length, 2);
   drain.close(); log.close();
+});
+
+test("a requeued parked receipt is delivered as a first delivery once Build accepts it", async () => {
+  const log = openLog(":memory:");
+  const parked = landing(log, "a", "landed");
+  let fixed = false;
+  const build = fakeBuild((input) => input.operationId === parked && !fixed ? { kind: "refused", code: "invalid_action_input" } : { kind: "accepted", value: null });
+  const drain = createReceiptDrain({ log, route: build.route });
+  drain.wake(); await drain.idle();
+  assert.equal(log.snapshot("test").build!.parked, 1);
+  fixed = true;
+  const landedSeq = log.events({ operationId: parked }).find((row) => row.event.type === "landed")!.seq;
+  assert.deepEqual(requeueParked(log, parked, "operator"), [{ sequence: landedSeq, code: "invalid_action_input" }]);
+  // The requeue wakes the drain itself; the gate run waiting on the parked fact follows it.
+  await until(() => log.snapshot("test").build!.pending === 0 && build.runs.length === 1);
+  const first = build.sent[0]!, resent = build.sent.at(-1)!;
+  assert.deepEqual(resent, first);
+  assert.deepEqual(settled(log, parked).map((event) => event.type === "build_receipt" && event.state), ["parked", "requeued", "delivered"]);
+  assert.equal(log.snapshot("test").build!.parked, 0);
+  const outcome = log.operation(parked)!;
+  assert.ok(outcome.kind === "landing" && outcome.outcome?.build?.receipts === "delivered");
+  // Nothing parked is left to resend.
+  assert.deepEqual(requeueParked(log, parked, "operator"), []);
+  drain.close(); log.close();
+});
+
+test("a resend Build refuses again stays parked with the new code and holds back no other receipt", async () => {
+  const log = openLog(":memory:");
+  const parked = landing(log, "a", "landed");
+  let code = "invalid_action_input";
+  const build = fakeBuild((input) => input.operationId === parked ? { kind: "refused", code } : { kind: "accepted", value: null });
+  const drain = createReceiptDrain({ log, route: build.route });
+  drain.wake(); await drain.idle();
+  code = "attempt_fact_invalid";
+  const healthy = landing(log, "e", "landed");
+  requeueParked(log, parked, "operator");
+  await until(() => settled(log, parked).length === 3 && settled(log, healthy).length === 1);
+  assert.deepEqual(settled(log, parked).map((event) => event.type === "build_receipt" && [event.state, event.code]), [["parked", "invalid_action_input"], ["requeued", "invalid_action_input"], ["parked", "attempt_fact_invalid"]]);
+  assert.deepEqual(settled(log, healthy).map((event) => event.type === "build_receipt" && event.state), ["delivered"]);
+  assert.equal(log.snapshot("test").build!.parked, 1);
+  drain.close(); log.close();
+});
+
+test("a refused admission and an unknown or unparked operation have nothing to resend", () => {
+  const log = openLog(":memory:");
+  const refused = landing(log, "a", "open", "refused");
+  const delivered = landing(log, "e", "landed");
+  assert.deepEqual(requeueParked(log, refused, "operator"), []);
+  assert.deepEqual(requeueParked(log, delivered, "operator"), []);
+  assert.deepEqual(requeueParked(log, "op_unknown", "operator"), []);
+  log.close();
 });
 
 test("a published landing whose receipt is still owed reads as landed with its receipt pending", async () => {

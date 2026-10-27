@@ -7,6 +7,7 @@ import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, Cli
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
+import { requeueParked } from "../build/build-receipts.ts";
 import type { BuildAdmitter, BuildRoute } from "../build/build-admission.ts";
 import { BUILD_READ_ACTIONS } from "../build/tracker.ts";
 import type { BuildReadAction } from "../build/tracker.ts";
@@ -179,6 +180,17 @@ export function createRunnerHandler(input: {
       if (!pausing)
         input.onSubmitted();
       return json({ paused: pausing });
+    }
+    const resendRoute = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)/resend$`));
+    if (request.method === "POST" && resendRoute) {
+      const operationId = decodeURIComponent(resendRoute[1]!);
+      const body = await boundedJson(request);
+      if (!body || !boundedString(body.by)) return json({ error: "Invalid resend request" }, 400);
+      const operation = input.log.operation(operationId);
+      if (!operation) return json({ error: "Unknown operation" }, 404);
+      const requeued = requeueParked(input.log, operationId, body.by);
+      // The receipt drain wakes on the requeue and delivers them as owed receipts.
+      return requeued.length ? json({ requeued }) : json({ error: "No parked receipt to resend for this operation", requeued }, 409);
     }
     const repairRoute = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)/repair$`));
     if (repairRoute && (request.method === "POST" || request.method === "GET")) {

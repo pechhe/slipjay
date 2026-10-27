@@ -255,10 +255,33 @@ async function choreNumber(route: BuildRoute, value: unknown): Promise<{ number:
   }
 }
 
-/** Whether a receipt has been settled: delivered, or parked because Build will never accept it. */
-export const receiptSettlement = (history: readonly StoredEvent[], receipt: Pick<BuildReceipt, "operationId" | "key">) =>
-  history.findLast((row) => row.operationId === receipt.operationId && row.event.type === "build_receipt" && row.event.sequence === receipt.key)?.event as
+/**
+ * Whether a receipt has been settled: delivered, or parked because Build refused it. The latest settlement stands, so a
+ * parked receipt an operator requeued (`requeueParked`) is owed again until Build answers it.
+ */
+export const receiptSettlement = (history: readonly StoredEvent[], receipt: Pick<BuildReceipt, "operationId" | "key">) => {
+  const latest = history.findLast((row) => row.operationId === receipt.operationId && row.event.type === "build_receipt" && row.event.sequence === receipt.key)?.event as
     Extract<OperationEvent, { type: "build_receipt" }> | undefined;
+  return latest?.state === "requeued" ? undefined : latest as Extract<OperationEvent, { type: "build_receipt"; state: "delivered" | "parked" }> | undefined;
+};
+
+/**
+ * Makes an operation's parked receipts owed again, for when Build refused them through its own fault and has since been
+ * fixed. The drain then sends each as a first delivery, which Build replays; one refused again is parked with its new
+ * code, and never holds back another receipt. An admission Build refused is not a receipt and is never requeued: it
+ * settled the landing's outcome. Returns the requeued receipts, none when the operation has nothing parked.
+ */
+export function requeueParked(log: OperationLog, operationId: string, by: string): { sequence: number; code: string }[] {
+  const operation = log.operation(operationId);
+  if (operation?.kind !== "landing") return [];
+  const history = log.events({ operationId });
+  const requeued = owedReceipts(operation, history, log.integrationSettlements()).flatMap((receipt) => {
+    const settled = receiptSettlement(history, receipt);
+    return settled?.state === "parked" ? [{ sequence: receipt.key, code: settled.code ?? "unknown" }] : [];
+  });
+  for (const { sequence, code } of requeued) log.append(operationId, { type: "build_receipt", sequence, state: "requeued", code, by });
+  return requeued;
+}
 /** Receipts still to send, in ledger order: unsettled, and not waiting for the fact they attach to. */
 export function sendable(operation: LandingOperation, history: readonly StoredEvent[], settlements: IntegrationSettlements): BuildReceipt[] {
   return owedReceipts(operation, history, settlements).filter((receipt) => !receiptSettlement(history, receipt)
@@ -374,7 +397,8 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
     if (timer) return;
     running = pass().catch(() => schedule(backoff)).finally(() => { running = undefined; if (again) { again = false; wake(); } });
   }
-  const unsubscribe = log.subscribe((row) => { if (["build_admitted", "integration_held", "integration_recovered", "integration_released", ...TERMINAL_EVENT_TYPES].includes(row.event.type)) wake(); });
+  const unsubscribe = log.subscribe((row) => { if (["build_admitted", "integration_held", "integration_recovered", "integration_released", ...TERMINAL_EVENT_TYPES].includes(row.event.type)
+    || row.event.type === "build_receipt" && row.event.state === "requeued") wake(); });
   return {
     wake,
     async idle() { while (running) await running; },

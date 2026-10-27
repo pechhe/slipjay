@@ -162,6 +162,8 @@ export type OperationEvent =
   /** The receipt for this operation's fact at `sequence` reached Build, or was parked because Build refused it with `code`.
       A delivered chore landing names the Build item Build created for it, read by the id Build's answer gave. */
   | { type: "build_receipt"; sequence: number; state: "delivered" | "parked"; code?: string; chore?: { number: number } }
+  /** An operator asked for the parked receipt at `sequence` to be sent again (`slipjay runner resend`): it is owed once more. */
+  | { type: "build_receipt"; sequence: number; state: "requeued"; code: string; by: string }
   /** Runner-wide, under RUNNER_CONTROL_ID: Build stopped (or resumed) answering receipt delivery. */
   | { type: "build_delivery"; state: "available" | "unavailable"; reason?: string }
   /** A release of `commitId`, the integration commit a human approved. */

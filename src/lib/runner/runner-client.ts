@@ -556,6 +556,23 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
 }
 
 /**
+ * Sends an operation's parked Build receipts again (`slipjay runner resend`), once Build can accept what it refused.
+ * The runner's receipt drain delivers them; one refused again is parked with its new code.
+ */
+export async function resendReceipts(location: string, operationId: string, env: NodeJS.ProcessEnv = process.env): Promise<{ ok: boolean; line: string }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/resend`, { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ by: hostname() }) });
+    const body = await response.json() as { requeued?: { sequence: number; code: string }[]; error?: string };
+    const prefix = `[runner ${connection.name}]`;
+    if (!response.ok || !body.requeued?.length) return { ok: false, line: `${prefix} not resent: ${operationId} ${body.error ?? `answered HTTP ${response.status}`}` };
+    return { ok: true, line: `${prefix} resending ${body.requeued.length} parked receipt${body.requeued.length === 1 ? "" : "s"} of ${operationId} (refused with ${[...new Set(body.requeued.map((receipt) => receipt.code))].join(", ")}); \`slipjay runner outcome ${operationId}\` shows whether Build took them` };
+  } finally { connection.close(); }
+}
+
+/**
  * `session` and `tickets` shape the handoff a Build-tracked landing writes itself when none is supplied
  * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`, after `WEAVE_FORGE_SESSION_ID`) and further Tickets it completes.
  */

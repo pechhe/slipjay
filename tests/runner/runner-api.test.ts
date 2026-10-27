@@ -306,6 +306,19 @@ test("SSE deduplicates events received between subscribing and replay", async ()
   }
 });
 
+test("resend refuses an unknown operation, an invalid request and an operation with nothing parked", async () => {
+  const f = await fixture();
+  try {
+    const { operation } = await submitted(await f.submit());
+    assert.equal((await f.request("/operations/op_unknown/resend", { method: "POST", body: JSON.stringify({ by: "owner" }) })).status, 404);
+    assert.equal((await f.request(`/operations/${operation.id}/resend`, { method: "POST", body: JSON.stringify({}) })).status, 400);
+    const none = await f.request(`/operations/${operation.id}/resend`, { method: "POST", body: JSON.stringify({ by: "owner" }) });
+    assert.equal(none.status, 409);
+    assert.deepEqual(await none.json(), { error: "No parked receipt to resend for this operation", requeued: [] });
+    assert.equal(f.log.events({ operationId: operation.id }).some((row) => row.event.type === "build_receipt"), false);
+  } finally { await f.close(); }
+});
+
 test("cancelling queued work during a pause records paused_out", async () => {
   const f = await fixture();
   try {

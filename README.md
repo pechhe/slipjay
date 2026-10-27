@@ -1363,7 +1363,10 @@ drain backs off (1 second, doubling to 5 minutes) and records a runner-wide
 `build_delivery` event, so watch clients see the outage; the queue snapshot's `build`
 reports whether Forge is answering, how many receipts are owed and since when, and how
 many are parked. A receipt Forge refuses, including one it finds too large, is parked with its code and never holds back
-another operation's; a failure's command lists and excerpt are cut, and the receipt marked truncated,
+another operation's. When Forge refused one through its own fault and has since been fixed, `slipjay runner resend <operation>`
+requeues that operation's parked receipts (recorded as `build_receipt` `requeued`, naming who asked): the drain sends
+each as a first delivery, which Forge replays, and one refused again is parked with its new code. A refused admission is
+not a receipt and is never resent. A failure's command lists and excerpt are cut, and the receipt marked truncated,
 to keep each request under 200 KB. A landing's outcome reports its `build` admission and receipt
 state apart from its verdict: a published landing whose receipt is still owed is
 landed, with `receipts: "pending"`. Refused, unadmitted and unbound operations owe
