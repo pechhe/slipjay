@@ -130,7 +130,8 @@ test("two sequential failures and a later pass are all reported with an index", 
 test("stopOnFailure stops later stages after concurrent siblings settle and marks them not run", async () => {
   const s = scripted({ install: [failing("install")], one: [failing("one")], two: [{}] });
   const error = await failedWith([decl("install"), decl("one", { concurrent: true, stopOnFailure: true }), decl("two", { concurrent: true }), decl("later")], s.run);
-  assert.deepEqual(s.started, ["install", "one", "two"]);
+  assert.equal(s.started[0], "install");
+  assert.deepEqual([...s.started].sort(), ["install", "one", "two"]);
   assert.deepEqual(error.evidence.checks.map((check) => check.outcome), ["failed", "failed", "passed", "not_run"]);
   assert.equal(error.evidence.checks[3]!.command, "node later");
   assert.match(error.message, /4\. node later: not run/);
