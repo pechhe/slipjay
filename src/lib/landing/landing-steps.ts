@@ -18,6 +18,8 @@ export type LandingTailOptions = {
   environment?: () => NodeJS.ProcessEnv;
   /** Called once finalization has succeeded, just before the push. */
   onPublishing?: () => void;
+  /** Called before a command could touch the target, or when an earlier attempt may have. */
+  onTargetReached?: () => void;
   /** Speculative publication requires this exact remote predecessor, including at push time. */
   expectedBase?: string;
   runCommand?: import("./landing-candidate.ts").CandidateOptions["runCommand"];
@@ -217,6 +219,7 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
   const gitDirectory = await jj(cwd, ["--ignore-working-copy", "git", "root"]);
   const postIntegration = await finalizePostIntegration({
     gitDirectory, integratedCommitSha: commitId, approval: options.postIntegrationApproval,
+    onTargetReached: options.onTargetReached,
     // A retry after a later landing: a completed descendant with unchanged migration
     // inputs covers this artifact, or its exact source runs; drift still fails closed.
     recoverDescendant: true,

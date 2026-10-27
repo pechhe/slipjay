@@ -20,8 +20,8 @@ export type ResetPolicy = {
   targetProbe: FinalizationCommand;
   timeoutMs: number;
   environmentKeys: string[];
-  /** How long after one reset began the runner starts the next on its own. */
-  intervalMs: number;
+  /** How long after one reset began the runner starts the next on its own; omitted means on demand only. */
+  intervalMs?: number;
 };
 
 export type PostIntegrationApproval = {
@@ -89,15 +89,15 @@ export function postIntegrationPolicy(value: unknown): PostIntegrationPolicy | n
  * on demand (`slipjay reset`), in the integration branch's exact source (the target
  * follows it), alone in the serial queue. It rebuilds the target from scratch, so it
  * declares no approval mode or idempotency contract. A reset of a whole database
- * takes longer than a migration, so its deadline may run to an hour; it runs at
- * most hourly and at least monthly.
+ * takes longer than a migration, so its deadline may run to an hour; a declared interval runs at
+ * most hourly and at least monthly. Omit the interval for on-demand resets only.
  */
 export function resetPolicy(value: unknown): ResetPolicy | null {
   if (value === undefined)
     return null;
   const row = object(value, "Reset");
   if (row.version !== 1 || typeof row.target !== "string" || !TARGET.test(row.target) || !Number.isInteger(row.timeoutMs) || Number(row.timeoutMs) < 1 || Number(row.timeoutMs) > 3_600_000
-    || !Number.isInteger(row.intervalMs) || Number(row.intervalMs) < 3_600_000 || Number(row.intervalMs) > 30 * 86_400_000) {
+    || row.intervalMs !== undefined && (!Number.isInteger(row.intervalMs) || Number(row.intervalMs) < 3_600_000 || Number(row.intervalMs) > 30 * 86_400_000)) {
     throw new Error("Invalid reset identity, deadline or interval");
   }
   return {
@@ -107,7 +107,7 @@ export function resetPolicy(value: unknown): ResetPolicy | null {
     targetProbe: command(row.targetProbe, "Reset"),
     timeoutMs: Number(row.timeoutMs),
     environmentKeys: environmentKeys(row, "Reset"),
-    intervalMs: Number(row.intervalMs),
+    ...(row.intervalMs !== undefined ? { intervalMs: Number(row.intervalMs) } : {}),
   };
 }
 export function postIntegrationPolicyDigest(policy: PostIntegrationPolicy | null): string {

@@ -272,15 +272,15 @@ test("snapshot hold SQL preserves repository lifecycle and ignores obsolete reco
     hold("b", "other");
     hold("a", "A", "retry");
     recover("a", "wrong");
-    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "A", since: first.at, reason: "retry", retries: 1 });
+    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "A", since: first.at, reason: "retry", retries: 1, targetReached: true });
     assert.equal(log.snapshot("runner").held.length, 2);
     recover("a", "A");
     assert.deepEqual(log.snapshot("runner").held.map((entry) => entry.repo), ["b"]);
     const again = hold("a", "A");
-    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "A", since: again.at, reason: "blocked", retries: 0 });
+    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "A", since: again.at, reason: "blocked", retries: 0, targetReached: true });
     const newer = hold("a", "B");
     recover("a", "A");
-    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "B", since: newer.at, reason: "blocked", retries: 0 });
+    assert.deepEqual(log.snapshot("runner").held.find((entry) => entry.repo === "a"), { repo: "a", commitId: "B", since: newer.at, reason: "blocked", retries: 0, targetReached: true });
     hold("a", "B");
     assert.equal(log.snapshot("runner").held.find((entry) => entry.repo === "a")?.retries, 1);
     recover("a", "B");
@@ -476,5 +476,22 @@ test("a failed event without failures classifies one run by command as before", 
     log.append("legacy", { type: "failed", stage: "verifying", reason: "failed", command: "vp test run" });
     assert.equal(classifiedOf(log, "legacy")?.cause, "gate");
     assert.equal(classifiedOf(log, "legacy")?.checks, undefined);
+  } finally { log.close(); }
+});
+
+
+test("only an entirely proven pre-command hold is releasable; retries retain reached or unknown history", () => {
+  const log = openLog(":memory:");
+  try {
+    const hold = (targetReached?: boolean) => log.append("control", { type: "integration_held", repo: "owner/repo", commitId: "held", reason: "failed", targetReached });
+    hold(false); hold(false);
+    assert.equal(log.held()[0]?.targetReached, false);
+    hold(); hold(false);
+    assert.equal(log.held()[0]?.targetReached, true, "unknown history cannot be erased");
+    log.append("control", { type: "integration_released", repo: "owner/repo", commitId: "held", reason: "settled", by: "owner" });
+    hold(false);
+    assert.equal(log.held()[0]?.targetReached, false, "settlement starts a new lifecycle");
+    hold(true); hold(false);
+    assert.equal(log.held()[0]?.targetReached, true, "a reached attempt cannot be erased");
   } finally { log.close(); }
 });

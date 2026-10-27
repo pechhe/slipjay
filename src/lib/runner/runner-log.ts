@@ -285,14 +285,14 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       AND json_extract(b.data, '$.repo') = json_extract(h.data, '$.repo')
       AND ((b.type = 'integration_held' AND json_extract(b.data, '$.commitId') != json_extract(h.data, '$.commitId')) OR (b.type != 'integration_held' AND json_extract(b.data, '$.commitId') = json_extract(h.data, '$.commitId')))) AS boundary
     FROM latest h WHERE h.rank = 1 AND NOT EXISTS (SELECT 1 FROM events r WHERE r.type IN ('integration_recovered', 'integration_released') AND r.seq > h.seq AND json_extract(r.data, '$.repo') = json_extract(h.data, '$.repo') AND json_extract(r.data, '$.commitId') = json_extract(h.data, '$.commitId'))`);
-  const heldHistory = db.prepare(`SELECT MIN(at) AS since, COUNT(*) - 1 AS retries FROM events
+  const heldHistory = db.prepare(`SELECT MIN(at) AS since, COUNT(*) - 1 AS retries, MAX(CASE WHEN json_extract(data, '$.targetReached') = 0 THEN 0 ELSE 1 END) AS targetReached FROM events
     WHERE type = 'integration_held' AND seq > ? AND seq <= ?
     AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.commitId') = ?`);
   function held(): HeldIntegrationState[] {
     return (heldRows.all() as { seq: number; at: string; data: string; boundary: number | null }[]).map((row) => {
       const event = JSON.parse(row.data) as Extract<OperationEvent, { type: 'integration_held' }>;
-      const history = heldHistory.get(row.boundary ?? 0, row.seq, event.repo, event.commitId) as { since: string; retries: number };
-      return { repo: event.repo, commitId: event.commitId, reason: event.reason, ...history };
+      const history = heldHistory.get(row.boundary ?? 0, row.seq, event.repo, event.commitId) as { since: string; retries: number; targetReached: number };
+      return { repo: event.repo, commitId: event.commitId, reason: event.reason, ...(event.branch ? { branch: event.branch } : {}), ...(event.remote ? { remote: event.remote } : {}), ...history, targetReached: history.targetReached !== 0 };
     });
   }
   function append(operationId: string, event: OperationEvent): StoredEvent {

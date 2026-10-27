@@ -22,6 +22,7 @@ test("commands that publish or move the integration branch are refused", () => {
     "jj git push -b master",
     "jj git push --bookmark=master",
     "jj bookmark set master -r @",
+    "jj bookmark set master -r master@origin --allow-backwards",
     "jj b s master -r @-",
     "jj bookmark move master --to @",
     "git update-ref refs/heads/master HEAD",
@@ -49,6 +50,7 @@ test("ordinary work and feature-branch publication are allowed", () => {
     "jj bookmark list",
     "peach-workspace land",
     "slipjay land",
+    "slipjay runner release pechhe/yard-smith",
     "gh pr create --fill",
     "gh pr view 12",
   ]) assert.equal(landingBypass(line, branches), null, line);

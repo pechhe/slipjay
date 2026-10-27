@@ -762,3 +762,27 @@ test("handoff admission binds immutable author evidence and refuses changed repl
     assert.equal((await f.submit({ ...withoutRequestId, handoff: { ...handoff, intent: "changed" } })).status, 409);
   } finally { await f.close(); }
 });
+
+
+test("release controls require authentication and a requester, and preserve the lane's refusal", async () => {
+  const log = openOperationLog(":memory:");
+  const calls: { repo: string; by: string }[] = [];
+  let ok = false;
+  const handler = createRunnerHandler({ log, token, runnerName: "runner", readLog: async () => null,
+    onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: () => () => {},
+    releaseHeld: async (repo, by) => { calls.push({ repo, by }); return { ok, reason: ok ? "Released unpublished" : "Finalization may have reached the target" }; } });
+  const request = (body: unknown, credential = token) => handler(new Request(`http://runner${RUNNER_API}/runner/release`, {
+    method: "POST", headers: { authorization: `Bearer ${credential}` }, body: JSON.stringify(body) }));
+  try {
+    assert.equal((await request({ repo: "owner/repo", by: "agent" }, "wrong")).status, 401);
+    assert.equal((await request({ repo: "owner/repo" })).status, 400);
+    assert.equal((await request({ repo: "owner/repo/other", by: "agent" })).status, 400);
+    assert.equal(calls.length, 0);
+    const refused = await request({ repo: "owner/repo", by: "agent" });
+    assert.equal(refused.status, 409);
+    assert.match((await refused.json() as { reason: string }).reason, /may have reached/);
+    ok = true;
+    assert.equal((await request({ repo: "owner/repo", by: "agent" })).status, 200);
+    assert.deepEqual(calls, [{ repo: "owner/repo", by: "agent" }, { repo: "owner/repo", by: "agent" }]);
+  } finally { log.close(); }
+});

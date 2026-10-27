@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.46.20
+
+- **Release a hold that never reached the target (SJ-74):** `slipjay runner release <owner/repo>` lets the runner
+  release an unpublished held integration only when every attempt proves the finalization command never started.
+  It serializes with the repository lane, checks the remote, restores its own integration bookmark and records
+  `integration_released` with the requester. Reached or unknown outcomes still require reconciliation.
+  Landing refuses a committed policy that cannot finalize before verification. A reset may omit `intervalMs`
+  to run only through `slipjay reset`, with no automatic schedule.
+
 ## v3.46.19
 
 - **Stale Bun metadata gets one frozen recovery (SJ-89):** workspace, runner candidate and release installs retry an

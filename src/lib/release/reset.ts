@@ -1,7 +1,7 @@
 /**
  * A repository's declared `reset` step: rebuild an external target (YardSmith: the
  * Development database, from a scrubbed copy of Production). The runner runs it every
- * `intervalMs` and on demand, alone in its serial queue, so no landing finalizes
+ * an optional `intervalMs` and on demand, alone in its serial queue, so no landing finalizes
  * against that target meanwhile. The target follows the integration branch (landing
  * finalizes each integrated commit against it), so the step runs in an exact source
  * view of the integration tip the runner just fetched. The runner's operation log is

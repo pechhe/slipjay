@@ -134,3 +134,24 @@ test("a submission the runner refused is not pinned, so a retry goes to the curr
     assert.ok(!f.lines.some((line) => line.includes("where it was submitted")));
   } finally { await other.close(); await f.dispose(); }
 });
+
+
+test("land refuses an unfinalisable committed reset before publishing or submitting its candidate", async () => {
+  const f = await fixture();
+  try {
+    const { readFile, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const file = join(f.cwd, "slipjay.json");
+    const policy = JSON.parse(await readFile(file, "utf8"));
+    const command = { executable: "true", args: [] };
+    policy.reset = { version: 1, target: "development-db", timeoutMs: 1000, intervalMs: 1, command, targetProbe: command };
+    await writeFile(file, JSON.stringify(policy));
+    await assert.rejects(landThroughRunner(f.cwd, f.options), (error: unknown) => {
+      assert.ok(error instanceof LandingNotSubmitted);
+      assert.match(error.message, /Invalid reset identity, deadline or interval/);
+      return true;
+    });
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 0);
+    assert.throws(() => execFileSync("git", ["--git-dir", f.remote, "rev-parse", `refs/heads/${candidateBookmark(f.change)}`], { stdio: "pipe" }));
+  } finally { await f.dispose(); }
+});

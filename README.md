@@ -344,6 +344,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]` | Plan a promotion of the integration branch (or of an older staging-green `--candidate`) to the declared release branch, or have the runner verify and publish the confirmed candidate (see [Release](#release)). |
 | `deploy <environment>` | Have the runner deploy the integration branch's latest commit on the remote to a declared environment now, and follow it (see [Deploys](#deploys)). |
 | `deploys [--environment <name>] [--json]` | Each deploy, newest first: environment, commit, outcome per project, and the commits it added since the previous deploy. |
+| `runner release <owner/repo>` | Release an unpublished held integration only when the runner proves its finalization never started the target command (see [Held integrations](#runner)). Records the requester and `integration_released`; exits 1 on refusal. |
 | `reset` | Have the runner reset the repository's declared `reset` target now (or follow its open reset) and print the verdict as JSON; exits 0 once it is `reset` (see [Reset](#reset)). |
 | `audit [status]` | The repository's nightly audits and what they say: the last green audit, the latest verdict, whether the last green one is overdue, the open failure with its suspects and recorded cause, and the escapes counted (see [Audit](#audit)). |
 | `audit cause <landing...\|--flake\|--infrastructure\|--unresolved> [--audit <id>] [--note <text>]` | Record why the repository's failing audit failed: one or more culprit landings (a landing's operation id, or its published commit in full or by 12 or more hex digits), or exactly one of `--flake`, `--infrastructure`, `--unresolved`. It covers the whole open failure, or the failing audit `--audit` names, and lifts the promotion refusal. |
@@ -577,16 +578,21 @@ and held state through the existing recovery path.
   new admission of the Spec meanwhile (`delivery_pending`), so relanding the commit whose
   integration is held follows that recovery turn instead: it ends `landed`, and Forge's
   `published` receipt for the original landing follows from the confirmation. A deterministic
-  failure needs a person: `slipjay runner pause` first, so the retries below stand still while
-  you work, reconcile the target, then on the runner host move the
-  checkout's integration bookmark back to the remote
-  (`jj -R ~/.slipjay/runner/repos/<owner>/<name> bookmark set <branch> -r <branch>@origin --allow-backwards`).
-  The next recovery turn finds the commit neither held nor on the remote, records
-  `integration_released` to clear the hold and ends `cancelled`. A paused runner runs no recovery turn, and
-  none is queued after a failed landing until the runner restarts or that commit is landed again, so
-  `slipjay runner resume` and land the commit: while the hold is recorded that landing follows a recovery
-  turn, which releases the hold and ends `cancelled`. Land the commit once more then, as
-  an ordinary submission. A recovery turn that fails (the remote is unreachable, say) is queued
+  failure that never started the target command can be released with one command:
+  `slipjay runner release <owner/repo>`. The runner decides from its recorded evidence,
+  waits for the repository lane, moves its own integration bookmark back to the fetched
+  remote and records `integration_released` with the requester's machine. Other repositories
+  keep running, and the next landing can proceed. Policy parse, source preparation and
+  target-probe failures qualify only when every recorded attempt proves the target command
+  never started. A repository without `postIntegration` has no external target: a failed
+  publication may be released too, but the runner first checks that the commit is absent
+  from the remote. A commit already on the remote belongs to its recovery turn.
+  If a command may have run, or earlier evidence is missing (including older runner holds),
+  the command refuses and keeps the hold. A person must reconcile the external target;
+  retry finalization with the same artifact key once it is safe, or reconcile the runner's
+  retained integration after establishing the target's actual state. Agents cannot move
+  the integration bookmark by hand: `slipjay guard` still blocks that bypass.
+  A recovery turn that fails (the remote is unreachable, say) is queued
   again after 30 seconds, doubling per failure up to 15 minutes, until it publishes, releases the hold
   or is stopped. Once the hold is released, the runner tells Forge that the landing whose integration it
   was failed unpublished (`failed`, recovering by `code_repair`), which ends Forge's custody: that Spec is
@@ -813,7 +819,9 @@ never runs at promotion:
     "environmentKeys": ["NEON_API_KEY"] } }
 ```
 
-- **When.** `intervalMs` (one hour to 30 days) after the latest reset that ran its
+- **When.** Omit `intervalMs` for an on-demand-only target: `slipjay reset` still runs
+  it, and the runner never schedules it. With `intervalMs` (one hour to 30 days), the
+  next scheduled reset starts that interval after the latest reset that ran its
   step, scheduled or on demand, or at once when the repository never had one. A reset
   that failed in its step waits for the next interval; one that failed before it (a
   fetch, a tip that declares no reset) retries an hour later; one the owner killed

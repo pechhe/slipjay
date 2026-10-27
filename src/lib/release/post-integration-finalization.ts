@@ -9,6 +9,8 @@ export type PostIntegrationResult = {
   target?: string;
   idempotencyKey?: string;
   attempt?: number;
+  /** False proves no command started in any attempt of this artifact. Missing is unknown. */
+  targetReached?: boolean;
   approved?: true;
   authorization?: "human" | "repository-policy";
   coverage?: "descendant" | "ancestor";
@@ -25,6 +27,7 @@ export type PostIntegrationInput = {
   integratedCommitSha: string;
   readIntegrationTip: () => Promise<string>;
   approval?: unknown;
+  onTargetReached?: () => void;
   abortSignal?: AbortSignal;
   recoverDescendant?: boolean;
   /** Internal test/storage seam, never accepted from delivery tool input. */
@@ -104,7 +107,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
   const commit = input.integratedCommitSha;
   const environmentFactory = input.environment ?? sanitizedProcessEnv;
   const { gitDirectory, policy } = await readPostIntegrationPolicy(input.gitDirectory, commit, environmentFactory);
-  if (!policy) return { ok: true, sourceIntegrated: true, status: "not_declared", integratedCommitSha: commit };
+  if (!policy) return { ok: true, sourceIntegrated: true, status: "not_declared", integratedCommitSha: commit, targetReached: false };
   const policyDigest = postIntegrationPolicyDigest(policy);
   const identity = artifactKey(gitDirectory, commit, policyDigest, policy.target);
   const stateDirectory = input.stateDirectory ?? postIntegrationHome();
@@ -112,7 +115,13 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
   await mkdir(stateDirectory, { recursive: true, mode: 448 });
   const targetKey = targetKeyOf(gitDirectory, policy.target);
   const { abortSignal } = input;
-  const previous = await readState(statePath);
+  const previous = await readState(statePath).catch((error: unknown) => {
+    // An unreadable receipt cannot prove what an earlier attempt did.
+    input.onTargetReached?.();
+    throw error;
+  });
+  let targetReached = previous !== null && previous.targetReached !== false;
+  if (targetReached) input.onTargetReached?.();
   if (previous && (previous.integratedCommitSha !== commit || previous.policyDigest !== policyDigest || previous.target !== policy.target || previous.idempotencyKey !== identity)
     && !completedLegacyReceipt(previous, gitDirectory, commit, policy)) {
     throw new Error("Post-integration identity drift requires reconciliation");
@@ -128,6 +137,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
       ...evidence,
       ok: false,
       status: "approval_required",
+      targetReached,
       attempt: previous?.attempt ?? 0,
       reason: "Explicit approval for this integrated artifact, policy and external target is required"
     };
@@ -151,7 +161,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
     // An interrupted step records nothing.
     if (abortSignal?.aborted) throw new Error("Finalization interrupted before coverage was recorded; rerun land");
     const covered: PostIntegrationResult = { ...accepted, ok: true, status: "covered", coverage: coverByDescendant ? "descendant" : "ancestor", ...coverage,
-      attempt: previous?.attempt ?? 0,
+      attempt: previous?.attempt ?? 0, targetReached,
       ...(previous?.status === "failed" ? { priorFailure: { attempt: previous.attempt, reason: previous.reason! } } : {}) };
     await writeWorkspaceJson(statePath, covered);
     // Ancestor coverage re-asserts its completed anchor. Descendant coverage
@@ -163,7 +173,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
   // Invalidate the target's coverage before any external work, so an
   // interrupted run can never be skipped over.
   await writeTargetOutcome(stateDirectory, targetKey, { ...outcome, status: "running" });
-  await writeWorkspaceJson(statePath, { ...accepted, ok: false, status: "running", attempt });
+  await writeWorkspaceJson(statePath, { ...accepted, ok: false, status: "running", attempt, targetReached });
   let reason = "Integration tip changed before finalization";
   let output: string | undefined;
   // Redacted before clipping; a truncated stream may still split a credential, so it is withheld.
@@ -206,10 +216,15 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
       reason = "Integration tip changed before external-state finalization";
       await historicalMigrationTip(input, gitDirectory, commit, policyDigest, environmentFactory, abortSignal);
       reason = "Finalization command failed or its outcome is unknown; retry with the same artifact key";
+      const commandCwd = await checkoutCwd(root, policy.command.cwd, "Finalization command");
+      targetReached = true;
+      input.onTargetReached?.();
+      // Persist before spawn: a crash or unknown command outcome can never become releasable.
+      await writeWorkspaceJson(statePath, { ...accepted, ok: false, status: "running", attempt, targetReached });
       const result = await (input.runCommand ?? runBoundedProcess)({
         executable: policy.command.executable,
         args: policy.command.args,
-        cwd: await checkoutCwd(root, policy.command.cwd, "Finalization command"),
+        cwd: commandCwd,
         env: environment, abortSignal,
         timeoutMs: policy.timeoutMs,
         maxOutputBytes: 16 * 1024,
@@ -221,7 +236,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
       }
       reason = "Integration tip changed during finalization; external outcome requires reconciliation";
       await historicalMigrationTip(input, gitDirectory, commit, policyDigest, environmentFactory, abortSignal);
-      return { ...accepted, ok: true, status: "complete", attempt };
+      return { ...accepted, ok: true, status: "complete", attempt, targetReached };
     }, environmentFactory, abortSignal);
     reason = "Finalization interrupted; external outcome requires reconciliation";
     if (abortSignal?.aborted) throw new Error(reason);
@@ -232,7 +247,7 @@ export async function finalizePostIntegration(input: PostIntegrationInput): Prom
   } catch (error) {
     if (error instanceof HistoricalMigrationFailure) reason = error.message;
     else if (error instanceof SourcePreparationFailure) reason = `Exact source preparation failed: ${error.message}`;
-    const failed: PostIntegrationResult = { ...accepted, ok: false, status: "failed", attempt, reason, ...(output ? { output } : {}) };
+    const failed: PostIntegrationResult = { ...accepted, ok: false, status: "failed", attempt, targetReached, reason, ...(output ? { output } : {}) };
     await writeTargetOutcome(stateDirectory, targetKey, { ...outcome, status: "failed" });
     await writeWorkspaceJson(statePath, failed);
     return failed;

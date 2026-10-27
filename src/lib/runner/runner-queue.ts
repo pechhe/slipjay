@@ -24,7 +24,7 @@ import type { BuildCheckAccess } from "../build/build-check-access.ts";
 import { RequiredVerificationError, runRequiredVerification, type RequiredVerificationFailureEvidence } from "../landing/required-verification.ts";
 import { readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import { postIntegrationPolicy } from "../policy/post-integration-policy.ts";
-import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit } from "../policy/execution-policy.ts";
+import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit, parseExecutionPolicy } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
 import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
@@ -64,12 +64,23 @@ class HeldIntegration extends Error {
   readonly commitId: string;
   readonly stage: "finalizing" | "publishing";
   readonly output?: string;
-  constructor(commitId: string, stage: "finalizing" | "publishing", reason: string, output?: string) {
+  readonly targetReached: boolean;
+  constructor(commitId: string, stage: "finalizing" | "publishing", reason: string, output?: string, targetReached = true) {
     super(`${reason}\nThe runner holds ${commitId.slice(0, 12)}, integrated but not published, and retries it before the next landing.`);
     this.commitId = commitId;
     this.stage = stage;
     this.output = output;
+    this.targetReached = targetReached;
   }
+}
+
+/** A committed candidate policy cannot be finalized; refuse it before running checks. */
+class CandidatePolicyRefusal extends Error {}
+async function validateCandidatePolicy(checkout: string, commit: string): Promise<void> {
+  const text = await readPolicyTextAtCommit(checkout, commit);
+  if (text === null) return;
+  try { parseExecutionPolicy(text); }
+  catch (error) { throw new CandidatePolicyRefusal(`Candidate slipjay.json refused: ${message(error)}`); }
 }
 
 /** The owner's kill reached the operation; it ends cancelled, never passed. */
@@ -136,6 +147,7 @@ export function createRunnerQueue(input: {
    * Queue the recovery of `repo`'s held integration, unless one is queued or running: that operation, or null when nothing is held.
    */
   recoverHeld(repo: string): Operation | null;
+  releaseHeld(repo: string, by: string): Promise<{ ok: boolean; reason: string }>;
   /**
    * Stop admitting work and resolve once no operation is integrating, finalizing, publishing, deploying or recovering a held
    * integration. Work before integration is not waited for: a restart records it failed ("land again") with nothing published.
@@ -801,16 +813,17 @@ export function createRunnerQueue(input: {
     // Finalization, then publication, of an integrated commit (completeLanding).
     async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string, publisher = checkout, expectedBase?: string): Promise<void> {
       setStage("finalizing");
-      const tail = await completeLanding(publisher, context, commitId, { ...(environment ? { environment } : {}), expectedBase, runCommand: run, onPublishing: () => setStage("publishing") })
-        .catch((error: unknown) => { throw new HeldIntegration(commitId, stage === "publishing" ? "publishing" : "finalizing", message(error)); });
+      let targetReached = false;
+      const tail = await completeLanding(publisher, context, commitId, { ...(environment ? { environment } : {}), expectedBase, runCommand: run, onTargetReached: () => { targetReached = true; }, onPublishing: () => setStage("publishing") })
+        .catch((error: unknown) => { throw new HeldIntegration(commitId, stage === "publishing" ? "publishing" : "finalizing", message(error), undefined, targetReached); });
       if (tail.timings) {
         const { finalizingStartedAt, publishingStartedAt, finishedAt } = tail.timings;
         append(operation.id, { type: "stage_detail", stage: "finalizing", durationMs: 0, migrateDurationMs: Math.max(0, (publishingStartedAt ?? finishedAt) - finalizingStartedAt) });
         if (publishingStartedAt !== undefined) append(operation.id, { type: "stage_detail", stage: "publishing", durationMs: 0, pushDurationMs: Math.max(0, finishedAt - publishingStartedAt), remoteMoved: !tail.publication.ok && /remote.*(?:mov|chang|refus)|(?:mov|chang).*remote/i.test(tail.publication.reason ?? "") });
       }
       if (!tail.postIntegration.ok)
-        throw new HeldIntegration(commitId, "finalizing", `Post-integration ${tail.postIntegration.status}: ${tail.postIntegration.reason ?? "no reason recorded"}`, tail.postIntegration.output);
-      if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed");
+        throw new HeldIntegration(commitId, "finalizing", `Post-integration ${tail.postIntegration.status}: ${tail.postIntegration.reason ?? "no reason recorded"}`, tail.postIntegration.output, targetReached);
+      if (!tail.publication.ok) throw new HeldIntegration(commitId, "publishing", tail.publication.reason ?? "Integration publication failed", undefined, targetReached);
       if (log.held().some((entry) => entry.repo === operation.repo && entry.commitId === commitId))
         append(operation.id, { type: "integration_recovered", repo: operation.repo, commitId, retried: true });
     }
@@ -896,7 +909,7 @@ export function createRunnerQueue(input: {
       if (operation.kind === "recovery") {
         // Nothing is held now, by this turn or by whoever published it first: the remote either has the commit or the hold is gone.
         if (!await revisionExists(checkout, `${settled} & ::${branch}@${remote}`)) {
-          // The fetch above succeeded, so the remote does not have it: a person discarded the integration (the README's manual fix).
+          // The fetch above succeeded, so the remote does not have it: the integration was released or reconciled outside this recovery turn.
           // Release the hold, or every reland of the commit would be sent back to a recovery that finds nothing.
           const stale = `${settled.slice(0, 12)} is neither held nor on ${branch}@${remote}`;
           if (log.held().some((entry) => entry.repo === operation.repo && entry.commitId === settled))
@@ -950,6 +963,7 @@ export function createRunnerQueue(input: {
       const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
       const identity = log.events({ operationId: operation.id }).findLast((row) => row.event.type === "identity")?.event;
       append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") ?? (identity?.type === "identity" ? identity.spec : undefined) });
+      await validateCandidatePolicy(checkout, operation.commitId);
       await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
       const candidateOptions = {
@@ -960,6 +974,7 @@ export function createRunnerQueue(input: {
         runCommand: run,
         adapter: {
           verify: async ({ base, candidate }) => {
+            await validateCandidatePolicy(checkout, candidate);
             const { budgets } = candidateContext.configuration;
             append(operation.id, { type: "verification_base", base, candidate, ...(budgets ? { budgets } : {}) });
             await recordShape(checkout, candidateContext.integrationBranch, candidate, candidateContext.configuration.migrationFinalization);
@@ -1088,8 +1103,9 @@ export function createRunnerQueue(input: {
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
+      else if (error instanceof CandidatePolicyRefusal) verdict = { type: "declined", reason: error.message, paths: [EXECUTION_POLICY_PATH] };
       else if (error instanceof HeldIntegration) {
-        append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message });
+        append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message, targetReached: error.targetReached, branch: integrationBranch, remote });
         verdict = { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) };
       }
       else if (error instanceof RequiredVerificationError) verdict = {
@@ -1457,6 +1473,31 @@ export function createRunnerQueue(input: {
     wakeMain();
     return log.operation(id);
   }
+  async function releaseHeld(repo: string, by: string): Promise<{ ok: boolean; reason: string }> {
+    if (recovering || heldStart || draining) return { ok: false, reason: "Runner recovery or shutdown is in progress; retry when it has finished" };
+    return serially(repo, async () => {
+      const hold = log.held().find((entry) => entry.repo === repo);
+      if (!hold) return { ok: false, reason: `No held integration for ${repo}` };
+      if (hold.targetReached !== false) return { ok: false, reason: `Finalization may have reached the target (including unknown earlier attempts): ${hold.reason}. Reconcile the target and recover the held integration` };
+      if (prefixes.get(repo)?.length) return { ok: false, reason: "A landing is still running in this repository; retry after it finishes" };
+      const checkout = repoCheckout(repo);
+      // These identities were observed before finalization parsed the held policy.
+      // Reading that invalid policy again would make precisely this recovery impossible.
+      if (!hold.branch || !hold.remote) return { ok: false, reason: "Held integration has no recorded branch and remote; recovery must reconcile it" };
+      const branch = hold.branch;
+      const remote = hold.remote;
+      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch]);
+      if (await revisionExists(checkout, `${hold.commitId} & ::${branch}@${remote}`))
+        return { ok: false, reason: "Held integration is already on the remote; its recovery turn must confirm publication" };
+      if ((await revisionFacts(checkout, branch)).commitId !== hold.commitId)
+        return { ok: false, reason: "Runner integration bookmark differs from the hold; recovery must reconcile it" };
+      await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
+      const reason = `Released unpublished by ${by}: finalization never started the target command`;
+      append(RUNNER_CONTROL_ID, { type: "integration_released", repo, commitId: hold.commitId, reason, by });
+      retryFailedRecovery(repo, false);
+      return { ok: true, reason };
+    });
+  }
   /** Whether `operation` is past the stages an owner's kill may stop, or is finishing a held integration. Its verdict ends it. */
   const inTail = (operation: Operation) => operation.status === "running"
     && (operation.kind === "recovery" || operation.stage === "integrating" || operation.stage === "finalizing" || operation.stage === "publishing" || operation.stage === "deploying");
@@ -1515,6 +1556,7 @@ export function createRunnerQueue(input: {
       }).finally(wakeMain);
     },
     recoverHeld,
+    releaseHeld,
     async drain() {
       draining = true;
       await deploying;

@@ -231,10 +231,10 @@ export type OperationEvent =
   /** Runner-wide, under RUNNER_CONTROL_ID: the queue takes no next operation until resumed. */
   | { type: "paused"; by: string }
   | { type: "resumed"; by: string }
-  | { type: "integration_held"; repo: string; commitId: string; reason: string }
+  | { type: "integration_held"; repo: string; commitId: string; reason: string; targetReached?: boolean; branch?: string; remote?: string }
   | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean }
-  /** A hold whose commit is neither in the runner's checkout nor on the remote: a person discarded it, so nothing is left to publish. */
-  | { type: "integration_released"; repo: string; commitId: string; reason: string };
+  /** A hold discarded unpublished after reconciliation or proof that its target command never started. */
+  | { type: "integration_released"; repo: string; commitId: string; reason: string; by?: string };
 
 /** A landing's `submitted` event; rows from before releases existed carry no `kind`. */
 export type LandingSubmission = Extract<OperationEvent, { type: "submitted"; changeId: string }>;
@@ -575,7 +575,7 @@ export type RunnerConfig = {
   build?: { origin: string };
 };
 
-export type HeldIntegrationState = { repo: string; commitId: string; since: string; reason: string; retries: number };
+export type HeldIntegrationState = { repo: string; commitId: string; since: string; reason: string; retries: number; targetReached?: boolean; branch?: string; remote?: string };
 
 export type WatchOperation = Operation & {
   stageStartedAt?: string;

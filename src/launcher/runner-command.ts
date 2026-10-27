@@ -1,9 +1,15 @@
-import { controlRunner, resendReceipts, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, runnerLocation, operationRunnerLocation } from "../lib/runner/runner-client.ts";
+import { releaseHeldIntegration, controlRunner, resendReceipts, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, runnerLocation, operationRunnerLocation } from "../lib/runner/runner-client.ts";
 import { startRunner } from "../lib/runner/runner-service.ts";
 import { resolve } from "node:path";
 
 export async function runRunner(rest: string[]): Promise<void> {
-  if (rest[0] === "artifact" && rest.length === 3) {
+  if (rest[0] === "release" && rest.length === 2 && /^[\w.-]+\/[\w.-]+$/.test(rest[1]!)) {
+    const location = runnerLocation();
+    if (!location) throw new Error("No runner location configured");
+    const outcome = await releaseHeldIntegration(location, rest[1]!);
+    console.log(outcome.line);
+    if (!outcome.ok) process.exitCode = 1;
+  } else if (rest[0] === "artifact" && rest.length === 3) {
     const location = await operationRunnerLocation(rest[1]!);
     if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
     console.log(JSON.stringify(await readRunArtifact(location, rest[1]!, rest[2]!), null, 2));
@@ -49,5 +55,5 @@ export async function runRunner(rest: string[]): Promise<void> {
     console.error("SlipJay runner stopping once no integration is being finished and no deploy is running");
     await runner.drain();
     process.exit(0);
-  } else throw new Error("Usage: slipjay runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|resend <operation>|kill [<operation>]|pause|resume>");
+  } else throw new Error("Usage: slipjay runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|resend <operation>|kill [<operation>]|pause|resume|release <owner/repo>>");
 }

@@ -17,6 +17,7 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "../landing/landing-steps.ts";
+import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
 import { promotionRefusal } from "../release/audit-ledger.ts";
 import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
@@ -555,6 +556,18 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
   } finally { connection.close(); }
 }
 
+/** Ask the runner to release a hold; only the runner's ledger and lane decide eligibility. */
+export async function releaseHeldIntegration(location: string, repo: string, env: NodeJS.ProcessEnv = process.env): Promise<{ ok: boolean; line: string }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, "/v1/runner/release", { method: "POST",
+      headers: { "content-type": "application/json" }, body: JSON.stringify({ repo, by: hostname() }) });
+    const body = await response.json() as { ok?: boolean; reason?: string; error?: string };
+    return { ok: response.ok && body.ok === true, line: `[runner ${connection.name}] ${body.reason ?? body.error ?? `Release refused (HTTP ${response.status})`}` };
+  } finally { connection.close(); }
+}
+
 /**
  * Sends an operation's parked Build receipts again (`slipjay runner resend`), once Build can accept what it refused.
  * The runner's receipt drain delivers them; one refused again is parked with its new code.
@@ -698,6 +711,8 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
           } finally { if (retained !== connection) retained.close(); }
         }, existing.filter((op) => op.status === "queued" && op.commitId !== target.commitId));
       }
+      // Validate the exact committed candidate before publishing its bookmark or submitting it.
+      await readExecutionPolicyAtCommit(cwd, target.commitId);
       requestId = await landingRequestIdentity(context, location, repo, target.commitId);
       // Named on the submission so a queue view can say which Spec a landing delivers before the runner reads its trailers.
       const workspaceIssue = (await workspaceMetadata(context.current.name))?.issueNumber;

@@ -7,7 +7,7 @@ import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 
 const HOUR = 3_600_000;
 const command = { executable: "true", args: [], cwd: "." };
-const weekly: ResetPolicy = { version: 1, target: "db", command, targetProbe: command, timeoutMs: 60_000, environmentKeys: [], intervalMs: 7 * 24 * HOUR };
+const weekly: ResetPolicy & { intervalMs: number } = { version: 1, target: "db", command, targetProbe: command, timeoutMs: 60_000, environmentKeys: [], intervalMs: 7 * 24 * HOUR };
 
 function fixture() {
   const log = openOperationLog(":memory:");
@@ -113,5 +113,25 @@ test("a reset that is not due yet is submitted by one timer when the interval en
     f.advance(1_000);
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.equal(f.submitted.length, 2, "the cleared timer submits nothing");
+  } finally { f.scheduler.close(); f.log.close(); }
+});
+
+
+test("an on-demand-only reset never schedules, including after a previous scheduled reset", () => {
+  const f = fixture();
+  try {
+    const manual = { ...weekly, intervalMs: undefined };
+    f.scheduler.consider("owner/manual", manual);
+    f.advance(60 * 24 * HOUR);
+    f.scheduler.consider("owner/manual", manual);
+    assert.deepEqual(f.submitted, []);
+    f.advance(-60 * 24 * HOUR);
+    f.scheduler.consider("owner/manual", weekly);
+    f.start("reset-1"); f.finish("reset-1", "reset");
+    f.scheduler.consider("owner/manual", weekly);
+    f.scheduler.consider("owner/manual", manual);
+    f.advance(60 * 24 * HOUR);
+    f.scheduler.consider("owner/manual", manual);
+    assert.deepEqual(f.submitted, ["reset-1"]);
   } finally { f.scheduler.close(); f.log.close(); }
 });

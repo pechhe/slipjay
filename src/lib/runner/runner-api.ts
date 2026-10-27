@@ -34,6 +34,7 @@ export function createRunnerHandler(input: {
   kill(operationId?: string): KillOutcome;
   /** Queues the publication of the repository's held integration unless one is queued or running; null when none is held. */
   recoverHeld?(repo: string): Operation | null;
+  releaseHeld?(repo: string, by: string): Promise<{ ok: boolean; reason: string }>;
   /** A queued operation was cancelled: a landing's candidate bookmark is the queue's to delete, and an audit's slot is due again. */
   onCancelled?(operation: Operation): void;
   subscribe(listener: (event: StoredEvent) => void): () => void;
@@ -153,6 +154,18 @@ export function createRunnerHandler(input: {
       const hasMore = events.length > Number(bound);
       if (hasMore) events.pop();
       return json({ events, nextSeq: events.at(-1)?.seq ?? since, hasMore });
+    }
+    if (request.method === "POST" && path === `${RUNNER_API}/runner/release`) {
+      const body = await boundedJson(request);
+      if (!body || !boundedString(body.repo) || !/^[\w.-]+\/[\w.-]+$/.test(body.repo) || !boundedString(body.by))
+        return json({ error: "Release requires a repository and requester" }, 400);
+      if (!input.releaseHeld) return json({ error: "Held integration release is unavailable on this runner" }, 501);
+      try {
+        const outcome = await input.releaseHeld(repositoryKey(body.repo), body.by);
+        return json(outcome, outcome.ok ? 200 : 409);
+      } catch (error) {
+        return json({ error: `Held integration release could not complete: ${error instanceof Error ? error.message : String(error)}` }, 409);
+      }
     }
     const control = path.match(new RegExp(`^${RUNNER_API}/runner/(kill|pause|resume)$`));
     if (request.method === "POST" && control) {

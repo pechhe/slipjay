@@ -23,7 +23,7 @@ export function createResetScheduler(input: {
   function consider(repo: string, policy: ResetPolicy | null): void {
     clearTimeout(timers.get(repo));
     timers.delete(repo);
-    if (!policy) return;
+    if (policy?.intervalMs === undefined) return;
     const resets = log.resets(repo);
     // The queue re-asks when an open reset ends.
     if (resets.some((operation) => operation.status === "queued" || operation.status === "running")) return;
