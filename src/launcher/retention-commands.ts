@@ -168,7 +168,8 @@ export async function runMaintain(rest: string[]): Promise<void> {
   const { outcome } = await evictIdleWorkspaces(process.cwd());
   if (json) console.log(JSON.stringify({ requests: outcomes, evictions: outcome }, null, 2));
   else {
-    for (const entry of outcomes) console.log(`${entry.outcome}\t${entry.workspacePath}\t${entry.reason}`);
+    // A request that could not be read has no workspace path to name, so it names the request instead.
+    for (const entry of outcomes) console.log(`${entry.outcome}\t${entry.workspacePath || entry.requestId}\t${entry.reason}`);
     for (const result of outcome.results) console.log(`evicted\t${result.name}\t${result.removedPaths.join(", ")}`);
     for (const skipped of outcome.skipped) if (!/used within|pool spare|no activity recorded/.test(skipped.reason)) console.error(`kept\t${skipped.name}\t${skipped.reason}`);
     if (!outcomes.length && !outcome.results.length) console.log("Nothing to archive or evict.");

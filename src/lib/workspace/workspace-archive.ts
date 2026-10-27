@@ -388,9 +388,17 @@ export type ArchiveOutcome = {
 export const archiveRequestsHome = (): string => join(stateHome(), "archive-requests");
 export const archiveOutcomesPath = (): string => join(stateHome(), "archive-outcomes.jsonl");
 
-async function readRequests(): Promise<Array<{ file: string; request: ArchiveRequest }>> {
+/**
+ * The requests a pass can honour, and the failures recorded for the ones it cannot read:
+ * a caller reporting the pass has to name those too, not only the requests it processed.
+ */
+async function readRequests(): Promise<{
+  requests: Array<{ file: string; request: ArchiveRequest }>;
+  failures: ArchiveOutcome[];
+}> {
   const entries = await readdir(archiveRequestsHome()).catch(() => [] as string[]);
   const requests: Array<{ file: string; request: ArchiveRequest }> = [];
+  const failures: ArchiveOutcome[] = [];
   for (const entry of entries) {
     if (!entry.endsWith(".json")) continue;
     const file = join(archiveRequestsHome(), entry);
@@ -399,29 +407,35 @@ async function readRequests(): Promise<Array<{ file: string; request: ArchiveReq
     } catch (error) {
       // An unreadable request is reported and left in place: dropping it silently is the
       // failure the retry exists to prevent.
-      await appendFile(archiveOutcomesPath(), `${JSON.stringify({
+      const failure: ArchiveOutcome = {
         requestId: entry.slice(0, -".json".length), workspacePath: "", at: new Date().toISOString(),
         outcome: "failed", reason: `the request file could not be read: ${error instanceof Error ? error.message : String(error)}`,
-      } satisfies ArchiveOutcome)}\n`).catch(() => undefined);
+      };
+      await appendFile(archiveOutcomesPath(), `${JSON.stringify(failure)}\n`).catch(() => undefined);
+      failures.push(failure);
     }
   }
-  return requests;
+  return { requests, failures };
 }
 
 /**
  * Process every pending release request: archive it, retire it when the request asks
  * and the checkout is not in use, or record why not and keep the request for the next
- * pass. Every outcome is appended to one record, so the hourly pass can be inspected.
+ * pass. Every outcome is appended to one record, so the hourly pass can be inspected; one
+ * for a request file that could not be read is returned with them, not only written.
  */
 export async function processArchiveRequests(options: { now?: number; retire?: boolean } = {}): Promise<ArchiveOutcome[]> {
   const now = options.now ?? Date.now();
-  const outcomes: ArchiveOutcome[] = [];
+  // An unreadable request is recorded as it is met, so it needs no record here, but it is
+  // still something this pass did and the caller reports it with the outcomes it processed.
+  const { requests, failures } = await readRequests();
+  const outcomes: ArchiveOutcome[] = [...failures];
   const record = async (outcome: ArchiveOutcome) => {
     outcomes.push(outcome);
     await mkdir(stateHome(), { recursive: true, mode: 0o700 });
     await appendFile(archiveOutcomesPath(), `${JSON.stringify(outcome)}\n`);
   };
-  for (const { file, request } of await readRequests()) {
+  for (const { file, request } of requests) {
     const base = { requestId: request.id, workspacePath: request.workspacePath, at: new Date(now).toISOString() };
     try {
       if (!existsSync(request.workspacePath)) {

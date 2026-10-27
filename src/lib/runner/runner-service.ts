@@ -23,6 +23,7 @@ import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { shortRepositories } from "./pipeline-metrics.ts";
 import { localExecutor } from "./local-executor.ts";
 import { createRunnerQueue, runnerLogOptions } from "./runner-queue.ts";
+import { createRetention } from "./retention-loop.ts";
 
 /** How long a submission's conflict probe may hold admission before the submission queues unchecked. */
 const PROBE_BUDGET_MS = 30_000;
@@ -101,22 +102,19 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   relay?.start();
   // Retained evidence is bounded: expire it at start and every six hours. One pass at a time. The ledger follows it,
   // so an attempt's evidence is recorded expired before the events explaining it go, and the WAL returns its pages then.
-  let pruning: Promise<unknown> = Promise.resolve();
-  const retain = () => {
-    pruning = pruning.then(async () => {
-      const pass = await pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] });
+  // A pass that fails is journalled, and the next interval runs it again.
+  const retention = createRetention({
+    async pass() {
+      const { unfinished } = await pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] });
       // What no reader has finished with stays whole: an attempt whose files a cut-short deletion left behind (it must
       // be found again to finish), and one whose receipts Build has not taken (the history is what says what to send).
       // Owning a receipt is a fact of the ledger, not of this process's connection: a runner restarted without one still
       // protects it.
       const owed = receiptsOwedTo(log);
-      log.forgetHistory(new Date(), new Set([...pass.unfinished, ...owed]));
+      log.forgetHistory(new Date(), new Set([...unfinished, ...owed]));
       log.checkpoint();
-    }).catch(() => {});
-    return pruning;
-  };
-  const retention = setInterval(retain, 6 * 60 * 60 * 1000);
-  retention.unref();
+    },
+  });
   // A busy ledger's WAL would otherwise sit at its high-water mark until the next retention pass.
   const journal = setInterval(() => log.checkpoint(), 5 * 60 * 1000);
   journal.unref();
@@ -131,6 +129,6 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
       console.error(`[recovery] could not finish, and the runner will start nothing until it restarts: ${reason}`);
       queue.hold(reason);
     })
-    .then(() => { if (!startHeld) { queue.wake(); receipts?.wake(); } void retain(); });
-  return { url: server.url, recovered, drain: queue.drain, close: async () => { clearInterval(retention); clearInterval(journal); await recovered; await pruning; relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
+    .then(() => { if (!startHeld) { queue.wake(); receipts?.wake(); } void retention.retain(); });
+  return { url: server.url, recovered, drain: queue.drain, close: async () => { retention.close(); clearInterval(journal); await recovered; await retention.idle(); relay?.close(); await relay?.idle(); await server.close(); receipts?.close(); await receipts?.idle(); queue.close(); await queue.idle(); log.close(); } };
 }
