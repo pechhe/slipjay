@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { lstat, readdir, readFile, realpath, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { outputLines } from "../infra/verification-failure.ts";
 import { migrationCommandFailure } from "../landing/migration-command-evidence.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { timed } from "./start-steps.ts";
@@ -51,6 +52,15 @@ async function workspaceDependencyCommand(workspacePath: string): Promise<{ comm
   const command = dependencyInstallCommand(packageManager, process.platform);
   if (!command) throw new Error(`Workspace dependency provisioning does not support package manager '${packageManager}'.`);
   return command;
+}
+
+/** Bun's stale manifest diagnostic, restricted to an exact version in the frozen text lock. */
+async function missingLockedBunVersion(workspacePath: string, output: string): Promise<boolean> {
+  const lock = await readFile(join(workspacePath, "bun.lock"), "utf8").catch(() => "");
+  for (const match of outputLines({ stderr: output }).join("\n").matchAll(/(?:^|\n)error: No version matching "(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)" found for specifier "([^"\n]+)"/g)) {
+    if (lock.includes(JSON.stringify(`${match[2]}@${match[1]}`))) return true;
+  }
+  return false;
 }
 
 /** The workspace's tracked `package.json` paths, relative to its root, or null when JJ cannot list them. */
@@ -193,6 +203,7 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   steps?: StartSteps;
 } = {}): Promise<{
   state: "ready" | "not_required"; packageManager: string | null; installInputs: string | null; seeded?: true; cloneMs?: number;
+  installAttempts?: Record<string, unknown>[];
 }> {
   const inputs = options.installInputs !== undefined ? options.installInputs
     : options.recordInputs || options.seedFrom ? await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath)) : null;
@@ -215,27 +226,45 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   }
   // Installation is not a landing command: it has a longer deadline, and outside the runner it keeps the
   // user's environment. The runner passes `runCommand`, which shares its budget and withholds its secrets.
+  const installAttempts: Record<string, unknown>[] = [];
+  let args = dependencyCommand.args;
   const install = async () => {
-    if (!options.runCommand) return run(dependencyCommand.command, dependencyCommand.args,
-      { cwd: workspacePath, inherit: !options.quiet, env: options.env ?? process.env, timeoutMs: 30 * 60_000 });
-    const result = await options.runCommand({ executable: dependencyCommand.command, args: dependencyCommand.args,
-      cwd: workspacePath, env: options.env ?? process.env, timeoutMs: 30 * 60_000, maxOutputBytes: 16 * 1024 * 1024 });
-    return { ...result, code: result.error || result.timedOut ? 1 : result.exitCode ?? 1,
-      stderr: result.error ? `${result.stderr}\n${result.error}` : result.stderr, truncated: Boolean(result.stdoutTruncated || result.stderrTruncated) };
+    // Recovery must inspect and retain the original failure, so a foreground start streams Bun's output and keeps it too.
+    const result = !options.runCommand
+      ? await run(dependencyCommand.command, args,
+        { cwd: workspacePath, tee: !options.quiet, env: options.env ?? process.env, timeoutMs: 30 * 60_000 })
+      : await options.runCommand({ executable: dependencyCommand.command, args,
+        cwd: workspacePath, env: options.env ?? process.env, timeoutMs: 30 * 60_000, maxOutputBytes: 16 * 1024 * 1024 })
+        .then((result) => ({ ...result, code: result.error || result.timedOut || result.cancelled ? 1 : result.exitCode ?? 1,
+          stderr: result.error ? `${result.stderr}\n${result.error}` : result.stderr, truncated: Boolean(result.stdoutTruncated || result.stderrTruncated) }));
+    const evidence = migrationCommandFailure([dependencyCommand.command, ...args].join(" "), result,
+      workspacePath, options.env ?? process.env, "Dependency").evidence;
+    installAttempts.push({ ...evidence, outcome: result.code === 0 ? "success" : evidence.outcome });
+    return result;
   };
+  const retryable = (result: Awaited<ReturnType<typeof install>>) =>
+    !result.signal && !result.timedOut && !("cancelled" in result && result.cancelled) && !("error" in result && result.error);
   let result = await install();
-  if (result.code !== 0 && seeded) {
+  // One metadata refresh, retaining cached package bytes and the frozen lockfile. Do this before
+  // discarding a seed: a stale manifest is independent of the cloned node_modules tree.
+  if (dependencyCommand.command === "bun" && result.code !== 0 && retryable(result)
+      && await missingLockedBunVersion(workspacePath, `${result.stdout}\n${result.stderr}`)) {
+    args = args.map((arg) => arg === "--prefer-offline" ? "--no-cache" : arg);
+    result = await install();
+  } else if (result.code !== 0 && seeded && retryable(result)) {
     await Promise.all(seeded.map((path) => rm(path, { recursive: true, force: true })));
     result = await install();
   }
   const damage = dependencyCommand.command === "bun" ? await bunStoreDamage(workspacePath, options.env ?? process.env) : null;
   if (result.code !== 0) {
-    const failure = migrationCommandFailure([dependencyCommand.command, ...dependencyCommand.args].join(" "), result, workspacePath, options.env ?? process.env, "Dependency");
+    const failure = migrationCommandFailure([dependencyCommand.command, ...args].join(" "), result, workspacePath, options.env ?? process.env, "Dependency");
+    failure.evidence.installAttempts = installAttempts;
+    failure.message += `\nInstall attempts: ${JSON.stringify(installAttempts)}`;
     if (damage) failure.message += `\n${damage}`;
     throw failure;
   }
   // A frozen install can report success over a store it did not repair.
   if (damage) throw new Error(damage);
   const installed = options.recordInputs && inputs && await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath));
-  return { state: "ready", packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true, cloneMs: cloneMs! } : {}) };
+  return { state: "ready", installAttempts, packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true, cloneMs: cloneMs! } : {}) };
 }

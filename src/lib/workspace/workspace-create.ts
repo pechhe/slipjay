@@ -425,9 +425,9 @@ async function ready({ hooks, context, issueNumber, prepared, installInputs: cla
   if (prepared) console.error(`[deps] ${basename(context.current.root)}: install inputs unchanged since the spare was prepared; reusing its dependencies`);
   const readiness = prepared ?? await timed(steps, "install", () => prepare(hooks, context.integration.root, context.current.root, claimedInputs, steps));
   // Fresh installs publish readiness under their install lock; reused spares need their record restored after assignment.
-  const { state, packageManager, installInputs } = (hooks.prepare ? {} : prepared ?? {}) as { state?: string; packageManager?: string | null; installInputs?: string | null };
+  const { state, packageManager, installInputs, installAttempts } = (hooks.prepare ? {} : prepared ?? {}) as { state?: string; packageManager?: string | null; installInputs?: string | null; installAttempts?: Record<string, unknown>[] };
   if (installInputs) {
-    await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs } });
+    await writeWorkspaceJson(metadataPath(context.current.name), { ...await workspaceMetadata(context.current.name), preparedDependencies: { state, packageManager, installInputs, installAttempts } });
   }
   acquired(hooks, context, issueNumber);
   return { ...workspace, readiness, steps };

@@ -115,6 +115,7 @@ export async function runStart(rest: string[]): Promise<void> {
         ...(options.attemptId ? { attemptId: options.attemptId } : {}),
         ...(refill ? { refill } : {}),
         steps: result.steps,
+        installAttempts: (result.readiness as { installAttempts?: Record<string, unknown>[] } | undefined)?.installAttempts,
       })}\n`);
     }
   }

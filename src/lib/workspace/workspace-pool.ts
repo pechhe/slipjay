@@ -30,10 +30,12 @@ export interface ReusedDependencies {
   packageManager: string | null;
   installInputs: string;
   reused: true;
+  installAttempts?: Record<string, unknown>[];
 }
 
 /** Dependency readiness stored in a spare's untyped metadata. */
 interface PreparedDependencies {
+  installAttempts?: Record<string, unknown>[];
   state?: string;
   packageManager?: string | null;
   installInputs?: string | null;
@@ -107,10 +109,10 @@ export async function refreshDependencies(integrationRoot: string, workspacePath
     if (installed.installInputs) {
       const context = await workspaceContext(workspacePath);
       if (!context) throw new Error(`Workspace disappeared while recording dependency readiness: ${workspacePath}`);
-      const { state, packageManager, installInputs } = installed;
+      const { state, packageManager, installInputs, installAttempts } = installed;
       // Publish the seed before releasing the lock: the next install must be able to find it.
       const name = context.current.name;
-      await writeWorkspaceJson(metadataPath(name), { ...await workspaceMetadata(name), preparedDependencies: { state, packageManager, installInputs } });
+      await writeWorkspaceJson(metadataPath(name), { ...await workspaceMetadata(name), preparedDependencies: { state, packageManager, installInputs, installAttempts } });
     }
     return installed;
   }, { waitMs: INSTALL_WAIT_MS });
@@ -156,6 +158,7 @@ export type DependencySource = "handover" | "clone" | "install" | "none";
 export interface ProvisionOutcome {
   provisioned: boolean; reason?: string; workspacePath?: string; name?: string;
   project?: string; integrationRoot?: string; dependencySource?: DependencySource; dependencyMs?: number; cloneMs?: number;
+  installAttempts?: Record<string, unknown>[];
 }
 
 /**
@@ -198,13 +201,13 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<Provi
     }
     await linkSharedPaths(root, workspacePath);
     const handedOver = Boolean((await workspaceMetadata(name))?.dependencyHandover);
-    const { state, packageManager, installInputs, seeded, cloneMs, dependencyMs } = await refillDependencies(root, workspacePath);
+    const { state, packageManager, installInputs, seeded, cloneMs, dependencyMs, installAttempts } = await refillDependencies(root, workspacePath);
     const dependencySource: DependencySource = state === "not_required" ? "none" : seeded ? "clone" : handedOver ? "handover" : "install";
     const { preparingPid: _done, dependencyHandover: _handover, ...metadata } = (await workspaceMetadata(name)) ?? {};
-    await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: { state, packageManager, installInputs } });
+    await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: { state, packageManager, installInputs, installAttempts } });
     return {
       provisioned: true, workspacePath, name, project: await repositoryProjectCode(root), integrationRoot: root,
-      dependencySource, dependencyMs, ...(dependencySource === "clone" ? { cloneMs } : {}),
+      dependencySource, dependencyMs, installAttempts, ...(dependencySource === "clone" ? { cloneMs } : {}),
     };
   } catch (error) {
     // Hand the name back so another refill can adopt and finish it.
@@ -263,7 +266,7 @@ export async function refreshSpares(cwd: string): Promise<SpareRefresh[]> {
       if (!reusableDependencies(spare.root, prepared, installInputs)) {
         const installed = await refillDependencies(root, spare.root, { installInputs });
         outcome = installed.seeded ? "seeded" : "installed";
-        current = { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs };
+        current = { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs, installAttempts: installed.installAttempts };
       }
       const { preparingPid: _done, ...metadata } = (await workspaceMetadata(spare.name)) ?? {};
       await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: current });
@@ -344,7 +347,7 @@ function reusableDependencies(root: string, prepared: PreparedDependencies | nul
   if (!prepared?.installInputs || (prepared.state !== "ready" && prepared.state !== "not_required")) return null;
   if (prepared.state === "ready" && !existsSync(join(root, "node_modules"))) return null;
   if (current !== prepared.installInputs) return null;
-  return { state: prepared.state, packageManager: prepared.packageManager ?? null, installInputs: prepared.installInputs, reused: true };
+  return { state: prepared.state, packageManager: prepared.packageManager ?? null, installInputs: prepared.installInputs, installAttempts: prepared.installAttempts, reused: true };
 }
 
 /**

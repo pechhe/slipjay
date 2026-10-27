@@ -200,6 +200,24 @@ install repeated from scratch. Existing `node_modules`, however stale, are insta
 over in place and never replaced by a clone: in a large repository, deleting and
 cloning the tree takes minutes, while an incremental install changes only what changed.
 
+For Bun, an exact-version “No version matching” failure naming a version in the
+frozen `bun.lock` gets one retry in the same workspace with `--no-cache` replacing
+`--prefer-offline`. This refreshes manifest lookup without deleting the global
+cache or changing dependency pins. Other errors, cancellations and timeouts do
+not trigger this recovery; an absent version still fails after that one retry.
+Binary `bun.lockb` files have no automatic metadata recovery because SlipJay cannot
+prove the reported version is locked from their text.
+
+Install attempts retain bounded, redacted diagnostics in the workspace's
+`preparedDependencies.installAttempts`, the `start --json` result's `installAttempts`
+and the provisioning log. On failure the error carries all attempts and readiness
+is not recorded. Runner candidate and release installs use the same recovery;
+their existing command evidence records each original and retry command separately.
+`steps.install` continues to measure the entire install, including recovery. A foreground
+`slipjay start` still streams Bun's output live while keeping a bounded copy for this inspection.
+Bun's frozen install also applies changed `patchedDependencies` over reused trees;
+SlipJay preserves the candidate's patch files and lockfile.
+
 Each spare a background refill provisions is one line in `pool-refill.log` (in the state home), so the log alone
 shows how often spares come from handovers rather than clones, and what each cost, per repository:
 `{"provisioned":true,"workspacePath","name","project","integrationRoot","dependencySource","dependencyMs"}`, with

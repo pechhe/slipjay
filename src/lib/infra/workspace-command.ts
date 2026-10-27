@@ -42,13 +42,15 @@ export function jjEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * Run one workspace command with a timeout and an output bound. Resolves with
  * `{ code, signal, stdout, stderr, timedOut, truncated }`, with `input` sent to its stdin; a timeout or spawn
  * failure is a nonzero `code` with the reason in `stderr`. `inherit` streams to
- * this terminal unbounded in time, for interactive dependency installation.
+ * this terminal unbounded in time, for interactive dependency installation; `tee` streams the same way
+ * and also keeps the last `MAX_OUTPUT_BYTES` of each stream, for a caller that must inspect a failure.
  */
 export async function runWorkspaceCommand(
   command: string,
   args: readonly string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean; input?: string } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean; tee?: boolean; input?: string } = {},
 ): Promise<WorkspaceCommandResult> {
+  if (options.tee) return runTeed(command, args, options);
   if (options.inherit) return runInherited(command, args, options);
   const timeoutMs = commandTimeoutMs(options);
   const env = options.env ?? landingCommandEnvironment();
@@ -79,5 +81,28 @@ function runInherited(
     const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, stdio: "inherit" });
     child.once("error", reject);
     child.once("close", (code, signal) => resolveRun({ code: code ?? 1, signal, stdout: "", stderr: "", timedOut: false, truncated: false }));
+  });
+}
+
+/** `runInherited`, with each stream also kept (its last `MAX_OUTPUT_BYTES`) for the caller. */
+function runTeed(
+  command: string,
+  args: readonly string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv },
+): Promise<WorkspaceCommandResult> {
+  return new Promise((resolveRun) => {
+    const child = spawn(command, args, { cwd: options.cwd, env: options.env ?? process.env, stdio: ["inherit", "pipe", "pipe"] });
+    const kept = { stdout: "", stderr: "" };
+    let truncated = false;
+    const keep = (stream: "stdout" | "stderr", chunk: Buffer) => {
+      (stream === "stdout" ? process.stdout : process.stderr).write(chunk);
+      const joined = kept[stream] + chunk.toString("utf8");
+      if (joined.length > MAX_OUTPUT_BYTES) truncated = true;
+      kept[stream] = joined.slice(-MAX_OUTPUT_BYTES);
+    };
+    child.stdout.on("data", (chunk: Buffer) => keep("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer) => keep("stderr", chunk));
+    child.once("error", (error) => resolveRun({ code: 1, signal: null, stdout: kept.stdout, stderr: `${kept.stderr}\n${command} could not start: ${error.message}`.trim(), timedOut: false, truncated }));
+    child.once("close", (code, signal) => resolveRun({ code: code ?? 1, signal, ...kept, timedOut: false, truncated }));
   });
 }

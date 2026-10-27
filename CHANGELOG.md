@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.46.19
+
+- **Stale Bun metadata gets one frozen recovery (SJ-89):** workspace, runner candidate and release installs retry an
+  exact locked-version resolution failure once with `--no-cache`, retaining the original and recovery diagnostics.
+  The retry keeps the frozen lockfile and package cache; absent versions and unrelated failures still fail truthfully,
+  and cancelled installs are never retried. Start JSON, workspace readiness and spare provisioning retain install
+  attempts; runner command evidence retains both runs. A local tarball fixture proves changed Bun patches apply
+  over reused `node_modules` without changing the candidate lockfile.
+
 ## v3.46.18
 
 - **Resend a parked Forge receipt (SJ-129):** `slipjay runner resend <operation>` requeues an operation's parked receipts,

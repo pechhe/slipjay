@@ -13,7 +13,7 @@ import { write, advance, bunProject } from "./fixtures/workspace-spare-dependenc
 test("a claimed spare reuses its dependencies when the refresh leaves install inputs unchanged", async () => {
   const f = await bunProject();
   try {
-    await provisionSpare(f.repo);
+    const provisioned = await provisionSpare(f.repo);
     assert.equal(await f.count(), 1);
     await write(f.repo, {
       "README.md": "changed\n", "scripts/unrelated.mjs": "export const unrelated = 2;\n",
@@ -24,12 +24,16 @@ test("a claimed spare reuses its dependencies when the refresh leaves install in
 
     const created = await createWorkspace("task", f.repo);
     assert.equal(created.pooled, true);
-    assert.deepEqual({ ...(created.readiness as object), installInputs: undefined },
+    const { installAttempts, ...readiness } = created.readiness as { installAttempts?: Record<string, unknown>[] };
+    assert.deepEqual(installAttempts, provisioned.installAttempts, "the claim retains its provisioning install evidence");
+    assert.equal(installAttempts?.at(-1)?.outcome, "success");
+    assert.deepEqual({ ...readiness, installInputs: undefined },
       { state: "ready", packageManager: "bun", installInputs: undefined, reused: true });
     assert.equal(await f.count(), 1, "no install ran on claim");
     assert.ok(existsSync(join(created.workspacePath, "node_modules", ".bun")), "the provisioned node_modules is in place");
     assert.equal(await readFile(join(created.workspacePath, "README.md"), "utf8"), "changed\n", "the claim refreshed to the integration head");
-    const recorded = (await workspaceMetadata(created.current.name))?.preparedDependencies as { installInputs?: string } | undefined;
+    const recorded = (await workspaceMetadata(created.current.name))?.preparedDependencies as { installInputs?: string; installAttempts?: Record<string, unknown>[] } | undefined;
+    assert.deepEqual(recorded?.installAttempts, installAttempts, "the workspace keeps the evidence after assignment");
     assert.equal(recorded?.installInputs, await installInputFingerprint(created.workspacePath), "the claimed workspace records its install inputs, so it can seed others");
   } finally {
     await f.dispose();
