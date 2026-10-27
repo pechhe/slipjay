@@ -245,6 +245,28 @@ test("a restart mid-audit records the audit interrupted, which is no verdict, an
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("no deploy starts while an audit runs on the host: it waits, naming the audit, and starts once the audit ends", async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.root, "hold-audit"), "");
+    await f.queue.recover();
+    for (const deadline = Date.now() + 60_000; f.audits()[0]?.status !== "running" && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(f.audits()[0]?.status, "running");
+    const deploy = newOperationId();
+    f.log.append(deploy, { type: "submitted", kind: "deploy", repo: "fixture/other", environment: "staging", commitId: "d".repeat(40), submittedBy: "test" });
+    f.queue.wake();
+    // The deploy queue runs on its own chain: give it the turn it would take.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(f.log.operation(deploy)?.status, "queued", "no deploy starts beside an audit");
+    assert.match(f.log.operation(deploy)?.waitingFor ?? "", /^audit /);
+    await rm(join(f.root, "hold-audit"));
+    await f.settle((audits) => audits.every((operation) => operation.status === "audited") && f.log.operation(deploy)?.status !== "queued");
+    assert.equal(f.audits()[0]?.status, "audited");
+    // The fixture runner has no checkout of the deploy's repository, so it fails once it starts.
+    assert.equal(f.log.operation(deploy)?.status, "failed");
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("an audit takes the repository's lane like a landing: it waits for the running landing and then runs", async () => {
   const f = await fixture();
   try {
@@ -260,5 +282,33 @@ test("an audit takes the repository's lane like a landing: it waits for the runn
     await f.settle((audits) => audits.every((operation) => operation.status === "audited") && f.log.operation(landing)?.status === "landed");
     assert.equal(f.log.operation(landing)?.status, "landed");
     assert.equal(f.audits()[0]?.status, "audited");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("an audit waits while a deploy builds on the host, naming it, and runs once the deploy ends", async () => {
+  const f = await fixture();
+  try {
+    await f.queue.recover();
+    await f.settle((audits) => audits.some((operation) => operation.status === "audited"));
+    // A deploy of another repository, already building on this host.
+    const deploy = newOperationId();
+    f.log.append(deploy, { type: "submitted", kind: "deploy", repo: "fixture/other", environment: "staging", commitId: "d".repeat(40), submittedBy: "test" });
+    f.log.append(deploy, { type: "stage", stage: "deploying" });
+    const night = newOperationId();
+    f.log.append(night, { type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date(Date.now() + 86_400_000).toISOString(), submittedBy: "test" });
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(night)?.status, "queued", "no audit starts beside a deploy");
+    assert.match(f.log.operation(night)?.waitingFor ?? "", /^deploy /);
+    // A landing of the audited repository is not held back by the waiting audit.
+    const landing = f.submit(await f.candidate("passes.txt"));
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(landing)?.status, "landed");
+    assert.equal(f.log.operation(night)?.status, "queued");
+    f.log.append(deploy, { type: "failed", stage: "deploying", reason: "fixture" });
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(night)?.status, "audited", JSON.stringify(f.log.operation(night)));
   } finally { await f.dispose(); }
 }, 120_000);

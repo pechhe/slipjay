@@ -357,11 +357,13 @@ export function createRunnerQueue(input: {
     deployPending = true;
     deploying = deploying.then(() => { deployPending = false; return deployLoop(); });
   }
+  /** Whether an audit runs on this host, which no deploy starts beside (see `startable`). */
+  const auditRunning = (): boolean => [...admitted.values()].some((entry) => entry.kind === "audit");
   function deployLoop(): void {
     for (;;) {
       // Recovery settles the commands a previous process left, deploys included: they wait for it as landings do.
       if (log.paused() || draining || recovering || heldStart) return;
-      const operation = activeDeploys.size < deployWorkers
+      const operation = activeDeploys.size < deployWorkers && !auditRunning()
         ? log.openOperations().find((entry): entry is DeployOperation => entry.kind === "deploy" && entry.status === "queued"
           && ![...activeDeploys.values()].some((active) => repositoryKey(active.repo) === repositoryKey(entry.repo))) : undefined;
       if (operation) {
@@ -621,7 +623,7 @@ export function createRunnerQueue(input: {
     for (const operation of open) {
       if (!admits(true, places(), workers, shortPlace)) break;
       if (operation.kind === "deploy") {
-        if (!executor.combinedLimits && operation.status === "queued" && !activeDeploys.has(operation.id)) admitDeploy(operation);
+        if (!executor.combinedLimits && operation.status === "queued" && !activeDeploys.has(operation.id) && !auditRunning()) admitDeploy(operation);
         continue;
       }
       if (behind.has(laneOf(operation.repo))) continue;
@@ -662,6 +664,10 @@ export function createRunnerQueue(input: {
   function startable(operation: Operation, open: readonly Operation[]): { short: boolean; prefix: boolean } | undefined {
     // `open` is a snapshot: what this wake already admitted still reads as queued there.
     if (operation.kind === "deploy" || admitted.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
+    // An audit's verdict gates promotion, so it and a deploy never run together on this host: a deploy's load fails
+    // tests that fit their bounds on a quiet host, and that failure says nothing about the code. The audit starts once
+    // the deploys end (which wakes the queue), and deploys wait for it (`auditRunning`).
+    if (operation.kind === "audit" && (activeDeploys.size || open.some((entry) => entry.kind === "deploy" && entry.status === "running"))) return undefined;
     if (lanes.has(admissionLane(laneOf(operation.repo), operation.repo, operation.kind))) return undefined;
     // A pre-verification verifies a staged commit in its release lane, outside the depth-two chain, once staging has caught up.
     if (operation.kind === "verification") return log.stagingDue(operation.repo) ? undefined : { short: false, prefix: false };

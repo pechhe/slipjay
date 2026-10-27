@@ -163,6 +163,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const serial = open.filter((operation) => operation.kind !== "deploy" && !(operation.kind === "landing" && operation.admission === "pending") && !replaced.includes(operation));
     const deploys = open.filter((operation) => operation.kind === "deploy");
     const runningDeploys = deploys.filter((operation) => operation.status === "running");
+    const runningAudits = serial.filter((operation) => operation.kind === "audit" && operation.status === "running");
     const busy = (separateDeploys ? serial : open).filter((operation) => operation.status === "running");
     const admittedTo = (operation: Operation) => admissionLane(lane(operation.repo), operation.repo, operation.kind);
     const holding = (first: Operation | undefined) => first && first.kind !== "deploy" ? busy.find((operation) => lane(operation.repo) === lane(first.repo) && (
@@ -185,7 +186,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       if (operation.status !== "queued") continue;
       if (held) operation.stage = "paused";
       const same = runningDeploys.find((other) => repositoryKey(other.repo) === repositoryKey(operation.repo));
-      const blockers = same ? [same] : runningDeploys.length >= deployWorkers ? runningDeploys : !separateDeploys ? busy : [];
+      // As the queue admits, no deploy starts beside a running audit.
+      const blockers = same ? [same] : runningAudits.length ? runningAudits : runningDeploys.length >= deployWorkers ? runningDeploys : !separateDeploys ? busy : [];
       if (blockers.length) operation.waitingFor = blockers.map(label).join(", ");
     }
     for (const entries of lanes) {
@@ -209,6 +211,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         }
       });
     }
+    // As the queue admits, an audit that could otherwise start waits for every running deploy, without holding its lane;
+    // the queue reads its own admitted deploys, which this ledger shows as running once their first stage is recorded.
+    for (const operation of serial) if (operation.kind === "audit" && operation.status === "queued" && operation.waitingFor === undefined && runningDeploys.length)
+      operation.waitingFor = runningDeploys.map(label).join(", ");
     // Nothing passes older work of its repository lane that waits for a place, as the queue admits.
     const waitingForPlace = new Map<string, Operation>();
     for (const operation of serial) {

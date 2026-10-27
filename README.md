@@ -849,7 +849,10 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
   reads `audit` at the repository's integration head, so a repository audits without any landing
   in the ledger; it is rebuilt at startup and after every landing and every audit.
 - **Where.** An audit takes its repository's lane like a landing and waits its turn behind queued
-  work. The runner fetches the
+  work. It never runs beside a deploy on the runner: it waits while any deploy runs, naming it, and
+  no deploy starts while it runs (the deploy names the audit instead), since a deploy's load fails
+  tests that fit their bounds on a quiet host and the audit's verdict gates promotion. Work queued
+  behind it in its lane is not held back meanwhile. The runner fetches the
   integration branch, resolves the published head, records it (`audit_head`), checks that exact
   commit out and runs the commands in order, with the landing gate's bounds. It leaves the
   integration bookmark alone, so a held integration stays held. `runner kill` stops it while it
