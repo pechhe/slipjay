@@ -156,7 +156,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const open = projectIds((openIds.all() as { operation_id: string }[]).map((row) => row.operation_id));
     const held = paused() !== null;
     // Until Build admits it, a Build-bound landing holds no place in any lane.
-    for (const operation of open) if (operation.kind === "landing" && operation.admission === "pending" && operation.status === "queued") operation.waitingFor = "Build admission";
+    for (const operation of open) if (operation.kind === "landing" && operation.admission === "pending" && operation.status === "queued") operation.waitingFor = operation.admissionUnavailable ? `Build admission: ${operation.admissionUnavailable.reason}` : "Build admission";
     // Nor does a candidate Build may yet replace with a newer one.
     const replaced = open.filter((operation) => awaitingReplacement(operation, open));
     for (const operation of replaced) operation.waitingFor = "Build admission of a newer candidate";
@@ -599,8 +599,14 @@ function project(id: string, events: StoredEvent[], projections: OperationLogPro
         operation.status = "queued";
         operation.stage = "queued";
         break;
+      case "admission_unavailable":
+        if (operation.kind === "landing" && operation.admission === "pending") operation.admissionUnavailable = { reason: event.reason, at: stored.at };
+        break;
       case "build_admitted":
-        if (operation.kind === "landing") operation.admission = "admitted";
+        if (operation.kind === "landing") {
+          operation.admission = "admitted";
+          delete operation.admissionUnavailable;
+        }
         break;
       case "audit_head":
         if (operation.kind === "audit") operation.head = event.commit;

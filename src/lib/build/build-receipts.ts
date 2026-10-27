@@ -354,9 +354,8 @@ export function createReceiptDrain(input: { log: OperationLog; route: BuildRoute
       if (closed) return;
       if (!owedAdmission(history)) continue;
       const result = await settleAdmission(log, admit, operation.id);
-      // Stop this lane at its first outage, but do not strand already-admitted publications
-      // behind an unrelated admission whose item reads cannot complete.
-      if (!result.resolved) { admissionUnavailable = result.reason; break; }
+      // An unanswered admission holds no later admission or receipt behind it; retry it next pass.
+      if (!result.resolved) { admissionUnavailable ??= result.reason; continue; }
       // Admitted, it may start; refused, the candidate it would have replaced may.
       input.onAdmissionSettled?.();
     }

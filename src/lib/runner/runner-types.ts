@@ -155,6 +155,8 @@ export type OperationEvent =
       admission?: BuildAdmissionRecord;
       /** Declared by its author as belonging to no Spec: once published, reported to Build as a chore landing. */
       chore?: { title: string; helperRevisions: string[] } }
+  /** Build could not answer admission; the ledger timestamp records when the reason changed. Does not settle admission. */
+  | { type: "admission_unavailable"; reason: string }
   /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
   | { type: "build_admitted"; sequence: number; sessionId: string; recordedAt: string | null;
       /** The admitted Spec's and Tickets' numbers; absent on admissions recorded before they were read. */
@@ -276,7 +278,9 @@ type OperationFields = {
 
 export type LandingOperation = OperationFields & { kind: "landing"; changeId: string; bookmark: string; outcome?: LandingOutcome;
   /** Build-bound only: `pending` until Build admits it, and the queue never starts it while pending. */
-  admission?: "pending" | "admitted" };
+  admission?: "pending" | "admitted";
+  /** Latest unanswered admission attempt, while admission is pending. */
+  admissionUnavailable?: { reason: string; at: string } };
 
 /** Versioned recorded evidence, not authority to repair, retry, or release the author. */
 export type LandingOutcome = {
@@ -299,7 +303,7 @@ export type LandingOutcome = {
   /** `unassociated`: its author declared it part of no Spec, so it is never admitted and reports only its publication.
       `chore` is Build's own item number for that publication, once Build has recorded it and its number was read. */
   build?: { admission: "pending" | "admitted" | "refused" | "unassociated"; receipts: "none" | "pending" | "delivered" | "parked";
-    chore?: { number: number } };
+    admissionUnavailable?: { reason: string; at: string }; chore?: { number: number } };
 };
 
 /** Releases share the serial queue with landings: a landing submitted behind a release waits for it. */

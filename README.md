@@ -1309,14 +1309,18 @@ queue it unadmitted. After retaining the source it records the operation as awai
 Forge admission, then calls Forge's `admitAttempt` (`POST {origin}/api/build/runner`)
 with that `submitted` record's ledger sequence, waiting at most 10 seconds. Until Forge
 admits it the operation has no place in its queue and never starts (`waitingFor`
-reads `Forge admission`); once admitted it queues as usual, and a pause still holds
+reads `Build admission`, followed by the latest unavailable reason when recorded); once admitted it queues as usual, and a pause still holds
 it. A Forge refusal (`bind_generation_stale`, `admission_session_invalid`,
 `delivery_pending`, `attempt_fact_conflict`, or an input Forge will not accept) ends
 the operation as `declined` with Forge's code, and nothing runs. Only `delivery_pending`
 is marked retryable: another delivery of the Spec is still in Forge's custody, so land
 again once it has finished. When Forge does not
 answer, the runner keeps the operation awaiting admission and refuses the submission
-as retryable (503). The receipt drain then keeps offering that same admission until Forge
+as retryable (503). It records `admission_unavailable` on that operation, with the reason and the
+ledger timestamp, only when the reason differs from its last such event, so repeated identical retries
+add no events. The queue projection and `runner outcome` expose the latest reason and time as
+`admissionUnavailable`; `waitingFor` names the reason while queued. The operation remains queued
+with admission pending. The receipt drain then keeps offering that same admission until Forge
 answers, which Forge replays, so a lost response never opens a second operation and
 needs no further landing; running `slipjay land` again only asks sooner. An owner may
 cancel an operation awaiting admission: the drain still settles its admission, and if
@@ -1382,7 +1386,8 @@ message is never trusted, and SlipJay has no attach command of its own: Forge re
 Every receipt repeats the admitted source tuple:
 the author's commit as `candidateRevision`, the Spec, Tickets, body revision and hash,
 and the bind generation. An independent drain reconciles unanswered admissions and sends owed receipts in ledger order,
-with each lane stopping at its first unavailable answer. An unresolved admission never blocks receipts for already-admitted work;
+trying later admissions even when an earlier one remains unanswered; receipt delivery stops at its first unavailable answer.
+An unresolved admission never blocks later admissions or receipts for already-admitted work;
 either lane still owing an answer retains the shared outage state and exponential backoff. The drain
 records each delivery in the ledger, and resends until Forge answers, which Forge
 replays, so a Forge outage, a runner restart or a lost response delays a receipt but

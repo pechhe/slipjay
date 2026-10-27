@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.21
+
+- **Unanswered admissions hold no later admission (YS-468):** each operation records `admission_unavailable`
+  when its unanswered admission reason changes, exposing the latest reason and time in its queue projection and
+  runner outcome while it stays queued with admission pending. The drain tries later admissions in the same pass,
+  retaining the shared delivery outage state and backoff until all admissions and receipts have answers.
+
 ## v3.46.20
 
 - **Release a hold that never reached the target (SJ-74):** `slipjay runner release <owner/repo>` lets the runner

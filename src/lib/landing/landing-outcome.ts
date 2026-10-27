@@ -65,6 +65,8 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     admission: bound.type === "submitted" && "chore" in bound && bound.chore ? "unassociated" : events.some((event) => event.type === "build_admitted") ? "admitted"
       : result?.type === "declined" && result.build ? "refused" : "pending",
     receipts: !owed.length ? "none" : settled.includes(undefined) ? "pending" : settled.includes("parked") ? "parked" : "delivered",
+    // Only while admission is still owed: a refused, cancelled or finished landing no longer waits on it.
+    ...operation.admissionUnavailable && !result && !events.some((event) => event.type === "build_admitted") ? { admissionUnavailable: operation.admissionUnavailable } : {},
     ...chore ? { chore } : {} } : undefined;
   return { version: 1, operationId: operation.id, repo: operation.repo, changeId: operation.changeId, sourceCommitId: operation.commitId,
     status: operation.status, stage: operation.stage, terminal: Boolean(result), asOfSeq: operation.lastSeq,

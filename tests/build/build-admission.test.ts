@@ -8,6 +8,7 @@ import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { candidateBookmark, RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
 import type { Operation, SubmitRequest } from "../../src/lib/runner/runner-types.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
 import type { BuildBinding, SubmissionHandoff } from "../../src/lib/landing/submission-handoff.ts";
 
 const token = "runner-secret";
@@ -22,7 +23,7 @@ const submission = (commitId = "a".repeat(40), extra: Partial<SubmitRequest> = {
 
 /** The handler with a controlled Build: each admission takes the next scripted answer. */
 function fixture(answers: BuildAdmission[] | null) {
-  const log = openOperationLog(":memory:");
+  const log = openOperationLog(":memory:", {}, { landingOutcome });
   const offered: BuildAdmissionRequest[] = [];
   let woken = 0, unresolved = 0;
   const handler = createRunnerHandler({
@@ -81,7 +82,7 @@ test("Build unavailable leaves the submission unqueued, and resubmitting replays
   assert.match(first.body.error!, /did not answer in time.*slipjay land again/);
   const pending = f.log.operationsForChange("owner/repo", changeId);
   assert.equal(pending.length, 1);
-  assert.ok(pending[0]!.admission === "pending" && pending[0]!.status === "queued" && pending[0]!.position === undefined && pending[0]!.waitingFor === "Build admission");
+  assert.ok(pending[0]!.admission === "pending" && pending[0]!.status === "queued" && pending[0]!.position === undefined && pending[0]!.waitingFor === "Build admission: Build did not answer in time");
   assert.equal(f.woken, 0);
   // A lost response: the author resubmits the same request, and the runner resends the identical fact.
   f.answers!.push(admitted({ sequence: f.offered[0]!.sequence }));
@@ -93,6 +94,33 @@ test("Build unavailable leaves the submission unqueued, and resubmitting replays
   assert.equal(f.log.operationsForChange("owner/repo", changeId).length, 1);
   assert.equal(f.woken, 1);
   f.log.close();
+});
+
+test("unanswered admission records only changed reasons, with its time, without settling or starting the operation", async () => {
+  const firstReason = "Build could not be reached", lastReason = "the admitted items could not be read";
+  const f = fixture([firstReason, firstReason, lastReason].map((reason) => ({ outcome: "unavailable", reason })));
+  try {
+    for (let attempt = 0; attempt < 3; attempt++) assert.equal((await f.submit(submission())).status, 503);
+    const operation = f.log.operationsForChange("owner/repo", changeId)[0]!;
+    const unanswered = f.log.events({ operationId: operation.id }).filter((row) => row.event.type === "admission_unavailable");
+    assert.deepEqual(unanswered.map((row) => row.event), [
+      { type: "admission_unavailable", reason: firstReason }, { type: "admission_unavailable", reason: lastReason },
+    ]);
+    assert.ok(unanswered.every((row) => Number.isFinite(Date.parse(row.at))));
+    assert.equal(operation.status, "queued");
+    assert.equal(operation.admission, "pending");
+    assert.equal(operation.position, undefined);
+    assert.equal(operation.waitingFor, `Build admission: ${lastReason}`);
+    assert.deepEqual(operation.admissionUnavailable, { reason: lastReason, at: unanswered[1]!.at });
+    assert.deepEqual(operation.outcome?.build, { admission: "pending", receipts: "none", admissionUnavailable: operation.admissionUnavailable });
+    f.answers!.push(admitted());
+    assert.equal((await f.submit(submission())).status, 200);
+    const settled = f.log.operation(operation.id)!;
+    assert.ok(settled.kind === "landing" && settled.admission === "admitted");
+    assert.equal(settled.admissionUnavailable, undefined);
+    assert.equal(settled.outcome?.build?.admissionUnavailable, undefined);
+    assert.equal(settled.waitingFor, undefined);
+  } finally { f.log.close(); }
 });
 
 test("without a request identity, the same pending candidate retries its admission instead of opening a second operation", async () => {

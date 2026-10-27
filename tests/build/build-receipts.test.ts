@@ -361,7 +361,38 @@ test("an unavailable cancelled admission does not strand unrelated published rec
   } finally { drain.close(); log.close(); }
 });
 
-test("a total outage tries only the first admission and receipt in each backed-off pass", async () => {
+test("an older admission whose items cannot be read does not hold back a newer admission", async () => {
+  const log = openLog();
+  const pending = (change: string, specId: string) => {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", repo: "owner/repo", changeId: change.repeat(32), commitId: change.repeat(40),
+      bookmark: candidateBookmark(change.repeat(32)), submittedBy: "author", admission: { ...admission, binding: { ...binding, specId } } });
+    return id;
+  };
+  const older = pending("a", "older-spec"), newer = pending("b", "newer-spec");
+  const build = fakeBuild();
+  const route: BuildRoute = (action, input) => action === "read" && (input as { itemId: string }).itemId === "older-spec"
+    ? Promise.resolve({ kind: "unavailable", reason: "older item read timed out" }) : build.route(action, input);
+  let settledWakes = 0;
+  const drain = createReceiptDrain({ log, route, onAdmissionSettled: () => { settledWakes++; } });
+  try {
+    drain.wake(); await drain.idle();
+    const first = log.operation(older)!, second = log.operation(newer)!;
+    assert.ok(first.kind === "landing" && second.kind === "landing");
+    assert.equal(first.status, "queued");
+    assert.equal(first.admission, "pending");
+    assert.match(first.waitingFor ?? "", /older item read timed out/);
+    assert.equal(second.status, "queued");
+    assert.equal(second.admission, "admitted");
+    assert.equal(second.position, 1);
+    assert.equal(settledWakes, 1);
+    assert.deepEqual(build.admissions.map((request) => request.operationId), [older, newer]);
+    assert.equal(log.snapshot("test").build?.state, "unavailable");
+    assert.equal(log.snapshot("test").build?.pending, 1);
+  } finally { drain.close(); log.close(); }
+});
+
+test("a total outage tries every admission and only the first receipt in each backed-off pass", async () => {
   vi.useFakeTimers();
   const log = openLog();
   landing(log, "a", "open", "pending");
@@ -373,15 +404,15 @@ test("a total outage tries only the first admission and receipt in each backed-o
   const drain = createReceiptDrain({ log, route: build.route, initialBackoffMs: 20, maxBackoffMs: 40 });
   try {
     drain.wake(); await drain.idle();
-    assert.deepEqual([build.admissions.length, build.sent.length], [1, 1]);
+    assert.deepEqual([build.admissions.length, build.sent.length], [2, 1]);
     drain.wake(); await drain.idle();
-    assert.deepEqual([build.admissions.length, build.sent.length], [1, 1]);
+    assert.deepEqual([build.admissions.length, build.sent.length], [2, 1]);
     await vi.advanceTimersByTimeAsync(20); await drain.idle();
-    assert.deepEqual([build.admissions.length, build.sent.length], [2, 2]);
+    assert.deepEqual([build.admissions.length, build.sent.length], [4, 2]);
     await vi.advanceTimersByTimeAsync(39); await drain.idle();
-    assert.deepEqual([build.admissions.length, build.sent.length], [2, 2]);
+    assert.deepEqual([build.admissions.length, build.sent.length], [4, 2]);
     await vi.advanceTimersByTimeAsync(1); await drain.idle();
-    assert.deepEqual([build.admissions.length, build.sent.length], [3, 3]);
+    assert.deepEqual([build.admissions.length, build.sent.length], [6, 3]);
     assert.equal(log.snapshot("test").build?.state, "unavailable");
   } finally { drain.close(); log.close(); vi.useRealTimers(); }
 });

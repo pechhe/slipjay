@@ -93,8 +93,15 @@ export async function settleAdmission(log: OperationLog, admit: BuildAdmitter, o
   const { repo, changeId, commitId, admission } = submitted.event;
   if (admissionSettled(log.events({ operationId }))) return { resolved: true };
   const answer = await admit(admissionRequest({ repo, operationId, sequence: submitted.seq, occurredAt: submitted.at, commitId, record: admission }));
-  if (answer.outcome === "unavailable") return { resolved: false, reason: answer.reason };
-  if (admissionSettled(log.events({ operationId }))) return { resolved: true };
+  const history = log.events({ operationId });
+  if (admissionSettled(history)) return { resolved: true };
+  if (answer.outcome === "unavailable") {
+    // Keep repeated retries quiet: record only a change from the last unavailable reason.
+    const last = history.findLast((row) => row.event.type === "admission_unavailable");
+    if (last?.event.type !== "admission_unavailable" || last.event.reason !== answer.reason)
+      log.append(operationId, { type: "admission_unavailable", reason: answer.reason });
+    return { resolved: false, reason: answer.reason };
+  }
   if (answer.outcome === "admitted") {
     log.append(operationId, { type: "build_admitted", sequence: answer.sequence, sessionId: answer.sessionId, recordedAt: answer.recordedAt, ...answer.items ? { items: answer.items } : {} });
     // Only candidates submitted before it: one admitted late after being cancelled never displaces a newer one.
