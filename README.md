@@ -869,7 +869,9 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
 - **Where.** An audit takes its repository's lane like a landing and waits its turn behind queued
   work. It never runs beside a deploy on the runner: it waits while any deploy runs, naming it, and
   no deploy starts while it runs (the deploy names the audit instead), since a deploy's load fails
-  tests that fit their bounds on a quiet host and the audit's verdict gates promotion. Work queued
+  tests that fit their bounds on a quiet host and the audit's verdict gates promotion. With the
+  default single deploy worker it starts as soon as the running deploy ends; with several
+  `deployWorkers`, deploys that keep overlapping can hold it back until they stop. Work queued
   behind it in its lane is not held back meanwhile. The runner fetches the
   integration branch, resolves the published head, records it (`audit_head`), checks that exact
   commit out and runs the commands in order, with the landing gate's bounds. It leaves the
