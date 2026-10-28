@@ -450,11 +450,14 @@ Each admitted operation holds one place until its terminal outcome: the head of 
 short repository may take the short place, and its successor always counts as long, so
 it waits for a worker (`a worker (…)`) even when its own queue could take it. An older
 reset, release or audit of its repository holds a depth-two head or successor back, and it names that
-operation. Of the repositories SlipJay itself lands, YardSmith runs at depth two: its
-gates take free ports, run database tests in disposable containers, and never read
-Preview, so its `postIntegration` step declares `readByGate: false`; its heavy checks
-share host-wide slots on purpose (YardSmith's `docs/agents/tooling.md` lists the shared
-state). T3 Code is a candidate: it runs at depth one until its gates are shown safe in
+operation. Of the repositories SlipJay itself lands, none runs at depth two. YardSmith
+did from 26 to 28 Oct 2026 and went back to depth one (YS-542): its gates take free
+ports, run database tests in disposable containers, and never read Preview, so its
+`postIntegration` step declares `readByGate: false`, and its heavy checks share host-wide
+slots on purpose (YardSmith's `docs/agents/tooling.md` lists the shared state). Safe was
+not faster. In the first 30 landings after 10:00 GMT on 27 Oct, at three workers, passing
+landings that overlapped another verification took a median 465 s against 194 s alone,
+and the queue-wait p90 was 652 s. T3 Code is a candidate: it runs at depth one until its gates are shown safe in
 independent checkouts on `t3peach`, including a controlled pair through its
 upstream-receipt check. SlipJay's real-systemd tests are not yet shown safe in
 parallel, and agent-config's and splay's landings are too short to gain from it.
