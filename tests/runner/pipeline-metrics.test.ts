@@ -83,19 +83,24 @@ test("confirms repeated in-window failures after a later matching successful com
   assert.equal(metrics.flakes[0]?.fileSet, "same-files");
   assert.deepEqual(metrics.flakes[0]?.changes, ["acme/app/change-a", "acme/app/change-b"]);
   assert.deepEqual(metrics.flakes[0]?.passingEvidence, { operationId: "pass", seq: 14 });
-  assert.match(formatPipelineMetrics(metrics), /widget > retries \(confirmed;/);
+  assert.match(formatPipelineMetrics(metrics), /Confirmed flakes: widget > retries \(2 changes;/);
   assert.deepEqual(pipelineMetrics(events, at(2_500)).flakes, []);
 });
 
-test("reports an unconfirmed candidate when file sets differ or no successful run follows", () => {
+test("reports an unconfirmed candidate when file sets differ and the command passed in between", () => {
   const command = "vp test run tests/widget.test.ts";
+  const midPass = (seq: number): StoredEvent[] => [
+    row(seq, "mid-pass", 1_500, submitted("acme/app", "change-mid")),
+    ...run("mid-good", command, 20, 0).map((event, index) => row(seq + 1 + index, "mid-pass", 1_501 + index, event)),
+  ];
   const events: StoredEvent[] = [
     row(1, "fail-a", 1_000, submitted("acme/app", "change-a")), row(2, "fail-a", 1_001, shape("files-a")), row(3, "fail-a", 1_002, testFailure(command, "widget > retries")),
     ...run("bad-a", command, 20, 1).map((event, index) => row(4 + index, "fail-a", 1_003 + index, event)),
-    row(6, "fail-b", 2_000, submitted("acme/app", "change-b")), row(7, "fail-b", 2_001, shape("files-b")), row(8, "fail-b", 2_002, testFailure(command, "widget > retries")),
-    ...run("bad-b", command, 20, 1).map((event, index) => row(9 + index, "fail-b", 2_003 + index, event)),
-    row(11, "pass-different", 3_000, submitted("acme/app", "change-c")), row(12, "pass-different", 3_001, shape("files-b")),
-    ...run("good", command, 20, 0).map((event, index) => row(13 + index, "pass-different", 3_002 + index, event)),
+    ...midPass(6),
+    row(9, "fail-b", 2_000, submitted("acme/app", "change-b")), row(10, "fail-b", 2_001, shape("files-b")), row(11, "fail-b", 2_002, testFailure(command, "widget > retries")),
+    ...run("bad-b", command, 20, 1).map((event, index) => row(12 + index, "fail-b", 2_003 + index, event)),
+    row(14, "pass-different", 3_000, submitted("acme/app", "change-c")), row(15, "pass-different", 3_001, shape("files-b")),
+    ...run("good", command, 20, 0).map((event, index) => row(16 + index, "pass-different", 3_002 + index, event)),
   ];
 
   const confirmed = pipelineMetrics(events, at(0)).flakes;
@@ -109,7 +114,7 @@ test("reports an unconfirmed candidate when file sets differ or no successful ru
   assert.equal(candidate[0]?.confirmed, false);
   assert.equal("fileSet" in candidate[0]!, false);
   assert.equal("passingEvidence" in candidate[0]!, false);
-  assert.match(formatPipelineMetrics(pipelineMetrics(withoutPass, at(0))), /widget > retries \(candidate;/);
+  assert.match(formatPipelineMetrics(pipelineMetrics(withoutPass, at(0))), /Flake candidates: widget > retries \(2 changes;/);
   assert.doesNotMatch(formatPipelineMetrics(pipelineMetrics(withoutPass, at(0))), /fileSet/);
   assert.deepEqual(pipelineMetrics(events.filter((event) => event.operationId === "fail-a"), at(0)).flakes, []);
 });
@@ -119,10 +124,12 @@ test("does not use a successful run from another repository as flake confirmatio
   const events: StoredEvent[] = [
     row(1, "fail-a", 1_000, submitted("acme/app", "change-a")), row(2, "fail-a", 1_001, shape("same-files")), row(3, "fail-a", 1_002, testFailure(command, "widget > retries")),
     ...run("bad-a", command, 20, 1).map((event, index) => row(4 + index, "fail-a", 1_003 + index, event)),
-    row(6, "fail-b", 2_000, submitted("acme/app", "change-b")), row(7, "fail-b", 2_001, shape("same-files")), row(8, "fail-b", 2_002, testFailure(command, "widget > retries")),
-    ...run("bad-b", command, 20, 1).map((event, index) => row(9 + index, "fail-b", 2_003 + index, event)),
-    row(11, "pass-other-repo", 3_000, submitted("other/app", "change-c")), row(12, "pass-other-repo", 3_001, shape("same-files")),
-    ...run("good-other", command, 20, 0).map((event, index) => row(13 + index, "pass-other-repo", 3_002 + index, event)),
+    row(6, "mid-pass", 1_500, submitted("acme/app", "change-mid")),
+    ...run("mid-good", command, 20, 0).map((event, index) => row(7 + index, "mid-pass", 1_501 + index, event)),
+    row(9, "fail-b", 2_000, submitted("acme/app", "change-b")), row(10, "fail-b", 2_001, shape("same-files")), row(11, "fail-b", 2_002, testFailure(command, "widget > retries")),
+    ...run("bad-b", command, 20, 1).map((event, index) => row(12 + index, "fail-b", 2_003 + index, event)),
+    row(14, "pass-other-repo", 3_000, submitted("other/app", "change-c")), row(15, "pass-other-repo", 3_001, shape("same-files")),
+    ...run("good-other", command, 20, 0).map((event, index) => row(16 + index, "pass-other-repo", 3_002 + index, event)),
   ];
 
   const flakes = pipelineMetrics(events, at(0)).flakes;
@@ -135,11 +142,13 @@ test("a killed successful-looking run cannot confirm a flake candidate", () => {
   const events: StoredEvent[] = [
     row(1, "fail-a", 1_000, submitted("acme/app", "change-a")), row(2, "fail-a", 1_001, shape("same-files")), row(3, "fail-a", 1_002, testFailure(command, "widget > retries")),
     ...run("bad-a", command, 20, 1).map((event, index) => row(4 + index, "fail-a", 1_003 + index, event)),
-    row(6, "fail-b", 2_000, submitted("acme/app", "change-b")), row(7, "fail-b", 2_001, shape("same-files")), row(8, "fail-b", 2_002, testFailure(command, "widget > retries")),
-    ...run("bad-b", command, 20, 1).map((event, index) => row(9 + index, "fail-b", 2_003 + index, event)),
-    row(11, "killed-pass", 3_000, submitted("acme/app", "change-c")), row(12, "killed-pass", 3_001, shape("same-files")),
-    row(13, "killed-pass", 3_002, { type: "run_started", runId: "killed", command, host: "slipjay-test" }),
-    row(14, "killed-pass", 3_003, { type: "run_finished", runId: "killed", exitCode: 0, signal: null, timedOut: false, killed: true, durationMs: 20 }),
+    row(6, "mid-pass", 1_500, submitted("acme/app", "change-mid")),
+    ...run("mid-good", command, 20, 0).map((event, index) => row(7 + index, "mid-pass", 1_501 + index, event)),
+    row(9, "fail-b", 2_000, submitted("acme/app", "change-b")), row(10, "fail-b", 2_001, shape("same-files")), row(11, "fail-b", 2_002, testFailure(command, "widget > retries")),
+    ...run("bad-b", command, 20, 1).map((event, index) => row(12 + index, "fail-b", 2_003 + index, event)),
+    row(14, "killed-pass", 3_000, submitted("acme/app", "change-c")), row(15, "killed-pass", 3_001, shape("same-files")),
+    row(16, "killed-pass", 3_002, { type: "run_started", runId: "killed", command, host: "slipjay-test" }),
+    row(17, "killed-pass", 3_003, { type: "run_finished", runId: "killed", exitCode: 0, signal: null, timedOut: false, killed: true, durationMs: 20 }),
   ];
 
   const flakes = pipelineMetrics(events, at(0)).flakes;
@@ -413,7 +422,101 @@ test("attributes each failing test to the command that failed it, not to the fir
         { checkIndex: 1, command: "vp test run", cause: "gate", runId: "r2", failingTests: ["tests/a.test.ts > breaks"], diagnostics: [] },
       ] }),
   ];
-  const events = [...failing("op-a", 1, 1_000), ...failing("op-b", 10, 2_000).map((entry) => ({ ...entry, event: entry.event.type === "submitted" ? { ...entry.event, changeId: "other" } : entry.event }))];
+  const midPass = [
+    row(4, "mid-pass", 1_500, submitted("acme/app", "passing")),
+    ...run("mid-good", "vp test run", 5, 0).map((event, index) => row(5 + index, "mid-pass", 1_501 + index, event)),
+  ];
+  const events = [...failing("op-a", 1, 1_000), ...midPass, ...failing("op-b", 10, 2_000).map((entry) => ({ ...entry, event: entry.event.type === "submitted" ? { ...entry.event, changeId: "other" } : entry.event }))];
   const metrics = pipelineMetrics(events, at(0));
   assert.deepEqual(metrics.flakes.map((candidate) => [candidate.test, candidate.command]), [["tests/a.test.ts > breaks", "vp test run"]]);
+});
+
+test("a test that failed for two changes on one broken base, with no pass there, is a shared failure and not a flake candidate", () => {
+  const command = "bun run test:landing";
+  const events: StoredEvent[] = [
+    row(1, "fail-a", 1_000, submitted("acme/app", "change-a")), row(2, "fail-a", 1_001, { type: "verification_base", base: "broken-base", candidate: "tree-a" }),
+    row(3, "fail-a", 1_002, shape("files-a")), row(4, "fail-a", 1_003, testFailure(command, "landing > rename")),
+    ...run("bad-a", command, 20, 1).map((event, index) => row(5 + index, "fail-a", 1_004 + index, event)),
+    row(7, "fail-b", 2_000, submitted("acme/app", "change-b")), row(8, "fail-b", 2_001, { type: "verification_base", base: "broken-base", candidate: "tree-b" }),
+    row(9, "fail-b", 2_002, shape("files-b")), row(10, "fail-b", 2_003, testFailure(command, "landing > rename")),
+    ...run("bad-b", command, 20, 1).map((event, index) => row(11 + index, "fail-b", 2_004 + index, event)),
+  ];
+  assert.deepEqual(pipelineMetrics(events, at(0)).flakes, [], "both failures ran on one base, and nothing passed there");
+
+  // A pass of the same command on that base after them shows the base is not deterministically broken.
+  const eventsWithPass = [...events,
+    row(20, "pass-same-base", 3_000, submitted("acme/app", "change-c")), row(21, "pass-same-base", 3_001, { type: "verification_base", base: "broken-base", candidate: "tree-c" }),
+    row(22, "pass-same-base", 3_002, shape("files-c")),
+    ...run("good", command, 20, 0).map((event, index) => row(23 + index, "pass-same-base", 3_003 + index, event)),
+  ];
+  assert.equal(pipelineMetrics(eventsWithPass, at(0)).flakes.length, 1);
+});
+
+test("plain output names confirmed flakes and candidates separately", () => {
+  const command = "bun run test:landing";
+  const events: StoredEvent[] = [
+    row(1, "fail-a", 1_000, submitted("acme/app", "change-a")), row(2, "fail-a", 1_001, shape("same-files")), row(3, "fail-a", 1_002, testFailure(command, "widget > retries")),
+    ...run("bad-a", command, 20, 1).map((event, index) => row(4 + index, "fail-a", 1_003 + index, event)),
+    row(6, "fail-b", 2_000, submitted("acme/app", "change-b")), row(7, "fail-b", 2_001, shape("same-files")), row(8, "fail-b", 2_002, testFailure(command, "widget > retries")),
+    ...run("bad-b", command, 20, 1).map((event, index) => row(9 + index, "fail-b", 2_003 + index, event)),
+    row(11, "pass", 3_000, submitted("acme/app", "change-c")), row(12, "pass", 3_001, shape("same-files")),
+    ...run("good", command, 20, 0).map((event, index) => row(13 + index, "pass", 3_002 + index, event)),
+    row(15, "other-fail-a", 4_000, submitted("acme/app", "change-d")), row(16, "other-fail-a", 4_001, shape("files-a")), row(17, "other-fail-a", 4_002, testFailure(command, "search > orders")),
+    ...run("other-bad-a", command, 20, 1).map((event, index) => row(18 + index, "other-fail-a", 4_003 + index, event)),
+    row(20, "search-mid-pass", 4_500, submitted("acme/app", "change-mid")),
+    ...run("search-mid-good", command, 20, 0).map((event, index) => row(21 + index, "search-mid-pass", 4_501 + index, event)),
+    row(25, "other-fail-b", 5_000, submitted("acme/app", "change-e")), row(26, "other-fail-b", 5_001, shape("files-b")), row(27, "other-fail-b", 5_002, testFailure(command, "search > orders")),
+    ...run("other-bad-b", command, 20, 1).map((event, index) => row(28 + index, "other-fail-b", 5_003 + index, event)),
+  ];
+  const lines = formatPipelineMetrics(pipelineMetrics(events, at(0))).split("\n");
+  const confirmed = lines.find((line) => line.startsWith("Confirmed flakes:")) ?? "";
+  const candidates = lines.find((line) => line.startsWith("Flake candidates:")) ?? "";
+  assert.match(confirmed, /widget > retries/);
+  assert.doesNotMatch(confirmed, /search > orders/);
+  assert.match(candidates, /search > orders/);
+  assert.doesNotMatch(candidates, /widget > retries/);
+});
+
+test("a test every change broke with no pass between them, on one base or across a moved one, is a shared failure", () => {
+  const command = "bun run test:landing";
+  const failing = (id: string, seq: number, ms: number, base?: string): StoredEvent[] => [
+    row(seq, id, ms, submitted("acme/app", `change-${id}`)),
+    ...(base ? [row(seq + 1, id, ms + 1, { type: "verification_base", base, candidate: `tree-${id}` } as OperationEvent)] : []),
+    row(seq + 2, id, ms + 2, shape(`files-${id}`)), row(seq + 3, id, ms + 3, testFailure(command, "landing > rename")),
+    ...run(`bad-${id}`, command, 20, 1).map((event, index) => row(seq + 4 + index, id, ms + 4 + index, event)),
+  ];
+  // A base that moved under the changes: the same break, no pass of the command between the failures.
+  const moved = [...failing("a", 1, 1_000, "base-1"), ...failing("b", 10, 2_000, "base-2")];
+  assert.deepEqual(pipelineMetrics(moved, at(0)).flakes, [], "the failures are one break that the base moved through");
+  // No base recorded either: nothing shows the test varies, so the shared break explains them too.
+  const unrecorded = [...failing("a", 1, 1_000), ...failing("b", 10, 2_000)];
+  assert.deepEqual(pipelineMetrics(unrecorded, at(0)).flakes, []);
+  // A pass of the command between the failures, on either base, contradicts the shared break.
+  const midPass = [
+    row(6, "mid-pass", 1_500, submitted("acme/app", "change-mid")),
+    row(7, "mid-pass", 1_501, { type: "verification_base", base: "base-2", candidate: "tree-mid" } as OperationEvent),
+    ...run("mid-good", command, 20, 0).map((event, index) => row(8 + index, "mid-pass", 1_502 + index, event)),
+  ];
+  const withPass = [...failing("a", 1, 1_000, "base-1"), ...midPass, ...failing("b", 10, 2_000, "base-2")];
+  const [candidate] = pipelineMetrics(withPass, at(0)).flakes;
+  assert.deepEqual([candidate?.test, candidate?.confirmed], ["landing > rename", false]);
+});
+test("a pass of the command on the same base before the failures contradicts that base's determinism", () => {
+  const command = "bun run test:landing";
+  // The command passed on this base before the two changes failed on it.
+  const events: StoredEvent[] = [
+    row(1, "early-pass", 500, submitted("acme/app", "change-early")),
+    row(2, "early-pass", 501, { type: "verification_base", base: "broken-base", candidate: "tree-early" } as OperationEvent),
+    ...run("good", command, 20, 0).map((event, index) => row(3 + index, "early-pass", 502 + index, event)),
+    row(6, "fail-a", 1_000, submitted("acme/app", "change-a")),
+    row(7, "fail-a", 1_001, { type: "verification_base", base: "broken-base", candidate: "tree-a" } as OperationEvent),
+    row(8, "fail-a", 1_002, shape("files-a")), row(9, "fail-a", 1_003, testFailure(command, "landing > rename")),
+    ...run("bad-a", command, 20, 1).map((event, index) => row(10 + index, "fail-a", 1_004 + index, event)),
+    row(12, "fail-b", 2_000, submitted("acme/app", "change-b")),
+    row(13, "fail-b", 2_001, { type: "verification_base", base: "broken-base", candidate: "tree-b" } as OperationEvent),
+    row(14, "fail-b", 2_002, shape("files-b")), row(15, "fail-b", 2_003, testFailure(command, "landing > rename")),
+    ...run("bad-b", command, 20, 1).map((event, index) => row(16 + index, "fail-b", 2_004 + index, event)),
+  ];
+  const [flake] = pipelineMetrics(events, at(0)).flakes;
+  assert.deepEqual([flake?.test, flake?.confirmed], ["landing > rename", false]);
 });

@@ -137,8 +137,8 @@ function operationHistory(events: readonly StoredEvent[]): Map<string, Operation
 }
 
 function flakeCandidates(all: Map<string, OperationHistory>, since: number): FlakeCandidate[] {
-  type Failure = { operationId: string; seq: number; at: number; repo: string; changeId: string; source: string; candidate?: string; test: string; command: string; fileSet?: string };
-  type Pass = { operationId: string; seq: number; repo: string; source: string; candidate?: string; command: string; fileSet?: string };
+  type Failure = { operationId: string; seq: number; at: number; repo: string; changeId: string; source: string; candidate?: string; base?: string; test: string; command: string; fileSet?: string };
+  type Pass = { operationId: string; seq: number; repo: string; source: string; candidate?: string; base?: string; command: string; fileSet?: string };
   const failures: Failure[] = [];
   const passes: Pass[] = [];
 
@@ -146,9 +146,9 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
     if (!isLandingSubmission(op.submitted)) continue;
     const commandByRun = new Map<string, string>();
     // The tree the gate verified is the candidate rebased onto the base at that point, not the submitted source.
-    const candidateAt = (seq: number): string | undefined => {
+    const verifiedAt = (seq: number): { base: string; candidate?: string } | undefined => {
       const verified = op.events.findLast((row) => row.seq < seq && row.event.type === "verification_base")?.event;
-      return verified?.type === "verification_base" ? verified.candidate : undefined;
+      return verified?.type === "verification_base" ? { base: verified.base, ...(verified.candidate ? { candidate: verified.candidate } : {}) } : undefined;
     };
     for (const row of op.events) if (row.event.type === "run_started") commandByRun.set(row.event.runId, row.event.command);
     for (const row of op.events) {
@@ -157,12 +157,12 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
         const attributed = row.event.checks?.length
           ? row.event.checks.filter((check) => check.cause === "gate").flatMap((check) => check.failingTests.map((test) => ({ test, command: check.command })))
           : row.event.failingTests.map((test) => ({ test, command: row.event.type === "classified" ? row.event.command! : "" }));
-        for (const { test, command } of attributed) failures.push({ operationId: op.id, seq: row.seq, at: eventTime(row), repo: op.submitted.repo, changeId: op.submitted.changeId, source: op.submitted.commitId, ...(candidateAt(row.seq) ? { candidate: candidateAt(row.seq)! } : {}), test, command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
+        for (const { test, command } of attributed) failures.push({ operationId: op.id, seq: row.seq, at: eventTime(row), repo: op.submitted.repo, changeId: op.submitted.changeId, source: op.submitted.commitId, ...verifiedAt(row.seq), test, command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
       }
       if (row.event.type !== "run_finished") continue;
       const command = commandByRun.get(row.event.runId);
       if (command && row.event.exitCode === 0 && row.event.signal === null && !row.event.timedOut && !row.event.killed)
-        passes.push({ operationId: op.id, seq: row.seq, repo: op.submitted.repo, source: op.submitted.commitId, ...(candidateAt(row.seq) ? { candidate: candidateAt(row.seq)! } : {}), command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
+        passes.push({ operationId: op.id, seq: row.seq, repo: op.submitted.repo, source: op.submitted.commitId, ...verifiedAt(row.seq), command, ...(op.shape ? { fileSet: op.shape.fileSet } : {}) });
     }
   }
 
@@ -172,6 +172,22 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
     const group = latestFailures.get(key) ?? [];
     group.push(failure);
     latestFailures.set(key, group);
+  }
+  /**
+   * The failures are one break the changes shared, not evidence that the test itself varies: every failure ran on
+   * the same integration base and no pass of that command happened on it, or the failures span bases with no pass
+   * of the command between them, as a base that moves during a rename does. Evidence that confirms a flake
+   * outranks this, so the caller checks that first.
+   */
+  function sharedFailure(group: Failure[]): boolean {
+    const [first] = group;
+    if (!first) return false;
+    const passed = (pass: Pass) => pass.repo === first.repo && pass.command === first.command;
+    if (first.base !== undefined && group.every((entry) => entry.base === first.base))
+      return !passes.some((pass) => passed(pass) && pass.base === first.base);
+    const earliest = Math.min(...group.map((entry) => entry.seq));
+    const latest = Math.max(...group.map((entry) => entry.seq));
+    return !passes.some((pass) => passed(pass) && pass.seq > earliest && pass.seq < latest);
   }
   const grouped = new Map<string, Failure[]>();
   for (const failure of failures) {
@@ -190,15 +206,18 @@ function flakeCandidates(all: Map<string, OperationHistory>, since: number): Fla
     const retried = group.flatMap((failure) => passes.filter((pass) => pass.seq > failure.seq && pass.operationId !== failure.operationId
       && pass.repo === failure.repo && pass.source === failure.source && pass.command === failure.command
       && failure.candidate !== undefined && pass.candidate === failure.candidate)).sort((a, b) => a.seq - b.seq)[0];
-    if (changes.length < 2 && !retried) continue;
     const allFailures = latestFailures.get(key) ?? group;
     const latestFailureSeq = Math.max(...allFailures.map((entry) => entry.seq));
     const passing = passes.find((pass) => pass.seq > latestFailureSeq && pass.repo === first.repo && pass.command === first.command && pass.fileSet !== undefined && group.some((failure) => failure.fileSet === pass.fileSet));
     const confirmedFailure = passing ? group.find((failure) => failure.fileSet === passing.fileSet) : undefined;
+    const confirmed = Boolean((passing && confirmedFailure) || retried);
+    if (changes.length < 2 && !retried) continue;
+    // A shared break explains the failures without the test varying; only evidence that confirms a flake outranks it.
+    if (!confirmed && sharedFailure(group)) continue;
     result.push({
       test: first.test,
       command: first.command,
-      confirmed: Boolean((passing && confirmedFailure) || retried),
+      confirmed,
       ...(passing && confirmedFailure ? { fileSet: passing.fileSet, passingEvidence: { operationId: passing.operationId, seq: passing.seq } } : {}),
       ...(retried ? { retriedPass: { operationId: retried.operationId, seq: retried.seq } } : {}),
       changes,
@@ -454,6 +473,9 @@ const formatTiming = (value: MetricTiming | null | undefined): string => value
   ? `${value.samples} samples, median ${Math.round(value.medianMs)}ms, p90 ${Math.round(value.p90Ms)}ms`
   : "no samples";
 const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+/** One line of flake evidence: confirmed flakes and candidates are never pooled, so each keeps its own line. */
+const flakeLine = (label: string, entries: FlakeCandidate[]): string =>
+  `${label}: ${entries.length ? entries.map((candidate) => `${candidate.test} (${candidate.changes.length} changes; ${candidate.command}${candidate.fileSet ? `; fileSet ${candidate.fileSet}` : ""}${candidate.retriedPass ? `; passed on retry ${candidate.retriedPass.operationId}` : ""})`).join("; ") : "none"}`;
 
 /** Render a concise terminal summary of the measured pipeline evidence. */
 export function formatPipelineMetrics(metrics: PipelineMetrics): string {
@@ -479,7 +501,8 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     if (repo.testFilesOverBudget.length) lines.push(`  Test files over budget: ${repo.testFilesOverBudget.map((file) => `${file.suite} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
     if (repo.costCandidates.length) lines.push(`  Cost candidates: ${repo.costCandidates.length} file(s), slowest ${repo.costCandidates.slice(0, 5).map((file) => `${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
   }
-  lines.push(`Flake candidates: ${metrics.flakes.length ? metrics.flakes.map((candidate) => `${candidate.test} (${candidate.confirmed ? "confirmed" : "candidate"}; ${candidate.changes.length} changes; ${candidate.command}${candidate.fileSet ? `; fileSet ${candidate.fileSet}` : ""}${candidate.retriedPass ? `; passed on retry ${candidate.retriedPass.operationId}` : ""})`).join("; ") : "none"}`);
+  lines.push(flakeLine("Confirmed flakes", metrics.flakes.filter((candidate) => candidate.confirmed)));
+  lines.push(flakeLine("Flake candidates", metrics.flakes.filter((candidate) => !candidate.confirmed)));
   lines.push(`Attempts: ${metrics.attempts.length ? metrics.attempts.map((attempt) => `${attempt.repo}/${attempt.changeId} ${attempt.attempts}${attempt.landed ? " until landed" : " open"}`).join("; ") : "none"}`);
   lines.push(`Held integrations: ${metrics.held.length ? metrics.held.map((entry) => `${entry.repo}/${entry.commitId} retries ${entry.retries}, ${entry.durationMs}ms, ${entry.published ? "published" : "unpublished"}`).join("; ") : "none"}`);
   lines.push(`Workspace starts: ${metrics.workspaceStarts.length ? metrics.workspaceStarts.map((entry) => `${entry.repo} on ${entry.machine} ${entry.starts} starts, ${entry.poolHits} from the pool, claim median ${Math.round(entry.claim.medianMs)}ms, p90 ${Math.round(entry.claim.p90Ms)}ms, median ${entry.medianSpares} spares at start${Object.keys(entry.steps).length ? ` (step medians: ${Object.entries(entry.steps).map(([step, ms]) => `${step} ${Math.round(ms)}ms`).join(", ")})` : ""}`).join("; ") : "none"}`);

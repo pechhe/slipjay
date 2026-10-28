@@ -540,16 +540,50 @@ export function createRunnerQueue(input: {
    * `slipjay promote --confirm` would, by queueing the same release, once its pre-verification passed. The setting
    * is read from the release branch's policy at the base the pre-verification ran against, never from the candidate.
    * A candidate the safeguards refuse (non-additive migrations, an audit refusal) or whose verification failed stays
-   * unpromoted, with the reason on its pre-verification's log; a newer verified candidate is asked again.
-   * Asked after a pre-verification passes, a release or a production deploy ends, and at startup.
+   * unpromoted, with the reason on its pre-verification's log; a newer verified candidate is asked again. A
+   * pre-verification that just passed for a commit this consideration does not promote says why on its own log too.
+   * Asked after a pre-verification passes (`after`, that operation), a release or a production deploy ends, and at startup.
    */
-  function promoteAutomatically(repo: string): Promise<void> {
-    const next = (automaticPromotions.get(repo) ?? Promise.resolve()).then(() => considerAutomaticPromotion(repo))
+  function promoteAutomatically(repo: string, after?: string): Promise<void> {
+    const next = (automaticPromotions.get(repo) ?? Promise.resolve()).then(() => considerAutomaticPromotion(repo, after))
       .catch((error: unknown) => { console.error(`[runner] automatic promotion of ${repo} could not be considered: ${message(error)}`); });
     automaticPromotions.set(repo, next);
     return next;
   }
-  async function considerAutomaticPromotion(repo: string): Promise<void> {
+  /** Why a passed pre-verification cannot promote its commit, or null when it may: its migrations, which no one approved. */
+  const migrationsWithheld = (verified: { nonAdditiveMigrations?: string[] }): string | null =>
+    verified.nonAdditiveMigrations === undefined ? "its migrations were not assessed"
+      : verified.nonAdditiveMigrations.length ? `it carries non-additive migrations (${verified.nonAdditiveMigrations.join(", ")}): the owner decides`
+      : null;
+  /**
+   * What a development release base declares no value for, so nothing may promote from it: null when it may. A commit
+   * cannot switch the mode on for itself, so this is the one place that decides what a promotion needs.
+   */
+  const missingPromotion = (base: NonNullable<Awaited<ReturnType<typeof releasePolicy>>>): string | null => {
+    const missing = [
+      ...(base.deployments?.environments.production ? [] : ["production environment"]),
+      ...(base.releaseBranch ? [] : ["release branch"]),
+      ...(base.requiredReleaseVerification ? [] : ["requiredReleaseVerification"]),
+    ];
+    return missing.length ? `the release base's policy does not promote: it declares no ${missing.join(", no ")}` : null;
+  };
+  /**
+   * What already stands for a commit, so nothing promotes it again: the release or production deploy the ledger
+   * holds for it and how each ended. Null when it holds neither. Phrased to follow a subject.
+   */
+  const standsFor = (repo: string, commitId: string): string | null => {
+    const states: string[] = [];
+    const release = log.releases(repo).find((entry) => entry.commitId === commitId);
+    if (release) states.push(release.result?.type === "released" ? "is already released"
+      : release.status === "queued" || release.status === "running" ? `has a release (${release.id}) still open`
+      : `has a release that ended ${release.status}`);
+    const deploy = log.deployments(repo, "production").find((entry) => entry.commitId === commitId);
+    if (deploy) states.push(deploy.result?.type === "deployed" ? "is already live on production"
+      : deploy.status === "queued" || deploy.status === "running" ? `has a production deploy (${deploy.id}) still open`
+      : "has a production deploy that did not succeed");
+    return states.length ? states.join(", and ") : null;
+  };
+  async function considerAutomaticPromotion(repo: string, after?: string): Promise<void> {
     const newest = log.lastLanded(repo);
     if (!newest) return;
     const note = (commitId: string, verificationId: string, reason: string): void => {
@@ -559,7 +593,31 @@ export function createRunnerQueue(input: {
         console.error(`[runner] ${repo}: ${line}`);
       }
     };
+    /**
+     * The pre-verification that just ended passed, but this consideration promotes another commit (or none): it
+     * leaves why on its own log, so a green landing that is not live always says so. Its reason is its own
+     * safeguard when it has one, else what already stands for it or for the newer landing that stopped the walk.
+     */
+    const explain = async (operationId: string, chosen: string | undefined): Promise<void> => {
+      const ended = log.verifications(repo).find((entry) => entry.id === operationId);
+      const verified = ended?.result?.type === "verified" ? ended.result : undefined;
+      if (!ended || !verified) return;
+      const base = await releasePolicy(repo, ended.commitId, verified.base);
+      if (!base || base.process !== "development") return;
+      const own = standsFor(repo, ended.commitId);
+      const ahead = newest.commitId === ended.commitId ? null : standsFor(repo, newest.commitId);
+      const reason = migrationsWithheld(verified) ?? missingPromotion(base) ?? (chosen
+        ? `a newer pre-verified candidate (${chosen.slice(0, 12)}) is ahead of it`
+        : own ? `it ${own}`
+        : ahead ? `the newest landing (${newest.commitId.slice(0, 12)}) ${ahead}`
+        : null);
+      // Nothing was withheld when nothing has been done with the commit: a verification of a commit that never
+      // landed here, for one, says nothing.
+      if (reason) note(ended.commitId, ended.id, reason);
+    };
     const choice = promotionCandidate(repo);
+    // The pre-verification that woke this consideration is answered whether or not it is the candidate.
+    if (after && after !== choice?.verification.id) await explain(after, choice?.commitId);
     // A newest landing whose verification failed is left behind, and says why.
     const failed = log.verifications(repo).find((entry) => entry.commitId === newest.commitId && entry.status === "failed");
     if (failed && !log.releases(repo).some((entry) => entry.commitId === failed.commitId) && (await releasePolicy(repo, failed.commitId))?.process === "development")
@@ -571,19 +629,27 @@ export function createRunnerQueue(input: {
     // Only the chosen candidate promotes: an older one still queued is replaced.
     const next = newOperationId();
     supersedeAutomaticReleases(repo, commitId, next);
-    const open = log.openOperations(repo);
-    if (open.some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
     const withheld = (reason: string): void => note(commitId, verification.id, reason);
+    // A release or a production deploy already in flight promotes what it holds; this one waits for it to end.
+    const open = log.openOperations(repo).find((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"));
+    if (open) return withheld(`a ${open.kind === "release" ? "release" : "production deploy"} (${open.id}) is already open`);
     const base = await releasePolicy(repo, commitId, verified.base);
-    if (base?.process !== "development") return;
-    if (verified.nonAdditiveMigrations === undefined || verified.nonAdditiveMigrations.length)
-      return withheld(verified.nonAdditiveMigrations ? `it carries non-additive migrations (${verified.nonAdditiveMigrations.join(", ")}): the owner decides` : "its migrations were not assessed");
+    if (!base) return withheld("its release base's policy could not be read");
+    if (base.process !== "development") return;
+    const migrations = migrationsWithheld(verified);
+    if (migrations) return withheld(migrations);
     // Every decision input is the release base's, never the candidate's.
-    if (!promotesFrom(base)) return;
-    const refusal = base?.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
+    const refuses = missingPromotion(base);
+    if (refuses) return withheld(refuses);
+    const refusal = base.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
     if (refusal) return withheld(refusal);
     // Asked again after the reads above, which let a newer candidate pass and a release or a production deploy begin.
-    if (promotionCandidate(repo)?.commitId !== commitId || log.openOperations(repo).some((entry) => entry.kind === "release")) return;
+    const current = promotionCandidate(repo);
+    if (current?.commitId !== commitId) return withheld(current
+      ? `a newer candidate (${current.commitId.slice(0, 12)}) passed while it was decided`
+      : "a release or production deploy now holds it");
+    const opened = log.openOperations(repo).find((entry) => entry.kind === "release");
+    if (opened) return withheld(`a release (${opened.id}) opened while it was decided`);
     const automatic = { setting: "process", value: "development" } as const;
     append(next, { type: "submitted", kind: "release", repo, commitId, migrationsReady: false, submittedBy: `${executor.host}:automatic`, automatic });
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
@@ -1170,7 +1236,7 @@ export function createRunnerQueue(input: {
         await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
       if (verdict) append(operation.id, verdict);
       // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
-      if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo);
+      if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo, operation.kind === "verification" ? operation.id : undefined);
       if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
       if (verdict?.type === "landed")
         await schedule(operation.repo, verdict.commitId, readLandedPolicy).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));

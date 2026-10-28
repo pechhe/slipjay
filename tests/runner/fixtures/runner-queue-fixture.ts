@@ -229,6 +229,8 @@ export async function fixture(migrations = false, release = false, deployments?:
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
+  /** Move origin's release branch to `commit`, as a release branch that stands on an older integration commit. */
+  const updateRelease = (commit: string) => git(["--git-dir", origin, "update-ref", "refs/heads/release", commit]);
   /**
    * Seed a prerequisite: publish a genuine commit straight onto origin's integration branch,
    * bypassing the landing, the way a landing leaves it — parented on the branch's current tip
@@ -320,7 +322,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     return id;
   }
   const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
-  return { root, logPath, authors, requestedEnvironments, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, parents, remoteFile, seedMain, push, candidate, submit, submitRelease, submitReset, lines, result,
+  return { root, logPath, authors, requestedEnvironments, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, updateRelease, parents, remoteFile, seedMain, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
