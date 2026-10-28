@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.46.24
+
+- **A refused admission says why (YS-78):** when Forge refuses a landing's admission, `slipjay land` prints Forge's
+  message beside its code, e.g. `Build refused admission: admission_session_other_spec: Session … is a session of
+  YS-2, but this landing delivers YS-1 …`, instead of the bare code. Retryable refusals are unchanged.
+
 ## v3.46.23
 
 - **A helper whose start base left the lead's history explains its recovery (SJ-88):** `slipjay adopt` names the

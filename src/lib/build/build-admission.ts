@@ -50,7 +50,7 @@ export async function readAdmittedItems(read: BuildReader, specId: string, ticke
  */
 export type BuildAdmission =
   | { outcome: "admitted"; sequence: number; sessionId: string; recordedAt: string | null; items?: BuildAdmittedItems }
-  | { outcome: "refused"; code: string }
+  | { outcome: "refused"; code: string; message?: string }
   | { outcome: "unavailable"; reason: string };
 
 export type BuildAdmitter = (request: BuildAdmissionRequest) => Promise<BuildAdmission>;
@@ -111,7 +111,8 @@ export async function settleAdmission(log: OperationLog, admit: BuildAdmitter, o
   } else if (!log.operation(operationId)?.result) {
     const retryable = RETRYABLE_BUILD_REFUSALS.includes(answer.code);
     log.append(operationId, { type: "declined", paths: [], build: { code: answer.code, retryable },
-      reason: `Build refused admission: ${answer.code}${retryable ? "; another delivery of this Spec is still in Build's custody: land again once it has finished" : ""}` });
+      // A retryable refusal keeps SlipJay's own retry hint alone; any other prints Build's message, which names what it found.
+      reason: `Build refused admission: ${answer.code}${answer.message && !retryable ? `: ${answer.message}` : ""}${retryable ? "; another delivery of this Spec is still in Build's custody: land again once it has finished" : ""}` });
   } else log.append(operationId, { type: "build_receipt", sequence: submitted.seq, state: "parked", code: answer.code });
   return { resolved: true };
 }
@@ -126,9 +127,13 @@ export const RETRYABLE_BUILD_REFUSALS: readonly string[] = ["delivery_pending"];
  */
 export type BuildRouteAnswer =
   | { kind: "accepted"; value: unknown }
-  | { kind: "refused"; code: string }
+  | { kind: "refused"; code: string; message?: string }
   | { kind: "unavailable"; reason: string };
 export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding" | BuildReadAction, input: unknown) => Promise<BuildRouteAnswer>;
+
+/** Build's own sentence for a refusal, which names what it found; bounded, since it is printed and logged. */
+const refusalMessage = (message: unknown): { message?: string } =>
+  typeof message === "string" && message.trim() ? { message: message.trim().slice(0, 600) } : {};
 
 /** Calls `POST {origin}/api/build/runner`; never throws, and never waits longer than `timeoutMs`. */
 export function buildRoute(options: { origin: string; token: string; timeoutMs?: number; fetch?: (url: string, init: RequestInit) => Promise<Response> }): BuildRoute {
@@ -136,7 +141,7 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
   const url = new URL("/api/build/runner", options.origin).toString();
   return async (action, input) => {
     let response: Response;
-    let body: { status?: unknown; code?: unknown; value?: unknown } | null;
+    let body: { status?: unknown; code?: unknown; value?: unknown; details?: { message?: unknown } | null } | null;
     try {
       response = await call(url, { method: "POST", redirect: "error", signal: AbortSignal.timeout(options.timeoutMs ?? BUILD_ADMISSION_TIMEOUT_MS),
         headers: { "content-type": "application/json", authorization: `Bearer ${options.token}` },
@@ -148,7 +153,7 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
     if (response.status === 200 && (body?.status === "succeeded" || body?.status === "duplicate")) return { kind: "accepted", value: body.value ?? null };
     // Build's domain answers, and its refusal of a request it will never accept (400 malformed, 413 too large).
     if ([400, 409, 413, 422].includes(response.status) && typeof body?.code === "string" && body.code.trim())
-      return { kind: "refused", code: body.code.slice(0, 200) };
+      return { kind: "refused", code: body.code.slice(0, 200), ...refusalMessage(body.details?.message) };
     // Build answers a read of an item that does not exist with its `unavailable` outcome, which its route sends as 503;
     // the body's code tells it from an outage, which never carries one.
     if (response.status === 503 && body?.status === "unavailable" && body.code === BUILD_ITEM_UNAVAILABLE) return { kind: "refused", code: BUILD_ITEM_UNAVAILABLE };
@@ -175,7 +180,7 @@ export function buildAdmitter(route: BuildRoute): BuildAdmitter {
   return async (request) => {
     const answer = await route("admitAttempt", request);
     if (answer.kind === "unavailable") return { outcome: "unavailable", reason: answer.reason };
-    if (answer.kind === "refused") return { outcome: "refused", code: answer.code };
+    if (answer.kind === "refused") return { outcome: "refused", code: answer.code, ...answer.message ? { message: answer.message } : {} };
     const recordedAt = (answer.value as { admission?: { recordedAt?: unknown } | null } | null)?.admission?.recordedAt;
     let items: BuildAdmittedItems;
     try { items = await readAdmittedItems(buildReader(route), request.specId, request.ticketIds); }

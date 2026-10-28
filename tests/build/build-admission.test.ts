@@ -58,7 +58,7 @@ test("Build admits a bound submission at its submitted sequence before the queue
 });
 
 test("Build's refusals end the operation without running it and name Build's code", async () => {
-  for (const code of ["bind_generation_stale", "admission_session_invalid", "delivery_pending", "attempt_fact_conflict"]) {
+  for (const code of ["bind_generation_stale", "admission_session_other_spec", "delivery_pending", "attempt_fact_conflict"]) {
     const f = fixture([{ outcome: "refused", code }]);
     const { status, body } = await f.submit(submission());
     assert.equal(status, 200);
@@ -71,6 +71,25 @@ test("Build's refusals end the operation without running it and name Build's cod
     assert.equal(f.log.openOperations().length, 0);
     f.log.close();
   }
+});
+
+test("a refusal's message from Build is printed in the declined reason, naming both Specs for another Spec's session", async () => {
+  const message = "Session s1 is a session of YS-2, but this landing delivers YS-1: one landing delivers one Spec, so land from YS-2's workspace or start a session for YS-1.";
+  const f = fixture([{ outcome: "refused", code: "admission_session_other_spec", message }]);
+  const { body } = await f.submit(submission());
+  const result = body.operation!.result;
+  assert.ok(result?.type === "declined");
+  assert.equal(result.reason, `Build refused admission: admission_session_other_spec: ${message}`);
+  f.log.close();
+});
+
+test("a retryable refusal keeps its retry hint alone, even when Build sends a message", async () => {
+  const f = fixture([{ outcome: "refused", code: "delivery_pending", message: "Another delivery of this Spec is pending; wait for it to finish." }]);
+  const { body } = await f.submit(submission());
+  const result = body.operation!.result;
+  assert.ok(result?.type === "declined");
+  assert.equal(result.reason, "Build refused admission: delivery_pending; another delivery of this Spec is still in Build's custody: land again once it has finished");
+  f.log.close();
 });
 
 test("Build unavailable leaves the submission unqueued, and resubmitting replays the same admission into one operation", async () => {
@@ -235,6 +254,9 @@ test("the Build route client maps answers, sends the runner credential and gives
     assert.equal((await admit(request)).outcome, "admitted");
     reply = { status: 409, body: { status: "blocked", code: "delivery_pending" } };
     assert.deepEqual(await admit(request), { outcome: "refused", code: "delivery_pending" });
+    // Build's message rides with its code, so the declined reason names what Build found.
+    reply = { status: 409, body: { status: "blocked", code: "admission_session_other_spec", details: { message: "Session s is a session of YS-2, but this landing delivers YS-1.", field: "sessionId" } } };
+    assert.deepEqual(await admit(request), { outcome: "refused", code: "admission_session_other_spec", message: "Session s is a session of YS-2, but this landing delivers YS-1." });
     reply = { status: 422, body: { status: "invalid", code: "attempt_ticket_invalid" } };
     assert.deepEqual(await admit(request), { outcome: "refused", code: "attempt_ticket_invalid" });
     reply = { status: 413, body: { status: "invalid", code: "runner_body_too_large" } };
