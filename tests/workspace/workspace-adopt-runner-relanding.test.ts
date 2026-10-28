@@ -12,6 +12,7 @@ import { workspaceContext } from "../../src/lib/infra/workspace-jj.ts";
 import { frozenAdoptions, workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { waitForExit, withTestRunner } from "../support/test-runner.ts";
+import { drainFixtureWorkers } from "../support/fixture-workers.ts";
 import { occupy } from "./fixtures/workspace-sweep-fixture.ts";
 import { isolateAdoptionFixtures, contribution } from "./fixtures/workspace-adopt-fixture.ts";
 
@@ -27,6 +28,9 @@ test("a failed runner landing carries its adoption into the successful replaceme
     await withTestRunner(f, async ({ location, env }) => {
       const failed = await landThroughRunner(lead.workspacePath, { location, env });
       assert.equal(failed.ok, false);
+      // The failed attempt schedules the repository's housekeeping, which reads the workspace list in the
+      // same repository; a concurrent listing can fail and leave no context. Join it before reading.
+      await drainFixtureWorkers(f.root);
       assert.equal(await workspaceCoverage((await workspaceContext(helper.workspacePath))!, helper.current.name), "pending");
       await writeFile(join(lead.workspacePath, "fixed.txt"), "verification fixed\n");
       const published = await landThroughRunner(lead.workspacePath, { location, env });
@@ -110,6 +114,7 @@ test("a lost real submission response keeps its pending identity and adoption ev
       const records = Object.values(frozenAdoptions(metadata.landingAdoptions));
       assert.deepEqual(records.flatMap((record) => record.adoptions.flatMap((item) => item.revisions)), [revision]);
       assert.equal(records[0]!.operationId, undefined, "unacknowledged acceptance stays unresolved");
+      await drainFixtureWorkers(f.root);
       assert.equal(await workspaceCoverage((await workspaceContext(helper.workspacePath))!, helper.current.name), "pending");
     });
   } finally { await f.dispose(); }

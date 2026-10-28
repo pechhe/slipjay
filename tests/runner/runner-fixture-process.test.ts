@@ -39,7 +39,13 @@ test("fixture runner serves authenticated HTTP and joins its exit and output", (
 
 test("fixture runner propagates startup failures instead of waiting for readiness", () => fixture(async (home) => {
   await writeFile(join(home, "config.json"), "{}");
-  await assert.rejects(startTestRunnerProcess({ home, env: environment() }), /runner config sets no user.name/);
+  // The child reports the failure this test expects on stderr. Every test in the run shares that stream, and a
+  // landing's failure summary reads its first error from it, so it would name this expected error instead of the
+  // failing test's. Keep it off the shared stream; the rejection below carries the runner's own message.
+  const echo = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+  try {
+    await assert.rejects(startTestRunnerProcess({ home, env: environment() }), /runner config sets no user.name/);
+  } finally { echo.mockRestore(); }
 }));
 
 test("fixture runner fails its caller when the child terminates unexpectedly", () => fixture(async (home) => {

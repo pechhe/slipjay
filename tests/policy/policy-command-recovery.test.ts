@@ -37,7 +37,7 @@ test("a rerun after an interrupted policy set reattaches to its operation and ne
     try { assert.equal(log.events().filter((row) => row.event.type === "submitted").length, 1); }
     finally { log.close(); }
   } finally { await f.dispose(); }
-}, 180_000);
+}, 240_000);
 
 test("a rerun after an attempt that failed before writing its patch prepares it and lands it", async () => {
   const f = await project({ verify: slowGate });
@@ -54,7 +54,7 @@ test("a rerun after an attempt that failed before writing its patch prepares it 
       assert.equal(JSON.parse(f.remoteFile("slipjay.json")).spares, 2);
     });
   } finally { await f.dispose(); }
-}, 180_000);
+}, 240_000);
 
 test("a rerun once the patch is on the integration branch reports it applied and releases the earlier attempt", async () => {
   const f = await project({ verify: slowGate });
@@ -67,7 +67,7 @@ test("a rerun once the patch is on the integration branch reports it applied and
       const leftover = (await createWorkspace(patchTask(view.digest!, patch), f.repo)).workspacePath;
       const rerun = await setPolicy(f.repo, { base: view.revision, patch, location, env });
       assert.equal(rerun.phase, "already-applied", JSON.stringify(rerun));
-      await vi.waitFor(() => assert.equal(existsSync(leftover), false), { timeout: 30_000, interval: 50 });
+      await vi.waitFor(() => assert.equal(existsSync(leftover), false), { timeout: 120_000, interval: 50 });
     });
   } finally { await f.dispose(); }
-}, 180_000);
+}, 240_000);

@@ -31,7 +31,10 @@ export async function drainFixtureWorkers(root?: string): Promise<void> {
     // A worker can register more work before exiting. Reread until all of it is joined.
     for (const { file, worker } of workers) {
       if (process.env.SLIPJAY_TRANSACTION_DIAGNOSTICS) console.error(`[fixture worker] joining pid=${worker.pid} cwd=${worker.cwd} command=${worker.command.join(" ")}`);
-      try { await waitForExit(worker.pid, 30_000); }
+      // The same budget `waitForExit` gives a landing's own housekeeping. These are the same niced sweeps: 0.15-1.5s
+      // in this fixture on a quiet machine, but starved past 30s while the whole suite loads every core, which is
+      // how the policy rerun failed on its drain rather than on its work.
+      try { await waitForExit(worker.pid); }
       catch (error) {
         // Don't leave a timed-out fixture holding its locks into the next test.
         try { process.kill(-worker.pid, "SIGTERM"); } catch { /* already exited */ }

@@ -83,7 +83,7 @@ test("a real runner clones, fetches and pushes locally while JJ exposes the conf
     assert.equal(jj(f.repo, ["config", "get", "git.executable-path"]), previousGit);
     assert.equal(githubRepository(jj(f.repo, ["git", "remote", "list"]), "origin"), null);
   } finally { await f.dispose(); }
-}, 60000);
+}, 180_000);
 
 test("a commit's Issue comes from its trailer for this repository, else a closing reference or (#N)", () => {
   assert.equal(commitIssue("Add a thing\n\nIssue: owner/app#12", "owner/app"), 12);

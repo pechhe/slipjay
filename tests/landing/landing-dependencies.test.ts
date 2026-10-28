@@ -35,4 +35,4 @@ test("landing installs a workspace package the rebase brought in before verifica
     assert.equal(result.ok, true, result.lines.join("\n"));
     assert.equal(f.remoteFile("notes.md"), "change\n");
   } finally { await f.dispose(); }
-}, 60000);
+}, 180_000);
