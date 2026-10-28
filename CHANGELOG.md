@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.22
+
+- **A divergent landing is refused up front (SJ-126):** when the change `slipjay land` would land has more than one
+  visible commit, it refuses before describing, rebasing or queuing. The refusal names each copy, the workspaces and
+  bookmarks that keep it visible, and the `jj abandon` or `jj metaedit --update-change-id` command that retires the
+  other copy, instead of failing later with jj's bare "Change ID … is divergent".
+
 ## v3.46.21
 
 - **Unanswered admissions hold no later admission (YS-468):** each operation records `admission_unavailable`

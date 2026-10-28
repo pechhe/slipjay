@@ -87,8 +87,34 @@ export async function landingPreview(cwd: string = process.cwd(), options: { all
   const targetRevision = current.empty ? "@-" : "@";
   const target = await revisionFacts(cwd, targetRevision);
   if (target.conflict) throw new Error("The landing artifact has conflicts");
+  await assertSingleVisibleCopy(cwd, target);
   const stat = await jj(cwd, ["diff", "--from", context.integrationBranch, "--to", targetRevision, "--stat"]);
   return { context, targetRevision, target, stat };
+}
+
+/**
+ * Refuses a target whose change has more than one visible commit, before landing describes, rebases or queues it.
+ * jj cannot resolve a divergent change id, so a later step would otherwise fail with jj's bare "is divergent".
+ * The refusal names each copy, the workspaces and bookmarks that keep it visible, and how to retire the others.
+ */
+export async function assertSingleVisibleCopy(cwd: string, target: RevisionFacts): Promise<void> {
+  const names = async (revset: string, template: string) =>
+    (await jj(cwd, ["--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", `${template} ++ " "`])).split(/\s+/).filter(Boolean);
+  const copies = await names(`change_id(${target.changeId})`, "commit_id");
+  if (copies.length < 2) return;
+  const lines = await Promise.all(copies.map(async (commitId) => {
+    const workspaces = [...new Set(await names(`${commitId}:: & working_copies()`, 'working_copies.map(|w| w.name()).join(" ")'))].sort();
+    const bookmarks = [...new Set(await names(`${commitId}:: & bookmarks()`, 'local_bookmarks.map(|b| b.name()).join(" ")'))].sort();
+    const held = [...workspaces.map((name) => `workspace ${name}`), ...bookmarks.map((name) => `bookmark ${name}`)];
+    const which = commitId === target.commitId ? " (this workspace's candidate)" : "";
+    return `  ${commitId}${which}: kept visible by ${held.length ? held.join(", ") : "no workspace or bookmark (an earlier operation)"}`;
+  }));
+  const others = copies.filter((commitId) => commitId !== target.commitId);
+  throw new Error([
+    `Change ${target.changeId} is divergent: ${copies.length} visible commits share it, and landing needs exactly one.`,
+    ...lines,
+    `Keep ${target.commitId.slice(0, 12)} and retire the other copy: \`jj abandon ${others.join(" ")}\` if it is stale, or \`jj metaedit --update-change-id -r ${others.join(" -r ")}\` to keep it as a separate change. Then land again.`,
+  ].join("\n"));
 }
 
 /** The paths `revision` leaves conflicted, as `jj resolve --list` names them; none when it has no conflict. */
