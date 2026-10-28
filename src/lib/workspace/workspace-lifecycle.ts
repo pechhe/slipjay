@@ -633,24 +633,27 @@ export async function workspaceRegistered(integrationRoot: string, workspaceName
 }
 
 export async function finishMissingRetirement(integrationRoot: string, workspaceName: string, workspacePath: string): Promise<void> {
-  const registered = await workspaceRegistered(integrationRoot, workspaceName, workspacePath)
-    .catch((error: unknown) => { throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}: ${error instanceof Error ? error.message : String(error)}`); });
-  if (registered) {
-    await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
-  }
-  // A record that exists but cannot be read is not an absent one: its path is unknown, so
-  // clearing its sidecars could strip a live workspace whose record a full disk truncated.
-  const metadata = await workspaceMetadata(workspaceName);
-  if (metadata === null && !await metadataReadable(workspaceName)) {
-    throw new Error(`the record for ${workspaceName} is unreadable; refusing to clear it`);
-  }
-  const recordedPath = typeof metadata?.workspacePath === "string" ? resolve(metadata.workspacePath) : null;
-  if (recordedPath !== null && recordedPath !== resolve(workspacePath)) {
-    throw new Error(`the name ${workspaceName} now belongs to ${recordedPath}; refusing to clear its record`);
-  }
-  await rm(metadataPath(workspaceName), { force: true });
-  for (const candidate of landingStatePaths(workspaceName)) await rm(candidate, { force: true });
-  await rm(lockPath(workspaceName), { force: true });
+  // Callers hold allocate:<repository>; take writer second, as normal release does.
+  await withWorkspaceTransaction(`writer:${workspaceName}`, async () => {
+    const registered = await workspaceRegistered(integrationRoot, workspaceName, workspacePath)
+      .catch((error: unknown) => { throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}: ${error instanceof Error ? error.message : String(error)}`); });
+    if (registered) {
+      await forgetWorkspace(integrationRoot, workspaceName, workspacePath);
+    }
+    // A record that exists but cannot be read is not an absent one: its path is unknown, so
+    // clearing its sidecars could strip a live workspace whose record a full disk truncated.
+    const metadata = await workspaceMetadata(workspaceName);
+    if (metadata === null && !await metadataReadable(workspaceName)) {
+      throw new Error(`the record for ${workspaceName} is unreadable; refusing to clear it`);
+    }
+    const recordedPath = typeof metadata?.workspacePath === "string" ? resolve(metadata.workspacePath) : null;
+    if (recordedPath !== null && recordedPath !== resolve(workspacePath)) {
+      throw new Error(`the name ${workspaceName} now belongs to ${recordedPath}; refusing to clear its record`);
+    }
+    await rm(metadataPath(workspaceName), { force: true });
+    for (const candidate of landingStatePaths(workspaceName)) await rm(candidate, { force: true });
+    await rm(lockPath(workspaceName), { force: true });
+  });
 }
 
 export async function forgetWorkspace(integrationRoot: string, workspaceName: string, workspacePath: string, hooks: Pick<RetirementHooks, "forget"> = {}): Promise<void> {

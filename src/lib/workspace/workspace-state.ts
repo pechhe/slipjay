@@ -214,32 +214,39 @@ export async function renameListedWorkspace(current: Pick<WorkspaceEntry, "name"
   taken.delete(current.name);
   let name = base;
   for (let index = 2; taken.has(name); index += 1) name = `${base}-${index}`;
+  // Renaming to its own name moves nothing; returning here also keeps a caller that holds
+  // writer:<current> from waiting on its own key.
+  if (name === current.name) return { oldName: name, name };
 
-  // A name some earlier workspace held and JJ forgot is dropped from its store first (see the module).
-  const integrationRoot = workspaces.find((workspace) => workspace.name === "default")?.root;
-  if (integrationRoot) await dropForgottenWorkspaceName(integrationRoot, name);
-  await jj(current.root, ["workspace", "rename", name]);
-  const oldName = current.name;
-  const operationId = await jj(current.root, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
-  const target = await revisionFacts(current.root, "@");
-  const renamed = (data: Record<string, unknown>) => ({
-    ...data,
-    workspaceName: name,
-    previousWorkspaceNames: [...new Set([
-      ...(Array.isArray(data.previousWorkspaceNames) ? data.previousWorkspaceNames.filter((value: unknown) => typeof value === "string" && value.trim()) : []),
-      oldName,
-    ])].slice(-16),
+  // A spare claim can already hold allocate: and pool:; acquire only the destination
+  // writer here, never either outer key. Reconciliation cannot clear moved sidecars.
+  return withWorkspaceTransaction(`writer:${name}`, async () => {
+    // A name some earlier workspace held and JJ forgot is dropped from its store first (see the module).
+    const integrationRoot = workspaces.find((workspace) => workspace.name === "default")?.root;
+    if (integrationRoot) await dropForgottenWorkspaceName(integrationRoot, name);
+    await jj(current.root, ["workspace", "rename", name]);
+    const oldName = current.name;
+    const operationId = await jj(current.root, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
+    const target = await revisionFacts(current.root, "@");
+    const renamed = (data: Record<string, unknown>) => ({
+      ...data,
+      workspaceName: name,
+      previousWorkspaceNames: [...new Set([
+        ...(Array.isArray(data.previousWorkspaceNames) ? data.previousWorkspaceNames.filter((value: unknown) => typeof value === "string" && value.trim()) : []),
+        oldName,
+      ])].slice(-16),
+    });
+    await moveSidecarFile(lockHome(), oldName, name, (data) => ({ ...data, workspaceName: name }));
+    await moveSidecarFile(metadataHome(), oldName, name, (data) => ({
+      ...renamed(data),
+      workspaceRenameEpochs: [
+        ...(Array.isArray(data.workspaceRenameEpochs) ? data.workspaceRenameEpochs.filter((value: unknown) => value && typeof value === "object") : []),
+        { version: 1, operationId, fromName: oldName, toName: name, workspacePath: current.root, changeId: target.changeId, commitId: target.commitId },
+      ].slice(-16),
+    }));
+    for (const directory of [stateHome(), landedHome()]) await moveSidecarFile(directory, oldName, name, renamed);
+    return { oldName, name };
   });
-  await moveSidecarFile(lockHome(), oldName, name, (data) => ({ ...data, workspaceName: name }));
-  await moveSidecarFile(metadataHome(), oldName, name, (data) => ({
-    ...renamed(data),
-    workspaceRenameEpochs: [
-      ...(Array.isArray(data.workspaceRenameEpochs) ? data.workspaceRenameEpochs.filter((value: unknown) => value && typeof value === "object") : []),
-      { version: 1, operationId, fromName: oldName, toName: name, workspacePath: current.root, changeId: target.changeId, commitId: target.commitId },
-    ].slice(-16),
-  }));
-  for (const directory of [stateHome(), landedHome()]) await moveSidecarFile(directory, oldName, name, renamed);
-  return { oldName, name };
 }
 
 export async function workspaceContinuationState(context: WorkspaceContext | null): Promise<WorkspaceContinuationDisposition> {
