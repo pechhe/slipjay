@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.46.23
+
+- **A helper whose start base left the lead's history explains its recovery (SJ-88):** `slipjay adopt` names the
+  helper's recorded base, says a rebase never moves it, and lists the supported recovery: a fresh helper on the
+  lead's base, only the original's changed paths restored into it, a diff check, then ordinary adoption, keeping the
+  original helper until the landing publishes. No safety check changes.
+
 ## v3.46.22
 
 - **A divergent landing is refused up front (SJ-126):** when the change `slipjay land` would land has more than one

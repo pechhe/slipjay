@@ -7,6 +7,23 @@ import { unsnapshottedEdits } from "./workspace-lifecycle.ts";
 import { adoptions } from "./workspace-coverage.ts";
 import type { Adoption } from "./workspace-coverage.ts";
 
+/**
+ * Why a helper whose recorded base left the lead's history cannot be adopted, and the supported recovery. The base is
+ * fixed when the helper starts, so rebasing the helper never changes it: a stacked parent that was rewritten, or
+ * published under another commit, leaves the helper's contribution selectable only from a fresh helper.
+ */
+export function baseNotInLeadMessage(base: string, helperRoot: string, fromMetadata: boolean): string {
+  return [
+    `Helper base ${base} is not an ancestor of the lead working copy.`,
+    `It is the commit the helper started on (recorded ${fromMetadata ? "as its adoptionBase" : "by its creation operation"}) and never moves: rebasing the helper does not change it.`,
+    "This happens when that commit was rewritten or published under another commit id, for example a stacked parent that landed. To adopt the work:",
+    "  1. From the lead, start a fresh helper on its current base: slipjay start --base @- --json \"<task>\"",
+    `  2. In the fresh helper, bring over only this helper's contribution: jj restore --from <helper tip> --into @ <paths>, quoting each of the paths listed by jj -R ${helperRoot} diff --from ${base} --to @ --name-only`,
+    `  3. Check the contribution is unchanged: jj -R ${helperRoot} diff --from ${base} --to @ --git and jj diff --git -r @ in the fresh helper match apart from their index lines`,
+    "  4. Describe it and run slipjay adopt <fresh helper path>. Keep this helper until the lead's landing publishes.",
+  ].join("\n");
+}
+
 /** Adopt a pinned helper contribution, retaining the original revisions as provenance. */
 export async function adoptWorkspace(cwd: string, path: string): Promise<Adoption> {
   const context = await workspaceContext(cwd);
@@ -23,7 +40,7 @@ export async function adoptWorkspace(cwd: string, path: string): Promise<Adoptio
     const edited = await unsnapshottedEdits(root, context.integration.root);
     if (edited.length) throw new Error(`Helper edited since its last snapshot: ${edited.join(", ")}`);
     const before = await workingCopyCommit(cwd);
-    if (!await revisionExists(cwd, `${base} & ::${before}`)) throw new Error("Helper base is not an ancestor of the lead working copy");
+    if (!await revisionExists(cwd, `${base} & ::${before}`)) throw new Error(baseNotInLeadMessage(base, root, typeof helperMetadata?.adoptionBase === "string"));
     const select = async () => {
       const tip = await revisionFacts(root, "@", { ignoreWorkingCopy: true });
       const end = tip.empty ? "@-" : "@";
