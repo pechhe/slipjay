@@ -9,7 +9,8 @@ import { migrationCommandFailure, redactMigrationOutput } from "./migration-comm
 import { checkoutCwd } from "../infra/checkout-cwd.ts";
 import { commitIssue, githubRepository } from "../build/issue-references.ts";
 
-const matches = (roots: string[], file: string): boolean => roots.some(root => file === root || file.startsWith(root + "/"));
+/** Whether `file` is one of the policy's migration roots or below one; provenance reports changes by the same rule. */
+export const matchesMigrationRoot = (roots: string[], file: string): boolean => roots.some(root => file === root || file.startsWith(root + "/"));
 const changedPaths = (summary: string): string[] => summary.split(/\r?\n/).filter(Boolean).map(line => line.replace(/^[A-Z?]\s+/, ""));
 
 /** The paths between two commits that the late-bound migration step owns (trigger or artifact paths), and every changed path (none without a policy). */
@@ -17,7 +18,7 @@ export async function migrationPaths(cwd: string, policy: MigrationFinalizationP
   jj: (cwd: string, args: string[]) => Promise<string>): Promise<{ owned: string[]; changed: string[] }> {
   if (!policy) return { owned: [], changed: [] };
   const changed = changedPaths(await jj(cwd, ["diff", "--from", base, "--to", candidate, "--summary"]));
-  return { owned: changed.filter(file => matches([...policy.triggerPaths, ...policy.artifactPaths], file)), changed };
+  return { owned: changed.filter(file => matchesMigrationRoot([...policy.triggerPaths, ...policy.artifactPaths], file)), changed };
 }
 
 /** Called in the runner's serial queue, before the final rebase and held
@@ -29,6 +30,7 @@ export async function migrationCandidate(cwd: string, context: {
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;
 }, options: {
+  onCandidate?: (candidate: string, base: string) => void;
   onProgress?: (line: string) => void;
   environment?: () => NodeJS.ProcessEnv;
   runCommand?: (request: BoundedProcessRequest, purpose?: MigrationRunPurpose) => Promise<BoundedProcessResult>;
@@ -44,7 +46,7 @@ export async function migrationCandidate(cwd: string, context: {
       if (!policy) return candidate;
       const { owned, changed: semanticPaths } = await migrationPaths(cwd, policy, base.commitId, candidate.commitId, io.jj);
       if (!owned.length) return candidate;
-      if (semanticPaths.some(file => matches(policy.artifactPaths, file))) throw new Error("Late-bound migration artifacts must be generated during landing, not committed in the semantic candidate");
+      if (semanticPaths.some(file => matchesMigrationRoot(policy.artifactPaths, file))) throw new Error("Late-bound migration artifacts must be generated during landing, not committed in the semantic candidate");
       const remote = context.configuration.remote ?? "origin";
       const remoteList = await io.jj(cwd, ["git", "remote", "list"]);
       // githubRepository normally falls back to another remote; provenance must not.
@@ -78,20 +80,22 @@ export async function migrationCandidate(cwd: string, context: {
         await io.jj(cwd, ["status"]);
         await run(policy.verify, "migration_verify");
         const finalized = await io.revisionFacts(cwd, candidate.changeId);
+        options.onCandidate?.(finalized.commitId, base.commitId);
         const resultPaths = changedPaths(await io.jj(cwd, ["diff", "--from", base.commitId, "--to", finalized.commitId, "--summary"]));
-        if (!resultPaths.some(file => matches(policy.artifactPaths, file))) {
+        if (!resultPaths.some(file => matchesMigrationRoot(policy.artifactPaths, file))) {
           // A trigger path changed without a schema change (for example a table moved
           // between modules): generation and verification passed and wrote nothing.
           if (finalized.commitId !== candidate.commitId) throw new Error("Migration generator changed source without producing declared artifacts");
           generated.finalized = finalized;
           return finalized;
         }
-        const unexpected = resultPaths.filter(file => !semanticPaths.includes(file) && !matches(policy.artifactPaths, file));
+        const unexpected = resultPaths.filter(file => !semanticPaths.includes(file) && !matchesMigrationRoot(policy.artifactPaths, file));
         if (unexpected.length) throw new Error("Migration generation changed undeclared paths: " + unexpected.join(", "));
         generated.finalized = finalized;
         return finalized;
       } catch (error) {
         generated.finalized = await io.revisionFacts(cwd, candidate.changeId);
+        options.onCandidate?.(generated.finalized.commitId, base.commitId);
         throw error;
       }
     },

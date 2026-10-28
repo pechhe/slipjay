@@ -565,6 +565,16 @@ and held state through the existing recovery path.
   Because the queue is serial, concurrent migration changes get consecutive numbers.
   The runner host therefore needs whatever that step needs (YardSmith: Docker access to
   its Coolify databases).
+- **Failure provenance.** A failed landing records the checked candidate’s changed
+  migration trigger and artifact paths, the failing run’s recorded runtime identity,
+  and root lockfile blob ids. Optional top-level `"provenance": { "fixturePaths":
+  ["tests/fixtures"] }` declares literal repository paths whose object ids identify
+  the fixture in that candidate. Declare 1–50 safe relative paths (at most 500
+  characters each); unknown provenance keys, globs and parent traversal are refused.
+  Without a declaration the failure explains that fixture provenance is unavailable.
+  These values are frozen in the ledger once, bounded and sorted; receipt resends
+  never reread policy or repository state. Operations predating this evidence keep
+  sending their original failure fields.
 - **Held integrations.** If finalization or publication fails, the external target
   may already reflect the integration, so the runner keeps it on its local
   integration branch instead of dropping it, and the failure says so. Every later

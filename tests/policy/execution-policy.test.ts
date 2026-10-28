@@ -409,3 +409,14 @@ test("deployments declare environments with projects; unknown environments and m
     { version: 1, environments: { production: { timeoutMs: 1, projects: [{ ...project, activate: project.command }], migrations: { verify: project.command } } } },
   ]) assert.throws(() => parseExecutionPolicy(policy({ deployments })), JSON.stringify(deployments));
 });
+
+test("fixture provenance validates literal contained paths and refuses unknown keys", () => {
+  assert.deepEqual(parseExecutionPolicy(policy({ provenance: { fixturePaths: ["tests/fixtures", "data.json", "data.json"] } })).provenance,
+    { fixturePaths: ["data.json", "tests/fixtures"] });
+  assert.equal(parseExecutionPolicy(policy({})).provenance, undefined);
+  for (const provenance of [null, [], {}, { fixturePaths: [] }, { fixturePaths: ["ok"], other: [] },
+    ...["", "/tmp", "../secret", "a/../b", "a//b", "./a", "a\\b", "C:/data", "a\0b", "a\nb", "**/fixtures", "a".repeat(501), 3].map(path => ({ fixturePaths: [path] })),
+    { fixturePaths: Array.from({ length: 51 }, (_, n) => `path${n}`) }]) {
+    assert.throws(() => parseExecutionPolicy(policy({ provenance })), /provenance/);
+  }
+});

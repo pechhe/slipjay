@@ -12,6 +12,7 @@ type AttemptFailure = {
   exit: { code: number | null; signal: string | null; timedOut: boolean; cancelled: boolean };
   checks: { passed: string[]; failed: string[]; skipped: string[]; incomplete: string[] };
   artifacts: string[]; truncated: boolean;
+  provenance?: import("../runner/runner-types.ts").FailureProvenance;
   recovery: "code_repair" | "infrastructure_retry" | "publication_unknown" | "cancelled" | "superseded" | "policy_refusal";
 };
 
@@ -50,8 +51,25 @@ const bodyBytes = (action: string, input: unknown) => Buffer.byteLength(JSON.str
 const bounded = (values: string[], count: number, length: number) => [...new Set(values.map((value) => value.slice(0, length)))].slice(0, count);
 /** Shrinks only the failure's free text and lists, reporting it as truncated, until the whole request fits. */
 function fit(input: BuildReceiptInput): BuildReceiptInput {
-  const failure = input.failure;
+  let failure = input.failure;
   if (!failure) return input;
+  if (failure.provenance && bodyBytes("recordAttempt", input) > RECEIPT_MAX_BYTES) {
+    // Preserve existing failure detail first. Lists are expendable before provenance itself.
+    for (const count of [20, 0]) {
+      const value: NonNullable<AttemptFailure["provenance"]> = failure.provenance!;
+      const provenance: NonNullable<AttemptFailure["provenance"]> = { ...value,
+        migrations: "paths" in value.migrations ? { paths: value.migrations.paths.slice(0, count), truncated: true as const } : value.migrations,
+        toolchain: { ...value.toolchain, lockfiles: value.toolchain.lockfiles.slice(0, count), truncated: true as const },
+        fixture: "paths" in value.fixture ? { paths: value.fixture.paths.slice(0, count), truncated: true as const } : value.fixture };
+      failure = { ...failure, provenance, truncated: true };
+      input = { ...input, failure };
+      if (bodyBytes("recordAttempt", input) <= RECEIPT_MAX_BYTES) return input;
+    }
+    const { provenance: _omitted, ...rest } = failure;
+    failure = rest;
+    input = { ...input, failure };
+    if (bodyBytes("recordAttempt", input) <= RECEIPT_MAX_BYTES) return input;
+  }
   for (const [count, length, excerpt] of [[500, 500, 8000], [100, 200, 4000], [20, 100, 1000], [0, 0, 0]] as const) {
     const candidate = { ...input, failure: { ...failure, truncated: failure.truncated || count < 500 || excerpt < 8000,
       excerpt: failure.excerpt === null || excerpt === 0 ? null : failure.excerpt.slice(0, excerpt),
@@ -220,6 +238,7 @@ function failureOf(operation: LandingOperation, events: readonly StoredEvent[], 
     : event.type === "declined" ? "policy_refusal" : event.type === "cancelled" || cause === "killed" ? "cancelled"
       : cause === "infrastructure" || cause === "paused_out" || cause === "held" && !own ? "infrastructure_retry" : "code_repair";
   const output = failed?.output ?? null;
+  const provenance = failed && events.findLast(entry => entry.seq <= row.seq && entry.event.type === "provenance")?.event;
   const named = (outcome: RunOutcome) => bounded(operation.runs.filter((entry) => runOutcome(entry) === outcome).map((entry) => entry.command), 500, 500);
   return {
     stage: failed?.stage ?? operation.stage, cause: (event.type === "superseded" ? `Superseded by ${event.by}` : event.reason).slice(0, 2000),
@@ -229,6 +248,7 @@ function failureOf(operation: LandingOperation, events: readonly StoredEvent[], 
     artifacts: [`slipjay runner log ${operation.id}`, ...operation.runs.filter((entry) => entry.artifact?.status === "retained")
       .map((entry) => `slipjay runner artifact ${operation.id} ${entry.runId}`)].slice(0, 100),
     truncated: (output?.length ?? 0) > 8000, recovery,
+    ...(provenance && provenance.type === "provenance" ? { provenance: provenance.value } : {}),
   };
 }
 

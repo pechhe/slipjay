@@ -143,3 +143,19 @@ test("rebase uses the checked commit even if the integration bookmark moves befo
   assert.ok(!f.steps.includes("verify"));
   assert.deepEqual(f.state, {});
 });
+
+test("candidate observations retain the exact base before dependencies and after generation even when verification fails", async () => {
+  const f = fixture();
+  const observed: [string, string][] = [];
+  f.options.adapter.verify = async () => { throw new Error("gate failed"); };
+  await assert.rejects(integrateLandingCandidate("/task", { ...f.options, onCandidate: (candidate, base) => { observed.push([candidate, base]); } }, f.io), /gate failed/);
+  assert.deepEqual(observed, [["semantic", "base"], ["generated", "base"]]);
+});
+
+test("dependency failure still observes the rebased candidate without mistaking the submitted source for it", async () => {
+  const f = fixture();
+  const observed: [string, string][] = [];
+  f.io.prepareCandidateDependencies = async () => { throw new Error("install failed"); };
+  await assert.rejects(prepareLandingCandidate("/task", { ...f.options, onCandidate: (candidate, base) => { observed.push([candidate, base]); } }, f.io), /install failed/);
+  assert.deepEqual(observed, [["semantic", "base"]]);
+});

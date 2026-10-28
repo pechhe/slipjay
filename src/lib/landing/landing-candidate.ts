@@ -32,6 +32,8 @@ export type CandidateOptions = {
   environment?: () => NodeJS.ProcessEnv;
   /** Runs migration generation and verification commands (default: a bounded local process). */
   runCommand?: (request: import("../infra/bounded-process.ts").BoundedProcessRequest, purpose?: import("./migration-candidate.ts").MigrationRunPurpose) => Promise<import("../infra/bounded-process.ts").BoundedProcessResult>;
+  /** Observe exact candidates before commands and after migration generation, including failures. */
+  onCandidate?: (candidate: string, base: string) => void;
   onProgress?: (line: string) => void;
   onStage?: (stage: "rebasing" | "verifying" | "integrating" | "cleaning") => void;
 };
@@ -105,8 +107,10 @@ export async function prepareLandingCandidate(cwd: string, options: CandidateOpt
     await assertStackConflictFree(cwd, context.integrationBranch, rebased.commitId);
     const base = originalTip;
     let candidate = rebased;
+    options.onCandidate?.(candidate.commitId, base.commitId);
     await prepareCandidateDependencies(cwd, context, candidate, options.onProgress, options.runCommand);
     candidate = await (adapter.finalizeCandidate?.(candidate, base) ?? migration.finalize(candidate, base));
+    options.onCandidate?.(candidate.commitId, base.commitId);
     const identity = { context, artifact: candidate, base: base.commitId };
     // A retry can still be on an empty child: gates inspecting @ require the exact candidate.
     if ((await revisionFacts(cwd, "@")).commitId !== candidate.commitId) {

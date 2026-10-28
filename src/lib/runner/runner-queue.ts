@@ -31,6 +31,7 @@ import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, i
 import { label, newOperationId } from "./runner-log.ts";
 import type { OperationLogOptions } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
+import { failureProvenance, provenanceSource } from "./failure-provenance.ts";
 import { commandEvidence } from "./command-evidence.ts";
 import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
@@ -711,6 +712,8 @@ export function createRunnerQueue(input: {
   async function processOperation(operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, prefix?: PrefixTurn): Promise<void> {
     let stage: RunnerStage = "queued";
     let stageStarted = Date.now();
+    let provenancePolicy: Pick<import("../policy/execution-policy.ts").ExecutionPolicy, "migrationFinalization" | "provenance"> | undefined;
+    let checkedCandidate: { candidate: string; base: string } | undefined;
     let installSource: "fresh" | "existing" | undefined;
     let rebaseConflict = false;
     let conflictFiles: string[] = [];
@@ -937,6 +940,7 @@ export function createRunnerQueue(input: {
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
+      provenancePolicy = context.configuration;
       tracker = context.configuration.tracker;
       if (operation.kind === "reset") {
         verdict = await reset(branch);
@@ -967,6 +971,7 @@ export function createRunnerQueue(input: {
       await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
       const candidateContext = context;
       const candidateOptions = {
+        onCandidate: (candidate: string, base: string) => { checkedCandidate = { candidate, base }; },
         originalSource: operation.commitId,
         pinnedSource: Boolean(prefix || retainedSource),
         environment, onProgress: progress,
@@ -1161,6 +1166,8 @@ export function createRunnerQueue(input: {
         verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy),
           ...integrated?.type === "integrated" && integrated.process ? { process: integrated.process } : {} };
       }
+      if (verdict?.type === "failed" && operation.kind === "landing")
+        await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
       if (verdict) append(operation.id, verdict);
       // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
       if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo);
@@ -1329,6 +1336,15 @@ export function createRunnerQueue(input: {
       return { type: "failed", stage, reason: result.reason };
     }
   }
+  async function freezeProvenance(id: string, checkout: string, failure: Extract<OperationEvent, { type: "failed" }>,
+    checked?: { candidate: string; base: string }, policy?: Pick<import("../policy/execution-policy.ts").ExecutionPolicy, "migrationFinalization" | "provenance">): Promise<void> {
+    const events = log.events({ operationId: id });
+    if (events.some(row => row.event.type === "provenance")) return;
+    const source = provenanceSource(events, failure);
+    // Recovery has no live attempt context; read its committed integration policy once at failure.
+    policy ??= (await workspaceContext(checkout).catch(() => null))?.configuration;
+    append(id, { type: "provenance", value: await failureProvenance({ checkout, ...source, checked: checked ?? source.checked, policy }) });
+  }
   async function recoverRunning(): Promise<void> {
     for (const operation of log.openOperations().filter((entry) => entry.status === "running")) {
       const checkout = checkoutPath(operation);
@@ -1420,6 +1436,7 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "progress", line: `Recovery could not confirm publication: ${message(error)}` });
       }
       if (remote) await cleanup(operation, checkout, remote);
+      if (verdict.type === "failed") await freezeProvenance(operation.id, checkout, verdict);
       append(operation.id, verdict);
     }
   }

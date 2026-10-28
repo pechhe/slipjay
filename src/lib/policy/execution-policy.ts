@@ -24,6 +24,7 @@ export type ExecutionPolicy = {
   /** Checks the exact release candidate must pass; undefined when undeclared. */
   requiredReleaseVerification?: VerificationDeclaration[];
   migrationFinalization: MigrationFinalizationPolicy | null;
+  provenance?: { fixturePaths: string[] };
   /** Run in a workspace (cwd = its path) before it is removed; undefined when undeclared. */
   workspaceTeardown?: { executable: string; args: string[] };
   generatedPaths?: unknown;
@@ -154,6 +155,21 @@ function migrationFinalization(value: unknown): MigrationFinalizationPolicy | nu
   return { mode: value.mode, triggerPaths: migrationPaths(value.triggerPaths, "triggerPaths"),
     artifactPaths: migrationPaths(value.artifactPaths, "artifactPaths"),
     generate: migrationCommand(value.generate, "generate"), verify: migrationCommand(value.verify, "verify") };
+}
+
+/** Fixture identities are literal repository paths, never globs or commands. */
+function provenance(value: unknown): ExecutionPolicy["provenance"] {
+  if (value === undefined) return undefined;
+  if (!isObject(value) || Object.keys(value).some(key => key !== "fixturePaths")) fail("provenance must contain only fixturePaths");
+  if (!Array.isArray(value.fixturePaths) || !value.fixturePaths.length || value.fixturePaths.length > 50)
+    fail("provenance.fixturePaths must list 1-50 paths");
+  const paths = value.fixturePaths.map(path => {
+    if (typeof path !== "string" || !path || path.length > 500 || path.includes("\\") || /[\x00-\x1f\x7f*?\[\]]/.test(path)
+      || path.startsWith("/") || /^[A-Za-z]:/.test(path) || path.split("/").some(part => !part || part === "." || part === ".."))
+      fail("provenance.fixturePaths declares an unsafe path");
+    return path;
+  });
+  return { fixturePaths: [...new Set(paths)].sort() };
 }
 
 /** `workspaceTeardown`: a bare executable and its args, run with the workspace as cwd before it is removed. */
@@ -324,6 +340,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     ...releasePolicy(parsed),
     migrationFinalization: migrationFinalization(parsed.migrationFinalization),
     workspaceTeardown: workspaceTeardown(parsed.workspaceTeardown),
+    ...(parsed.provenance === undefined ? {} : { provenance: provenance(parsed.provenance) }),
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
     ...(parsed.spares === undefined ? {} : { spares }),
     ...(parsed.process === undefined ? {} : { process: level }),

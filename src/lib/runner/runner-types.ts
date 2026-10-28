@@ -121,7 +121,14 @@ export type CommandArtifact = { status: "unavailable"; reason: "private-output" 
 
 export type ArtifactChunk = { version: 1; operationId: string; runId: string; sha256: string; bytes: number; offset: number; nextOffset: number | null; dataBase64: string };
 
+export type FailureProvenance = {
+  migrations: { paths: string[]; truncated?: true } | { unavailable: string };
+  toolchain: { runtime: { name: string; version: string; sha256: string } | { unavailable: string }; lockfiles: { path: string; blob: string }[]; truncated?: true };
+  fixture: { paths: { path: string; tree: string }[]; truncated?: true } | { unavailable: string };
+};
+
 export type OperationEvent =
+  | { type: "provenance"; value: FailureProvenance }
   | { type: "repair_claimed"; claimId: string; tokenSha256: string; source: string; workspace: string; by: string }
   | { type: "repair_released"; claimId: string; by: string; reason: "released" | "revoked" }
   | { type: "repair_proposed"; operationId: string; claimId: string; source: string }

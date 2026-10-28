@@ -487,3 +487,116 @@ test("a chore's number unread because Build did not answer leaves the receipt ow
   assert.deepEqual(settled(refusing, refused).map((event) => event.type === "build_receipt" && event.state === "delivered" && !event.chore), [true]);
   refusedDrain.close(); refusing.close();
 });
+
+const provenance = {
+  migrations: { paths: ["schema.ts"] },
+  toolchain: { runtime: { name: "bun", version: "1.4.4", sha256: "a".repeat(64) }, lockfiles: [{ path: "bun.lock", blob: "b".repeat(40) }] },
+  fixture: { unavailable: "the repository declares no provenance.fixturePaths" },
+};
+
+test("ledger provenance is copied unchanged into failures and reconciliation failures", () => {
+  const log = openLog();
+  try {
+    const id = landing(log, "e", "open");
+    log.append(id, { type: "integrated", base: "b".repeat(40), commitId: "c".repeat(40) });
+    log.append(id, { type: "provenance", value: provenance });
+    log.append(id, { type: "failed", stage: "publishing", reason: "push failed" });
+    log.append(newOperationId(), { type: "integration_released", repo: "owner/repo", commitId: "c".repeat(40), reason: "released" });
+    const receipts = owedReceipts(log.operation(id) as import("../../src/lib/runner/runner-types.ts").LandingOperation, log.events({ operationId: id }), log.integrationSettlements());
+    const failures = receipts.flatMap(row => row.action === "recordAttempt" && row.input.failure ? [row.input.failure] : []);
+    assert.equal(failures.length, 2);
+    assert.deepEqual(failures.map(failure => failure.provenance), [provenance, provenance]);
+  } finally { log.close(); }
+});
+
+test("fit shrinks provenance lists before removing existing failure detail and stays below the receipt limit", () => {
+  const log = openLog();
+  try {
+    const id = landing(log, "e", "open");
+    for (let n = 0; n < 300; n++) {
+      log.append(id, { type: "run_started", runId: `extra${n}`, command: `${n} ${"x".repeat(480)}`, host: "test" });
+      log.append(id, { type: "run_finished", runId: `extra${n}`, exitCode: 0, signal: null, timedOut: false, durationMs: 1 });
+    }
+    const paths = Array.from({ length: 100 }, (_, n) => `${n}/${"x".repeat(490)}`).sort();
+    log.append(id, { type: "provenance", value: { ...provenance, migrations: { paths }, fixture: { paths: paths.slice(0, 50).map(path => ({ path, tree: "a".repeat(40) })) } } });
+    log.append(id, { type: "failed", stage: "verifying", reason: "gate failed", output: "x".repeat(8000) });
+    const row = owedReceipts(log.operation(id) as import("../../src/lib/runner/runner-types.ts").LandingOperation, log.events({ operationId: id }), log.integrationSettlements())[0]!;
+    assert.equal(row.action, "recordAttempt");
+    if (row.action !== "recordAttempt") throw new Error("expected attempt");
+    assert.ok(Buffer.byteLength(JSON.stringify({ action: row.action, input: row.input })) <= 200_000);
+    const failure = row.input.failure!;
+    assert.equal(failure.excerpt?.length, 8000);
+    assert.equal(failure.checks.passed.length, 301);
+    assert.equal(failure.truncated, true);
+    assert.ok(failure.provenance && "paths" in failure.provenance.migrations);
+    assert.equal(failure.provenance.migrations.truncated, true);
+    assert.ok(failure.provenance.migrations.paths.length < 100);
+  } finally { log.close(); }
+});
+
+// Forge compares the semantic attempt fields and canonical JSON of the failure. The only
+// tolerated enrichment is adding provenance to a failure that previously had none.
+const canonicalJson = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+function sameAttemptFact(recorded: BuildReceiptInput, incoming: BuildReceiptInput) {
+  if (canonicalJson({ ...recorded, failure: null }) !== canonicalJson({ ...incoming, failure: null })) return false;
+  if (canonicalJson(recorded.failure) === canonicalJson(incoming.failure)) return true;
+  if (!recorded.failure || recorded.failure.provenance || !incoming.failure?.provenance) return false;
+  const { provenance: _added, ...failure } = incoming.failure;
+  return canonicalJson(recorded.failure) === canonicalJson(failure);
+}
+
+test("legacy failure bytes replay after a dropped delivered row and a changed integration policy, then drain the runs", async () => {
+  const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await mkdtemp(join(tmpdir(), "receipt-replay-"));
+  const path = join(root, "events.sqlite");
+  let log = openLog(path);
+  let drain: ReturnType<typeof createReceiptDrain> | undefined;
+  try {
+    await writeFile(join(root, "slipjay.json"), JSON.stringify({ version: 1 }));
+    const id = landing(log, "e", "failed");
+    const operation = log.operation(id) as import("../../src/lib/runner/runner-types.ts").LandingOperation;
+    const original = owedReceipts(operation, log.events({ operationId: id }), log.integrationSettlements())[0]!;
+    assert.equal(original.action, "recordAttempt");
+    if (original.action !== "recordAttempt") throw new Error("expected attempt");
+    const bytes = JSON.stringify(original.input);
+    const expectedFailure = { stage: "verifying", cause: "gate failed", command: "vp test", excerpt: "1 failing",
+      exit: { code: 1, signal: null, timedOut: false, cancelled: false }, checks: { passed: [], failed: ["vp test"], skipped: [], incomplete: [] },
+      artifacts: [`slipjay runner log ${id}`], truncated: false, recovery: "code_repair" };
+    assert.equal(bytes, JSON.stringify({ ...original.input, failure: expectedFailure }));
+    const recorded = structuredClone(original.input);
+    const enriched = { ...recorded, failure: { ...recorded.failure!, provenance } };
+    assert.ok(sameAttemptFact(recorded, enriched));
+    assert.equal(sameAttemptFact(enriched, { ...enriched, failure: { ...enriched.failure, provenance: { ...provenance, migrations: { paths: ["other"] } } } }), false);
+    let allowRuns = false, replayed = 0, runs = 0;
+    const route: BuildRoute = async (action, input) => {
+      if (action === "recordAttempt") {
+        if (!sameAttemptFact(recorded, input as BuildReceiptInput)) return { kind: "refused", code: "attempt_fact_conflict", retryable: false };
+        assert.equal(JSON.stringify(input), bytes);
+        replayed++;
+        return { kind: "accepted", value: recorded };
+      }
+      assert.equal(action, "recordAttemptRun");
+      if (!allowRuns) return { kind: "unavailable", reason: "interrupted before run delivery" };
+      runs++;
+      return { kind: "accepted", value: null };
+    };
+    drain = createReceiptDrain({ log, route, initialBackoffMs: 60_000 });
+    drain.wake(); await drain.idle(); drain.close();
+    assert.equal(replayed, 1); assert.equal(runs, 0);
+    log.close();
+    const db = new DatabaseSync(path);
+    db.prepare("DELETE FROM events WHERE operation_id = ? AND json_extract(data, '$.type') = 'build_receipt' AND json_extract(data, '$.sequence') = ?").run(id, original.key);
+    db.close();
+    // No receipt projection is allowed to consult the integration policy on resend.
+    await writeFile(join(root, "slipjay.json"), JSON.stringify({ version: 1, provenance: { fixturePaths: ["new-fixture"] } }));
+    log = openLog(path); allowRuns = true;
+    drain = createReceiptDrain({ log, route });
+    drain.wake(); await drain.idle();
+    assert.equal(replayed, 2); assert.equal(runs, 1);
+    assert.equal(log.snapshot("test").build?.pending, 0);
+  } finally { drain?.close(); log.close(); await rm(root, { recursive: true, force: true }); }
+});

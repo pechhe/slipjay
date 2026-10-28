@@ -1,5 +1,9 @@
 # Changelog
 
+## v3.46.25
+
+- **Failed attempts retain provenance (YS-71):** the runner freezes migration-policy paths, recorded runtime, root lockfile blob ids and declared fixture object ids in the operation ledger. Forge failure receipts reuse that evidence on every resend; older operations keep their original receipts. Declare fixture identities with `provenance.fixturePaths`.
+
 ## v3.46.24
 
 - **A refused admission says why (YS-78):** when Forge refuses a landing's admission, `slipjay land` prints Forge's
