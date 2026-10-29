@@ -17,14 +17,26 @@
  * The runner reads them into `{ file, ms, status }` rows, files relative to the repository.
  * The command's exit status stays the verdict: a report never passes or fails a run, and a
  * missing or malformed one is recorded as such, never as rows.
+ *
+ * A command may also write diagnostic logs under `logs/` in the directory, such as the full
+ * output of a sub-check it only summarises. When the run fails, the runner keeps them in the
+ * run's output artifact (`slipjay runner artifact`); a passing run's logs are discarded.
  */
-import { readFile } from "node:fs/promises";
+import { lstat, open, readdir, readFile } from "node:fs/promises";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 
 export const TEST_REPORT_DIR_ENV = "SLIPJAY_TEST_REPORT_DIR";
 export const TEST_REPORT_MANIFEST = "slipjay-test-reports.json";
 const REPORT_BYTES = 16 * 1024 * 1024;
 const MAX_FILES = 5_000;
+/** The directory, under the report directory, whose files a failed run keeps. */
+export const TEST_REPORT_LOGS = "logs";
+const MAX_LOGS = 16;
+/** A longer log is read from its end, where its failure is. */
+const LOG_READ_BYTES = 4 * 1024 * 1024;
+
+/** One log a run left under `logs/`: its path there, and its last LOG_READ_BYTES. */
+export type RetainedLog = { path: string; content: string; truncated: boolean };
 
 export type TestReportFormat = "vitest-json" | "bun-junit";
 export type TestFileRow = { file: string; suite: string; ms: number; status: "passed" | "failed" | "skipped" };
@@ -122,4 +134,35 @@ export async function readTestReports(directory: string, root: string): Promise<
   }
   if (files.length > MAX_FILES) return { status: "recorded", files: files.slice(0, MAX_FILES), truncated: true, ...(selection ? { selection } : {}) };
   return { status: "recorded", files, ...(selection ? { selection } : {}) };
+}
+
+/** The regular files under `directory`'s `logs/`, in path order, at most MAX_LOGS of them. Never throws. */
+export async function readRetainedLogs(directory: string): Promise<RetainedLog[]> {
+  const base = join(directory, TEST_REPORT_LOGS);
+  const paths: string[] = [];
+  const walk = async (relativeDirectory: string): Promise<void> => {
+    const entries = await readdir(join(base, relativeDirectory), { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      // Symbolic links are never followed, so a log can only be a file the command wrote here.
+      if (entry.isDirectory()) await walk(path);
+      else if (entry.isFile()) paths.push(path);
+    }
+  };
+  await walk("");
+  const logs: RetainedLog[] = [];
+  for (const path of paths.slice(0, MAX_LOGS)) {
+    try {
+      const file = join(base, path);
+      const { size } = await lstat(file);
+      const handle = await open(file, "r");
+      try {
+        const length = Math.min(size, LOG_READ_BYTES);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, size - length);
+        logs.push({ path, content: buffer.toString("utf8"), truncated: size > length });
+      } finally { await handle.close(); }
+    } catch { /* A log that vanished or cannot be read is left out; the run's own output still stands. */ }
+  }
+  return logs;
 }

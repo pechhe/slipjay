@@ -192,3 +192,24 @@ test("the client pages a failed command's multi-megabyte artifact back whole, fr
     assert.equal(legacyPages, Math.ceil(reference.bytes / 16384), "the older runner is read in its own 16 KiB pages");
   } finally { await server.close(); await legacy.close(); log.close(); await rm(home, { recursive: true, force: true }); }
 });
+
+test("a failed run keeps its logs, redacted and bounded; a passing run keeps none", async () => {
+  const home = await mkdtemp(join(tmpdir(), "slipjay-artifacts-"));
+  try {
+    const logs = [{ path: "static/architecture.log", content: "token fixture-secret-value\nprivate feature access\n", truncated: false },
+      { path: "long.log", content: "cut-off-half\nreal failure\n", truncated: true }];
+    const failed = await retainCommandArtifact({ home, operationId: "op", runId: "failed", request, result: result({ exitCode: 1 }), logs });
+    retained(failed);
+    assert.deepEqual(failed.logs, ["static/architecture.log", "long.log"]);
+    const artifact = JSON.parse(Buffer.from((await readCommandArtifact(home, "op", "failed", failed, 0, COMMAND_ARTIFACT_PAGE_BYTES)).dataBase64, "base64").toString("utf8"));
+    assert.equal(artifact.logs[0].path, "static/architecture.log");
+    assert.match(artifact.logs[0].text, /private feature access/);
+    assert.doesNotMatch(JSON.stringify(artifact.logs), /fixture-secret-value|cut-off-half/);
+    assert.deepEqual([artifact.logs[0].complete, artifact.logs[1].complete], [true, false]);
+    assert.match(artifact.logs[1].text, /real failure/);
+    const passed = await retainCommandArtifact({ home, operationId: "op", runId: "passed", request, result: result(), logs });
+    retained(passed);
+    assert.equal(passed.logs, undefined);
+    assert.equal(JSON.parse(Buffer.from((await readCommandArtifact(home, "op", "passed", passed, 0, COMMAND_ARTIFACT_PAGE_BYTES)).dataBase64, "base64").toString("utf8")).logs, undefined);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});

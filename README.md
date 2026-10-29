@@ -1238,6 +1238,15 @@ command that wrote no manifest is recorded as `missing` and a malformed report a
 records the runner's load average, memory and running operations as it began, and
 the queue snapshot gives each operation's `startedAt`, when it left the queue.
 
+**Gate logs.** A gate command may also write diagnostic logs under `logs/` in that
+directory, such as the full output of a sub-check it only summarises. When the run fails,
+the runner keeps them in the run's output artifact (`logs`: path, text, `complete`), redacted
+like the command's own output: up to 16 files, each read from its last 4 MiB and kept up to
+1 MiB as head and tail. The run's artifact reference lists their paths, and a failed landing's
+report names them beside `slipjay runner artifact`. A passing run's logs are discarded. On a
+remote verifier the directory comes back from the machine with the reports, so a log survives
+the machine's checkout being cleaned.
+
 **The file-cost run.** `bun run test:file-cost` runs in the nightly audit: it takes the
 files metrics list as `costCandidates` (parallel medians past half the per-file ceiling)
 and runs each one in its own process (`--maxWorkers=1 --no-file-parallelism`), Vitest

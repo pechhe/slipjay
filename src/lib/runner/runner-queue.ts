@@ -22,7 +22,7 @@ import type { BuildReader } from "../build/tracker.ts";
 import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "../build/build-check-access.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
 import { RequiredVerificationError, runRequiredVerification, type RequiredVerificationFailureEvidence } from "../landing/required-verification.ts";
-import { readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
+import { readRetainedLogs, readTestReports, TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import { postIntegrationPolicy } from "../policy/post-integration-policy.ts";
 import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit, parseExecutionPolicy } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
@@ -867,6 +867,7 @@ export function createRunnerQueue(input: {
       }
       const redact = privateRun ? request.redactOutput ?? ((value: string) => value) : (value: string) => redactVerificationOutput(value, checkout);
       const token = build[BUILD_READ_TOKEN_ENV];
+      const redactOutput = token ? (value: string) => redact(value.split(token).join("[REDACTED]")) : redact;
       // Evidence describes the final execution environment, including runner-provided variables.
       const executionRequest = { ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment };
       // A remote verifier runs its own Bun; the evidence names the one that ran.
@@ -874,12 +875,14 @@ export function createRunnerQueue(input: {
       append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: via.host, timeoutMs: request.timeoutMs,
         purpose: runPurpose, ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
       const result = await via.run({ ...executionRequest,
-        redactOutput: token ? (value) => redact(value.split(token).join("[REDACTED]")) : redact, abortSignal }).catch((error: unknown) => {
+        redactOutput, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
         throw error;
       });
       const finished = runFinished(runId, result, started, request, privateRun);
-      finished.artifact = await retainCommandArtifact({ home, operationId: operation.id, runId, request, result, privateOutput: privateRun });
+      // Logs never passed through the executor's redaction, so the artifact applies the run's own to them.
+      const logs = reports ? (await readRetainedLogs(reports)).map((log) => ({ ...log, content: redactOutput(log.content) })) : [];
+      finished.artifact = await retainCommandArtifact({ home, operationId: operation.id, runId, request, result, privateOutput: privateRun, logs });
       append(operation.id, finished);
       if (reports) {
         append(operation.id, { type: "test_report", runId, ...await readTestReports(reports, await realpath(checkout).catch(() => checkout)) });

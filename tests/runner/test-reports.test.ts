@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { parseTestReport, readTestReports, TEST_REPORT_MANIFEST } from "../../src/lib/runner/test-reports.ts";
+import { parseTestReport, readRetainedLogs, readTestReports, TEST_REPORT_LOGS, TEST_REPORT_MANIFEST } from "../../src/lib/runner/test-reports.ts";
 
 const junit = `<?xml version="1.0"?><testsuites><testsuite name="a.test.ts" file="a.test.ts" tests="2" failures="0" errors="0" skipped="0" time="0.25">`
   + `<testsuite name="nested" file="a.test.ts" tests="1" failures="1" time="0.1"></testsuite></testsuite>`
@@ -94,4 +94,22 @@ test("a manifest's optional selection is kept, and a kind the contract does not 
       assert.equal(reading.status === "recorded" ? reading.selection : "missing", expected, name);
     } finally { await fixture.dispose(); }
   }
+});
+
+test("a run's logs are the regular files under logs/, in path order, a long one read from its end", async () => {
+  const { directory, root, dispose } = await reportDir(async (directory, root) => {
+    await mkdir(join(directory, TEST_REPORT_LOGS, "static"), { recursive: true });
+    await writeFile(join(directory, TEST_REPORT_LOGS, "static", "architecture.log"), "private feature access\n");
+    await writeFile(join(directory, TEST_REPORT_LOGS, "big.log"), `${"x".repeat(5 * 1024 * 1024)}\nlast line\n`);
+    await writeFile(join(directory, TEST_REPORT_MANIFEST), "{}");
+    await writeFile(join(root, "outside.log"), "not a log of this run");
+    await symlink(join(root, "outside.log"), join(directory, TEST_REPORT_LOGS, "linked.log"));
+  });
+  try {
+    const logs = await readRetainedLogs(directory);
+    assert.deepEqual(logs.map(({ path, truncated }) => ({ path, truncated })), [{ path: "big.log", truncated: true }, { path: "static/architecture.log", truncated: false }]);
+    assert.match(logs[0]!.content, /last line\n$/);
+    assert.equal(logs[1]!.content, "private feature access\n");
+    assert.deepEqual(await readRetainedLogs(join(root, "missing")), []);
+  } finally { await dispose(); }
 });

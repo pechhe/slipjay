@@ -129,6 +129,8 @@ export type CommandEvidence = { status: "unavailable"; reason: "capacity" } | {
 export type CommandArtifact = { status: "unavailable"; reason: "private-output" | "capture-failed" } | {
   status: "retained"; version: 1; sha256: string; bytes: number; complete: boolean;
   retention: "runner-retention-policy";
+  /** The logs a failed run wrote under its report directory's `logs/`, kept in the artifact's `logs`. */
+  logs?: string[];
 };
 
 export type ArtifactChunk = { version: 1; operationId: string; runId: string; sha256: string; bytes: number; offset: number; nextOffset: number | null; dataBase64: string };

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
+import { COMMAND_ARTIFACT_PAGE_BYTES } from "../../src/lib/runner/runner-contract.ts";
 import { gate, test, fixture } from "./fixtures/runner-queue-fixture.ts";
 
 test("gate commands get a temporary directory of their own checkout, emptied at each turn", async () => {
@@ -46,5 +48,23 @@ test("a gate run's test reports become per-file rows, a missing or malformed one
     assert.equal((await f.land(malformed))?.type, "landed", "a malformed report never fails the gate");
     assert.deepEqual(reports(malformed).map((report) => report.status), ["malformed"]);
 
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a failed gate run keeps the logs it wrote under its report directory", async () => {
+  const loggingGate = () => 'const fs=require("node:fs"),p=require("node:path"),d=process.env.SLIPJAY_TEST_REPORT_DIR;'
+    + 'if(!d)process.exit(9);fs.mkdirSync(p.join(d,"logs","static"),{recursive:true});'
+    + 'fs.writeFileSync(p.join(d,"logs","static","architecture.log"),"feature runtime cycle: a -> b -> a\\n");'
+    + 'if(fs.existsSync("fail"))process.exit(1);';
+  const f = await fixture(false, false, undefined, false, { prefixGate: loggingGate });
+  try {
+    const id = f.submit(await f.candidate("fail"));
+    assert.equal((await f.land(id))?.type, "failed");
+    const run = f.log.operation(id)!.runs.find((entry) => entry.purpose === "gate" && entry.exitCode === 1)!;
+    assert.equal(run.artifact?.status, "retained");
+    if (run.artifact?.status !== "retained") throw new Error("Expected retained command artifact");
+    assert.deepEqual(run.artifact.logs, ["static/architecture.log"]);
+    const artifact = JSON.parse(Buffer.from((await readCommandArtifact(f.home, id, run.runId, run.artifact, 0, COMMAND_ARTIFACT_PAGE_BYTES)).dataBase64, "base64").toString("utf8"));
+    assert.deepEqual(artifact.logs.map((log: { path: string; text: string }) => [log.path, log.text]), [["static/architecture.log", "feature runtime cycle: a -> b -> a\n"]]);
   } finally { await f.dispose(); }
 }, 120_000);

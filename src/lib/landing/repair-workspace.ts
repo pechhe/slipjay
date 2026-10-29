@@ -135,7 +135,7 @@ export function repairBrief(input: {
   } else gaps.push("The failure was not classified; its cause is unknown");
   if (outcome.failure?.excerpt) lines.push("", `Output excerpt${outcome.failure.excerptTruncated ? " (truncated)" : ""}:`, "", quote(outcome.failure.excerpt));
   lines.push("", "## Commands the runner recorded", "");
-  for (const run of outcome.runs) lines.push(`- ${run.outcome}${run.invalidated ? " (invalidated by a later attempt)" : ""}: ${run.command}${run.failingTests?.length ? ` (failing: ${run.failingTests.join(", ")})` : ""}${run.artifact?.status === "retained" ? ` (output: slipjay runner artifact ${outcome.operationId} ${run.runId})` : ""}`);
+  for (const run of outcome.runs) lines.push(`- ${run.outcome}${run.invalidated ? " (invalidated by a later attempt)" : ""}: ${run.command}${run.failingTests?.length ? ` (failing: ${run.failingTests.join(", ")})` : ""}${run.artifact?.status === "retained" ? ` (output${run.artifact.logs?.length ? ` and logs ${run.artifact.logs.join(", ")}` : ""}: slipjay runner artifact ${outcome.operationId} ${run.runId})` : ""}`);
   if (!outcome.runs.length) lines.push("- none");
   if (handoff) {
     lines.push("", "## Author-reported checks and reviews", "", "These are the author's reports, not runner verification.", "");

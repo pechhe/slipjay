@@ -8,10 +8,13 @@ import { OUTPUT_OMISSION } from "../infra/bounded-process.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import { COMMAND_ARTIFACT_LIMIT_BYTES, COMMAND_ARTIFACT_PAGE_BYTES } from "./runner-contract.ts";
 import type { ArtifactChunk, CommandArtifact } from "./runner-types.ts";
+import type { RetainedLog } from "./test-reports.ts";
 
 const digest = (data: string | Buffer) => createHash("sha256").update(data).digest("hex");
 const artifactPath = (home: string, operationId: string, runId: string) => join(home, "command-artifacts", digest(operationId), `${digest(runId)}.json`);
 const STREAM_BYTES = DIAGNOSTIC_STREAM_BYTES;
+/** Each log a failed run keeps (see test-reports.ts): its head and its last FAILED_TAIL_BYTES beyond this. */
+const LOG_BYTES = 1024 * 1024;
 /** A passing command's serialised artifact. */
 export const COMMAND_ARTIFACT_MAX_BYTES = 256 * 1024;
 /** A failed command's: two full streams, the selected diagnostics and JSON escaping, which the halving below keeps within it. */
@@ -58,10 +61,11 @@ const failedCommand = (result: BoundedProcessResult) => result.exitCode !== 0 ||
 /**
  * A passing command keeps at most 8 KiB of each stream and never a truncated capture. A failed one keeps each stream
  * up to FAILED_STREAM_BYTES, a truncated capture included once its cut lines are dropped; beyond that its head and its
- * last FAILED_TAIL_BYTES, marked `artifact-capacity`, so the command's closing summary always survives.
+ * last FAILED_TAIL_BYTES, marked `artifact-capacity`, so the command's closing summary always survives. A failed
+ * command also keeps the logs it wrote for the runner, each redacted like its streams and bounded the same way.
  */
 export async function retainCommandArtifact(input: {
-  home: string; operationId: string; runId: string; request: BoundedProcessRequest; result: BoundedProcessResult; privateOutput?: boolean;
+  home: string; operationId: string; runId: string; request: BoundedProcessRequest; result: BoundedProcessResult; privateOutput?: boolean; logs?: RetainedLog[];
 }): Promise<CommandArtifact> {
   if (input.privateOutput) return { status: "unavailable", reason: "private-output" };
   const { request, result } = input;
@@ -79,6 +83,12 @@ export async function retainCommandArtifact(input: {
     const complete = !truncated && Buffer.byteLength(safe) <= budget;
     return { text: headAndTail(safe, budget, FAILED_TAIL_BYTES), complete, ...complete ? {} : { reason: "artifact-capacity" } };
   };
+  // A log read from its end starts mid-line: the omission marker leads it, so its cut first line is dropped like a stream's.
+  const logs = failed ? (input.logs ?? []).map(({ path, content, truncated }) => {
+    const safe = sanitize(truncated ? completeEdges(`${OUTPUT_OMISSION}${content}`) : content);
+    const complete = !truncated && Buffer.byteLength(safe) <= LOG_BYTES;
+    return { path, text: headAndTail(safe, LOG_BYTES, FAILED_TAIL_BYTES), complete, ...complete ? {} : { reason: "artifact-capacity" } };
+  }) : [];
   const serialise = (budget: number) => {
     const stream = (value: string, truncated: boolean) => failed ? failedStream(value, truncated, budget) : passedStream(value, truncated);
     const stdout = stream(result.stdout, result.stdoutTruncated), stderr = stream(result.stderr, result.stderrTruncated);
@@ -86,6 +96,7 @@ export async function retainCommandArtifact(input: {
     const complete = stdout.complete && stderr.complete;
     return { complete, bytes: Buffer.from(JSON.stringify({ version: 1, operationId: input.operationId, runId: input.runId, complete, stdout, stderr, selected,
       ...(result.error ? { error: truncateUtf8(sanitize(result.error), 1024) } : {}),
+      ...(logs.length ? { logs } : {}),
       diagnosticCapture: !selected ? "unavailable" : selected.incomplete || !selected.stdout.complete || !selected.stderr.complete ? "incomplete" : "selected" })) };
   };
   try {
@@ -112,7 +123,8 @@ export async function retainCommandArtifact(input: {
       }
     }
     finally { await rm(temporary, { force: true }).catch(() => {}); }
-    return { status: "retained", version: 1, sha256: digest(bytes), bytes: bytes.length, complete, retention: "runner-retention-policy" };
+    return { status: "retained", version: 1, sha256: digest(bytes), bytes: bytes.length, complete, retention: "runner-retention-policy",
+      ...(logs.length ? { logs: logs.map(({ path }) => path) } : {}) };
   } catch { return { status: "unavailable", reason: "capture-failed" }; }
 }
 
