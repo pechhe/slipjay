@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { classifyFailure, classifyVerificationFailures, FAILURE_COMMAND_PATTERNS, FAILURE_RULE_VERSION, parseFailureOutput } from "../../src/lib/runner/failure-classification.ts";
 import { OWNER_KILL_REASON } from "../../src/lib/runner/runner-contract.ts";
+import { verificationDiagnosticCollector } from "../../src/lib/infra/verification-failure.ts";
 import type { OperationEvent, VerificationFailureRef } from "../../src/lib/runner/runner-types.ts";
 
 test("parses Vitest, Bun and node TAP failures as concrete test execution", () => {
@@ -134,4 +135,46 @@ test("a gate's failure summary pairs each failing test with its first error and 
   assert.deepEqual(fact.checks?.[1]?.failureCauses, ["lint: 3 errors"]);
   assert.deepEqual(fact.failureCauses, ["core typecheck: src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.", "lint: 3 errors"]);
   assert.equal(fact.firstErrors?.[0]?.error, "AssertionError: expected 1 to be 2");
+});
+
+test("bun's closing recap is no file's failure, and each failing test is named once", () => {
+  // The shape of the seeded YardSmith landing's output (SJ-140.1): the wrapper's suite log, then its summary.
+  const output = [
+    "test/sj140-seed.test.ts:",
+    "error: expect(received).toBe(expected)",
+    "(fail) SJ-140 seeded failure names its test and first error [0.71ms]",
+    "test/plan.test.ts:",
+    "(pass) credit arithmetic > plan configuration gaps name what is missing [0.25ms]",
+    "1 tests failed:",
+    "(fail) SJ-140 seeded failure names its test and first error [0.71ms]",
+    "Landing failure summary:",
+    "FAIL packages/ai-usage/test/sj140-seed.test.ts > SJ-140 seeded failure names its test and first error",
+    "  first error: error: expect(received).toBe(expected)",
+  ].join("\n");
+  assert.deepEqual(parseFailureOutput(output).failingTests, ["packages/ai-usage/test/sj140-seed.test.ts > SJ-140 seeded failure names its test and first error"]);
+
+  // A run's identities and its event's merge without repeating one test under a shorter alias.
+  const fact = classifyFailure({ type: "failed", stage: "verifying", reason: "failed", command: "vp test run", output: " × adds 3ms" },
+    { paused: false, held: false, run: { runId: "r", command: "vp test run", host: "runner", startedAt: "now", failingTests: ["tests/a.test.ts > adds"] } });
+  assert.deepEqual(fact.failingTests, ["tests/a.test.ts > adds"]);
+});
+
+test("a gate's summary names its failures alone; two files whose paths share a suffix stay two", () => {
+  const output = ["FAIL test/a.test.ts > fails", "Landing failure summary:", "FAIL test/a.test.ts > fails", "FAIL packages/x/test/a.test.ts > fails"].join("\n");
+  assert.deepEqual(parseFailureOutput(output).failingTests, ["test/a.test.ts > fails", "packages/x/test/a.test.ts > fails"]);
+  // A summary that names only causes names no test, whatever the output around it printed.
+  assert.deepEqual(parseFailureOutput("other.test.ts:\n(fail) noise\nLanding failure summary:\nFailure cause: core typecheck: error TS2322").failingTests, []);
+});
+
+test("the selected diagnostics never file bun's recap under the last file, however long the passing results before it", () => {
+  const collector = verificationDiagnosticCollector();
+  const passing = Array.from({ length: 40 }, (_, index) => `(pass) plans ${index} [0.25ms]`);
+  collector.add(Buffer.from([
+    "test/seed.test.ts:", "error: expect(received).toBe(expected)", "(fail) seeded [0.71ms]",
+    "test/plan.test.ts:", ...passing, "", "1 tests failed:", "(fail) seeded [0.71ms]", " 26 pass", " 1 fail", "",
+  ].join("\n")));
+  const selected = collector.finish().output;
+  assert.match(selected, /1 tests failed:/);
+  assert.doesNotMatch(selected, /test\/plan\.test\.ts:\n\(fail\)/);
+  assert.deepEqual(parseFailureOutput(selected).failingTests, ["test/seed.test.ts > seeded"]);
 });

@@ -1,6 +1,6 @@
 import { OWNER_KILL_REASON } from "./runner-contract.ts";
 import type { ClassifiedCheck, ClassifiedFact, FailureEvent, FirstError, Operation, OperationEvent, RunRecord, StoredEvent, VerificationFailureRef } from "./runner-types.ts";
-import { diagnostics, failingTests, outputLines } from "../infra/verification-failure.ts";
+import { diagnostics, failingTests, outputLines, withoutAliases } from "../infra/verification-failure.ts";
 
 export const FAILURE_RULE_VERSION = 2;
 
@@ -8,6 +8,8 @@ const MAX_ITEMS = 100;
 const MAX_ITEM_CHARS = 500;
 const clip = (value: string): string => value.length > MAX_ITEM_CHARS ? `${value.slice(0, MAX_ITEM_CHARS - 1)}…` : value;
 const boundedUnique = (values: string[]): string[] => [...new Set(values.map(clip))].slice(0, MAX_ITEMS);
+/** Failing tests merged from several sources (a run's output, its event's, other checks') name each test once. */
+const boundedTests = (values: string[]): string[] => boundedUnique(withoutAliases(values));
 const boundedErrors = (values: FirstError[]): FirstError[] => {
   const seen = new Set<string>();
   return values.map(({ test, error }) => ({ test: clip(test), error: clip(error) }))
@@ -87,7 +89,7 @@ export function classifyFailure(
     ruleVersion: FAILURE_RULE_VERSION,
     cause,
     ...(command ? { command } : {}),
-    failingTests: boundedUnique([...(context.run?.failingTests ?? []), ...parsed.failingTests]),
+    failingTests: boundedTests([...(context.run?.failingTests ?? []), ...parsed.failingTests]),
     diagnostics: boundedUnique([...(context.run?.diagnostics ?? []), ...parsed.diagnostics]),
     ...named([...(context.run?.firstErrors ?? []), ...(parsed.firstErrors ?? [])], [...(context.run?.failureCauses ?? []), ...(parsed.failureCauses ?? [])]),
   });
@@ -138,7 +140,7 @@ export function classifyVerificationFailures(
   const cause = checks.find((check) => check.cause === "gate")?.cause ?? checks.find((check) => check.cause !== "infrastructure")?.cause ?? "infrastructure";
   return { type: "classified", ruleVersion: FAILURE_RULE_VERSION, cause,
     ...checks[0] ? { command: checks[0].command } : {},
-    failingTests: boundedUnique(checks.flatMap((check) => check.failingTests)),
+    failingTests: boundedTests(checks.flatMap((check) => check.failingTests)),
     diagnostics: boundedUnique(checks.flatMap((check) => check.diagnostics)),
     ...named(checks.flatMap((check) => check.firstErrors ?? []), checks.flatMap((check) => check.failureCauses ?? [])), checks };
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.46.27
+
+- **A failing test is named once, under its own file (SJ-140.1):** when a gate's output carries its own
+  `Landing failure summary:`, its `FAIL` lines are the failing tests and nothing is inferred around them. Bun's
+  closing `N tests failed:` recap no longer files its failures under the last test file printed, in the parser or
+  in the selected diagnostics, and a bare test name beside the same test with its file is listed once, also when
+  a run's tests merge with its failure event's.
+
 ## v3.46.26
 
 - **A failed gate names its tests and keeps its full output (SJ-140):** a gate check's output is captured up to

@@ -1649,15 +1649,19 @@ structured failure (`outcome.classification`, per check in `checks`), by ending 
 output with a summary in this form:
 
 ```text
+Landing failure summary:
 FAIL <file> > <test name>
   first error: <the first line of its error>
 Failure cause: <a cause that is not a test, such as "core typecheck: error TS2322 …">
 ```
 
-One `FAIL` line per failing test, each optionally followed directly by one
-`  first error:` line, which pairs them in `firstErrors`; one `Failure cause:` line per
-failure that names no test, collected in `failureCauses`. Both are absent when the
-output named none. Vitest, Bun test and node:test failures are recognised as failing
+The `Landing failure summary:` (or `Failure summary:`) line opens it. One `FAIL` line per
+failing test, each optionally followed directly by one `  first error:` line, which pairs
+them in `firstErrors`; one `Failure cause:` line per failure that names no test, collected
+in `failureCauses`. Both are absent when the output named none. When the output carries
+a summary, its `FAIL` lines are the failing tests: none is inferred from the output
+around it, so a test file a runner printed relative to its package, or a recap filed
+under the wrong file, cannot add a second or wrong identity. Vitest, Bun test and node:test failures are recognised as failing
 tests without a summary; the summary adds the pairing and the causes. YardSmith's
 `test:landing:affected` writes one (SJ-140).
 

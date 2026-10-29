@@ -33,6 +33,10 @@ const POSITION_ONLY = /^.+\.[a-z]+(?::\d+:\d+|\(\d+,\d+\))$/;
 const SOFT_SEVERITY = /^(?:Warn(?:ing)?|Hint):/;
 const CHECK_SUMMARY = /^(?:svelte-check found|Found) \d+ errors?\b/i;
 const SUMMARY_RESERVE_BYTES = 512;
+// Bun's closing recap ("2 tests failed:") repeats every failure after the last file's results: none is that file's.
+const BUN_RECAP = /^\d+ tests? failed:$/;
+// A gate's own failure summary (README, **Naming a failure**): when present, its FAIL lines are the failing tests.
+const FAILURE_SUMMARY = /^(?:landing )?failure summary:$/i;
 /** What the runner's command artifact keeps of one selected diagnostic stream; the collector never retains more than that. */
 export const DIAGNOSTIC_STREAM_BYTES = 8192;
 /** A gate check's output is captured, and a failed check's retained, up to this much per stream (SJ-140). */
@@ -52,6 +56,9 @@ export function outputLines(result: VerificationFailureResult): string[] {
 
 /** Failing test identities from Vitest, Bun test and node:test (TAP or spec) output. */
 export function failingTests(lines: string[]): string[] {
+  // The gate named its failures itself: nothing is inferred from the output around them.
+  const summary = lines.findLastIndex((line) => FAILURE_SUMMARY.test(line.trim()));
+  if (summary >= 0) return withoutAliases(lines.slice(summary + 1).flatMap((line) => /^\s*FAIL\s+(.+)$/.exec(line)?.[1]?.trim() ?? []));
   const found: string[] = [];
   let bunFile: string | null = null;
   let tapLocation: string | null = null;
@@ -64,6 +71,7 @@ export function failingTests(lines: string[]): string[] {
       if (!found.some((identity) => identity === name || identity.endsWith(` > ${name}`))) found.push(name);
     }
     else if (/^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(trimmed)) bunFile = trimmed.slice(0, -1);
+    else if (BUN_RECAP.test(trimmed)) bunFile = null;
     else if ((match = /^\(fail\) (.+?)(?: \[[\d.]+m?s\])?$/.exec(trimmed))) found.push(bunFile ? `${bunFile} > ${match[1]!}` : match[1]!);
     else if ((match = /^not ok \d+ - (.+)$/.exec(trimmed))) {
       const location = lines.slice(index + 1, index + 8).map((next) => /location: '(.+?):\d+:\d+'/.exec(next)?.[1]).find(Boolean);
@@ -74,7 +82,15 @@ export function failingTests(lines: string[]): string[] {
       tapLocation = null;
     }
   }
-  const unique = [...new Set(found)];
+  return withoutAliases(found);
+}
+
+/**
+ * Each failing test once: a bare name is dropped beside an identity that names it with its file (`t` beside
+ * `a.test.ts > t`). Paths are never matched by suffix: `test/a.test.ts` and `packages/x/test/a.test.ts` can be two files.
+ */
+export function withoutAliases(identities: readonly string[]): string[] {
+  const unique = [...new Set(identities)];
   return unique.filter((identity) => !unique.some((other) => other.length > identity.length && other.endsWith(` > ${identity}`)));
 }
 
@@ -205,6 +221,8 @@ export function verificationDiagnosticCollector(redact: (value: string) => strin
     const trimmed = value.trim();
     if (/^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?:$/.test(trimmed)) testFile = trimmed;
     if (CHECK_SUMMARY.test(trimmed)) { softBlock = false; retain(value, true); previous = value; return; }
+    // Bun's closing recap belongs to no file; kept, so a parser of the selected lines knows the file ended too.
+    if (BUN_RECAP.test(trimmed)) { testFile = ""; softBlock = false; retain(value, true); previous = value; context = 8; return; }
     // A warning or hint block, source fragment (blank lines included) up to the next position line, never competes with real errors for the retained budget.
     if (SOFT_SEVERITY.test(trimmed) && POSITION.test(previous)) softBlock = true;
     else if (POSITION_ONLY.test(trimmed)) softBlock = false;
