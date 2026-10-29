@@ -25,6 +25,12 @@ const READY_TIMEOUT_MS = 300_000;
 /** Each boat API call: an unreachable API fails the attempt well inside a minute. */
 const BOAT_TIMEOUT_MS = 30_000;
 const CONTROL_TIMEOUT_MS = 120_000;
+/**
+ * Boat stops a VM when its lifetime runs out, snapshotting its disk for a later resume, so the lifetime is the idle
+ * timer: long enough for any attempt while one runs, IDLE_LIFETIME_S once it closes. A runner restart loses no timer.
+ */
+const ATTEMPT_LIFETIME_S = 3 * 3600;
+const IDLE_LIFETIME_S = 15 * 60;
 /** How long recovery keeps retrying to clean the pool after a restart. */
 const RECOVERY_MS = 240_000;
 /** Remote paths an attempt's commands created (TMPDIR, test reports), removed by every clean. */
@@ -129,7 +135,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     const listed = await boat(["list"], signal) as { sandboxes?: unknown[] } | null;
     let vm = (listed?.sandboxes ?? []).map(vmOf).find((entry) => entry.name === name);
     if (!vm) {
-      vm = vmOf(await boat(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", "7200", "--type", size], signal));
+      vm = vmOf(await boat(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(ATTEMPT_LIFETIME_S), "--type", size], signal));
       // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
       const record = options.pending ? join(options.pending, vm.id) : undefined;
       if (record) { await mkdir(options.pending!, { recursive: true }); await writeFile(record, name); }
@@ -139,8 +145,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     } else if (["stopped", "stopping", "archived"].includes(vm.state)) {
       await boat(["resume", vm.id], signal);
     }
-    // The trial stops a sandbox two hours after its last extension; each attempt renews it.
-    await boat(["extend", vm.id, "--hours", "2"], signal);
+    await boat(["extend", vm.id, "--ttl", String(ATTEMPT_LIFETIME_S)], signal);
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
       vm = { ...vmOf(await boat(["info", vm.id], signal)), name };
@@ -157,11 +162,14 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
   /**
    * Stops every scope an attempt started, removes every container but the image's `keep-` ones and the remote scratch
    * the attempt's commands created, and cleans the checkout's untracked files, so the next attempt starts from none of it.
+   * It also drops dangling images, unused volumes and unreachable Git objects, so a long-lived VM's disk stays bounded.
    */
   const cleanScript = `systemctl --user stop 'slipjay-run-*.scope' 2>/dev/null || true
 docker ps -a --format '{{.Names}}' | grep -v '^keep-' | xargs -r docker rm -f >/dev/null 2>&1 || true
 if [ -f ${SCRATCH_LIST} ]; then sort -u ${SCRATCH_LIST} | while IFS= read -r path; do [ -n "$path" ] && [ "$path" != / ] && rm -rf -- "$path"; done; rm -f ${SCRATCH_LIST}; fi
-repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && git -C "$repo" clean -ffdxq -e node_modules -e .jj || true`;
+docker image prune -f >/dev/null 2>&1 || true
+docker volume prune -f >/dev/null 2>&1 || true
+repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git -C "$repo" clean -ffdxq -e node_modules -e .jj; git -C "$repo" gc --auto --quiet; } || true`;
   /** The VM's billed seconds and dollars so far, as boat reports them; null when it cannot say. */
   const usage = async (vm: Vm, signal?: AbortSignal) => {
     const value = await boat(["usage", vm.id], signal).catch(() => null) as { seconds?: unknown; dollars?: unknown } | null;
@@ -214,7 +222,8 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && git -C
   if [ "$current" != "$target" ]; then sudo mkdir -p "$(dirname "$target")"; sudo chown user "$(dirname "$target")"; rm -rf "$target"; mv "$current" "$target"; echo "$target" > ~/.slipjay-repo; fi
   cd "$target"
   cat > /tmp/slipjay-candidate.bundle
-  if [ -s /tmp/slipjay-candidate.bundle ]; then git fetch -q /tmp/slipjay-candidate.bundle ${shellWord(`${ref}/*:${ref}/*`)}; fi
+  # Forced: a slot's refs move to whatever it verifies next, which need not descend from a candidate that never landed.
+  if [ -s /tmp/slipjay-candidate.bundle ]; then git fetch /tmp/slipjay-candidate.bundle ${shellWord(`+${ref}/*:${ref}/*`)}; fi
   rm -f /tmp/slipjay-candidate.bundle
   # Bookmarks, so jj sees both commits whether this bundle carried them or an earlier one did.
   git update-ref ${shellWord(`refs/heads/slipjay-boat-${slot}-candidate`)} ${shellWord(candidate)}
@@ -301,6 +310,7 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && git -C
               if (master) await run({ executable: "ssh", args: ["-S", socket, "-O", "exit", `user@${vm.host}`], cwd: tmpdir(), timeoutMs: BOAT_TIMEOUT_MS,
                 maxOutputBytes: CONTROL_OUTPUT, env: process.env }).catch(() => undefined);
               await control(vm, "clean", cleanScript).catch(() => undefined);
+              await boat(["extend", vm.id, "--ttl", String(IDLE_LIFETIME_S)]).catch(() => undefined);
               await rm(scratch, { recursive: true, force: true });
             },
           };

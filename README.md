@@ -743,8 +743,9 @@ runner's environment, which the unit's `bws run` supplies from Bitwarden.
 
 Each repository has a pool of VMs, one per verification place, named
 `slipjay-<owner>-<name>-<slot>`, forked from the image when missing and resumed when
-stopped; every attempt renews its VM for two hours (the trial stops sandboxes after at most
-two). Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
+stopped. Boat stops a VM when its lifetime runs out, snapshotting its disk for the next resume, so
+the lifetime is the pool's idle timer: three hours while an attempt runs, fifteen minutes once it
+closes, and a runner restart loses no timer. Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
 the runner home, and a restart deletes it, keeping the record until boat confirms. An attempt has its VM to itself. Before the gate the runner stops every scope and
 container an earlier attempt left, moves the VM's one checkout to the runner checkout's own
 path, sends the candidate and its base as a Git bundle of only what the VM lacks, sets the
@@ -760,7 +761,9 @@ command evidence names the VM's Bun, so evidence, artifacts and failure classifi
 as they do locally. After the gate the checkout's files are read again: a gate that changed
 them fails the landing, since its result is no evidence for the candidate. Every clean,
 before and after each attempt, also removes the remote scratch (`TMPDIR`, test reports) its
-commands created. The ledger records
+commands created, dangling Docker images, unused volumes and unreachable Git objects, so a VM's
+disk stays bounded. Each attempt force-updates its slot's refs, since a candidate need not
+descend from the last one that slot verified. The ledger records
 `remote_verification` events: `ready` (machine, slot, candidate, tree, `setupMs`) and
 `finished` (the tree the checkout held after the gate, or the number of files that
 changed, and `machineMs` from opening to finishing), each with boat's billing for the VM

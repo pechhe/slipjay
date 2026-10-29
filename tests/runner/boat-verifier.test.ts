@@ -52,11 +52,11 @@ const open = (verification: ReturnType<typeof boatVerification>, slot = 0) => ve
 test("a missing pool VM is forked from the image, named for its slot and renewed; a stopped one is resumed", async () => {
   const missing = stand([], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
   await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: missing.run }), 1), /Remote executor unavailable \(setup\): clean/);
-  assert.deepEqual(missing.boat().slice(0, 4), ["list", "fork bx_image --no-env --no-monitoring --ttl 7200 --type default", "rename bx_new slipjay-pechhe-yardsmith-1", "extend bx_new --hours 2"]);
+  assert.deepEqual(missing.boat().slice(0, 4), ["list", "fork bx_image --no-env --no-monitoring --ttl 10800 --type default", "rename bx_new slipjay-pechhe-yardsmith-1", "extend bx_new --ttl 10800"]);
 
   const stopped = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
   await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: stopped.run })));
-  assert.deepEqual(stopped.boat().slice(0, 3), ["list", "resume bx_old", "extend bx_old --hours 2"]);
+  assert.deepEqual(stopped.boat().slice(0, 3), ["list", "resume bx_old", "extend bx_old --ttl 10800"]);
 });
 
 test("boat refusing a VM names boat and its error, so it is never mistaken for a gate failure", async () => {
@@ -137,4 +137,7 @@ test("concurrent gate commands reaching Build share one tunnel per attempt", asy
   assert.ok(!ready.calls.some((call) => call.includes("ExitOnForwardFailure=yes")), "no command opens its own listener");
   await attempt.close();
   assert.ok(ready.calls.some((call) => call.includes("-O") && call.includes("exit")), "the master closes with the attempt");
+  assert.equal(ready.boat().at(-1), "extend bx_old --ttl 900", "a closed attempt leaves its VM fifteen minutes before boat stops it");
+  assert.ok(ready.calls.some((call) => call.join(" ").includes("'\\''+refs/slipjay/boat/0/*:refs/slipjay/boat/0/*'\\''")),
+    "the slot's refs are forced, since the next candidate need not descend from one that never landed");
 });
