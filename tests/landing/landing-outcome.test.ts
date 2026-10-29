@@ -80,7 +80,7 @@ test("failed evidence carries cause version, diagnostics, attribution and bounde
     assert.equal(outcome.identity?.spec, 57);
     assert.equal(outcome.requestId, "request-fixture-123");
     assert.equal(outcome.sourceRetention?.handoffComplete, false);
-    assert.equal(outcome.classification?.ruleVersion, 1);
+    assert.equal(outcome.classification?.ruleVersion, 2);
     assert.equal(outcome.classification?.cause, "gate");
     assert.ok(outcome.classification?.diagnostics.includes("src/middle.ts:12:3 failure"));
     assert.equal(outcome.failure?.excerpt?.length, 6000);

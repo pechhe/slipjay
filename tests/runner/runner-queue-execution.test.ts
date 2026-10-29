@@ -3,7 +3,7 @@ import { execFile, execFileSync, spawn } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
+import { COMMAND_ARTIFACT_PAGE_BYTES, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
 import { runContainment } from "../../src/lib/runner/local-executor.ts";
@@ -104,9 +104,11 @@ test("middle failure diagnostics survive queue events and durable log retrieval"
     assert.equal(run.diagnosticCapture, "selected");
     assert.equal(run.artifact?.status, "retained");
     if (run.artifact?.status !== "retained") throw new Error("Expected retained command artifact");
-    assert.equal(run.artifact.complete, false);
-    const artifact = await readCommandArtifact(f.home, id, run.runId, run.artifact, 0, 16384);
-    assert.match(Buffer.from(artifact.dataBase64, "base64").toString("utf8"), /tests\/hidden.test.ts:27:3/);
+    // A failed command keeps its whole output, middle included, up to 4 MiB a stream (SJ-140).
+    assert.equal(run.artifact.complete, true);
+    const artifact = await readCommandArtifact(f.home, id, run.runId, run.artifact, 0, COMMAND_ARTIFACT_PAGE_BYTES);
+    assert.equal(artifact.nextOffset, null);
+    assert.match(JSON.parse(Buffer.from(artifact.dataBase64, "base64").toString("utf8")).stderr.text, /tests\/hidden.test.ts:27:3/);
     assert.equal(f.main(), before);
     const reopened = openOperationLog(f.logPath);
     try {

@@ -1,7 +1,7 @@
 import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "../landing/submission-handoff.ts";
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "../landing/repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
-import { candidateBookmark, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
 import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
@@ -488,9 +488,9 @@ export function createRunnerHandler(input: {
       if (lapsed) return json({ error: `Command artifact expired under the runner's ${lapsed.policy} retention policy at ${lapsed.at}` }, 410);
       const reference = operation.runs.find((run) => run.runId === runId)?.artifact;
       if (!reference || reference.status !== "retained") return json({ error: "Command artifact unavailable", reason: reference?.status === "unavailable" ? reference.reason : "not-recorded" }, 410);
-      const rawOffset = url.searchParams.get("offset") ?? "0", rawLimit = url.searchParams.get("limit") ?? "16384";
+      const rawOffset = url.searchParams.get("offset") ?? "0", rawLimit = url.searchParams.get("limit") ?? String(COMMAND_ARTIFACT_PAGE_BYTES);
       if (!/^\d+$/.test(rawOffset) || !Number.isSafeInteger(Number(rawOffset)) || Number(rawOffset) > reference.bytes
-        || !/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 16384) return json({ error: "Invalid artifact range" }, 400);
+        || !/^\d+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > COMMAND_ARTIFACT_PAGE_BYTES) return json({ error: "Invalid artifact range" }, 400);
       if (!input.readArtifact) return json({ error: "Artifact retrieval unavailable" }, 503);
       try { return json(await input.readArtifact(operationId, runId, reference, Number(rawOffset), Number(rawLimit))); }
       catch { return json({ error: "Retained artifact is missing or does not match ledger evidence" }, 410); }

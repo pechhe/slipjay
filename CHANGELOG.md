@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.46.26
+
+- **A failed gate names its tests and keeps its full output (SJ-140):** a gate check's output is captured up to
+  4 MiB a stream, and a failed command's artifact keeps it, a truncated capture included less the lines its cut
+  touched; beyond 4 MiB it keeps the head and the last 256 KiB, marked `artifact-capacity`, so the closing summary
+  survives. Passing commands keep today's 8 KiB. A gate that ends with `FAIL <file> > <test>`,
+  `  first error: …` and `Failure cause: …` lines gets them back as `firstErrors` and `failureCauses` in the
+  classification (rule 2) and in `slipjay land`'s structured failure. Artifact pages grow to 1 MiB.
+
 ## v3.46.25
 
 - **Failed attempts retain provenance (YS-71):** the runner freezes migration-policy paths, recorded runtime, root lockfile blob ids and declared fixture object ids in the operation ledger. Forge failure receipts reuse that evidence on every resend; older operations keep their original receipts. Declare fixture identities with `provenance.fixturePaths`.

@@ -1,18 +1,45 @@
 import { OWNER_KILL_REASON } from "./runner-contract.ts";
-import type { ClassifiedCheck, ClassifiedFact, FailureEvent, Operation, OperationEvent, RunRecord, StoredEvent, VerificationFailureRef } from "./runner-types.ts";
+import type { ClassifiedCheck, ClassifiedFact, FailureEvent, FirstError, Operation, OperationEvent, RunRecord, StoredEvent, VerificationFailureRef } from "./runner-types.ts";
 import { diagnostics, failingTests, outputLines } from "../infra/verification-failure.ts";
 
-export const FAILURE_RULE_VERSION = 1;
+export const FAILURE_RULE_VERSION = 2;
 
 const MAX_ITEMS = 100;
 const MAX_ITEM_CHARS = 500;
 const clip = (value: string): string => value.length > MAX_ITEM_CHARS ? `${value.slice(0, MAX_ITEM_CHARS - 1)}…` : value;
 const boundedUnique = (values: string[]): string[] => [...new Set(values.map(clip))].slice(0, MAX_ITEMS);
+const boundedErrors = (values: FirstError[]): FirstError[] => {
+  const seen = new Set<string>();
+  return values.map(({ test, error }) => ({ test: clip(test), error: clip(error) }))
+    .filter(({ test }) => !seen.has(test) && Boolean(seen.add(test))).slice(0, MAX_ITEMS);
+};
+/** The new fields only when present, so a failure that names neither keeps rule 1's shape. */
+const named = (firstErrors: FirstError[], failureCauses: string[]) => ({
+  ...firstErrors.length ? { firstErrors: boundedErrors(firstErrors) } : {},
+  ...failureCauses.length ? { failureCauses: boundedUnique(failureCauses) } : {},
+});
+
+/**
+ * A gate's own failure summary (README, **Naming a failure**): a `FAIL <file> > <test>` line directly followed by
+ * `  first error: <line>` pairs a test with its first error, and `Failure cause: <text>` names a cause that is not a test.
+ */
+export function failureSummary(lines: string[]): { firstErrors: FirstError[]; failureCauses: string[] } {
+  const firstErrors: FirstError[] = [], failureCauses: string[] = [];
+  for (const [index, line] of lines.entries()) {
+    const test = /^\s*FAIL\s+(.+)$/.exec(line)?.[1];
+    const error = test ? /^\s+first error: (.+)$/.exec(lines[index + 1] ?? "")?.[1] : undefined;
+    if (test && error) firstErrors.push({ test: test.trim(), error: error.trim() });
+    const cause = /^Failure cause: (.+)$/.exec(line.trim())?.[1];
+    if (cause) failureCauses.push(cause.trim());
+  }
+  return { firstErrors, failureCauses };
+}
 
 /** Parse concrete verification evidence, keeping persisted identities and diagnostics bounded. */
-export function parseFailureOutput(output: string): { failingTests: string[]; diagnostics: string[]; testBodyRan: boolean } {
+export function parseFailureOutput(output: string): { failingTests: string[]; diagnostics: string[]; testBodyRan: boolean; firstErrors?: FirstError[]; failureCauses?: string[] } {
   const lines = outputLines({ stdout: output });
   const tests = failingTests(lines);
+  const summary = failureSummary(lines);
   const ranMarker = lines.some((line) => {
     const text = line.trim();
     return /^(?:FAIL\s+.+ > |[×✓]\s+.+(?: > |[\d.]+m?s$)|\(fail\)\s+\S|\(pass\)\s+\S|not ok \d+\s+-\s+\S|ok \d+\s+-\s+\S)/.test(text)
@@ -22,6 +49,7 @@ export function parseFailureOutput(output: string): { failingTests: string[]; di
     failingTests: boundedUnique(tests),
     diagnostics: boundedUnique(diagnostics(lines, MAX_ITEMS)),
     testBodyRan: ranMarker,
+    ...named(summary.firstErrors, summary.failureCauses),
   };
 }
 
@@ -53,7 +81,7 @@ export function classifyFailure(
   context: { paused: boolean; held: boolean; run?: RunRecord & { testBodyRan?: boolean } },
 ): ClassifiedFact {
   const command = context.run?.command ?? (event.type === "failed" ? event.command : undefined);
-  const parsed = event.type === "failed" && event.output ? parseFailureOutput(event.output) : { failingTests: [], diagnostics: [], testBodyRan: false };
+  const parsed: ReturnType<typeof parseFailureOutput> = event.type === "failed" && event.output ? parseFailureOutput(event.output) : { failingTests: [], diagnostics: [], testBodyRan: false };
   const fact = (cause: ClassifiedFact["cause"]): ClassifiedFact => ({
     type: "classified",
     ruleVersion: FAILURE_RULE_VERSION,
@@ -61,6 +89,7 @@ export function classifyFailure(
     ...(command ? { command } : {}),
     failingTests: boundedUnique([...(context.run?.failingTests ?? []), ...parsed.failingTests]),
     diagnostics: boundedUnique([...(context.run?.diagnostics ?? []), ...parsed.diagnostics]),
+    ...named([...(context.run?.firstErrors ?? []), ...(parsed.firstErrors ?? [])], [...(context.run?.failureCauses ?? []), ...(parsed.failureCauses ?? [])]),
   });
 
   if (event.type === "superseded") return fact("superseded");
@@ -104,13 +133,14 @@ export function classifyVerificationFailures(
       ...position === 0 && event.output ? { output: event.output } : {} };
     const fact = classifyFailure(single, { ...context, ...run ? { run: { ...run, command: failure.command } } : {} });
     return { checkIndex: failure.checkIndex, command: failure.command, cause: fact.cause, ...failure.runId ? { runId: failure.runId } : {},
-      failingTests: fact.failingTests, diagnostics: fact.diagnostics };
+      failingTests: fact.failingTests, diagnostics: fact.diagnostics, ...named(fact.firstErrors ?? [], fact.failureCauses ?? []) };
   });
   const cause = checks.find((check) => check.cause === "gate")?.cause ?? checks.find((check) => check.cause !== "infrastructure")?.cause ?? "infrastructure";
   return { type: "classified", ruleVersion: FAILURE_RULE_VERSION, cause,
     ...checks[0] ? { command: checks[0].command } : {},
     failingTests: boundedUnique(checks.flatMap((check) => check.failingTests)),
-    diagnostics: boundedUnique(checks.flatMap((check) => check.diagnostics)), checks };
+    diagnostics: boundedUnique(checks.flatMap((check) => check.diagnostics)),
+    ...named(checks.flatMap((check) => check.firstErrors ?? []), checks.flatMap((check) => check.failureCauses ?? [])), checks };
 }
 
 /**

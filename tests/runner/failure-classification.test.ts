@@ -72,7 +72,7 @@ test("classifies terminal precedence, rebase conflicts, verification infrastruct
   assert.equal(classifyFailure({ ...failed("verifying", "install failed"), command: "bun install" }, { paused: false, held: false }).cause, "infrastructure");
 
   assert.deepEqual(FAILURE_COMMAND_PATTERNS.map(({ kind }) => kind), ["fetch", "install", "test", "lint", "typecheck"]);
-  assert.equal(FAILURE_RULE_VERSION, 1);
+  assert.equal(FAILURE_RULE_VERSION, 2);
 });
 
 test("combines per-check causes: gate if any check is a gate failure, infrastructure only if all are", () => {
@@ -101,4 +101,37 @@ test("combines per-check causes: gate if any check is a gate failure, infrastruc
   assert.equal(only.cause, "infrastructure");
   // The index text of a gate failure must not make the timeout look like a timeout-with-body or vice versa.
   assert.equal(classifyVerificationFailures(event([tests]), context, [{ failure: tests, run: run("r-test", tests.command, testRun) }]).cause, "gate");
+});
+
+test("a gate's failure summary pairs each failing test with its first error and names causes that are not a test", () => {
+  const summary = [
+    "landing tests workbench failed: …",
+    "Landing failure summary:",
+    "FAIL apps/workbench/src/plan.spec.ts > plan > rejects an empty route",
+    "  first error: AssertionError: expected 1 to be 2",
+    "FAIL packages/core/src/a.test.ts > adds",
+    "Failure cause: core typecheck: src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.",
+    "error: Related landing tests failed: 2 failing tests; 1 suite failed without a named test (core typecheck)",
+  ].join("\n");
+  const parsed = parseFailureOutput(summary);
+  assert.deepEqual(parsed.failingTests, ["apps/workbench/src/plan.spec.ts > plan > rejects an empty route", "packages/core/src/a.test.ts > adds"]);
+  assert.deepEqual(parsed.firstErrors, [{ test: "apps/workbench/src/plan.spec.ts > plan > rejects an empty route", error: "AssertionError: expected 1 to be 2" }]);
+  assert.deepEqual(parsed.failureCauses, ["core typecheck: src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'."]);
+  // A failure that names neither keeps the earlier shape.
+  assert.deepEqual(Object.keys(parseFailureOutput("Error: Related landing tests failed")), ["failingTests", "diagnostics", "testBodyRan"]);
+
+  // Each check keeps what it named, and the fact merges them: from the run the runner recorded and from the event's output.
+  const failures: VerificationFailureRef[] = [
+    { checkIndex: 0, command: "bun run test:landing:affected", outcome: "nonzero_exit", runId: "r-tests" },
+    { checkIndex: 1, command: "bun run check", outcome: "nonzero_exit", runId: "r-check" },
+  ];
+  const fact = classifyVerificationFailures({ type: "failed", stage: "verifying", reason: "Required verification failed", failures, output: summary }, { paused: false, held: false }, [
+    { failure: failures[0]!, run: { runId: "r-tests", command: failures[0]!.command, host: "runner", startedAt: "now", firstErrors: [{ test: "apps/workbench/src/plan.spec.ts > plan > rejects an empty route", error: "AssertionError: expected 1 to be 2" }] } },
+    { failure: failures[1]!, run: { runId: "r-check", command: failures[1]!.command, host: "runner", startedAt: "now", failureCauses: ["lint: 3 errors"] } },
+  ]);
+  assert.equal(fact.ruleVersion, 2);
+  assert.equal(fact.checks?.[0]?.firstErrors?.length, 1, "the run's and the output's pairing of one test count once");
+  assert.deepEqual(fact.checks?.[1]?.failureCauses, ["lint: 3 errors"]);
+  assert.deepEqual(fact.failureCauses, ["core typecheck: src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.", "lint: 3 errors"]);
+  assert.equal(fact.firstErrors?.[0]?.error, "AssertionError: expected 1 to be 2");
 });

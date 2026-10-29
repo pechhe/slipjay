@@ -92,10 +92,20 @@ export type ClientFact =
 /** One failed verification check of a `failed` event; `runId` names its run when the runner ran it. */
 export type VerificationFailureRef = { checkIndex: number; command: string; outcome: "nonzero_exit" | "timeout" | "cancelled" | "signal" | "spawn_failure"; runId?: string };
 
-/** One failed check's own classification (SJ-51): `failingTests` are the tests that command failed. */
-export type ClassifiedCheck = { checkIndex: number; command: string; cause: CauseClass; runId?: string; failingTests: string[]; diagnostics: string[] };
+/** A failing test and the first line of its error, as the gate's failure summary paired them (rule 2). */
+export type FirstError = { test: string; error: string };
 
-export type ClassifiedFact = { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; checks?: ClassifiedCheck[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
+/**
+ * What a failure names beyond its cause class (rule 2): `firstErrors` pairs failing tests with their first error and
+ * `failureCauses` names causes that are not a test (a type check, a timeout, memory, a moved candidate). Each is
+ * absent when the gate's output named none.
+ */
+export type NamedFailure = { firstErrors?: FirstError[]; failureCauses?: string[] };
+
+/** One failed check's own classification (SJ-51): `failingTests` are the tests that command failed. */
+export type ClassifiedCheck = { checkIndex: number; command: string; cause: CauseClass; runId?: string; failingTests: string[]; diagnostics: string[] } & NamedFailure;
+
+export type ClassifiedFact = NamedFailure & { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; checks?: ClassifiedCheck[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
 
 /**
  * Why a failing audit failed, as the person who looked recorded it. `culprits` names the
@@ -205,7 +215,7 @@ export type OperationEvent =
   | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence }
   /** What a gate run's test reports said (see `test-reports.ts`); absent when the command wrote none. */
   | ({ type: "test_report"; runId: string } & TestReportReading)
-  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact }
+  | { type: "run_finished"; runId: string; exitCode: number | null; signal: string | null; timedOut: boolean; durationMs: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact } & NamedFailure
   /** The integration bookmark moved locally to `commitId`; publication is next. Recovery reads it. */
   | { type: "integrated"; base: string; commitId: string; process?: "development" | "standard" }
   | { type: "landed"; base: string; commitId: string; branch: string; remote: string;
@@ -252,7 +262,7 @@ export type LandingSubmission = Extract<OperationEvent, { type: "submitted"; cha
 export type StoredEvent = { seq: number; operationId: string; at: string; event: OperationEvent };
 
 /** One executed command of an operation, projected from its run events. */
-export type RunRecord = {
+export type RunRecord = NamedFailure & {
   runId: string; command: string; host: string; startedAt: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence;
   finishedAt?: string; exitCode?: number | null; signal?: string | null; timedOut?: boolean; durationMs?: number; outputBytes?: number; killed?: boolean; failingTests?: string[]; diagnostics?: string[]; testBodyRan?: boolean; diagnosticCapture?: "selected" | "incomplete" | "unavailable"; artifact?: CommandArtifact;
   /** The per-file timings its command reported (see `test-reports.ts`); absent when it wrote none. */
@@ -505,7 +515,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  *                                                 replaying after `seq`, then live; ends after the terminal event
  * - GET  /v1/operations/:id/log                 → `text/plain` retained operation events (not complete process output)
  * - GET  /v1/operations/:id/outcome             → `{ outcome: LandingOutcome }` (409 for other operation kinds)
- * - GET  /v1/operations/:id/artifacts/:runId?offset=0&limit=16384 → ArtifactChunk (410 if unavailable; 400 invalid range)
+ * - GET  /v1/operations/:id/artifacts/:runId?offset=0&limit=1048576 → ArtifactChunk (410 if unavailable; 400 invalid range)
  * - POST /v1/operations/:id/cancel              → `{ operation }`; only a queued operation can be cancelled (else 409)
  * - GET  /v1/changes/:changeId?repo=<owner/name> → `{ operations: Operation[] }` newest first
  * - POST /v1/runner/kill                         `{ by }` → `{ operation }`: the running operation as the kill

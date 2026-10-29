@@ -35,6 +35,10 @@ const CHECK_SUMMARY = /^(?:svelte-check found|Found) \d+ errors?\b/i;
 const SUMMARY_RESERVE_BYTES = 512;
 /** What the runner's command artifact keeps of one selected diagnostic stream; the collector never retains more than that. */
 export const DIAGNOSTIC_STREAM_BYTES = 8192;
+/** A gate check's output is captured, and a failed check's retained, up to this much per stream (SJ-140). */
+export const FAILED_STREAM_BYTES = 4 * 1024 * 1024;
+/** Of a failed stream over FAILED_STREAM_BYTES, the end always kept, so the command's final summary survives. */
+export const FAILED_TAIL_BYTES = 256 * 1024;
 
 const clip = (line: string): string => (line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS - 1)}…` : line);
 

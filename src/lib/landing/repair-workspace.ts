@@ -128,6 +128,8 @@ export function repairBrief(input: {
     lines.push(`- Runner classification (rule ${classification.ruleVersion}): ${classification.cause}`);
     if (classification.command) lines.push(`- Failing command: ${classification.command}`);
     if (classification.failingTests.length) lines.push(`- Failing tests: ${classification.failingTests.join(", ")}`);
+    for (const { test, error } of classification.firstErrors ?? []) lines.push(`- First error of ${test}: ${error}`);
+    for (const cause of classification.failureCauses ?? []) lines.push(`- Named cause: ${cause}`);
     if (classification.interaction) lines.push(`- Suspected, not demonstrated: an interaction with ${classification.interaction.earlierOperation}, whose landing moved the base from ${classification.interaction.fromBase} to ${classification.interaction.toBase}`);
     if (classification.diagnostics.length) lines.push("", "Diagnostics:", "", quote(classification.diagnostics.join("\n")));
   } else gaps.push("The failure was not classified; its cause is unknown");

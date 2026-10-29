@@ -63,7 +63,7 @@ test("operation log projects stages, command runs and the latest terminal result
     const terminalEvents = log.events({ operationId: id, afterSeq: landed.seq });
     assert.deepEqual(terminalEvents.map((row) => row.event.type), ["classified", "failed"]);
     assert.deepEqual(terminalEvents[0]?.event, {
-      type: "classified", ruleVersion: 1, cause: "infrastructure", command: "git push", failingTests: [], diagnostics: [],
+      type: "classified", ruleVersion: 2, cause: "infrastructure", command: "git push", failingTests: [], diagnostics: [],
     });
     assert.deepEqual(terminalEvents[1], failed);
     assert.deepEqual(log.openOperations(), []);
@@ -335,7 +335,7 @@ test("terminal classifications record versioned killed, paused, superseded and h
     const cause = (id: string) => log.events({ operationId: id }).find((row) => row.event.type === "classified")?.event;
     for (const [id, expected] of [["killed", "killed"], ["paused", "paused_out"], ["superseded", "superseded"], ["held", "held"]] as const) {
       assert.deepEqual(cause(id), {
-        type: "classified", ruleVersion: 1, cause: expected, failingTests: [], diagnostics: [],
+        type: "classified", ruleVersion: 2, cause: expected, failingTests: [], diagnostics: [],
       });
     }
   } finally { log.close(); }
@@ -359,7 +359,7 @@ test("a same-commit retry records when an earlier base passed and the new base f
     log.append("new-base", { type: "run_finished", runId: "new-run", exitCode: 1, signal: null, timedOut: false, durationMs: 12, testBodyRan: true });
     log.append("new-base", { type: "failed", stage: "verifying", reason: "test failed", command: "vp test run", output: " FAIL tests/plan.test.ts > rejects route" });
     assert.deepEqual(log.events({ operationId: "new-base" }).find((row) => row.event.type === "classified")?.event, {
-      type: "classified", ruleVersion: 1, cause: "gate", command: "vp test run",
+      type: "classified", ruleVersion: 2, cause: "gate", command: "vp test run",
       failingTests: ["tests/plan.test.ts > rejects route"], diagnostics: [],
       interaction: { earlierOperation: "old-base", fromBase: "base-old", toBase: "base-new" },
     });
@@ -384,7 +384,7 @@ test("an incomplete earlier verification run does not establish a passing intera
 
     const classified = log.events({ operationId: "retry" }).find((row) => row.event.type === "classified")?.event;
     assert.deepEqual(classified, {
-      type: "classified", ruleVersion: 1, cause: "gate", command: "vp test run",
+      type: "classified", ruleVersion: 2, cause: "gate", command: "vp test run",
       failingTests: ["tests/plan.test.ts > rejects route"], diagnostics: [],
     });
   } finally { log.close(); }

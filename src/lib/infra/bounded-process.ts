@@ -308,7 +308,8 @@ function redactError(error: unknown, redact?: (value: string) => string): string
   const raw = error instanceof Error ? error.message : String(error);
   return (redact ? redact(raw) : raw).slice(0, 1000);
 }
-const OUTPUT_OMISSION = `
+/** Where the collector cut a stream's middle out: between its head and its tail. */
+export const OUTPUT_OMISSION = `
 …
 `;
 function joinCapturedEdges(head: Buffer, tail: Buffer, maxBytes: number): string {

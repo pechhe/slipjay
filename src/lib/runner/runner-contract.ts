@@ -12,6 +12,11 @@ import type { DeployProjectOutcome, LandingSubmission, Operation, OperationEvent
 /** API version prefix; every route below sits under it. */
 export const RUNNER_API = "/v1";
 
+/** The most one page of `GET /v1/operations/:id/artifacts/:runId` returns. */
+export const COMMAND_ARTIFACT_PAGE_BYTES = 1024 * 1024;
+/** The largest serialised command artifact: a failed command's (see `command-artifact.ts`). */
+export const COMMAND_ARTIFACT_LIMIT_BYTES = 12 * 1024 * 1024;
+
 /** The candidate bookmark a client pushes for the runner to fetch: `slipjay/changes/<changeId>`. */
 export const candidateBookmark = (changeId: string): string => `slipjay/changes/${changeId}`;
 

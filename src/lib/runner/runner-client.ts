@@ -22,7 +22,7 @@ import { promotionRefusal } from "../release/audit-ledger.ts";
 import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
-import { candidateBookmark, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { candidateBookmark, COMMAND_ARTIFACT_LIMIT_BYTES, COMMAND_ARTIFACT_PAGE_BYTES, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest } from "./runner-types.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
@@ -327,6 +327,8 @@ export async function operationRunnerLocation(operationId: string, env: NodeJS.P
   return (await readOperationRunners().catch(() => ({} as Record<string, string>)))[operationId] ?? runnerLocation(env);
 }
 
+const LEGACY_ARTIFACT_PAGE_BYTES = 16384;
+
 /** Chunked retrieval verifies bytes against the ledger-backed digest before exposing JSON. */
 export async function readRunArtifact(location: string, operationId: string, runId: string, env: NodeJS.ProcessEnv = process.env): Promise<unknown> {
   const token = await runnerToken(env);
@@ -334,16 +336,23 @@ export async function readRunArtifact(location: string, operationId: string, run
   try {
     const parts: Buffer[] = [];
     let offset = 0, sha256: string | undefined, size: number | undefined;
-    for (let page = 0; page < 17; page++) {
-      const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/artifacts/${encodeURIComponent(runId)}?offset=${offset}&limit=16384`, { signal: AbortSignal.timeout(15_000) });
+    // A runner from before 3.46.26 pages at most 16 KiB and refuses a larger page; its artifacts are at most 256 KiB.
+    let pageBytes = COMMAND_ARTIFACT_PAGE_BYTES;
+    const page = (limit: number) => request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/artifacts/${encodeURIComponent(runId)}?offset=${offset}&limit=${limit}`, { signal: AbortSignal.timeout(15_000) });
+    for (let pages = 0; pages <= Math.ceil(COMMAND_ARTIFACT_LIMIT_BYTES / pageBytes); pages++) {
+      const response = await page(pageBytes).catch((error: unknown) => {
+        if (pages > 0 || pageBytes === LEGACY_ARTIFACT_PAGE_BYTES || !(error instanceof RunnerRequestRefused && error.status === 400)) throw error;
+        pageBytes = LEGACY_ARTIFACT_PAGE_BYTES;
+        return page(pageBytes);
+      });
       const chunk = await response.json() as import("./runner-types.ts").ArtifactChunk;
       if (chunk.version !== 1 || chunk.operationId !== operationId || chunk.runId !== runId || chunk.offset !== offset
-        || !/^[a-f0-9]{64}$/.test(chunk.sha256) || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > 256 * 1024
-        || (sha256 !== undefined && (chunk.sha256 !== sha256 || chunk.bytes !== size)) || typeof chunk.dataBase64 !== "string" || chunk.dataBase64.length > 21848)
+        || !/^[a-f0-9]{64}$/.test(chunk.sha256) || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > COMMAND_ARTIFACT_LIMIT_BYTES
+        || (sha256 !== undefined && (chunk.sha256 !== sha256 || chunk.bytes !== size)) || typeof chunk.dataBase64 !== "string" || chunk.dataBase64.length > Math.ceil(COMMAND_ARTIFACT_PAGE_BYTES / 3) * 4)
         throw new Error("Runner returned inconsistent artifact metadata");
       sha256 = chunk.sha256; size = chunk.bytes;
       const bytes = Buffer.from(chunk.dataBase64, "base64");
-      if (bytes.length > 16384 || offset + bytes.length > size) throw new Error("Runner returned an invalid artifact chunk");
+      if (bytes.length > pageBytes || offset + bytes.length > size) throw new Error("Runner returned an invalid artifact chunk");
       parts.push(bytes); offset += bytes.length;
       if (chunk.nextOffset === null) {
         const all = Buffer.concat(parts);

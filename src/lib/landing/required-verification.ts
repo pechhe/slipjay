@@ -3,7 +3,7 @@ import { realpath } from "node:fs/promises";
 import { runBoundedProcess } from "../infra/bounded-process.ts";
 import { checkoutCwd } from "../infra/checkout-cwd.ts";
 import { truncateUtf8 } from "../infra/utf8.ts";
-import { countFailingTests, redactVerificationOutput, summarizeVerificationFailure } from "../infra/verification-failure.ts";
+import { countFailingTests, FAILED_STREAM_BYTES, redactVerificationOutput, summarizeVerificationFailure } from "../infra/verification-failure.ts";
 import { classifyCapabilityProbe, normalizeVerificationDeclaration, runVerificationStages, verificationEvidence, verificationGap } from "../policy/verification-policy.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { VerificationDeclaration, VerificationEvidence, VerificationGap } from "../policy/verification-policy.ts";
@@ -12,7 +12,7 @@ import type { RequiredVerificationFailureEvidence, RequiredVerificationCheckOutc
 export type { RequiredVerificationFailureEvidence, RequiredVerificationCheckOutcome, RequiredVerificationCheckRecord, RequiredVerificationCheckFailure } from "../infra/verification-evidence.ts";
 
 const CHECK_TIMEOUT_MS = 60 * 60_000;
-const OUTPUT_BYTES = 64 * 1024;
+const PROBE_OUTPUT_BYTES = 64 * 1024;
 const TAIL_BYTES = 4 * 1024;
 const COMMAND_BYTES = 1_000;
 const MESSAGE_CAP_CHARS = 24_000;
@@ -133,7 +133,7 @@ export async function runRequiredVerification(input: {
       const { probe } = check.capability;
       const probeCwd = await checkoutCwd(root, probe.cwd, `${subject} capability probe ${check.capability.id}`);
       const probeResult = await run({ executable: probe.executable, args: probe.args, cwd: probeCwd,
-        timeoutMs: 30_000, maxOutputBytes: OUTPUT_BYTES, env: environment });
+        timeoutMs: 30_000, maxOutputBytes: PROBE_OUTPUT_BYTES, env: environment });
       const probed = { ...probeResult, code: probeResult.exitCode ?? undefined };
       const availability = classifyCapabilityProbe(check.capability, probed);
       if (availability.status === "failed") throw new Error(`Capability probe failed for ${check.capability.id}: ${availability.reason}`);
@@ -146,7 +146,8 @@ export async function runRequiredVerification(input: {
     onProgress(`[verify ${index + 1}/${checks.length}] ${command}`);
     const started = Date.now();
     const result = await run({ executable: check.executable, args, cwd: checkCwd,
-      timeoutMs: CHECK_TIMEOUT_MS, maxOutputBytes: OUTPUT_BYTES, env: environment, captureDiagnostics: true });
+      // A failed check keeps this much of each stream, so the capture is sized for it; a passing one retains today's 8 KiB.
+      timeoutMs: CHECK_TIMEOUT_MS, maxOutputBytes: 2 * FAILED_STREAM_BYTES, maxOutputBytesPerStream: FAILED_STREAM_BYTES, env: environment, captureDiagnostics: true });
     const runId = result.runId ? { runId: result.runId } : {};
     if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error) {
       const accepted = await acceptFailure?.({ ...check, args }, result, environment);

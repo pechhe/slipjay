@@ -1210,19 +1210,25 @@ output, never authority to execute a suggested command.
 Run-finished events now reference immutable per-command JSON artifacts outside SQLite.
 `slipjay runner artifact <operation> <run>` retrieves one, verifies the retained hash,
 then prints JSON. Authenticated consumers can page
-`GET /v1/operations/:id/artifacts/:runId?offset=0&limit=16384`: each response names its
+`GET /v1/operations/:id/artifacts/:runId?offset=0&limit=1048576`: each response names its
 operation/run, SHA-256, total byte length, byte offset, nullable next offset and base64
-bytes. Pages never exceed 16 KiB; every read checks the file against its ledger reference.
+bytes. Pages never exceed 1 MiB; every read checks the file against its ledger reference.
 Missing, unavailable or changed artifacts return 410, invalid ranges 400, unknown
 operations 404, and missing credentials 401. The CLI read exits zero after verified
 retrieval regardless of the command's verdict; errors are nonzero and never resubmit.
 
-Artifacts keep at most 8 KiB of each sanitized stdout/stderr stream and of each selected
-diagnostic stream. Small complete streams carry `complete: true`; output already
-truncated by the process collector is withheld, since an edge may contain part of a
-credential. Selected middle diagnostics are retained separately with their own
-incomplete/capacity metadata. Redaction precedes artifact clipping, and the serialized
-file has a hard 256 KiB bound. These artifacts do not recover full noisy command logs.
+A gate check's output is captured up to 4 MiB a stream. A passing command's artifact keeps
+at most 8 KiB of each sanitized stdout/stderr stream; its output already truncated by the
+process collector is withheld, since an edge may contain part of a credential, and its
+serialized file has a hard 256 KiB bound. A failed command's artifact keeps each stream
+whole up to 4 MiB. A capture the collector truncated is kept less every line its cut
+touched (and any private-key block the cut left open), so no split credential survives;
+beyond 4 MiB the artifact keeps the head and the last 256 KiB. Either way the stream is
+marked `artifact-capacity`, and the command's closing summary survives. Its serialized
+file is bounded at 12 MiB: when JSON escaping would exceed that, the streams halve until
+it fits, still keeping their ends. Every stream with `complete: true` is whole. Selected
+middle diagnostics (8 KiB a stream) are retained separately with their own
+incomplete/capacity metadata. Redaction precedes artifact clipping.
 Private finalization/reset/deployment output is withheld. Capture failure records
 `unavailable`, preserving the original gate verdict and available diagnostics.
 Files are flushed before their ledger reference is appended; a repeated run identity
@@ -1626,7 +1632,7 @@ has `automaticRetry: false`. A read never claims a repair lease or releases the
 author workspace. Owner cancellation and supersession remain terminal history.
 
 Cause rules in `src/lib/runner/failure-classification.ts` carry their version on every
-`classified` event: `gate` for a failed verification, `conflict` for a rebase
+`classified` event (rule 2 adds `firstErrors` and `failureCauses`): `gate` for a failed verification, `conflict` for a rebase
 conflict, `infrastructure` for fetch/install/executor problems or a timeout before
 test execution, `policy` for declined paths, `killed` for the owner's kill,
 `paused_out` for cancellation during a pause, `held` for incomplete finalization
@@ -1637,6 +1643,23 @@ A flake candidate needs the same named test and command to fail in different
 changes in the selected window. It is confirmed when a later successful run of
 the same command in the same repository uses an unchanged source tree from a
 failed run. Candidate and confirmation are reported separately.
+
+**Naming a failure.** A gate command names what failed, for the classification and for `slipjay land`'s
+structured failure (`outcome.classification`, per check in `checks`), by ending its
+output with a summary in this form:
+
+```text
+FAIL <file> > <test name>
+  first error: <the first line of its error>
+Failure cause: <a cause that is not a test, such as "core typecheck: error TS2322 …">
+```
+
+One `FAIL` line per failing test, each optionally followed directly by one
+`  first error:` line, which pairs them in `firstErrors`; one `Failure cause:` line per
+failure that names no test, collected in `failureCauses`. Both are absent when the
+output named none. Vitest, Bun test and node:test failures are recognised as failing
+tests without a summary; the summary adds the pairing and the causes. YardSmith's
+`test:landing:affected` writes one (SJ-140).
 
 The authenticated `GET /v1/metrics/events?since=<seq>&limit=<1..1000>` exports
 events in global sequence order, returning `events`, `nextSeq` and `hasMore`.
