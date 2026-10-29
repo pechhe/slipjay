@@ -226,6 +226,11 @@ test("without systemd the executor runs one command at a time, stops each comman
       const text = await readFile(pids, "utf8").catch(() => "");
       return text ? JSON.parse(text) as number[] : undefined;
     });
+    // The runner records the command just after spawning it; kill it only once that record is written.
+    await until(async () => {
+      const [record] = await readdir(join(home, "commands")).catch(() => [] as string[]);
+      return record && await readFile(join(home, "commands", record), "utf8").catch(() => "") || undefined;
+    });
     child.kill("SIGKILL"); await exited;
     assert.deepEqual([alive(gatePid!), alive(childPid!)], [true, true], "the killed runner's command outlives it");
     await testExecutor({ env: {}, home }).recover!();

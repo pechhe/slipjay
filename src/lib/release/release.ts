@@ -709,6 +709,7 @@ async function verifyCandidate(checkout: string, plan: ReleasePlan, { onProgress
     ? await runRequiredVerification({ checks: plan.checks, root: checkout, onProgress,
       ...(environment ? { environment } : {}), ...(runCommand ? { run: runCommand } : {}), ...(abortSignal ? { abortSignal } : {}) })
     : { passed: [], gaps: [] };
+  abortSignal?.throwIfAborted();
   await requireCandidateTree(checkout, plan.candidate);
   return verification;
 }

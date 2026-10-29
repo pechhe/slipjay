@@ -1085,7 +1085,12 @@ other repositories' work that arrive later wait for a free place instead of
 stopping it, so release verification is never starved by a stream of landings, and the
 workers still bound the total load. A release of the same commit waits for the
 pre-verification and reuses its pass. So at most one pre-verification runs per
-repository. A newer green staging deploy supersedes a queued pre-verification; a
+repository. Each pre-verification stage has a wall-clock deadline: five minutes
+for fetching, thirty minutes for installing (including post-install inspection), and
+one hour for verifying. A deadline fails the operation with its stage and elapsed
+budget, freeing its worker and lane. `runner kill` interrupts these waits as well
+as its subprocesses; late continuations cannot start another command or count as a pass.
+A newer green staging deploy supersedes a queued pre-verification; a
 running one finishes. Only a runner restart returns a running one to the queue
 (`yielded`). The runner lists them at `GET
 /v1/verifications?repo=`.

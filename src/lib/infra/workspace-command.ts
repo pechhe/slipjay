@@ -1,5 +1,12 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn } from "node:child_process";
 import { runBoundedProcess, sanitizedProcessEnv } from "./bounded-process.ts";
+
+/** Cancellation follows nested jj/git reads as well as executor commands in a runner turn. */
+const commandSignal = new AsyncLocalStorage<{ signal: AbortSignal; pending: Set<Promise<unknown>> }>();
+export function withWorkspaceCommandSignal<T>(signal: AbortSignal, work: () => Promise<T>, pending: Set<Promise<unknown>>): Promise<T> {
+  return commandSignal.run({ signal, pending }, work);
+}
 
 /** Credential keys jj, git and gh need to reach a remote (D5), plus where jj's own
  *  configuration lives, which decides the author it records; nothing else of the user env. */
@@ -50,16 +57,24 @@ export async function runWorkspaceCommand(
   args: readonly string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean; tee?: boolean; input?: string } = {},
 ): Promise<WorkspaceCommandResult> {
+  const scope = commandSignal.getStore();
+  const abortSignal = scope?.signal;
+  abortSignal?.throwIfAborted();
   if (options.tee) return runTeed(command, args, options);
   if (options.inherit) return runInherited(command, args, options);
   const timeoutMs = commandTimeoutMs(options);
   const env = options.env ?? landingCommandEnvironment();
-  const result = await runBoundedProcess({
-    executable: command, args, cwd: options.cwd ?? process.cwd(), timeoutMs,
+  const pending = runBoundedProcess({
+    abortSignal, executable: command, args, cwd: options.cwd ?? process.cwd(), timeoutMs,
     maxOutputBytes: 2 * MAX_OUTPUT_BYTES, maxOutputBytesPerStream: MAX_OUTPUT_BYTES,
     env: command === "jj" ? jjEnvironment(env) : env,
     ...options.input === undefined ? {} : { input: options.input },
   });
+  scope?.pending.add(pending);
+  let result;
+  try { result = await pending; }
+  finally { scope?.pending.delete(pending); }
+  abortSignal?.throwIfAborted();
   const failure = result.timedOut ? `${command} ${args.slice(0, 3).join(" ")} timed out after ${Math.round(timeoutMs / 1000)}s`
     : result.error ? `${command} could not start: ${result.error}` : "";
   return {

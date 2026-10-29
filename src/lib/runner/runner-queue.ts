@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { stat, mkdir, realpath, rm } from "node:fs/promises";
 import { availableParallelism, freemem, loadavg, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
+import { withWorkspaceCommandSignal } from "../infra/workspace-command.ts";
 import { sanitizedProcessEnv } from "../infra/bounded-process.ts";
 import { candidateBun } from "./candidate-bun.ts";
 import { integrateLandingCandidate, prepareLandingCandidate, rollbackFailure, verifyPreparedCandidate, integratePreparedCandidate } from "../landing/landing-candidate.ts";
@@ -144,6 +145,8 @@ export function createRunnerQueue(input: {
   remoteVerification?: RemoteVerification;
   /** First availability probe after a boat outage; doubles up to one minute. */
   boatProbeMs?: number;
+  /** Override pre-verification stage deadlines (milliseconds), for embedded runners and tests. */
+  verificationStageTimeoutMs?: number;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /**
@@ -172,7 +175,7 @@ export function createRunnerQueue(input: {
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification, boatProbeMs = 5000 } = input;
+  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification, boatProbeMs = 5000, verificationStageTimeoutMs } = input;
   if (Object.values(config.repos).some((repo) => repo.verifier) && !remoteVerification) throw new Error("A repository names a remote verifier, but the runner has none");
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && !repo.verifier) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
@@ -838,6 +841,10 @@ export function createRunnerQueue(input: {
     const stageDetail = (): OperationEvent => ({ type: "stage_detail", stage, durationMs: Date.now() - stageStarted,
       ...(stage === "installing" ? { installSource } : {}), ...(stage === "rebasing" ? { conflict: rebaseConflict, files: conflictFiles } : {}) });
     const controller = new AbortController();
+    const pendingCommands = new Set<Promise<unknown>>();
+    let verificationTimer: ReturnType<typeof setTimeout> | undefined;
+    let verificationTimeout: string | undefined;
+    const authorityError = () => verificationTimeout ? new Error(verificationTimeout) : new OwnerKill();
     running.set(operation.id, { operation, stage, controller });
     let verdict: OperationEvent | undefined;
     let retryPrefix = false;
@@ -884,7 +891,7 @@ export function createRunnerQueue(input: {
     }
     async function withAuthority<T>(pending: Promise<T>): Promise<T> {
       const signal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]);
-      const fail = () => controller.signal.aborted ? new OwnerKill() : new Error("Exact predecessor invalidated this attempt");
+      const fail = () => controller.signal.aborted ? authorityError() : new Error("Exact predecessor invalidated this attempt");
       if (signal.aborted) throw fail();
       let aborted!: () => void;
       const cancellation = new Promise<never>((_resolve, reject) => { aborted = () => reject(fail()); signal.addEventListener("abort", aborted, { once: true }); });
@@ -893,6 +900,7 @@ export function createRunnerQueue(input: {
     }
     // Gate and migration commands both go through the executor, so each run records where it ran.
     async function run(request: BoundedProcessRequest, purpose?: RunPurpose, via: Pick<Executor, "host" | "run"> & { runtime?: RuntimeIdentity } = executor): Promise<BoundedProcessResult> {
+      if (controller.signal.aborted) throw authorityError();
       const runId = randomUUID();
       const started = Date.now();
       const runPurpose = purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate");
@@ -913,21 +921,33 @@ export function createRunnerQueue(input: {
       const redact = privateRun ? request.redactOutput ?? ((value: string) => value) : (value: string) => redactVerificationOutput(value, checkout);
       const token = build[BUILD_READ_TOKEN_ENV];
       const redactOutput = token ? (value: string) => redact(value.split(token).join("[REDACTED]")) : redact;
+      if (controller.signal.aborted) throw authorityError();
       // Evidence describes the final execution environment, including runner-provided variables.
       const executionRequest = { ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment };
       // A remote verifier runs its own Bun; the evidence names the one that ran.
       const context = commandEvidence(executionRequest, checkout, via.runtime ?? selected.runtime);
       append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: via.host, timeoutMs: request.timeoutMs,
         purpose: runPurpose, ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
-      const result = await via.run({ ...executionRequest,
+      const execution = via.run({ ...executionRequest,
         redactOutput, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
         throw error;
       });
+      pendingCommands.add(execution);
+      let result;
+      try { result = await execution; }
+      finally { pendingCommands.delete(execution); }
       const finished = runFinished(runId, result, started, request, privateRun);
+      if (controller.signal.aborted) {
+        // Retain the command's stop before the verdict, without waiting on artifact I/O.
+        finished.artifact = { status: "unavailable", reason: "capture-failed" };
+        append(operation.id, finished);
+        throw authorityError();
+      }
       // Logs never passed through the executor's redaction, so the artifact applies the run's own to them.
       const logs = reports ? (await readRetainedLogs(reports)).map((log) => ({ ...log, content: redactOutput(log.content) })) : [];
       finished.artifact = await retainCommandArtifact({ home, operationId: operation.id, runId, request, result, privateOutput: privateRun, logs });
+      if (controller.signal.aborted) throw authorityError();
       append(operation.id, finished);
       if (reports) {
         append(operation.id, { type: "test_report", runId, ...await readTestReports(reports, await realpath(checkout).catch(() => checkout)) });
@@ -980,16 +1000,25 @@ export function createRunnerQueue(input: {
     }
     const setStage = (next: RunnerStage) => {
       // A kill that landed between runs stops the operation before it moves a branch.
-      if (controller.signal.aborted) throw new OwnerKill();
+      if (controller.signal.aborted) throw authorityError();
       if (prefix?.invalidation.signal.aborted) throw new Error("Prepared prefix invalidated by its predecessor");
       const first = stage === "queued";
       if (!first) append(operation.id, stageDetail());
       stageStarted = Date.now();
       stage = next;
+      if (operation.kind === "verification") {
+        clearTimeout(verificationTimer);
+        const timeoutMs = verificationStageTimeoutMs ?? (next === "fetching" ? 5 * 60_000 : next === "installing" ? 30 * 60_000 : 60 * 60_000);
+        verificationTimer = setTimeout(() => {
+          verificationTimeout = `Pre-verification timed out during ${next} after ${timeoutMs}ms; nothing was published`;
+          controller.abort();
+        }, timeoutMs);
+        verificationTimer.unref?.();
+      }
       running.set(operation.id, { operation, stage, controller });
       append(operation.id, { type: "stage", stage, health: health(), ...first && shortAdmitted.has(operation.id) ? { shortLanding: true as const } : {} });
     };
-    try {
+    const execute = async () => {
       if (prefix?.predecessor) {
         // This attempt's own authority: a rebuilt attempt gets a fresh controller.
         const invalidation = prefix.invalidation;
@@ -1252,6 +1281,12 @@ export function createRunnerQueue(input: {
           return result;
         });
       }
+    };
+    try {
+      // A pre-verification publishes nothing. Race all its awaits, including post-install
+      // filesystem inspection, and fence late continuations with the same signal.
+      if (operation.kind === "verification") await withAuthority(withWorkspaceCommandSignal(controller.signal, execute, pendingCommands));
+      else await execute();
     } catch (error) {
       // A fresh attempt: once for a dependent whose predecessor's outcome invalidated it (it then
       // has no predecessor), and once for a head whose remote base moved. Its own failure, an
@@ -1260,6 +1295,7 @@ export function createRunnerQueue(input: {
         && (prefix.predecessor ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
+      else if (verificationTimeout) verdict = { type: "failed", stage, reason: verificationTimeout };
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
       else if (operation.kind === "landing" && (error instanceof BoatPaused || (error as RemoteOpenFailure)?.boatUnavailable && remoteVerification?.probe)) {
@@ -1306,6 +1342,9 @@ export function createRunnerQueue(input: {
         else prefix.completed.resolve(false);
       }
     } finally {
+      clearTimeout(verificationTimer);
+      // Cancellation has reached each subprocess; wait for containment to stop it before reusing the checkout.
+      await Promise.allSettled([...pendingCommands]);
       const token = checkEnvironment && (await checkEnvironment.catch(() => ({} as Record<string, string>)))[BUILD_READ_TOKEN_ENV];
       if (token) buildChecks!.revoke(token);
       if (stage !== "queued") append(operation.id, stageDetail());
