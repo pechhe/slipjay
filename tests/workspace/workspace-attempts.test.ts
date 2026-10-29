@@ -1,4 +1,5 @@
 import { jj, project } from "../support/workspace-project.ts";
+import { holdWorkspace } from "../support/workspace-holder.ts";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -101,7 +102,7 @@ test("release never removes a resumed Issue's checkout, a checkout in use, or on
 
     await assert.rejects(createWorkspace("busy", f.repo, { attemptId: "b-3", hooks: failingPrepare }));
     const busy = (await readAttempt("b-3"))!;
-    const child = spawn("sleep", ["60"], { cwd: busy.workspacePath, stdio: "ignore" });
+    const child = holdWorkspace(busy.workspacePath!);
     stops.push(() => child.kill());
     assert.match((await releaseAttempt("b-3") as { reason: string }).reason, /live process/);
     assert.ok(await readAttempt("b-3"), "a refused release keeps the attempt for a retry");

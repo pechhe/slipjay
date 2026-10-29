@@ -1,6 +1,5 @@
 import { project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -12,12 +11,7 @@ import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { lockPath, metadataPath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
 import { later, byName, landed } from "./fixtures/workspace-retention-plan-fixture.ts";
-
-/** A process working inside `cwd` until disposed, as a live session would be. */
-function occupy(cwd: string) {
-  const child = spawn("sleep", ["60"], { cwd, stdio: "ignore" });
-  return () => child.kill();
-}
+import { occupy } from "./fixtures/workspace-sweep-fixture.ts";
 
 async function fingerprint(root: string): Promise<string[]> {
   const found: string[] = [];

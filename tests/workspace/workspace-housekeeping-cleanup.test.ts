@@ -60,7 +60,8 @@ test("landing removes its own workspace, naming any other process that holds it"
       jj(held.workspacePath, ["describe", "-m", "Add held"]);
       const kept = await landOnTestRunner(runner, held.workspacePath);
       assert.equal(kept.ok, true, kept.lines.join("\n"));
-      assert.match(kept.lines.join("\n"), new RegExp(`Kept landed workspace ${held.current.name}: .*pid ${holder.pid} \\(sleep\\)`));
+      assert.ok(kept.lines.some((line) => line.startsWith(`Kept landed workspace ${held.current.name}: `)
+        && new RegExp(`pid ${holder.pid} \\([^)]+\\)$`).test(line)), kept.lines.join("\n"));
       assert.ok(existsSync(held.workspacePath));
       holder.dispose();
       assert.equal((await cleanupLandedWorkspace(held.workspacePath)).cleaned, true, "slipjay cleanup still works as before");

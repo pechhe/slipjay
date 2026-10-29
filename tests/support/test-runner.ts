@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { holdWorkspace } from "./workspace-holder.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
@@ -54,7 +54,7 @@ export function landThroughTestRunner(f: { root: string; repo: string; remote: s
 export async function landOnTestRunner({ location, env }: TestRunner, cwd: string, options: { direct?: boolean; keep?: boolean;
   session?: string; before?: () => Promise<void> } = {}) {
   // Its own process group: the landing ignores its caller's group as it would the CLI's.
-  const holder = options.keep ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { cwd, stdio: "ignore", detached: true }) : null;
+  const holder = options.keep ? holdWorkspace(cwd, { detached: true }) : null;
   const lines: string[] = [];
   try {
     const logged = (await readFile(poolRefillLogPath(), "utf8").catch(() => "")).length;

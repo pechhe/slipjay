@@ -1,6 +1,6 @@
 import { jj, project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { holdWorkspace } from "../support/workspace-holder.ts";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -16,7 +16,7 @@ test("a preview running inside a landed checkout keeps it until it stops, and a 
   try {
     const previewed = await landedWorkspace(f, "previewed");
     await mkdir(join(previewed.workspacePath, "apps", "web"), { recursive: true });
-    const server = spawn("sleep", ["60"], { cwd: join(previewed.workspacePath, "apps", "web"), stdio: "ignore" });
+    const server = holdWorkspace(join(previewed.workspacePath, "apps", "web"));
     const exited = new Promise((resolveExit) => server.once("exit", resolveExit));
     preview.stop = () => server.kill();
 
