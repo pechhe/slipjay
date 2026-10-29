@@ -113,6 +113,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (Object.values(config.repos).some((repo) => repo.lane !== undefined && (typeof repo.lane !== "string" || !repo.lane.trim()))) return `A repository's "lane" in the runner config must be a non-empty name`;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth !== undefined && repo.verificationDepth !== 1 && repo.verificationDepth !== 2)) return `A repository's "verificationDepth" must be 1 or 2`;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && repo.lane !== undefined)) return `Depth-two verification requires an isolated repository lane`;
+  if (Object.values(config.repos).some((repo) => repo.verifier !== undefined && repo.verifier !== "boat")) return `A repository's "verifier" can only be "boat"`;
+  if (Object.values(config.repos).some((repo) => repo.verifier === "boat") && !config.boat?.image?.trim()) return `A repository verifies on boat, but the runner config's "boat.image" names no starting sandbox`;
   if (config.build !== undefined && !/^(?:https:\/\/[^/\s]+|http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?)\/?$/.test(config.build?.origin ?? ""))
     return `The runner config's "build.origin" must be an https origin, such as "https://hq.example.com", or a loopback http one`;
   return null;

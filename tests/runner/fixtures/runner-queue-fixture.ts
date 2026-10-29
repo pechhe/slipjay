@@ -104,7 +104,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations" }, reset = false,
-  { buildChecks, postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {} }: { buildChecks?: import("../../../src/lib/build/build-check-access.ts").BuildCheckAccess; postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
+  { buildChecks, postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {}, remoteVerification }: { remoteVerification?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; buildChecks?: import("../../../src/lib/build/build-check-access.ts").BuildCheckAccess; postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -212,7 +212,7 @@ export async function fixture(migrations = false, release = false, deployments?:
       ...(request.env?.SLIPJAY_MIGRATION_CONTEXT ? { migrationContext: request.env.SLIPJAY_MIGRATION_CONTEXT } : {}) });
     return run(request);
   } };
-  const config: RunnerConfig = { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {}, ...extraRepos },
+  const config: RunnerConfig = { repos: { "Fixture/Repo": { url: origin, verificationDepth, ...lane ? { lane } : {}, ...remoteVerification ? { verifier: "boat" as const } : {} }, ...other ? { "Fixture/Other": { url: otherOrigin, ...lane ? { lane } : {} } } : {}, ...extraRepos },
     ...workers === undefined ? {} : { workers }, ...deployWorkers === undefined ? {} : { deployWorkers },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } };
   const log = openOperationLog(logPath, runnerLogOptions(config, executor), { classify: classifyEvent, landingOutcome, ...projections });
@@ -225,7 +225,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
   });
-  const queue = createRunnerQueue({ log, executor, home, config, buildChecks, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs },
+  const queue = createRunnerQueue({ log, executor, home, config, buildChecks, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs }, ...remoteVerification ? { remoteVerification } : {},
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);

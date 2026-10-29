@@ -21,6 +21,7 @@ import { openOperationLog } from "./runner-log.ts";
 import { classifyEvent } from "./failure-classification.ts";
 import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { shortRepositories } from "./pipeline-metrics.ts";
+import { boatVerification } from "./boat-verifier.ts";
 import { localExecutor } from "./local-executor.ts";
 import { createRunnerQueue, runnerLogOptions } from "./runner-queue.ts";
 import { createRetention } from "./retention-loop.ts";
@@ -62,6 +63,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     log, home, config, executor,
     environment: () => env,
     ...build ? { readBuild: buildReader(build), buildChecks } : {},
+    ...config.boat ? { remoteVerification: boatVerification({ ...config.boat, scratch: join(home, "scratch"), pending: join(home, "boat-pending-forks") }) } : {},
   });
   // Receipts go from the ledger to Build on their own schedule: publication never waits on HQ.
   // Admissions Build never answered are settled there too, and each answer may let queued work start.

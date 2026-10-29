@@ -155,6 +155,15 @@ export type OperationEvent =
   | { type: "held"; repo: string; commitId: string; retries: number; durationMs: number; published: boolean }
   | { type: "client"; id: string; fact: ClientFact }
   /** `candidate` is the exact revision verified on `base`; rows from before it was recorded lack it. */
+  /**
+   * A remote verifier (`RemoteVerification`) took this attempt's gate: `ready` once the machine holds the exact candidate,
+   * `finished` after the gate, with the tree the machine's checkout held then (null when tracked files changed), `failed`
+   * when setup failed on a machine it had.
+   */
+  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; slot: number; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
+  | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null }
+  /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
+  | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
   | { type: "verification_base"; base: string; candidate?: string;
       /** The candidate policy's time budgets, so metrics can judge each repository by its own. */
       budgets?: import("../policy/execution-policy.ts").TimeBudgets }
@@ -542,6 +551,41 @@ export interface Executor {
   recover?(): Promise<void>;
 }
 
+/** What the remote machine's provider has billed for it so far: running time, idle included, and its price. */
+export type RemoteUsage = { seconds: number; dollars: number };
+
+/** The remote machine an attempt's gate ran on, as the ledger records it. */
+export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: string; image: string };
+
+/**
+ * Where a repository's gate runs when its runner entry names a `verifier`: a machine the attempt has to itself, whose
+ * checkout sits at the runner checkout's own path, so commands, evidence and test reports read as they would locally.
+ * The runner still prepares the candidate locally; only the gate's commands run remotely.
+ */
+export interface RemoteVerification {
+  /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`. */
+  open(input: { repo: string; slot: number; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
+  /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
+  recover?(repos: readonly string[]): Promise<void>;
+}
+
+/** An `open` that failed once it had a machine: which machine, and its billing at the failure. */
+export type RemoteOpenFailure = Error & { remote?: { machine: RemoteMachine; usageBefore: RemoteUsage | null; usage: RemoteUsage | null } };
+
+export interface RemoteAttempt {
+  /** Runs the gate's commands; `runtime` is the Bun they run with there, for command evidence. */
+  readonly executor: Executor & { runtime?: RuntimeIdentity };
+  readonly machine: RemoteMachine;
+  /** The tree of the files the machine's checkout holds before the gate: the candidate's, or the attempt fails. */
+  readonly tree: string;
+  /** The machine's billing when it took the attempt. */
+  readonly usage: RemoteUsage | null;
+  /** The checkout's files after the gate: `tree` null, and a count, when they no longer match the candidate. */
+  finish(): Promise<{ tree: string | null; trackedChanges: number; usage: RemoteUsage | null }>;
+  /** Stop everything the attempt started on the machine. */
+  close(): Promise<void>;
+}
+
 /** Runner-side configuration: `~/.slipjay/runner/config.json`. The token comes from `SLIPJAY_RUNNER_TOKEN`. */
 /** `operation` names the operation a kill targets; pause and resume take none. */
 export type RunnerControlRequest = { by: string; operation?: string };
@@ -570,7 +614,15 @@ export type RunnerConfig = {
    * Repositories with the same `lane` share one serial lane: give it to repositories whose gates
    * share external state (a database, a deploy environment, fixed ports). Each defaults to its own.
    */
-  repos: Record<string, { url: string; lane?: string; verificationDepth?: 1 | 2 }>;
+  repos: Record<string, { url: string; lane?: string; verificationDepth?: 1 | 2;
+    /** Run the gate on a remote verifier (see `boat`) instead of this host. Depth two then needs no host budget. */
+    verifier?: "boat" }>;
+  /**
+   * boat.dev VMs for repositories whose `verifier` is `boat`: one per verification place, forked from `image` (a sandbox
+   * kept stopped as the starting image) and reached over SSH with `sshKey`. `cli` is the boat CLI, which authenticates
+   * with `BOAT_API_KEY` from the runner's environment.
+   */
+  boat?: { image: string; cli?: string; sshKey?: string; size?: "small" | "default" | "large" | "xlarge" };
   /**
    * jj settings the runner sets as repository config in every warm checkout before it
    * touches one, over RUNNER_JJ_DEFAULTS, so nothing depends on the host's own jj config. The runner commits as

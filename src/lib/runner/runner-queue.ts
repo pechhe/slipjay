@@ -37,7 +37,7 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RunnerConfig, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-types.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -137,6 +137,8 @@ export function createRunnerQueue(input: {
   buildChecks?: BuildCheckAccess;
   /** The first delay before a failed recovery of a held integration is queued again; each further failure doubles it. */
   recoveryRetryMs?: number;
+  /** Runs the gate of each repository whose runner entry names a `verifier`; absent, such a repository cannot verify. */
+  remoteVerification?: RemoteVerification;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /**
@@ -165,8 +167,9 @@ export function createRunnerQueue(input: {
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS } = input;
-  if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2) && !executor.combinedLimits)
+  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification } = input;
+  if (Object.values(config.repos).some((repo) => repo.verifier) && !remoteVerification) throw new Error("A repository names a remote verifier, but the runner has none");
+  if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && !repo.verifier) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   const workers = runnerWorkers(config, executor);
   const deployWorkers = config.deployWorkers ?? RUNNER_DEFAULT_DEPLOY_WORKERS;
@@ -752,7 +755,7 @@ export function createRunnerQueue(input: {
     if (operation.kind === "verification") return log.stagingDue(operation.repo) ? undefined : { short: false, prefix: false };
     const active = prefixes.get(operation.repo) ?? [];
     const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
-    if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && executor.combinedLimits) {
+    if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && (executor.combinedLimits || configuredRepository(config, operation.repo)?.verifier)) {
       if (active.length >= 2) return undefined;
       // A queued reset/release is an arrival-order fence, even while no lane is held.
       const repository = log.openOperations(operation.repo);
@@ -840,7 +843,7 @@ export function createRunnerQueue(input: {
       finally { signal.removeEventListener("abort", aborted); }
     }
     // Gate and migration commands both go through the executor, so each run records where it ran.
-    async function run(request: BoundedProcessRequest, purpose?: RunPurpose): Promise<BoundedProcessResult> {
+    async function run(request: BoundedProcessRequest, purpose?: RunPurpose, via: Pick<Executor, "host" | "run"> & { runtime?: RuntimeIdentity } = executor): Promise<BoundedProcessResult> {
       const runId = randomUUID();
       const started = Date.now();
       const runPurpose = purpose ?? (stage === "resetting" ? "reset" : stage === "finalizing" ? "finalization" : stage === "installing" ? "dependencies" : "gate");
@@ -862,10 +865,11 @@ export function createRunnerQueue(input: {
       const token = build[BUILD_READ_TOKEN_ENV];
       // Evidence describes the final execution environment, including runner-provided variables.
       const executionRequest = { ...request, env: Object.keys(build).length ? { ...runEnvironment, ...build } : runEnvironment };
-      const context = commandEvidence(executionRequest, checkout, selected.runtime);
-      append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: executor.host, timeoutMs: request.timeoutMs,
+      // A remote verifier runs its own Bun; the evidence names the one that ran.
+      const context = commandEvidence(executionRequest, checkout, via.runtime ?? selected.runtime);
+      append(operation.id, { type: "run_started", runId, command: context.status === "recorded" ? [context.executable, ...context.args].join(" ") : "command context unavailable (capacity)", host: via.host, timeoutMs: request.timeoutMs,
         purpose: runPurpose, ...(prefix ? { attempt: prefix.attempt } : {}), commandEvidence: context });
-      const result = await executor.run({ ...executionRequest,
+      const result = await via.run({ ...executionRequest,
         redactOutput: token ? (value) => redact(value.split(token).join("[REDACTED]")) : redact, abortSignal }).catch((error: unknown) => {
         append(operation.id, { type: "run_finished", runId, exitCode: null, signal: null, timedOut: false, durationMs: Date.now() - started, artifact: { status: "unavailable", reason: "capture-failed" } });
         throw error;
@@ -878,6 +882,28 @@ export function createRunnerQueue(input: {
         await rm(reports, { recursive: true, force: true });
       }
       return { ...result, runId };
+    }
+    /** The remote verifier's machine for this attempt, holding exactly `candidate` on `base`. */
+    async function openRemote(base: string, candidate: string, integrationBranch: string, signal: AbortSignal): Promise<{ attempt: RemoteAttempt; started: number }> {
+      const started = Date.now();
+      const slot = prefix?.slot ?? 0;
+      progress(`[verify] preparing a remote verifier for ${candidate.slice(0, 12)}`);
+      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, checkout, base, candidate, integrationBranch, signal }).catch((error: RemoteOpenFailure) => {
+        if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
+        throw error;
+      });
+      append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, slot, candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
+      progress(`[verify] gate runs on ${attempt.executor.host}`);
+      return { attempt, started };
+    }
+    /** Records what the machine's checkout held after the gate; a gate that changed the candidate's files is no evidence for it. */
+    async function closeRemote({ attempt, started }: { attempt: RemoteAttempt; started: number }): Promise<void> {
+      try {
+        const after = await attempt.finish();
+        append(operation.id, { type: "remote_verification", phase: "finished", machine: attempt.machine, ...after, machineMs: Date.now() - started });
+        if (after.tree !== attempt.tree)
+          throw new Error(`The gate changed ${after.trackedChanges} file(s) of the candidate on ${attempt.executor.host}; its result is not evidence for the candidate`);
+      } finally { await attempt.close(); }
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
     async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string, publisher = checkout, expectedBase?: string): Promise<void> {
@@ -1061,11 +1087,17 @@ export function createRunnerQueue(input: {
               append(operation.id, { type: "verification_passed", base, candidate });
               return verificationEvidence([], [], settings.checks);
             }
-            const verification = await runRequiredVerification({
-              root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
-              environment, onProgress: progress, run,
-              abortSignal: AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]),
-            });
+            const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]);
+            const remote = configuredRepository(config, operation.repo)?.verifier
+              ? await openRemote(base, candidate, candidateContext.integrationBranch, abortSignal) : undefined;
+            const verification = await (async () => {
+              try {
+                return await runRequiredVerification({
+                  root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
+                  environment, onProgress: progress, run: remote ? (request: BoundedProcessRequest, purpose?: RunPurpose) => run(request, purpose, remote.attempt.executor) : run, abortSignal,
+                });
+              } finally { if (remote) await closeRemote(remote); }
+            })();
             if (prefix?.invalidation.signal.aborted) throw new Error("Exact predecessor invalidated this attempt; late verification success is not evidence");
             if (verification.status === "passed") append(operation.id, { type: "verification_passed", base, candidate });
             return verification;
@@ -1613,7 +1645,13 @@ export function createRunnerQueue(input: {
     async recover() {
       // Every lane is idle at startup; recovery waits for any that is not, and holds them all.
       // Commands an earlier process left running stop before recovery touches their checkouts.
-      recovering = Promise.allSettled([...lanes.values(), ...attempts]).then(async () => { await executor.recover?.(); await recoverRunning(); await reconcileHeld(); })
+      recovering = Promise.allSettled([...lanes.values(), ...attempts]).then(async () => {
+        await executor.recover?.();
+        // Every attempt cleans its machine first, so a recovery that fails here is reported, never a reason to stop.
+        await remoteVerification?.recover?.(Object.entries(config.repos).flatMap(([repo, entry]) => entry.verifier ? [repo] : []))
+          .catch((error: unknown) => console.error(`[runner] ${message(error)}`));
+        await recoverRunning(); await reconcileHeld();
+      })
         .finally(() => { recovering = undefined; });
       await recovering;
       for (const repo of Object.keys(config.repos).map(repositoryKey)) {

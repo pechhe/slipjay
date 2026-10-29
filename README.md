@@ -728,6 +728,57 @@ and held state through the existing recovery path.
 - **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
   releases (submit), deploys (submit, list) and changes by jj change ID.
 
+### Remote verification on boat
+
+A runner repository entry can set `verifier: "boat"` to run its gate on boat.dev VMs
+instead of this host (SJ-138). The runner still fetches, rebases, installs, generates
+migrations, integrates and publishes in its own checkouts; only the commands in
+`requiredLandingVerification` move. The runner config's `boat` names the starting image
+(`image`: a sandbox kept stopped, holding the repository, `node_modules`, the pinned Bun and
+jj, and a stopped `keep-*` container for each Docker image the gate uses, since boat drops
+unused images from snapshots), and optionally the boat CLI (`cli`, default
+`~/.ascii/bin/boat`), the SSH key boat authorises on its VMs (`sshKey`) and the VM `size`
+(default `default`, 4 vCPU and 8 GB). The CLI authenticates with `BOAT_API_KEY` from the
+runner's environment, which the unit's `bws run` supplies from Bitwarden.
+
+Each repository has a pool of VMs, one per verification place, named
+`slipjay-<owner>-<name>-<slot>`, forked from the image when missing and resumed when
+stopped; every attempt renews its VM for two hours (the trial stops sandboxes after at most
+two). Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
+the runner home, and a restart deletes it, keeping the record until boat confirms. An attempt has its VM to itself. Before the gate the runner stops every scope and
+container an earlier attempt left, moves the VM's one checkout to the runner checkout's own
+path, sends the candidate and its base as a Git bundle of only what the VM lacks, sets the
+integration bookmark to the base, `jj edit`s the candidate, cleans untracked files and
+installs against the candidate's lockfile. The checkout's files, read as a tree starting from the candidate's (so tracked files
+matching an ignore rule stay) with untracked files included, must be the candidate's exact tree, and the VM's Bun the one the
+candidate pins, or the attempt fails; the runner never downloads a runtime onto it. Each
+gate command then runs over SSH in a systemd scope of its own, with the command's
+environment minus the host's paths, and a loopback Build URL reaches the runner's grant
+endpoint through a reverse tunnel on the same port, one SSH master per attempt holding it for
+all of the attempt's commands. Its test reports are copied back and
+command evidence names the VM's Bun, so evidence, artifacts and failure classification read
+as they do locally. After the gate the checkout's files are read again: a gate that changed
+them fails the landing, since its result is no evidence for the candidate. Every clean,
+before and after each attempt, also removes the remote scratch (`TMPDIR`, test reports) its
+commands created. The ledger records
+`remote_verification` events: `ready` (machine, slot, candidate, tree, `setupMs`) and
+`finished` (the tree the checkout held after the gate, or the number of files that
+changed, and `machineMs` from opening to finishing), each with boat's billing for the VM
+so far (`usage`). `slipjay metrics` reports each group's attempts, setup timing, attempt
+machine time and its estimated cost, and the dollars boat billed the pool between its first
+and last reading in the window, idle time included; the first reading of each attempt is
+taken before setup, and a missing reading makes the spend unavailable rather than $0. A runner restart stops whatever the
+pool VMs were running, retrying for four minutes; every attempt cleans its VM first in any
+case.
+
+Nothing falls back to this host. A VM boat cannot supply or reach fails the landing as
+infrastructure with `Remote executor unavailable (boat): …` and boat's own error; a fault in
+the image or setup fails it as `Remote executor unavailable (setup): …`; an SSH connection
+lost during a command fails it as `executor lost`. Moving a repository back to local
+verification is removing `verifier` from its entry. With `verifier`, `verificationDepth: 2`
+needs no combined host budget, since the gates share no host; each place still holds a
+worker while it prepares and waits.
+
 ### Deploys
 
 Deploy records add `startedAt` (ISO timestamp) and `durationMs` for overall elapsed
