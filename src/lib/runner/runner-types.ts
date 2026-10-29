@@ -14,7 +14,7 @@ import type { TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 
 /**
  * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
- * never recorded: a queued operation shows it while the owner has paused the runner.
+ * never recorded: a queued operation shows it while the owner has paused the runner or boat admission is held.
  */
 export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "waiting-for-predecessor" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
 
@@ -263,6 +263,8 @@ export type OperationEvent =
   /** Runner-wide, under RUNNER_CONTROL_ID: the queue takes no next operation until resumed. */
   | { type: "paused"; by: string }
   | { type: "resumed"; by: string }
+  /** Repository-local admission hold while the boat API is unreachable. */
+  | { type: "boat_circuit"; repo: string; state: "open" | "closed"; reason: string }
   | { type: "integration_held"; repo: string; commitId: string; reason: string; targetReached?: boolean; branch?: string; remote?: string }
   | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean }
   /** A hold discarded unpublished after reconciliation or proof that its target command never started. */
@@ -569,6 +571,8 @@ export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: 
 export interface RemoteVerification {
   /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`. */
   open(input: { repo: string; slot: number; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
+  /** Read-only API availability check; never opens or starts a VM. */
+  probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
   recover?(repos: readonly string[]): Promise<void>;
   /** `repo`'s build machine of `pool`, holding `commitId` from `gitDirectory`, for one command of at most `lifetimeS`. */
@@ -588,7 +592,7 @@ export interface MachineLease {
 }
 
 /** An `open` that failed once it had a machine: which machine, and its billing at the failure. */
-export type RemoteOpenFailure = Error & { remote?: { machine: RemoteMachine; usageBefore: RemoteUsage | null; usage: RemoteUsage | null } };
+export type RemoteOpenFailure = Error & { boatUnavailable?: boolean; remote?: { machine: RemoteMachine; usageBefore: RemoteUsage | null; usage: RemoteUsage | null } };
 
 export interface RemoteAttempt {
   /** Runs the gate's commands; `runtime` is the Bun they run with there, for command evidence. */

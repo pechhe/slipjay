@@ -43,7 +43,7 @@ export const LEDGER_FACT_MS = 365 * 24 * 60 * 60 * 1000;
  */
 const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEvent["type"]>([
   ...TERMINAL_EVENT_TYPES, "submitted", "identity", "classified", "integrated", "publication_intent", "held",
-  "integration_held", "integration_recovered", "integration_released", "verification_passed", "verification_skipped",
+  "integration_held", "integration_recovered", "integration_released", "boat_circuit", "verification_passed", "verification_skipped",
   "attempt_prepared", "attempt_invalidated", "audit_head", "audit_cause", "repair_claimed", "repair_released",
   "provenance", "build_admitted", "build_receipt", "evidence_expired", "submission_request"]);
 
@@ -135,6 +135,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const event = row ? JSON.parse(row.data) as OperationEvent : undefined;
     return row && event?.type === "paused" ? { by: event.by, at: row.at } : null;
   }
+  const boatRows = db.prepare(`SELECT data FROM events WHERE seq IN (SELECT MAX(seq) FROM events WHERE type = 'boat_circuit' GROUP BY json_extract(data, '$.repo'))`);
   const projectIds = (ids: string[]): Operation[] =>
     ids.flatMap((id) => { const operation = project(id, events({ operationId: id }), projections); return operation ? [operation] : []; });
   // Lanes in submission order: each repository lane's landings with its resets, its release
@@ -226,6 +227,16 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     // A pre-verification waits for staging to catch up with the latest landing, then for a place like any other operation.
     for (const operation of serial) if (operation.kind === "verification" && operation.status === "queued" && stagingDue(operation.repo))
       operation.waitingFor = "a staging deploy of the latest landing";
+    const boatHolds = new Map<string, string>();
+    for (const row of boatRows.all() as { data: string }[]) {
+      const event = JSON.parse(row.data) as Extract<OperationEvent, { type: "boat_circuit" }>;
+      if (event.state === "open") boatHolds.set(event.repo, event.reason);
+      else boatHolds.delete(event.repo);
+    }
+    for (const operation of open) if (operation.kind === "landing" && operation.status === "queued" && boatHolds.has(operation.repo)) {
+      operation.stage = "paused";
+      operation.waitingFor = `boat: ${boatHolds.get(operation.repo)}`;
+    }
     return open;
   }
   function lastLanded(repo: string): { commitId: string; at: string } | null {
@@ -341,7 +352,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       const stored = { seq: Number(result.lastInsertRowid), operationId, at, event: JSON.parse(data) as OperationEvent };
       // A finished operation may be a new verify sample.
       if ((TERMINAL_EVENT_TYPES as readonly string[]).includes(event.type)) shortClasses = undefined;
-      if (projection && (touchesOpen || event.type === "submitted" || event.type === "paused" || event.type === "resumed")) projection = undefined;
+      if (projection && (touchesOpen || event.type === "submitted" || event.type === "paused" || event.type === "resumed" || event.type === "boat_circuit")) projection = undefined;
       for (const listener of [...listeners]) listener(stored);
       if (event.type === "submitted") {
         const current = operation(operationId)!;
@@ -454,6 +465,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         const row = newestOfType.get(RUNNER_CONTROL_ID, type) as { seq: number } | undefined;
         return row ? [row.seq] : [];
       }));
+      // An open boat circuit is live state even after its opening event ages past the history window.
+      for (const row of db.prepare("SELECT MAX(seq) AS seq FROM events WHERE type = 'boat_circuit' GROUP BY json_extract(data, '$.repo')").all() as { seq: number }[]) pinned.add(row.seq);
       for (const row of db.prepare("SELECT seq, json_extract(data, '$.commitId') AS commitId FROM events WHERE operation_id = ? AND at <= ?")
         .all(RUNNER_CONTROL_ID, horizonCutoff) as { seq: number; commitId: string | null }[]) {
         if (pinned.has(row.seq)) continue;

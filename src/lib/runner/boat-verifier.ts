@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
@@ -22,7 +23,7 @@ const REMOTE_PATH = `${USER_HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin`;
 /** Runner-host variables that describe the host, not the command, so they never reach the VM. */
 const HOST_ONLY = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", SYSTEMD_SLICE_ENV]);
 const READY_TIMEOUT_MS = 300_000;
-/** Each boat API call: an unreachable API fails the attempt well inside a minute. */
+/** Bound one boat API call; opening retries share a separate budget. */
 const BOAT_TIMEOUT_MS = 30_000;
 const CONTROL_TIMEOUT_MS = 120_000;
 /**
@@ -122,6 +123,9 @@ export type BoatVerifierOptions = NonNullable<RunnerConfig["boat"]> & {
   pending?: string;
   /** How long recovery retries; tests shorten it. */
   recoveryMs?: number;
+  /** Total API retry budget while opening a VM, and initial backoff; tests shorten them. */
+  openRetryMs?: number;
+  openRetryDelayMs?: number;
 };
 
 export function boatVerification(options: BoatVerifierOptions): RemoteVerification {
@@ -132,14 +136,20 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
   const fail = (what: string, detail: string): never => { throw new Error(`Remote executor unavailable (boat): ${what}: ${detail.trim().slice(0, 2000)}`); };
 
   async function boat(args: string[], signal?: AbortSignal, timeoutMs = BOAT_TIMEOUT_MS): Promise<unknown> {
+    signal?.throwIfAborted();
     const result = await run({ executable: cli, args: [...args, "--json", "--no-update"], cwd: tmpdir(), timeoutMs,
       maxOutputBytes: CONTROL_OUTPUT, env: process.env, ...signal ? { abortSignal: signal } : {} });
     const last = result.stdout.trim().split("\n").at(-1) ?? "";
     let parsed: unknown;
     try { parsed = last ? JSON.parse(last) : null; } catch { parsed = null; }
-    if (result.timedOut) fail(`boat ${args[0]}`, `no answer from boat within ${Math.round(timeoutMs / 1000)}s`);
-    if (result.exitCode !== 0 || (parsed && typeof parsed === "object" && "error" in parsed))
-      fail(`boat ${args[0]}`, (parsed as { error?: string } | null)?.error ?? (result.stderr || result.stdout || `exit ${result.exitCode}`));
+    signal?.throwIfAborted();
+    if (result.timedOut) throw Object.assign(new Error(`Remote executor unavailable (boat): boat ${args[0]}: no answer from boat within ${Math.round(timeoutMs / 1000)}s`), { boatUnavailable: true });
+    if (result.exitCode !== 0 || (parsed && typeof parsed === "object" && "error" in parsed)) {
+      const detail = (parsed as { error?: string } | null)?.error ?? (result.stderr || result.stdout || `exit ${result.exitCode}`);
+      if (/could not reach (?:the )?boat api|connection refused|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|fetch failed|service unavailable|bad gateway|gateway timeout|\b50[234]\b/i.test(detail))
+        throw Object.assign(new Error(`Remote executor unavailable (boat): boat ${args[0]}: ${detail.trim().slice(0, 2000)}`), { boatUnavailable: true });
+      fail(`boat ${args[0]}`, detail);
+    }
     return parsed;
   }
   const vmOf = (value: unknown): Vm => {
@@ -165,30 +175,51 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
    * The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped, and
    * given `lifetimeS` to live, after which boat stops it.
    */
-  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S): Promise<Vm> {
+  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false): Promise<Vm> {
+    // Only API failures before setup are retried. The budget spans all calls in this open, with each call bounded
+    // by the remaining time. Retrying an ambiguous fork could create a second VM, so a timed-out fork goes to the hold.
+    let retryDeadline: number | undefined;
+    let failures = 0;
+    const api = async (args: string[], callSignal?: AbortSignal): Promise<unknown> => {
+      let retrying = false;
+      for (;;) {
+        callSignal?.throwIfAborted();
+        try { return await boat(args, callSignal, !retrying || retryDeadline === undefined ? BOAT_TIMEOUT_MS : Math.max(1, Math.min(BOAT_TIMEOUT_MS, retryDeadline - Date.now()))); }
+        catch (error) {
+          callSignal?.throwIfAborted();
+          if (!retry || !(error as RemoteOpenFailure)?.boatUnavailable) throw error;
+          retrying = true;
+          retryDeadline ??= Date.now() + (options.openRetryMs ?? 180_000);
+          const left = retryDeadline - Date.now();
+          if (left <= 0 || args[0] === "fork" && /no answer from boat/.test(String(error))) throw error;
+          await delay(Math.min(left, 30_000, (options.openRetryDelayMs ?? 2000) * 2 ** Math.min(failures++, 16)), undefined, { signal: callSignal });
+          if (Date.now() >= retryDeadline) throw error;
+        }
+      }
+    };
     const name = poolName(repo, slot);
     // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
     // forked again under the same name.
-    const listed = await boat(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
+    const listed = await api(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
     const named = (listed?.sandboxes ?? []).map(vmOf).filter((entry) => entry.name === name);
     let vm = named.find((entry) => !STOPPED.includes(entry.state)) ?? named[0];
     // A second VM under the slot's name is a leftover fork; only one may hold the slot.
-    for (const extra of named) if (extra !== vm) await boat(["delete", extra.id, "--yes"], signal).catch(() => undefined);
+    for (const extra of named) if (extra !== vm) await api(["delete", extra.id, "--yes"], signal).catch(() => undefined);
     if (!vm) {
-      vm = vmOf(await boat(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
+      vm = vmOf(await api(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
       // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
       const record = options.pending ? join(options.pending, vm.id) : undefined;
       if (record) { await mkdir(options.pending!, { recursive: true }); await writeFile(record, name); }
-      await boat(["rename", vm.id, name], signal);
+      await api(["rename", vm.id, name], signal);
       if (record) await unlink(record).catch(() => undefined);
       vm = { ...vm, name };
     } else if (STOPPED.includes(vm.state)) {
-      await boat(["resume", vm.id], signal);
+      await api(["resume", vm.id], signal);
     }
-    await boat(["extend", vm.id, "--ttl", String(lifetimeS)], signal);
+    await api(["extend", vm.id, "--ttl", String(lifetimeS)], signal);
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
-      vm = { ...vmOf(await boat(["info", vm.id], signal)), name };
+      vm = { ...vmOf(await api(["info", vm.id], signal)), name };
       // A resumed VM answers ssh about a minute before boat has restored its disk, and finishing the restore swaps the
       // filesystem under any running command: setup run before then loses its checkout ("not a git repository").
       if (vm.host && vm.port && vm.hydrated) {
@@ -197,7 +228,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       }
       if (Date.now() > deadline) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${READY_TIMEOUT_MS / 1000}s`);
       if (signal?.aborted) fail(`${name} not reachable`, "attempt cancelled");
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      await delay(3000, undefined, { signal });
     }
   }
 
@@ -246,6 +277,15 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
   }
 
   return {
+    async probe(signal) {
+      try { await boat(["list", "--all"], signal); }
+      catch (error) {
+        signal.throwIfAborted();
+        // An API refusal proves it answers again. The next opening reports that refusal normally, rather than
+        // hiding a permanent authentication or plan problem behind an availability hold.
+        if ((error as RemoteOpenFailure)?.boatUnavailable) throw error;
+      }
+    },
     async lease({ repo, pool, gitDirectory, commitId, lifetimeS, signal }): Promise<MachineLease> {
       // The command's own time, then the idle lifetime: a runner that dies mid-command still leaves the VM to stop.
       const vm = await machine(repo, pool, signal, lifetimeS + IDLE_LIFETIME_S);
@@ -286,7 +326,7 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
       }
     },
     async open({ repo, slot, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
-      const vm = await machine(repo, slot, signal);
+      const vm = await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.
       const billed = await usage(vm, signal);

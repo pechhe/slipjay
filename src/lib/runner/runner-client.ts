@@ -247,7 +247,7 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
               if (stored.event.type === "stage") {
                 operation = { ...operation, stage: stored.event.stage, status: stored.event.stage === "queued" ? "queued" : "running" };
                 show();
-              } else if ((TERMINAL_EVENT_TYPES as readonly string[]).includes(stored.event.type)) {
+              } else if (stored.event.type === "yielded" || (TERMINAL_EVENT_TYPES as readonly string[]).includes(stored.event.type)) {
                 await refresh();
               }
             }

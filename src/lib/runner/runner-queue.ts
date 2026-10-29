@@ -92,6 +92,9 @@ class OwnerKill extends Error {
 /** A verified attempt lost its authoritative remote parent before integration. */
 class PrefixInvalidated extends Error {}
 
+/** A pause during remote admission returns the untouched landing to its queue. */
+class BoatPaused extends Error {}
+
 /**
  * How many operations run at once: the config's `workers`, or RUNNER_DEFAULT_WORKERS. Without
  * enforced combined limits concurrent runs would share no budget, so such an executor runs one
@@ -139,6 +142,8 @@ export function createRunnerQueue(input: {
   recoveryRetryMs?: number;
   /** Runs the gate of each repository whose runner entry names a `verifier`; absent, such a repository cannot verify. */
   remoteVerification?: RemoteVerification;
+  /** First availability probe after a boat outage; doubles up to one minute. */
+  boatProbeMs?: number;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /**
@@ -161,16 +166,53 @@ export function createRunnerQueue(input: {
   /** Stop scheduling deploys and resets: clears timers that are waiting for an interval. */
   close(): void;
   /**
-   * Kill a running landing, release or reset while it is in KILLABLE_STAGES: the named one, or,
-   * unnamed, the only one running. An unnamed kill with several running kills none.
+   * Kill a running landing, release or reset while it is in KILLABLE_STAGES, or a boat-held queued landing.
+   * Without a name, kill the only running operation, or the only held landing when none runs. Ambiguity kills none.
    */
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification } = input;
+  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification, boatProbeMs = 5000 } = input;
   if (Object.values(config.repos).some((repo) => repo.verifier) && !remoteVerification) throw new Error("A repository names a remote verifier, but the runner has none");
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && !repo.verifier) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
+  type BoatHold = { failures: number; timer?: ReturnType<typeof setTimeout>; controller?: AbortController };
+  const boatHolds = new Map<string, BoatHold>();
+  for (const { event } of log.events()) if (event.type === "boat_circuit") {
+    if (event.state === "open") boatHolds.set(event.repo, { failures: 0 });
+    else boatHolds.delete(event.repo);
+  }
+  for (const repo of boatHolds.keys()) if (configuredRepository(config, repo)?.verifier !== "boat") {
+    boatHolds.delete(repo);
+    log.append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo, state: "closed", reason: "Repository no longer verifies on boat" });
+  }
+  let closed = false;
+  function probeBoat(repo: string): void {
+    const hold = boatHolds.get(repo);
+    if (!hold || !remoteVerification?.probe || hold.timer || hold.controller || closed || draining || heldStart) return;
+    hold.timer = setTimeout(() => {
+      hold.timer = undefined;
+      const controller = new AbortController();
+      hold.controller = controller;
+      void remoteVerification!.probe!(controller.signal).then(() => {
+        if (controller.signal.aborted) return;
+        boatHolds.delete(repo);
+        append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo, state: "closed", reason: "Boat API answers again" });
+        wakeMain();
+      }, () => { hold.failures += 1; }).finally(() => {
+        hold.controller = undefined;
+        probeBoat(repo);
+      });
+    }, Math.min(60_000, boatProbeMs * 2 ** Math.min(hold.failures, 16)));
+    hold.timer.unref?.();
+  }
+  function holdForBoat(repo: string, reason: string): void {
+    if (!boatHolds.has(repo)) {
+      boatHolds.set(repo, { failures: 0 });
+      append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo, state: "open", reason });
+    }
+    probeBoat(repo);
+  }
   const workers = runnerWorkers(config, executor);
   const deployWorkers = config.deployWorkers ?? RUNNER_DEFAULT_DEPLOY_WORKERS;
   if (!executor.combinedLimits && deployWorkers > 1) throw new Error("Multiple deploy workers require an executor with enforced combined resource limits");
@@ -703,6 +745,7 @@ export function createRunnerQueue(input: {
    */
   function wakeMain(): void {
     if (recovering || draining || log.paused() || heldStart) return;
+    for (const repo of boatHolds.keys()) probeBoat(repo);
     const open = log.openOperations();
     // Repository lanes whose oldest startable operation found no place: nothing later in them may pass it.
     const behind = new Set<string>();
@@ -722,7 +765,8 @@ export function createRunnerQueue(input: {
         continue;
       }
       const active = prefixes.get(operation.repo) ?? [];
-      const turn: PrefixTurn = { operation, attempt: 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
+      const previousAttempts = log.events({ operationId: operation.id }).flatMap(({ event }) => event.type === "attempt_started" ? [event.attempt] : []);
+      const turn: PrefixTurn = { operation, attempt: Math.max(0, ...previousAttempts) + 1, slot: active.some((entry) => entry.slot === 0) ? 1 : 0,
         prepared: deferred(), completed: deferred(), invalidation: new AbortController(), predecessor: active.at(-1) };
       prefixes.set(operation.repo, [...active, turn]);
       admitted.set(operation.id, operation);
@@ -748,6 +792,7 @@ export function createRunnerQueue(input: {
    * keeps it waiting. A successor always counts as long; a head is short when its repository is.
    */
   function startable(operation: Operation, open: readonly Operation[]): { short: boolean; prefix: boolean } | undefined {
+    if (operation.kind === "landing" && boatHolds.has(operation.repo)) return undefined;
     // `open` is a snapshot: what this wake already admitted still reads as queued there.
     if (operation.kind === "deploy" || admitted.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
     // An audit's verdict gates promotion, so it and a deploy never run together on this host: a deploy's load fails
@@ -895,10 +940,14 @@ export function createRunnerQueue(input: {
       const started = Date.now();
       const slot = prefix?.slot ?? 0;
       progress(`[verify] preparing a remote verifier for ${candidate.slice(0, 12)}`);
-      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, checkout, base, candidate, integrationBranch, signal }).catch((error: RemoteOpenFailure) => {
+      const paused = new AbortController();
+      const unsubscribe = log.subscribe(({ event }) => { if (event.type === "paused") paused.abort(); });
+      if (log.paused()) paused.abort();
+      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, checkout, base, candidate, integrationBranch, signal: AbortSignal.any([signal, paused.signal]) }).catch((error: RemoteOpenFailure) => {
+        if (paused.signal.aborted && !signal.aborted) throw new BoatPaused("Runner paused while waiting for boat");
         if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
         throw error;
-      });
+      }).finally(unsubscribe);
       append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, slot, candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
       progress(`[verify] gate runs on ${attempt.executor.host}`);
       return { attempt, started };
@@ -1213,6 +1262,11 @@ export function createRunnerQueue(input: {
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
+      else if (operation.kind === "landing" && (error instanceof BoatPaused || (error as RemoteOpenFailure)?.boatUnavailable && remoteVerification?.probe)) {
+        retryPrefix = false;
+        if (!(error instanceof BoatPaused)) holdForBoat(operation.repo, message(error));
+        verdict = { type: "yielded", to: error instanceof BoatPaused ? "the runner pause" : "boat availability" };
+      }
       else if (error instanceof CandidatePolicyRefusal) verdict = { type: "declined", reason: error.message, paths: [EXECUTION_POLICY_PATH] };
       else if (error instanceof HeldIntegration) {
         append(operation.id, { type: "integration_held", repo: operation.repo, commitId: error.commitId, reason: error.message, targetReached: error.targetReached, branch: integrationBranch, remote });
@@ -1238,6 +1292,10 @@ export function createRunnerQueue(input: {
           else prefix.predecessor = undefined;
         }
         else if (retryPrefix) prefix.remoteRebuilt = true;
+        if (retryPrefix && boatHolds.has(operation.repo)) {
+          retryPrefix = false;
+          verdict = { type: "yielded", to: "boat availability" };
+        }
         if (retryPrefix) {
           // Fence later admission onto the fresh attempt before dependent cleanup can wake it.
           prefix.attempt += 1;
@@ -1254,7 +1312,7 @@ export function createRunnerQueue(input: {
       running.delete(operation.id);
       // Delete the candidate bookmark before the verdict: an author's repository that fetches
       // every bookmark after that would otherwise import it and pin the submitted commit.
-      if (!retryPrefix && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+      if (!retryPrefix && verdict?.type !== "yielded" && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
       // This checkout belongs to the runner: leave failed candidates in history,
       // and start the next turn from the integration (including any held commit).
       if (integrationBranch) {
@@ -1626,6 +1684,7 @@ export function createRunnerQueue(input: {
   /** Stop whatever would start work on its own: the interval schedulers that submit deploys, resets, audits and recoveries. */
   function stopScheduling(): void {
     scheduler.close(); resetScheduler.close(); auditScheduler.close();
+    for (const hold of boatHolds.values()) { clearTimeout(hold.timer); hold.controller?.abort(); }
     for (const retry of auditDiscovery.values()) clearTimeout(retry);
     auditDiscovery.clear();
     for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
@@ -1639,6 +1698,19 @@ export function createRunnerQueue(input: {
     });
     lanes.set(lane, pending);
     return pending;
+  }
+  function cancelled(operation: Operation): void {
+    // A cancelled audit is no verdict: its slot is due again, or the next one gets its timer.
+    if (operation.kind === "audit") auditScheduler.reconsider(operation.repo);
+    if (operation.kind !== "landing") return;
+    // A submission that woke the queue while this cleanup held the lane is admitted after it.
+    void inLane(laneOf(operation.repo), async () => {
+      // A yielded depth-two landing may have only a verifier checkout: its canonical publisher is created later.
+      const attempt = log.events({ operationId: operation.id }).map(({ event }) => event).findLast((event) => event.type === "attempt_started");
+      const checkout = attempt?.type === "attempt_started" ? attempt.checkout : checkoutPath(operation);
+      const context = await workspaceContext(checkout).catch(() => null);
+      if (context) await cleanup(operation, checkout, context.configuration.remote ?? "origin");
+    }).finally(wakeMain);
   }
   return {
     wake() {
@@ -1672,17 +1744,7 @@ export function createRunnerQueue(input: {
       // did needs its policy read from the remote, which takes its lane for a fetch.
       discoverAudits(Object.keys(config.repos).map(repositoryKey).filter((repo) => !log.lastLanded(repo)));
     },
-    cancelled(operation) {
-      // A cancelled audit is no verdict: its slot is due again, or the next one gets its timer.
-      if (operation.kind === "audit") auditScheduler.reconsider(operation.repo);
-      if (operation.kind !== "landing") return;
-      // A submission that woke the queue while this cleanup held the lane is admitted after it.
-      void inLane(laneOf(operation.repo), async () => {
-        const checkout = checkoutPath(operation);
-        const context = await workspaceContext(checkout).catch(() => null);
-        if (context) await cleanup(operation, checkout, context.configuration.remote ?? "origin");
-      }).finally(wakeMain);
-    },
+    cancelled,
     recoverHeld,
     releaseHeld,
     async drain() {
@@ -1704,9 +1766,18 @@ export function createRunnerQueue(input: {
       }
     },
     close() {
+      closed = true;
       stopScheduling();
     },
     kill(operationId) {
+      const held = log.openOperations().filter((operation) => operation.kind === "landing" && operation.status === "queued" && boatHolds.has(operation.repo));
+      const queued = operationId ? held.find((operation) => operation.id === operationId) : running.size === 0 && held.length === 1 ? held[0] : undefined;
+      if (queued) {
+        append(queued.id, { type: "cancelled", reason: OWNER_KILL_REASON });
+        cancelled(queued);
+        return { status: "killed", operation: log.operation(queued.id)! };
+      }
+      if (!operationId && !running.size && held.length > 1) return { status: "ambiguous", operations: held };
       const target = operationId === undefined ? undefined : running.get(operationId);
       if (operationId !== undefined && !target) return { status: "not_running", operation: log.operation(operationId) };
       if (!target && running.size > 1)

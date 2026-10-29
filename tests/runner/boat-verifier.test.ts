@@ -103,14 +103,16 @@ test("an ssh connection failure during setup names boat, not our setup", async (
   assert.ok(lost.boat().includes("extend bx_old --ttl 900"), "a failed setup leaves its VM fifteen minutes, not the attempt's three hours");
 });
 
-test("boat API calls are each bounded, so an unreachable API fails the attempt within a minute", async () => {
+test("boat API retries are bounded by the opening budget and report an availability failure", async () => {
   const timeouts: number[] = [];
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
     timeouts.push(request.timeoutMs);
     return { ...result(""), exitCode: null, timedOut: true };
   };
   const started = Date.now();
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run })), /Remote executor unavailable \(boat\): boat list: no answer from boat within 30s/);
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, openRetryMs: 30, openRetryDelayMs: 1 })),
+    (error: unknown) => Boolean((error as { boatUnavailable?: boolean }).boatUnavailable));
+  assert.ok(timeouts.length > 1, "retried before giving up");
   assert.ok(Date.now() - started < 60_000);
   assert.ok(timeouts.every((ms) => ms <= 30_000), String(timeouts));
 });
@@ -252,4 +254,55 @@ if [ "$1" = ps ]; then printf 'keep-postgres \\n4c8aqwxmo7iwveog98zdr1jy true\\n
     assert.equal(result.status, 0);
     assert.equal(await readFile(removed, "utf8"), "leftover-test other\n");
   } finally { await rm(bin, { recursive: true, force: true }); }
+});
+
+
+test("a short boat API outage retries opening and succeeds without repeating a gate", async () => {
+  const ready = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
+    (args) => args.at(-1) === "true" ? result("") : result(`runtime /home/user/.bun/bin/bun 1.4.4 ${"a".repeat(64)}\ntree ${"e".repeat(40)}`));
+  let lists = 0;
+  const run = async (request: BoundedProcessRequest) => {
+    if (request.executable === "boat" && request.args[0] === "list" && ++lists < 3)
+      return result("", 1, "could not reach the Boat API: connection refused");
+    if (request.executable === "git") return result(request.args[0] === "rev-parse" ? "e".repeat(40) : "", request.args[0] === "bundle" ? 128 : 0, request.args[0] === "bundle" ? "Refusing to create empty bundle." : "");
+    return ready.run(request);
+  };
+  const scratch = await mkdtemp(join(tmpdir(), "boat-retry-"));
+  try {
+    const attempt = await open(boatVerification({ image: "bx_image", cli: "boat", run, scratch, openRetryMs: 1000, openRetryDelayMs: 1 }));
+    assert.equal(lists, 3);
+    await attempt.close();
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+test("a kill interrupts the opening backoff promptly", async () => {
+  const controller = new AbortController();
+  let failed!: () => void;
+  const failure = new Promise<void>((resolve) => { failed = resolve; });
+  const verification = boatVerification({ image: "bx_image", cli: "boat", openRetryDelayMs: 30_000,
+    run: async () => { failed(); return result("", 1, "could not reach the Boat API"); } });
+  const opening = verification.open({ repo: "pechhe/yardsmith", slot: 0, checkout: "/nonexistent", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "main", signal: controller.signal });
+  await failure;
+  const started = Date.now();
+  controller.abort();
+  await assert.rejects(opening, /abort/i);
+  assert.ok(Date.now() - started < 1000);
+});
+
+test("a timed-out fork is not repeated because boat may already have created it", async () => {
+  const fake = stand([]);
+  let forks = 0;
+  const run = async (request: BoundedProcessRequest) => {
+    if (request.args[0] === "fork") { forks++; return { ...result(""), timedOut: true, exitCode: null }; }
+    return fake.run(request);
+  };
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run })), /no answer from boat/);
+  assert.equal(forks, 1);
+});
+
+
+test("an availability probe accepts an API refusal but keeps holding when the API is unreachable", async () => {
+  const signal = new AbortController().signal;
+  await boatVerification({ image: "bx_image", cli: "boat", run: async () => result(JSON.stringify({ error: "unauthorized" }), 1) }).probe!(signal);
+  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run: async () => result("", 1, "could not reach the Boat API") }).probe!(signal), /could not reach/);
 });

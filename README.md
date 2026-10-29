@@ -789,8 +789,22 @@ it), which keeps it past boat's 14 days for stopped sandboxes. Pool VMs keep the
 with: make the same change on each idle pool VM in place, which needs no pause, or delete them (paused
 admission, nothing running) for the next attempts to fork the new image.
 
-Nothing falls back to this host. A VM boat cannot supply or reach fails the landing as
-infrastructure with `Remote executor unavailable (boat): …` and boat's own error; a fault in
+Nothing falls back to this host. While opening a VM, transient boat API failures (an unreachable
+API, timeouts or service errors) retry with exponential backoff from two seconds up to thirty
+seconds, within a three-minute retry budget shared across that opening. A timed-out fork is
+not retried in that opening, since boat may already have created the VM. Cancellation interrupts both API
+calls and backoff; pausing during admission returns the landing to the queue.
+
+If boat remains unreachable, the runner opens a circuit for that repository: its landings stay
+queued, shown as `paused` with `waitingFor` naming boat and the API error, and use no worker.
+Other repositories continue. A read-only API probe retries after five seconds, doubling up to
+one minute; when boat answers, the circuit closes and the same submissions resume automatically,
+with fresh attempts and no author resubmission. The ledger records `boat_circuit` open and close
+events, and a restart retains the hold. An owner can kill a held landing as usual. Gates already
+running keep their existing failure behaviour; a gate failure is never retried for an API outage.
+
+A non-transient refusal (such as a plan limit), or a VM boat cannot reach over SSH, still fails
+as infrastructure with `Remote executor unavailable (boat): …` and boat's own error; a fault in
 the image or setup fails it as `Remote executor unavailable (setup): …`; an SSH connection
 lost during a command fails it as `executor lost`. Moving a repository back to local
 verification is removing `verifier` from its entry. With `verifier`, `verificationDepth: 2`

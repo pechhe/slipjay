@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { landThroughRunner, releaseThroughRunner } from "../../src/lib/runner/runner-client.ts";
-import { candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
+import { RUNNER_CONTROL_ID, candidateBookmark } from "../../src/lib/runner/runner-contract.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
 
@@ -96,5 +96,26 @@ test("a runner restart mid-follow reconnects and reports the verdict", async () 
     const result = await running;
     assert.equal(result.operation.id, op.id);
     assert.equal(result.operation.status, "cancelled");
+  } finally { await f.dispose(); }
+});
+
+
+test("a landing yielded for boat shows the waiting reason and keeps following until its verdict", async () => {
+  const f = await fixture();
+  try {
+    const running = landThroughRunner(f.cwd, f.options);
+    void running.catch(() => {});
+    await waitFor(() => f.lines.some((line) => line.includes("queued")));
+    const op = f.log.openOperations()[0]!;
+    f.append(op.id, { type: "stage", stage: "verifying" });
+    await waitFor(() => f.lines.includes("[runner test-runner] verifying"));
+    f.append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo: "fixture/project", state: "open", reason: "could not reach the Boat API" });
+    f.append(op.id, { type: "yielded", to: "boat availability" });
+    await waitFor(() => f.lines.some((line) => /paused.*boat: could not reach the Boat API/.test(line)));
+    assert.equal(f.log.operation(op.id)?.status, "queued");
+    f.append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo: "fixture/project", state: "closed", reason: "Boat API answers again" });
+    f.append(op.id, { type: "stage", stage: "verifying" });
+    f.append(op.id, { type: "cancelled", reason: "fixture done" });
+    assert.equal((await running).operation.status, "cancelled");
   } finally { await f.dispose(); }
 });

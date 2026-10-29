@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
+import { createRunnerQueue } from "../../src/lib/runner/runner-queue.ts";
 import { pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
 import type { RemoteAttempt, RemoteVerification } from "../../src/lib/runner/runner-types.ts";
-import { fixture, test } from "./fixtures/runner-queue-fixture.ts";
+import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
+import { fixture, test, until } from "./fixtures/runner-queue-fixture.ts";
 
 /** A remote verifier whose "machine" runs commands on this host, recording what the queue asked of it. */
 function fakeRemote(failOpen?: string, treeAfter = "t".repeat(40), billed = true) {
@@ -111,3 +114,156 @@ test("a setup that fails on a machine is recorded with the machine's billing, so
     assert.match(remote[0]?.phase === "failed" ? remote[0].reason : "", /bun install failed/);
   } finally { await f.dispose(); }
 }, 120_000);
+
+
+test("a boat outage holds only that repository, frees its worker, and resumes the same queued landings", async () => {
+  const fake = fakeRemote();
+  const originalOpen = fake.remote.open;
+  let available = false;
+  let opens = 0;
+  let probes = 0;
+  fake.remote.open = async (input) => {
+    opens++;
+    if (!available) throw Object.assign(new Error("Remote executor unavailable (boat): could not reach the Boat API"), { boatUnavailable: true });
+    return originalOpen(input);
+  };
+  fake.remote.probe = async () => {
+    probes++;
+    if (!available) throw new Error("still unreachable");
+  };
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote, boatProbeMs: 10, workers: 1, other: true, verificationDepth: 2 });
+  try {
+    const a = f.submit(await f.candidate("a.txt"));
+    const b = f.submit(await f.candidate("b.txt"));
+    const other = f.submit(await f.candidate("other.txt", f.otherAuthor, "fixture/other"));
+    f.queue.wake();
+    await until(() => f.log.operation(a)?.status === "queued" && f.log.operation(a)?.waitingFor?.includes("boat:") || undefined);
+    await f.queue.idle();
+    assert.equal(f.result(other)?.type, "landed", "the unavailable repository holds no worker");
+    for (const id of [a, b]) {
+      assert.equal(f.log.operation(id)?.status, "queued");
+      assert.equal(f.log.operation(id)?.stage, "paused");
+      assert.match(f.log.operation(id)?.waitingFor ?? "", /boat:.*could not reach the Boat API/);
+      assert.equal(f.result(id), undefined, "an outage is no terminal failure");
+    }
+    assert.equal(opens, 1, "the next landing never attempts the unavailable VM");
+    await until(() => probes >= 2 || undefined);
+    const events = f.log.events().map(({ event }) => event);
+    assert.equal(events.filter((event) => event.type === "boat_circuit" && event.state === "open").length, 1);
+    assert.ok(!events.some((event) => event.type === "classified" && event.cause === "infrastructure"));
+
+    available = true;
+    await until(() => f.result(a)?.type === "landed" && f.result(b)?.type === "landed" || undefined);
+    await f.queue.idle();
+    assert.equal(opens, 3);
+    const attempts = f.log.events({ operationId: a }).flatMap(({ event }) => event.type === "attempt_started" ? [event.attempt] : []);
+    assert.deepEqual(attempts, [1, 2], "resuming makes a fresh attempt, retaining the submission");
+    const circuits = f.log.events().flatMap(({ event }) => event.type === "boat_circuit" ? [event.state] : []);
+    assert.deepEqual(circuits, ["open", "closed"]);
+  } finally { await f.dispose(); }
+});
+
+test("killing a boat-held landing cancels it promptly and it is never resumed", async () => {
+  const fake = fakeRemote();
+  let available = false;
+  let opens = 0;
+  const originalOpen = fake.remote.open;
+  fake.remote.open = async (input) => {
+    opens++;
+    if (!available) throw Object.assign(new Error("Remote executor unavailable (boat): connection refused"), { boatUnavailable: true });
+    return originalOpen(input);
+  };
+  fake.remote.probe = async () => { if (!available) throw new Error("unreachable"); };
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote, boatProbeMs: 10, verificationDepth: 2 });
+  try {
+    const id = f.submit(await f.candidate("remote.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(id)?.status === "queued" && f.log.operation(id)?.stage === "paused" || undefined);
+    const start = Date.now();
+    assert.equal(f.queue.kill(id).status, "killed");
+    assert.equal(f.result(id)?.type, "cancelled");
+    assert.ok(Date.now() - start < 1000);
+    available = true;
+    await until(() => f.log.events().some(({ event }) => event.type === "boat_circuit" && event.state === "closed") || undefined);
+    await f.queue.idle();
+    assert.equal(opens, 1);
+    assert.equal(f.result(id)?.type, "cancelled");
+    const operation = f.log.operation(id)!;
+    assert.equal(execFileSync("git", ["--git-dir", f.origin, "for-each-ref", `refs/heads/${operation.kind === "landing" ? operation.bookmark : ""}`], { encoding: "utf8" }).trim(), "", "cancellation removes the held prefix's candidate bookmark");
+  } finally { await f.dispose(); }
+});
+
+test("a gate failure is never retried and never opens the boat circuit", async () => {
+  const fake = fakeRemote();
+  fake.remote.probe = async () => {};
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote, gates: () => ["process.exit(7)"] });
+  try {
+    const result = await f.land(f.submit(await f.candidate("remote.txt")));
+    assert.equal(result?.type, "failed");
+    assert.equal(fake.opened.length, 1);
+    assert.ok(!f.log.events().some(({ event }) => event.type === "boat_circuit" || event.type === "yielded"));
+    assert.equal(f.log.events().filter(({ event }) => event.type === "run_started" && event.purpose === "gate").length, 1);
+  } finally { await f.dispose(); }
+});
+
+test("pausing during boat admission stops the wait and leaves the landing queued until resume", async () => {
+  const fake = fakeRemote();
+  const originalOpen = fake.remote.open;
+  let opening = false;
+  fake.remote.open = async ({ signal }) => {
+    opening = true;
+    return new Promise((_resolve, reject) => {
+      signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+    });
+  };
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote });
+  try {
+    const id = f.submit(await f.candidate("remote.txt"));
+    f.queue.wake();
+    await until(() => opening || undefined);
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "test" });
+    await f.queue.idle();
+    assert.equal(f.log.operation(id)?.status, "queued");
+    assert.equal(f.log.operation(id)?.stage, "paused");
+    assert.equal(f.result(id), undefined);
+    assert.ok(!f.log.events().some(({ event }) => event.type === "boat_circuit"));
+    fake.remote.open = originalOpen;
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "test" });
+    assert.equal((await f.land(id))?.type, "landed");
+  } finally { await f.dispose(); }
+});
+
+
+test("a runner restart preserves the boat hold and probes before reopening the landing", async () => {
+  const fake = fakeRemote();
+  const originalOpen = fake.remote.open;
+  let available = false;
+  let opens = 0;
+  fake.remote.open = async (input) => {
+    opens++;
+    if (!available) throw Object.assign(new Error("Remote executor unavailable (boat): connection refused"), { boatUnavailable: true });
+    return originalOpen(input);
+  };
+  fake.remote.probe = async () => { if (!available) throw new Error("unreachable"); };
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote, boatProbeMs: 10, durable: true });
+  let restarted: ReturnType<typeof createRunnerQueue> | undefined;
+  try {
+    const id = f.submit(await f.candidate("remote.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(id)?.status === "queued" && f.log.operation(id)?.stage === "paused" || undefined);
+    await f.queue.idle();
+    f.queue.close();
+    restarted = createRunnerQueue({ log: f.log, executor: f.executor, home: f.home, config: { repos: { "fixture/repo": { url: f.origin, verifier: "boat" } } }, remoteVerification: fake.remote, boatProbeMs: 10 });
+    restarted.wake();
+    await restarted.idle();
+    assert.equal(opens, 1, "restart does not try the VM while the circuit is open");
+    assert.match(f.log.operation(id)?.waitingFor ?? "", /boat:/);
+    const later = f.submit(await f.candidate("later.txt"));
+    const snapshot = f.log.events({ operationId: later }).find(({ event }) => event.type === "queue_snapshot")?.event;
+    assert.equal(snapshot?.type === "queue_snapshot" && snapshot.waitingFor?.includes("boat:"), true);
+    available = true;
+    await until(() => f.result(id)?.type === "landed" && f.result(later)?.type === "landed" || undefined);
+    await restarted.idle();
+    assert.equal(opens, 3);
+  } finally { restarted?.close(); await restarted?.idle(); await f.dispose(); }
+});

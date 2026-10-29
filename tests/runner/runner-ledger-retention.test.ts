@@ -272,3 +272,19 @@ test("the queue projection answers a new append and a pause without a stale answ
     assert.deepEqual(log.openOperations().map((operation) => operation.commitId), ["second-commit"]);
   } finally { log.close(); }
 });
+
+
+test("retention preserves the latest boat circuit state for each repository", () => {
+  const log = openLog();
+  try {
+    const id = newOperationId();
+    log.append(id, submission("a".repeat(32), "queued"));
+    log.append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo: "owner/repo", state: "open", reason: "old outage" });
+    log.append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo: "owner/repo", state: "closed", reason: "recovered" });
+    log.append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo: "owner/other", state: "open", reason: "API unavailable" });
+    log.forgetHistory(new Date(Date.now() + LEDGER_FACT_MS + DAY));
+    assert.deepEqual(log.events({ operationId: RUNNER_CONTROL_ID }).flatMap(({ event }) => event.type === "boat_circuit" ? [[event.repo, event.state]] : []),
+      [["owner/repo", "closed"], ["owner/other", "open"]]);
+    assert.equal(log.operation(id)?.stage, "queued", "a recovered repository never resurrects its old hold");
+  } finally { log.close(); }
+});
