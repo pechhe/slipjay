@@ -54,6 +54,11 @@ export function outputLines(result: VerificationFailureResult): string[] {
     .filter((line) => line.trim() && !NOISE.test(line));
 }
 
+/** A gate's own causes that name no test (README, **Naming a failure**). */
+export function failureCauses(lines: string[]): string[] {
+  return lines.flatMap((line) => /^Failure cause: (.+)$/.exec(line.trim())?.[1]?.trim() ?? []);
+}
+
 /** Failing test identities from Vitest, Bun test and node:test (TAP or spec) output. */
 export function failingTests(lines: string[]): string[] {
   // The gate named its failures itself: nothing is inferred from the output around them.
@@ -144,7 +149,10 @@ export function summarizeVerificationFailure(result: VerificationFailureResult):
   const lines = outputLines(result);
   const tests = failingTests(lines);
   const kind = failureKind(result, lines, tests);
-  const sections = [`Failure: ${kind}${result.signal ? ` (signal ${result.signal})` : ""}`];
+  const sections = [
+    ...[...new Set(failureCauses(lines))].slice(0, MAX_DIAGNOSTICS).map((cause) => `Failure cause: ${clip(cause)}`),
+    `Failure: ${kind}${result.signal ? ` (signal ${result.signal})` : ""}`,
+  ];
   if (tests.length) {
     sections.push([`Failing tests (${tests.length}):`, ...tests.slice(0, MAX_TESTS).map((test) => `  ${clip(test)}`),
       ...(tests.length > MAX_TESTS ? [`  … ${tests.length - MAX_TESTS} more`] : [])].join("\n"));

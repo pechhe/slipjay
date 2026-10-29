@@ -1,6 +1,6 @@
 import { OWNER_KILL_REASON } from "./runner-contract.ts";
 import type { ClassifiedCheck, ClassifiedFact, FailureEvent, FirstError, Operation, OperationEvent, RunRecord, StoredEvent, VerificationFailureRef } from "./runner-types.ts";
-import { diagnostics, failingTests, outputLines, withoutAliases } from "../infra/verification-failure.ts";
+import { diagnostics, failingTests, failureCauses, outputLines, withoutAliases } from "../infra/verification-failure.ts";
 
 export const FAILURE_RULE_VERSION = 2;
 
@@ -26,15 +26,13 @@ const named = (firstErrors: FirstError[], failureCauses: string[]) => ({
  * `  first error: <line>` pairs a test with its first error, and `Failure cause: <text>` names a cause that is not a test.
  */
 export function failureSummary(lines: string[]): { firstErrors: FirstError[]; failureCauses: string[] } {
-  const firstErrors: FirstError[] = [], failureCauses: string[] = [];
+  const firstErrors: FirstError[] = [];
   for (const [index, line] of lines.entries()) {
     const test = /^\s*FAIL\s+(.+)$/.exec(line)?.[1];
     const error = test ? /^\s+first error: (.+)$/.exec(lines[index + 1] ?? "")?.[1] : undefined;
     if (test && error) firstErrors.push({ test: test.trim(), error: error.trim() });
-    const cause = /^Failure cause: (.+)$/.exec(line.trim())?.[1];
-    if (cause) failureCauses.push(cause.trim());
   }
-  return { firstErrors, failureCauses };
+  return { firstErrors, failureCauses: failureCauses(lines) };
 }
 
 /** Parse concrete verification evidence, keeping persisted identities and diagnostics bounded. */

@@ -132,6 +132,27 @@ test("typecheck and lint failures report their first diagnostics", () => {
   ]);
 });
 
+test("a gate's explicit causes lead the reason despite generic diagnostics and a warnings-only tail", () => {
+  const cause = "core typecheck: src/a.ts:7:3: Parameter 'error' implicitly has an 'any' type. (ts)";
+  const warnings = Array.from({ length: 40 }, (_, index) => `Warn: unused selector .cell-${index} (svelte)`);
+  const summary = summarizeVerificationFailure({
+    code: 1,
+    stdout: [
+      "Error: Related landing tests failed: 2 suites failed without a named test",
+      "Landing failure summary:",
+      `\u001b[31mFailure cause: ${cause}\u001b[39m`,
+      "Failure cause: core lint: unused variable",
+      `Failure cause: ${cause}`,
+    ].join("\n"),
+    stderr: warnings.join("\n"),
+  });
+  assert.ok(summary.startsWith(`Failure cause: ${cause}\nFailure cause: core lint: unused variable\nFailure: diagnostics\n`));
+  assert.ok(summary.includes("First diagnostics:\n  Error: Related landing tests failed"));
+  assert.equal(summary.slice(summary.indexOf("Output tail")), [
+    "Output tail (last 30 of 45 lines):", ...warnings.slice(-30),
+  ].join("\n"));
+});
+
 test("the summary stays bounded for huge outputs", () => {
   const failures = Array.from({ length: 500 }, (_, index) => ` FAIL  tests/t${index}.test.ts > case ${"x".repeat(1000)}`);
   const summary = summarizeVerificationFailure({ code: 1, stderr: [...failures, "Error: boom"].join("\n") });
