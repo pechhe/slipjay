@@ -146,7 +146,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     if (result.timedOut) throw Object.assign(new Error(`Remote executor unavailable (boat): boat ${args[0]}: no answer from boat within ${Math.round(timeoutMs / 1000)}s`), { boatUnavailable: true });
     if (result.exitCode !== 0 || (parsed && typeof parsed === "object" && "error" in parsed)) {
       const detail = (parsed as { error?: string } | null)?.error ?? (result.stderr || result.stdout || `exit ${result.exitCode}`);
-      if (/could not reach (?:the )?boat api|connection refused|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|fetch failed|service unavailable|bad gateway|gateway timeout|\b50[234]\b/i.test(detail))
+      if (/could not reach (?:the )?boat api|rate limit|too many requests|\b429\b|connection refused|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|fetch failed|service unavailable|bad gateway|gateway timeout|\b50[234]\b/i.test(detail))
         throw Object.assign(new Error(`Remote executor unavailable (boat): boat ${args[0]}: ${detail.trim().slice(0, 2000)}`), { boatUnavailable: true });
       fail(`boat ${args[0]}`, detail);
     }

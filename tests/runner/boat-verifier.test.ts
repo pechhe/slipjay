@@ -306,3 +306,11 @@ test("an availability probe accepts an API refusal but keeps holding when the AP
   await boatVerification({ image: "bx_image", cli: "boat", run: async () => result(JSON.stringify({ error: "unauthorized" }), 1) }).probe!(signal);
   await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run: async () => result("", 1, "could not reach the Boat API") }).probe!(signal), /could not reach/);
 });
+
+test("boat's rate limit is an availability failure, retried and held like an outage", async () => {
+  let calls = 0;
+  const run = async (): Promise<BoundedProcessResult> => { calls += 1; return result(JSON.stringify({ error: "Rate limit exceeded: 10000 requests per minute" }), 1); };
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, openRetryMs: 30, openRetryDelayMs: 1 })),
+    (error: unknown) => Boolean((error as { boatUnavailable?: boolean }).boatUnavailable));
+  assert.ok(calls > 1, "retried before giving up");
+});
