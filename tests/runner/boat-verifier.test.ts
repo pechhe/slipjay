@@ -60,6 +60,23 @@ test("a missing pool VM is forked from the image, named for its slot and renewed
   assert.deepEqual(stopped.boat().slice(0, 3), ["list --all", "resume bx_old", "extend bx_old --ttl 10800"]);
 });
 
+test("a resumed VM is not set up until boat has restored its disk", async () => {
+  const stopped = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
+  let infos = 0;
+  const events: string[] = [];
+  const run = async (request: BoundedProcessRequest) => {
+    if (request.executable === "boat" && request.args[0] === "info") {
+      const hydrated = ++infos > 1;
+      events.push(hydrated ? "restored" : "restoring");
+      return result(JSON.stringify({ sandbox: { id: "bx_old", state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated } }));
+    }
+    if (request.executable === "ssh") events.push("ssh");
+    return stopped.run(request);
+  };
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run })));
+  assert.deepEqual(events.slice(0, 3), ["restoring", "restored", "ssh"]);
+});
+
 test("a slot with two VMs under its name keeps the running one and deletes the other", async () => {
   const twice = stand([{ id: "bx_stale", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }, { id: "bx_live", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));

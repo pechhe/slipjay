@@ -72,7 +72,7 @@ export function remoteCommand(request: Pick<BoundedProcessRequest, "executable" 
 /** An SSH failure, as opposed to the remote command's own exit status: ssh exits 255 for its own errors. */
 const sshFailed = (result: BoundedProcessResult) => result.exitCode === 255 && /^(?:ssh|kex_exchange|Connection (?:closed|reset|timed out|refused)|client_loop)\b|\bssh: /m.test(result.stderr);
 
-type Vm = { id: string; name: string; state: string; host: string; port: number; size: string };
+type Vm = { id: string; name: string; state: string; host: string; port: number; size: string; hydrated: boolean };
 
 /** A loopback port in `url`, which a remote command reaches through a reverse tunnel to the runner host. */
 export const loopbackPort = (url: string | undefined): number | undefined => {
@@ -118,7 +118,8 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     const endpoint = String(sandbox.sshEndpoint ?? "");
     const at = endpoint.lastIndexOf(":");
     return { id: String(sandbox.id), name: String(sandbox.name ?? ""), state: String(sandbox.state ?? ""),
-      host: at > 0 ? endpoint.slice(0, at) : "", port: at > 0 ? Number(endpoint.slice(at + 1)) : 0, size: String(sandbox.type ?? size) };
+      host: at > 0 ? endpoint.slice(0, at) : "", port: at > 0 ? Number(endpoint.slice(at + 1)) : 0, size: String(sandbox.type ?? size),
+      hydrated: sandbox.hydrated !== false };
   };
   const sshArgs = (vm: Vm) => ["-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
     "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8", "-p", String(vm.port), `user@${vm.host}`];
@@ -156,11 +157,13 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
       vm = { ...vmOf(await boat(["info", vm.id], signal)), name };
-      if (vm.host && vm.port) {
+      // A resumed VM answers ssh about a minute before boat has restored its disk, and finishing the restore swaps the
+      // filesystem under any running command: setup run before then loses its checkout ("not a git repository").
+      if (vm.host && vm.port && vm.hydrated) {
         const probe = await run({ executable: "ssh", args: [...sshArgs(vm), "true"], cwd: tmpdir(), timeoutMs: 20_000, maxOutputBytes: 4096, env: process.env, abortSignal: signal });
         if (probe.exitCode === 0) return vm;
       }
-      if (Date.now() > deadline) fail(`${name} not reachable`, `state ${vm.state} after ${READY_TIMEOUT_MS / 1000}s`);
+      if (Date.now() > deadline) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${READY_TIMEOUT_MS / 1000}s`);
       if (signal.aborted) fail(`${name} not reachable`, "attempt cancelled");
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
