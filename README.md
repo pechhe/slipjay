@@ -778,6 +778,15 @@ taken before setup, and a missing reading makes the spend unavailable rather tha
 pool VMs were running, retrying for four minutes; every attempt cleans its VM first in any
 case.
 
+The image changes only by hand, when a gate needs something it lacks: a new Bun pin (setup fails
+naming the version), a Docker image or browser the gate starts, or a dependency tree far from the
+image's. Resume the image sandbox, update it in its checkout (`git fetch` and check out the
+integration branch, `bun install`, `docker pull` and recreate the matching stopped `keep-*`
+container, `bun x playwright install --with-deps chromium` in the app that pins Playwright), then
+`boat stop` it and `boat snapshot <id> <name>`, which keeps it past boat's 14 days for stopped
+sandboxes. Pool VMs keep the disk they were forked with, so delete them (paused admission, nothing
+running) for the next attempts to fork the new image.
+
 Nothing falls back to this host. A VM boat cannot supply or reach fails the landing as
 infrastructure with `Remote executor unavailable (boat): …` and boat's own error; a fault in
 the image or setup fails it as `Remote executor unavailable (setup): …`; an SSH connection
