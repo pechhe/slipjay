@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.46.28
+
+- **A deploy can run with a leased build machine (YS-683):** an environment that names `"machine": "<pool>"`
+  deploys with the repository's boat VM `slipjay-<owner>-<name>-<pool>` leased to it, holding the deployed commit,
+  reached through `SLIPJAY_MACHINE_SSH`; boat stops it fifteen minutes after the deploy. Environments other
+  than `staging` and `production` may be declared with `followsIntegrationBranch: true` and deploy each landing as
+  `staging` does. Gate restart recovery now cleans only numbered slot VMs.
+
 ## v3.46.27
 
 - **A failing test is named once, under its own file (SJ-140.1):** when a gate's output carries its own

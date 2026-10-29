@@ -410,6 +410,18 @@ test("deployments declare environments with projects; unknown environments and m
   ]) assert.throws(() => parseExecutionPolicy(policy({ deployments })), JSON.stringify(deployments));
 });
 
+test("another environment follows the integration branch only when it says so, and an environment may lease a named machine", () => {
+  const project = { name: "images", command: { executable: "bun", args: ["scripts/images.ts", "build"] } };
+  const parsed = parseExecutionPolicy(policy({ deployments: { version: 1, environments: { images: { followsIntegrationBranch: true, timeoutMs: 600_000, minIntervalMs: 0, machine: "images", projects: [project] } } } }));
+  assert.equal(parsed.deployments?.environments.images?.machine, "images");
+  for (const environments of [
+    { images: { timeoutMs: 1, projects: [project] } },
+    { stagin: { timeoutMs: 1, projects: [project] } },
+    { images: { followsIntegrationBranch: true, timeoutMs: 1, machine: "0", projects: [project] } },
+    { images: { followsIntegrationBranch: true, timeoutMs: 1, machine: "Images", projects: [project] } },
+  ]) assert.throws(() => parseExecutionPolicy(policy({ deployments: { version: 1, environments } })), JSON.stringify(environments));
+});
+
 test("fixture provenance validates literal contained paths and refuses unknown keys", () => {
   assert.deepEqual(parseExecutionPolicy(policy({ provenance: { fixturePaths: ["tests/fixtures", "data.json", "data.json"] } })).provenance,
     { fixturePaths: ["data.json", "tests/fixtures"] });

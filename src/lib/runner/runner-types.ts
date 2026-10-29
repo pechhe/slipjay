@@ -58,6 +58,8 @@ export type DeployRecord = {
   rollback?: { automatic: boolean; releaseBranch?: string; reason: string };
   /** Present once an environment that declares migrations reached them: see `DeployMigrations`. */
   migrations?: DeployMigrations;
+  /** The build machine leased to the deploy, and what boat billed while it was leased (null when boat could not say). */
+  machine?: RemoteMachine & { billed: RemoteUsage | null };
 };
 
 /**
@@ -567,6 +569,20 @@ export interface RemoteVerification {
   open(input: { repo: string; slot: number; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
   recover?(repos: readonly string[]): Promise<void>;
+  /** `repo`'s build machine of `pool`, holding `commitId` from `gitDirectory`, for one command of at most `lifetimeS`. */
+  lease?(input: { repo: string; pool: string; gitDirectory: string; commitId: string; lifetimeS: number; signal?: AbortSignal }): Promise<MachineLease>;
+}
+
+/**
+ * A build machine leased to one deploy. `env` is what the command is given: `SLIPJAY_MACHINE_SSH`, an executable
+ * that runs ssh to the machine with the arguments it is given (options, then the remote command), and
+ * `SLIPJAY_MACHINE_GIT_DIR`, the machine's Git directory holding the commit. `close` returns the machine to idle, which
+ * stops it after a quiet period, and reads what it billed since the lease began.
+ */
+export interface MachineLease {
+  readonly machine: RemoteMachine;
+  readonly env: Record<string, string>;
+  close(): Promise<RemoteUsage | null>;
 }
 
 /** An `open` that failed once it had a machine: which machine, and its billing at the failure. */

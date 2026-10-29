@@ -5,7 +5,8 @@ import { mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { boatVerification, loopbackPort, poolName, remoteCommand, worktreeTree } from "../../src/lib/runner/boat-verifier.ts";
+import { readFile } from "node:fs/promises";
+import { boatVerification, FENCE_SCRIPT, isSlotVm, loopbackPort, poolName, remoteCommand, worktreeTree } from "../../src/lib/runner/boat-verifier.ts";
 
 const result = (stdout: string, exitCode = 0, stderr = ""): BoundedProcessResult => ({ stdout, stderr, stdoutTruncated: false, stderrTruncated: false,
   finishedAt: new Date().toISOString(), exitCode, signal: null, timedOut: false, cancelled: false, outputSha256: "" });
@@ -28,8 +29,12 @@ test("a loopback Build URL is reached through a tunnel on the same port; any oth
   assert.equal(loopbackPort(undefined), undefined);
 });
 
-test("pool names are stable per repository and slot", () => {
+test("pool names are stable per repository and slot, and a named machine is never taken for a gate slot", () => {
   assert.equal(poolName("pechhe/YardSmith", 1), "slipjay-pechhe-yardsmith-1");
+  assert.equal(poolName("pechhe/yardsmith", "images"), "slipjay-pechhe-yardsmith-images");
+  assert.ok(isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-12"));
+  assert.ok(!isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-images"));
+  assert.ok(!isSlotVm("pechhe/yard", "slipjay-pechhe-yardsmith-1"));
 });
 
 /** A boat CLI and ssh stand-in: `sandboxes` is what `boat list` reports; every call is recorded. */
@@ -134,6 +139,19 @@ test("a VM forked but never named into its pool is deleted at recovery, retried 
   assert.deepEqual(await readdir(pending), ["bx_stuck"], "an orphan boat would not delete keeps its record");
 });
 
+test("the lease's fence ends an earlier lease's sessions, and refuses the machine while one stays open", async () => {
+  // A stand-in loginctl: this session (7), the desktop (c3), and an earlier lease's session (9) that ends unless refused.
+  const bin = await mkdtemp(join(tmpdir(), "slipjay-fence-"));
+  const fence = (refuse: boolean) => {
+    const state = join(bin, refuse ? "refused" : "ended");
+    execFileSync("sh", ["-c", `cat > ${bin}/loginctl <<'EOF'\n#!/bin/sh\ncase "$1" in\n  list-sessions) echo "7 1000 user - - active no -"; echo "c3 1000 user seat0 tty7 active no -"; [ -e ${state} ] || echo "9 1000 user - - active no -";;\n  terminate-session) ${refuse ? "exit 1" : `touch ${state}`};;\nesac\nEOF\nchmod +x ${bin}/loginctl`]);
+    try { execFileSync("bash", ["-c", `set -euo pipefail\n${FENCE_SCRIPT.replace("seq 1 60", "seq 1 2")}`], { env: { PATH: `${bin}:/usr/bin:/bin`, XDG_SESSION_ID: "7" }, stdio: "pipe" }); return 0; }
+    catch (error) { return (error as { status: number }).status; }
+  };
+  assert.equal(fence(false), 0, "the earlier session ended");
+  assert.equal(fence(true), 1, "a session that will not end refuses the lease");
+});
+
 test("the checkout's tree keeps a tracked file that matches an ignore rule", () => {
   const repo = execFileSync("mktemp", ["-d"], { encoding: "utf8" }).trim();
   const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
@@ -165,4 +183,59 @@ test("concurrent gate commands reaching Build share one tunnel per attempt", asy
   assert.equal(ready.boat().at(-1), "extend bx_old --ttl 900", "a closed attempt leaves its VM fifteen minutes before boat stops it");
   assert.ok(ready.calls.some((call) => call.join(" ").includes("'\\''+refs/slipjay/boat/0/*:refs/slipjay/boat/0/*'\\''")),
     "the slot's refs are forced, since the next candidate need not descend from one that never landed");
+});
+
+/** A one-commit repository's Git directory and its commit. */
+function repository() {
+  const repo = execFileSync("mktemp", ["-d"], { encoding: "utf8" }).trim();
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
+  git("init", "-q");
+  execFileSync("bash", ["-c", `cd ${repo} && echo a > a.txt`]);
+  git("add", "a.txt"); git("commit", "-qm", "c");
+  return { gitDirectory: join(repo, ".git"), commitId: git("rev-parse", "HEAD") };
+}
+
+test("a build machine is leased under its pool's name with the command's lifetime, holds the commit, and idles once closed", async () => {
+  const { gitDirectory, commitId } = repository();
+  let billed = 100;
+  const inputs: string[] = [];
+  const scripts: string[] = [];
+  const machine = stand([{ id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state: "stopped" }], (args) => { scripts.push(args.at(-1) ?? ""); return result(""); });
+  const run = async (request: BoundedProcessRequest) => {
+    if (request.executable === "ssh" && request.input) inputs.push(request.input.toString("latin1"));
+    if (request.executable === "git") return (await import("../../src/lib/infra/bounded-process.ts")).runBoundedProcess(request);
+    return request.args[0] === "usage" ? result(JSON.stringify({ seconds: billed, dollars: billed / 100_000 })) : machine.run(request);
+  };
+  const scratch = await mkdtemp(join(tmpdir(), "boat-scratch-"));
+  const lease = await boatVerification({ image: "bx_image", cli: "boat", run, scratch }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory, commitId, lifetimeS: 1500 });
+  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 2400"], "the command's time plus the idle lifetime");
+  assert.equal(lease.machine.name, "slipjay-pechhe-yardsmith-images");
+  const fence = scripts.findIndex((script) => script.includes("loginctl terminate-session"));
+  assert.ok(fence >= 0 && fence < scripts.findIndex((script) => script.includes("cat > /tmp/slipjay-machine.bundle")), "an earlier lease's sessions end before the commit arrives");
+  assert.equal(lease.env.SLIPJAY_MACHINE_GIT_DIR, "/home/user/slipjay-machine.git");
+  assert.ok(inputs.some((input) => input.startsWith("# v2 git bundle") || input.startsWith("# v3 git bundle")), "the commit is sent as a bundle");
+  const ssh = await readFile(lease.env.SLIPJAY_MACHINE_SSH!, "utf8");
+  assert.match(ssh, /^#!\/bin\/sh\nexec ssh .*'-p' '19000' 'user@198\.51\.100\.1' "\$@"\n$/);
+  billed = 400;
+  assert.deepEqual(await lease.close(), { seconds: 300, dollars: 0.003 });
+  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 900");
+  assert.deepEqual(await readdir(scratch), [], "the wrapper goes with the lease");
+});
+
+test("a build machine boat cannot supply fails naming boat", async () => {
+  const refused = stand([]);
+  const run = async (request: BoundedProcessRequest) => request.args[0] === "fork" ? result(JSON.stringify({ error: "out of starts" }), 1) : refused.run(request);
+  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "c".repeat(40), lifetimeS: 60 }),
+    /^Error: Remote executor unavailable \(boat\): boat fork: out of starts/);
+});
+
+test("restart recovery cleans the gate's slot VMs and never a build machine", async () => {
+  const pool = stand([{ id: "bx_0", name: "slipjay-pechhe-yardsmith-0", state: "idle", sshEndpoint: "198.51.100.1:19000" },
+    { id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state: "idle", sshEndpoint: "198.51.100.2:19000" }]);
+  const run = async (request: BoundedProcessRequest) => request.args[0] === "list" ? result(JSON.stringify({ sandboxes: [
+    { id: "bx_0", name: "slipjay-pechhe-yardsmith-0", state: "idle", sshEndpoint: "198.51.100.1:19000" },
+    { id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state: "idle", sshEndpoint: "198.51.100.2:19000" }] })) : pool.run(request);
+  await boatVerification({ image: "bx_image", cli: "boat", run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
+  const cleaned = pool.calls.filter(([executable]) => executable === "ssh").map((args) => args.find((arg) => arg.startsWith("user@")));
+  assert.deepEqual(cleaned, ["user@198.51.100.1"]);
 });

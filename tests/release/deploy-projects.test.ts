@@ -127,3 +127,41 @@ test("migrations go before the projects deploy only when the promotion's known f
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("an environment that names a machine leases it for the whole deploy, records it, and fails without one", async () => {
+  const repo = mkdtempSync(path.join(tmpdir(), "slipjay-deploy-machine-"));
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+    git("init", "--quiet");
+    writeFileSync(path.join(repo, "README.md"), "fixture\n");
+    git("add", "README.md");
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--quiet", "-m", "Initial");
+    const policy: DeploymentEnvironment = { minIntervalMs: 0, timeoutMs: 60_000, environmentKeys: [], machine: "images", projects: [
+      { name: "images", command: { executable: "build", args: [], cwd: "." } },
+      { name: "services", command: { executable: "services", args: [], cwd: "." } }] };
+    const machine = { verifier: "boat" as const, id: "bx_images", name: "slipjay-pechhe-yardsmith-images", size: "large", image: "bx_image" };
+    const commands: BoundedProcessRequest[] = [];
+    const leased: string[] = [];
+    let closed = 0;
+    const deploy = (lease?: Parameters<typeof runDeploy>[0]["lease"]) => runDeploy({
+      gitDirectory: path.join(repo, ".git"), environment: "images", commitId: git("rev-parse", "HEAD"), previous: null, policy,
+      readEnvironment: () => ({}), onProgress: () => {}, ...lease ? { lease } : {},
+      run: async (request) => { commands.push(request); return exited(0, ""); },
+    });
+    const record = await deploy(async (pool) => {
+      leased.push(pool);
+      return { machine, env: { SLIPJAY_MACHINE_SSH: "/scratch/ssh", SLIPJAY_MACHINE_GIT_DIR: "/home/user/m.git" }, close: async () => { closed++; return { seconds: 312, dollars: 0.0062 }; } };
+    });
+    assert.deepEqual(leased, ["images"], "one lease for the deploy");
+    assert.equal(closed, 1);
+    assert.deepEqual(commands.map((request) => request.env?.SLIPJAY_MACHINE_SSH), ["/scratch/ssh", "/scratch/ssh"]);
+    assert.deepEqual(record.machine, { ...machine, billed: { seconds: 312, dollars: 0.0062 } });
+
+    commands.length = 0;
+    await assert.rejects(deploy(async () => { throw new Error("Remote executor unavailable (boat): boat fork: out of starts"); }), /Remote executor unavailable \(boat\): boat fork: out of starts/);
+    assert.deepEqual(commands, [], "a deploy whose machine is unavailable runs nothing, anywhere");
+    await assert.rejects(deploy(), /deployments images names machine images, but this runner has no remote verifier/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

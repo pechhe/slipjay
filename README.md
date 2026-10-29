@@ -809,7 +809,10 @@ fields in `record`. Older records without timings remain readable and printable.
 
 A repository can declare environments the runner deploys. `staging` follows the
 integration branch; `production` deploys only through a promotion (see
-[Release](#release)), never on a schedule or by `slipjay deploy`:
+[Release](#release)), never on a schedule or by `slipjay deploy`. Any other environment
+follows the integration branch as `staging` does and says so with
+`"followsIntegrationBranch": true` (a misspelt `staging` is refused): YardSmith's `images`
+builds each landing's container images this way, with a `minIntervalMs` of 0.
 
 ```json
 { "deployments": { "version": 1, "environments": { "staging": {
@@ -861,6 +864,21 @@ integration branch; `production` deploys only through a promotion (see
   when compensation is permitted, or `0` when the promotion's migration policy
   prohibits it. Downstream activation commands must honor this flag before their
   own local compensation; declared environment keys cannot override its authority.
+- **Build machine.** An environment may name a `machine` pool (`"machine": "images"`). Its
+  deploy then has the repository's build machine leased to it from the runner's remote
+  verifier (see [Remote verification on boat](#remote-verification-on-boat)): the boat VM
+  `slipjay-<owner>-<name>-<pool>`, forked from the gate's image when missing and resumed when
+  stopped, living for twice the environment's `timeoutMs` and then the fifteen idle minutes
+  after which boat stops it. The runner first sends it the deployed commit as a Git bundle of
+  what it lacks, into its own bare repository, and gives every command of the deploy
+  `SLIPJAY_MACHINE_SSH` (an executable that runs ssh to the VM with the arguments it is
+  given: options, then the remote command) and `SLIPJAY_MACHINE_GIT_DIR` (that repository).
+  The VM holds no credential for this host: anything it must reach here goes through a
+  tunnel the command opens (`-R`). Deploys take turns within a repository, so a machine
+  serves one deploy at a time. The record carries the `machine` and what boat billed while
+  it was leased. A machine boat cannot supply or reach fails the deploy before any command
+  runs, with `Remote executor unavailable (boat): …`; so does a runner with no remote
+  verifier. Restart recovery cleans only the gate's numbered slots, never a build machine.
 - **Production migrations.** `production` may declare `migrations: { verify, apply }`,
   two commands run in the same source view and environment as its projects. For a
   promotion whose migration files are all additive they run before any project

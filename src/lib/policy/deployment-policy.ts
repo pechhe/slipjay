@@ -15,7 +15,8 @@ export type DeploymentProject = { name: string; command: FinalizationCommand; he
 /**
  * One environment the runner deploys. `staging` follows the integration branch: the
  * runner deploys its latest landed commit after landings, at most once per
- * `minIntervalMs`, plus on demand. `production` does not follow the integration branch: it
+ * `minIntervalMs`, plus on demand. Any other environment follows it the same way, and says so
+ * (`followsIntegrationBranch: true`), so a misspelt `staging` is refused rather than deployed. `production` does not follow the integration branch: it
  * deploys only through a promotion (`slipjay promote`), so its `minIntervalMs` is unused, and must activate, so a failed promotion can be rolled back.
  * Each project's command runs in an exact source view
  * of the deployed commit, with the declared `environmentKeys` and
@@ -29,6 +30,11 @@ export type DeploymentEnvironment = {
   projects: DeploymentProject[];
   /** Production only: how the runner brings the database to the deployed commit (see `DeploymentMigrations`). */
   migrations?: DeploymentMigrations;
+  /**
+   * A build machine pool: the runner leases the repository's machine of this pool for the whole deploy (see
+   * `MachineLease`), holding the deployed commit, and every command reaches it through `SLIPJAY_MACHINE_SSH`.
+   */
+  machine?: string;
 };
 
 /**
@@ -46,11 +52,18 @@ export type DeploymentPolicy = { version: 1; environments: Record<string, Deploy
 /** Environments the runner knows how to drive; production deploys only through promotion (#32). */
 export const DEPLOYMENT_ENVIRONMENTS = ["staging", "production"] as const;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
+/** A machine pool's name: never a number, so it cannot be taken for a gate slot's VM. */
+const MACHINE = /^[a-z][a-z0-9-]{0,29}$/;
 const HOUR = 3_600_000;
 
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${label}`);
   return value as Record<string, unknown>;
+}
+
+function machineName(value: unknown, environment: string): string {
+  if (typeof value !== "string" || !MACHINE.test(value)) throw new Error(`deployments ${environment} names a machine that is not a pool name (a-z, 0-9, -)`);
+  return value;
 }
 
 /** `deployments`: strict, so a typo never silently stops an environment deploying. */
@@ -60,8 +73,9 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
   if (row.version !== 1) throw new Error("deployments must be version 1");
   const environments: Record<string, DeploymentEnvironment> = {};
   for (const [name, declared] of Object.entries(object(row.environments, "deployments environments"))) {
-    if (!(DEPLOYMENT_ENVIRONMENTS as readonly string[]).includes(name)) throw new Error(`deployments declares unknown environment ${name}`);
     const environment = object(declared, `deployments environment ${name}`);
+    if (!(DEPLOYMENT_ENVIRONMENTS as readonly string[]).includes(name) && !(NAME.test(name) && environment.followsIntegrationBranch === true))
+      throw new Error(`deployments declares unknown environment ${name}; another environment that follows the integration branch declares followsIntegrationBranch: true`);
     const minIntervalMs = environment.minIntervalMs ?? HOUR;
     if (!Number.isInteger(minIntervalMs) || (minIntervalMs as number) < 0 || (minIntervalMs as number) > 24 * HOUR)
       throw new Error(`deployments ${name} minIntervalMs must be an integer from 0 to 86400000`);
@@ -92,6 +106,7 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
     environments[name] = {
       minIntervalMs: minIntervalMs as number, timeoutMs: environment.timeoutMs as number,
       environmentKeys: environmentKeys(environment, "Deployment"), projects, ...migrations ? { migrations } : {},
+      ...environment.machine === undefined ? {} : { machine: machineName(environment.machine, name) },
     };
   }
   return { version: 1, environments };

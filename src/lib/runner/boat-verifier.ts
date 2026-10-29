@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../infra/bounded-process.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 import { TEST_REPORT_DIR_ENV } from "./test-reports.ts";
-import type { RemoteAttempt, RemoteMachine, RemoteOpenFailure, RemoteVerification, RunnerConfig, RuntimeIdentity } from "./runner-types.ts";
+import type { MachineLease, RemoteAttempt, RemoteMachine, RemoteOpenFailure, RemoteVerification, RunnerConfig, RuntimeIdentity } from "./runner-types.ts";
 
 /**
  * Gates on boat.dev VMs (SJ-138). Each repository verifying on boat has a pool of long-lived VMs, one per verification
@@ -50,8 +50,31 @@ const CONTROL_OUTPUT = 1024 * 1024;
 /** Quotes `value` as one POSIX shell word. */
 export const shellWord = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
-/** A pool VM's name: stable per repository and slot, so a later runner process finds the same one. */
-export const poolName = (repo: string, slot: number): string => `slipjay-${repo.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${slot}`;
+/**
+ * A pool VM's name: stable per repository and slot, so a later runner process finds the same one. A gate slot is a
+ * number; a build machine's pool (a deployment project's `machine`) is a name, so the two never collide.
+ */
+export const poolName = (repo: string, slot: number | string): string => `slipjay-${repo.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${slot}`;
+/** Whether `name` is one of `repo`'s gate slot VMs, which restart recovery cleans; a build machine is not. */
+export const isSlotVm = (repo: string, name: string): boolean => {
+  const prefix = poolName(repo, "");
+  return name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length));
+};
+/**
+ * Ends every SSH login of an earlier lease still open on a build machine (a runner that died mid-command, a lost
+ * connection), with the commands and reverse tunnels it held, so a new lease never shares the machine with it. Only
+ * seatless sessions other than this one go: the VM's desktop session stays, and the builder's containers and cache are
+ * not sessions, so they survive. A session that has already gone needs no ending; one still open after a minute fails
+ * the lease, so the machine is never handed over while an earlier lease may still hold it. It never calls `exit`: under
+ * `set -e` a login shell that does runs the VM's ~/.bash_logout, whose failing clear_console would replace its status.
+ */
+export const FENCE_SCRIPT = `others() { loginctl list-sessions --no-legend | awk -v me="$XDG_SESSION_ID" '$3 == "user" && $4 == "-" && $1 != me { print $1 }'; }
+for session in $(others); do loginctl terminate-session "$session" 2>/dev/null || true; done
+for _ in $(seq 1 60); do [ -n "$(others)" ] || break; sleep 1; done
+open=$(others | tr '\\n' ' ')
+[ -z "$open" ] || { echo "sessions of an earlier lease are still open: $open" >&2; false; }`;
+/** Where a build machine keeps the commits it is sent: a bare repository of its own, apart from any gate checkout. */
+const MACHINE_GIT_DIR = `${USER_HOME}/slipjay-machine.git`;
 
 /**
  * The remote script for `request`: in the checkout path, under a scope `close` can stop, with the command's own
@@ -132,8 +155,11 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     return result.stdout.trim();
   }
 
-  /** The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped. */
-  async function machine(repo: string, slot: number, signal: AbortSignal): Promise<Vm> {
+  /**
+   * The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped, and
+   * given `lifetimeS` to live, after which boat stops it.
+   */
+  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S): Promise<Vm> {
     const name = poolName(repo, slot);
     // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
     // forked again under the same name.
@@ -143,7 +169,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     // A second VM under the slot's name is a leftover fork; only one may hold the slot.
     for (const extra of named) if (extra !== vm) await boat(["delete", extra.id, "--yes"], signal).catch(() => undefined);
     if (!vm) {
-      vm = vmOf(await boat(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(ATTEMPT_LIFETIME_S), "--type", size], signal));
+      vm = vmOf(await boat(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
       // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
       const record = options.pending ? join(options.pending, vm.id) : undefined;
       if (record) { await mkdir(options.pending!, { recursive: true }); await writeFile(record, name); }
@@ -153,18 +179,18 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     } else if (STOPPED.includes(vm.state)) {
       await boat(["resume", vm.id], signal);
     }
-    await boat(["extend", vm.id, "--ttl", String(ATTEMPT_LIFETIME_S)], signal);
+    await boat(["extend", vm.id, "--ttl", String(lifetimeS)], signal);
     const deadline = Date.now() + READY_TIMEOUT_MS;
     for (;;) {
       vm = { ...vmOf(await boat(["info", vm.id], signal)), name };
       // A resumed VM answers ssh about a minute before boat has restored its disk, and finishing the restore swaps the
       // filesystem under any running command: setup run before then loses its checkout ("not a git repository").
       if (vm.host && vm.port && vm.hydrated) {
-        const probe = await run({ executable: "ssh", args: [...sshArgs(vm), "true"], cwd: tmpdir(), timeoutMs: 20_000, maxOutputBytes: 4096, env: process.env, abortSignal: signal });
+        const probe = await run({ executable: "ssh", args: [...sshArgs(vm), "true"], cwd: tmpdir(), timeoutMs: 20_000, maxOutputBytes: 4096, env: process.env, ...signal ? { abortSignal: signal } : {} });
         if (probe.exitCode === 0) return vm;
       }
       if (Date.now() > deadline) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${READY_TIMEOUT_MS / 1000}s`);
-      if (signal.aborted) fail(`${name} not reachable`, "attempt cancelled");
+      if (signal?.aborted) fail(`${name} not reachable`, "attempt cancelled");
       await new Promise((resolve) => setTimeout(resolve, 3000));
     }
   }
@@ -192,7 +218,67 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
     return result.stdout.trim();
   }
 
+  const scratchDirectory = async () => {
+    await mkdir(options.scratch ?? tmpdir(), { recursive: true });
+    return mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-boat-"));
+  };
+  /**
+   * A Git bundle of `refs` from the repository at `cwd`, without what the VM already holds: the commits among `heads` (the
+   * VM's own refs) that this repository knows too. Empty when the VM lacks nothing, which git refuses to write as a bundle.
+   */
+  async function bundleMissing(cwd: string, refs: string[], heads: string[], bundle: string): Promise<Buffer> {
+    const known: string[] = [];
+    for (const head of new Set(heads)) {
+      const present = await run({ executable: "git", args: ["cat-file", "-e", `${head}^{commit}`], cwd, timeoutMs: 10_000, maxOutputBytes: 1024, env: process.env });
+      if (present.exitCode === 0) known.push(head);
+    }
+    const bundled = await run({ executable: "git", args: ["bundle", "create", bundle, ...refs, ...known.map((head) => `^${head}`)],
+      cwd, timeoutMs: SETUP_TIMEOUT_MS, maxOutputBytes: CONTROL_OUTPUT, env: process.env });
+    if (bundled.exitCode !== 0 && /empty bundle/i.test(bundled.stderr)) return Buffer.alloc(0);
+    if (bundled.exitCode !== 0) throw new Error(`Remote executor unavailable (setup): git bundle failed: ${bundled.stderr.trim().slice(-1000)}`);
+    return readFile(bundle);
+  }
+
   return {
+    async lease({ repo, pool, gitDirectory, commitId, lifetimeS, signal }): Promise<MachineLease> {
+      // The command's own time, then the idle lifetime: a runner that dies mid-command still leaves the VM to stop.
+      const vm = await machine(repo, pool, signal, lifetimeS + IDLE_LIFETIME_S);
+      const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
+      const billed = await usage(vm, signal);
+      const scratch = await scratchDirectory();
+      const idle = async () => {
+        await boat(["extend", vm.id, "--ttl", String(IDLE_LIFETIME_S)]).catch(() => undefined);
+        await rm(scratch, { recursive: true, force: true });
+      };
+      try {
+        const ref = `refs/slipjay/machine/${pool}`;
+        await control(vm, "end the previous lease", FENCE_SCRIPT, { signal });
+        const heads = (await control(vm, "list commits", `git init --quiet --bare ${MACHINE_GIT_DIR} && git --git-dir=${MACHINE_GIT_DIR} for-each-ref --format='%(objectname)'`, { signal }))
+          .split("\n").filter((line) => /^[0-9a-f]{40}$/.test(line));
+        await local("git", ["update-ref", ref, commitId], gitDirectory);
+        const bundle = await bundleMissing(gitDirectory, [ref], heads, join(scratch, "commit.bundle"));
+        await control(vm, "receive the commit", `cat > /tmp/slipjay-machine.bundle
+if [ -s /tmp/slipjay-machine.bundle ]; then git --git-dir=${MACHINE_GIT_DIR} fetch --quiet /tmp/slipjay-machine.bundle ${shellWord(`+${ref}:${ref}`)}; fi
+rm -f /tmp/slipjay-machine.bundle
+git --git-dir=${MACHINE_GIT_DIR} update-ref ${shellWord(ref)} ${shellWord(commitId)}
+git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)}`, { input: bundle, timeoutMs: SETUP_TIMEOUT_MS, signal });
+        // One executable the command runs ssh through, so it needs neither the key nor the VM's address.
+        const ssh = join(scratch, "ssh");
+        await writeFile(ssh, `#!/bin/sh\nexec ssh ${sshArgs(vm).map(shellWord).join(" ")} "$@"\n`, { mode: 0o700 });
+        return {
+          machine: machineInfo,
+          env: { SLIPJAY_MACHINE_SSH: ssh, SLIPJAY_MACHINE_GIT_DIR: MACHINE_GIT_DIR },
+          async close() {
+            const after = await usage(vm);
+            await idle();
+            return billed && after ? { seconds: after.seconds - billed.seconds, dollars: after.dollars - billed.dollars } : null;
+          },
+        };
+      } catch (error) {
+        await idle();
+        throw error;
+      }
+    },
     async open({ repo, slot, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
       const vm = await machine(repo, slot, signal);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
@@ -208,24 +294,12 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
         // Send what the VM lacks of the candidate and its base, under refs of this slot.
         const heads = (await control(vm, "list commits", `repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); git -C "$repo" for-each-ref --format='%(objectname)'`, { signal }))
           .split("\n").filter((line) => /^[0-9a-f]{40}$/.test(line));
-        const known: string[] = [];
-        for (const head of new Set(heads)) {
-          const present = await run({ executable: "git", args: ["cat-file", "-e", `${head}^{commit}`], cwd: checkout, timeoutMs: 10_000, maxOutputBytes: 1024, env: process.env });
-          if (present.exitCode === 0) known.push(head);
-        }
-        await mkdir(options.scratch ?? tmpdir(), { recursive: true });
-        const scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-boat-"));
+        const scratch = await scratchDirectory();
         const ref = `refs/slipjay/boat/${slot}`;
         try {
           await local("git", ["update-ref", `${ref}/candidate`, candidate], checkout);
           await local("git", ["update-ref", `${ref}/base`, base], checkout);
-          const bundle = join(scratch, "candidate.bundle");
-          const bundled = await run({ executable: "git", args: ["bundle", "create", bundle, `${ref}/candidate`, `${ref}/base`, ...known.map((head) => `^${head}`)],
-            cwd: checkout, timeoutMs: SETUP_TIMEOUT_MS, maxOutputBytes: CONTROL_OUTPUT, env: process.env });
-          // An empty bundle means the VM already holds both commits; git refuses to write one.
-          const empty = bundled.exitCode !== 0 && /empty bundle/i.test(bundled.stderr);
-          if (bundled.exitCode !== 0 && !empty) throw new Error(`Remote executor unavailable (setup): git bundle failed: ${bundled.stderr.trim().slice(-1000)}`);
-          if (empty) await writeFile(bundle, "");
+          const bundle = await bundleMissing(checkout, [`${ref}/candidate`, `${ref}/base`], heads, join(scratch, "candidate.bundle"));
           const tree = await local("git", ["rev-parse", `${candidate}^{tree}`], checkout);
           const observed = await control(vm, "check out the candidate", `target=${shellWord(checkout)}
   current=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo)
@@ -251,7 +325,7 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
   echo "runtime $bun $(bun --version) $(sha256sum "$bun" | cut -d' ' -f1)"
   # An assignment, so a failing git command stops the script under -e and its stderr reaches the error.
   observed=$(${worktreeTree(tree)})
-  echo "tree $observed"`, { input: await readFile(bundle), timeoutMs: SETUP_TIMEOUT_MS, signal });
+  echo "tree $observed"`, { input: bundle, timeoutMs: SETUP_TIMEOUT_MS, signal });
           const line = (label: string) => observed.split("\n").findLast((entry) => entry.startsWith(`${label} `))?.slice(label.length + 1) ?? "";
           const observedTree = line("tree");
           if (observedTree !== tree) throw new Error(`Remote executor unavailable (setup): ${vm.name}'s checkout holds tree ${observedTree || "none"} after setup, not the candidate's ${tree}`);
@@ -347,8 +421,7 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
         if (listed) {
           const sandboxes = (listed.sandboxes ?? []).map(vmOf);
           dirty.clear();
-          const running = sandboxes.filter((vm) => repos.some((repo) => vm.name.startsWith(`${poolName(repo, 0).slice(0, -1)}`))
-            && vm.host && !STOPPED.includes(vm.state));
+          const running = sandboxes.filter((vm) => repos.some((repo) => isSlotVm(repo, vm.name)) && vm.host && !STOPPED.includes(vm.state));
           for (const vm of running) {
             if (deadline <= Date.now() || !await control(vm, "clean", cleanScript, { timeoutMs: left(CONTROL_TIMEOUT_MS) }).then(() => true, () => false)) dirty.add(vm.name);
           }

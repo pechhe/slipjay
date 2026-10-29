@@ -439,6 +439,10 @@ export function createRunnerQueue(input: {
         gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
         previousUrls, nonAdditive: manual.length > 0, earlierSchemaChange, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
+        // The deploy lane runs one deploy per repository, so a repository's machine serves one deploy at a time. Its
+        // lifetime covers the steps before a build (migrations) and the build itself, each bounded by the timeout.
+        ...remoteVerification?.lease ? { lease: (pool: string) => remoteVerification.lease!({ repo: operation.repo, pool, gitDirectory: exact.gitDirectory,
+          commitId: operation.commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000) }) } : {},
         run: async (request) => {
           const runId = randomUUID();
           const started = Date.now();
