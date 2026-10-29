@@ -39,7 +39,8 @@ function stand(sandboxes: Record<string, unknown>[], ssh: (args: readonly string
     calls.push([request.executable, ...request.args]);
     if (request.executable === "ssh") return ssh(request.args);
     const [command, id] = request.args;
-    if (command === "list") return result(JSON.stringify({ sandboxes }));
+    // Like boat, a plain `list` shows only running sandboxes; `--all` shows every state.
+    if (command === "list") return result(JSON.stringify({ sandboxes: request.args.includes("--all") ? sandboxes : sandboxes.filter((vm) => vm.state !== "stopped") }));
     if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } }));
     if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "", state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000" } }));
     return result(JSON.stringify({ ok: true }));
@@ -52,11 +53,18 @@ const open = (verification: ReturnType<typeof boatVerification>, slot = 0) => ve
 test("a missing pool VM is forked from the image, named for its slot and renewed; a stopped one is resumed", async () => {
   const missing = stand([], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
   await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: missing.run }), 1), /Remote executor unavailable \(setup\): clean/);
-  assert.deepEqual(missing.boat().slice(0, 4), ["list", "fork bx_image --no-env --no-monitoring --ttl 10800 --type default", "rename bx_new slipjay-pechhe-yardsmith-1", "extend bx_new --ttl 10800"]);
+  assert.deepEqual(missing.boat().slice(0, 4), ["list --all", "fork bx_image --no-env --no-monitoring --ttl 10800 --type default", "rename bx_new slipjay-pechhe-yardsmith-1", "extend bx_new --ttl 10800"]);
 
   const stopped = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
   await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: stopped.run })));
-  assert.deepEqual(stopped.boat().slice(0, 3), ["list", "resume bx_old", "extend bx_old --ttl 10800"]);
+  assert.deepEqual(stopped.boat().slice(0, 3), ["list --all", "resume bx_old", "extend bx_old --ttl 10800"]);
+});
+
+test("a slot with two VMs under its name keeps the running one and deletes the other", async () => {
+  const twice = stand([{ id: "bx_stale", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }, { id: "bx_live", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
+    (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: twice.run })));
+  assert.deepEqual(twice.boat().slice(0, 3), ["list --all", "delete bx_stale --yes", "extend bx_live --ttl 10800"]);
 });
 
 test("boat refusing a VM names boat and its error, so it is never mistaken for a gate failure", async () => {

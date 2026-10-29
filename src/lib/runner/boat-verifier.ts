@@ -31,6 +31,8 @@ const CONTROL_TIMEOUT_MS = 120_000;
  */
 const ATTEMPT_LIFETIME_S = 3 * 3600;
 const IDLE_LIFETIME_S = 15 * 60;
+/** Boat states in which a VM holds no running machine: it resumes from its snapshot. */
+const STOPPED = ["stopped", "stopping", "archived"];
 /** How long recovery keeps retrying to clean the pool after a restart. */
 const RECOVERY_MS = 240_000;
 /** Remote paths an attempt's commands created (TMPDIR, test reports), removed by every clean. */
@@ -132,8 +134,13 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
   /** The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped. */
   async function machine(repo: string, slot: number, signal: AbortSignal): Promise<Vm> {
     const name = poolName(repo, slot);
-    const listed = await boat(["list"], signal) as { sandboxes?: unknown[] } | null;
-    let vm = (listed?.sandboxes ?? []).map(vmOf).find((entry) => entry.name === name);
+    // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
+    // forked again under the same name.
+    const listed = await boat(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
+    const named = (listed?.sandboxes ?? []).map(vmOf).filter((entry) => entry.name === name);
+    let vm = named.find((entry) => !STOPPED.includes(entry.state)) ?? named[0];
+    // A second VM under the slot's name is a leftover fork; only one may hold the slot.
+    for (const extra of named) if (extra !== vm) await boat(["delete", extra.id, "--yes"], signal).catch(() => undefined);
     if (!vm) {
       vm = vmOf(await boat(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(ATTEMPT_LIFETIME_S), "--type", size], signal));
       // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
@@ -142,7 +149,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       await boat(["rename", vm.id, name], signal);
       if (record) await unlink(record).catch(() => undefined);
       vm = { ...vm, name };
-    } else if (["stopped", "stopping", "archived"].includes(vm.state)) {
+    } else if (STOPPED.includes(vm.state)) {
       await boat(["resume", vm.id], signal);
     }
     await boat(["extend", vm.id, "--ttl", String(ATTEMPT_LIFETIME_S)], signal);
@@ -331,12 +338,12 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
       for (let round = 0; ; round++) {
         // Half of what is left at most, so the retry after a wait still has time to run.
         if (round) await new Promise((resolve) => setTimeout(resolve, Math.min(30_000, Math.max(0, (deadline - Date.now()) / 2))));
-        const listed = await boat(["list"], undefined, left(BOAT_TIMEOUT_MS)).catch(() => null) as { sandboxes?: unknown[] } | null;
+        const listed = await boat(["list", "--all"], undefined, left(BOAT_TIMEOUT_MS)).catch(() => null) as { sandboxes?: unknown[] } | null;
         if (listed) {
           const sandboxes = (listed.sandboxes ?? []).map(vmOf);
           dirty.clear();
           const running = sandboxes.filter((vm) => repos.some((repo) => vm.name.startsWith(`${poolName(repo, 0).slice(0, -1)}`))
-            && vm.host && !["stopped", "stopping", "archived"].includes(vm.state));
+            && vm.host && !STOPPED.includes(vm.state));
           for (const vm of running) {
             if (deadline <= Date.now() || !await control(vm, "clean", cleanScript, { timeoutMs: left(CONTROL_TIMEOUT_MS) }).then(() => true, () => false)) dirty.add(vm.name);
           }
