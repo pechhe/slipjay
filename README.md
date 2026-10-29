@@ -735,8 +735,9 @@ instead of this host (SJ-138). The runner still fetches, rebases, installs, gene
 migrations, integrates and publishes in its own checkouts; only the commands in
 `requiredLandingVerification` move. The runner config's `boat` names the starting image
 (`image`: a sandbox kept stopped, holding the repository, `node_modules`, the pinned Bun and
-jj, and a stopped `keep-*` container for each Docker image the gate uses, since boat drops
-unused images from snapshots), and optionally the boat CLI (`cli`, default
+jj, a stopped `keep-*` container for each Docker image the gate uses, since boat drops
+unused images from snapshots, and any service container the gate expects under a fixed name,
+labelled `slipjay.keep=true`), and optionally the boat CLI (`cli`, default
 `~/.ascii/bin/boat`), the SSH key boat authorises on its VMs (`sshKey`) and the VM `size`
 (default `default`, 4 vCPU and 8 GB). The CLI authenticates with `BOAT_API_KEY` from the
 runner's environment, which the unit's `bws run` supplies from Bitwarden.
@@ -751,7 +752,7 @@ again, and a second VM under a slot's name is deleted. A resumed VM answers ssh 
 restored its disk, and finishing the restore swaps the filesystem under any running command, so the runner sets a VM up
 only once boat reports it `hydrated` (about 65 s after a resume, measured 29 Oct 2026). Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
 the runner home, and a restart deletes it, keeping the record until boat confirms. An attempt has its VM to itself. Before the gate the runner stops every scope and
-container an earlier attempt left, moves the VM's one checkout to the runner checkout's own
+container an earlier attempt left (all but the image's `keep-*` and `slipjay.keep=true` ones), moves the VM's one checkout to the runner checkout's own
 path, sends the candidate and its base as a Git bundle of only what the VM lacks, sets the
 integration bookmark to the base, `jj edit`s the candidate, cleans untracked files and
 installs against the candidate's lockfile. The checkout's files, read as a tree starting from the candidate's (so tracked files

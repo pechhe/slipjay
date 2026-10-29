@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
-import { mkdtemp, readdir, writeFile } from "node:fs/promises";
-import { execFileSync } from "node:child_process";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { boatVerification, FENCE_SCRIPT, isSlotVm, loopbackPort, poolName, remoteCommand, worktreeTree } from "../../src/lib/runner/boat-verifier.ts";
+import { boatVerification, FENCE_SCRIPT, isSlotVm, loopbackPort, poolName, remoteCommand, REMOVE_CONTAINERS, worktreeTree } from "../../src/lib/runner/boat-verifier.ts";
 
 const result = (stdout: string, exitCode = 0, stderr = ""): BoundedProcessResult => ({ stdout, stderr, stdoutTruncated: false, stderrTruncated: false,
   finishedAt: new Date().toISOString(), exitCode, signal: null, timedOut: false, cancelled: false, outputSha256: "" });
@@ -238,4 +238,17 @@ test("restart recovery cleans the gate's slot VMs and never a build machine", as
   await boatVerification({ image: "bx_image", cli: "boat", run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
   const cleaned = pool.calls.filter(([executable]) => executable === "ssh").map((args) => args.find((arg) => arg.startsWith("user@")));
   assert.deepEqual(cleaned, ["user@198.51.100.1"]);
+});
+
+test("cleaning removes every container but the image's keep- and slipjay.keep ones", async () => {
+  const bin = await mkdtemp(join(tmpdir(), "fake-docker-"));
+  try {
+    const removed = join(bin, "removed");
+    await writeFile(join(bin, "docker"), `#!/bin/sh
+if [ "$1" = ps ]; then printf 'keep-postgres \\n4c8aqwxmo7iwveog98zdr1jy true\\nleftover-test \\nother false\\n'; else shift 2; echo "$@" >> ${removed}; fi
+`, { mode: 0o755 });
+    const result = spawnSync("sh", ["-c", REMOVE_CONTAINERS], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: "utf8" });
+    assert.equal(result.status, 0);
+    assert.equal(await readFile(removed, "utf8"), "leftover-test other\n");
+  } finally { await rm(bin, { recursive: true, force: true }); }
 });

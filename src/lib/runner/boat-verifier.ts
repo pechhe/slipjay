@@ -92,6 +92,12 @@ export function remoteCommand(request: Pick<BoundedProcessRequest, "executable" 
   ].join(" && ");
 }
 
+/**
+ * Removes every container on the VM but the image's own: a stopped `keep-*` one holding a Docker image the gate uses, or
+ * one labelled `slipjay.keep=true`, such as a database service the gate expects under a fixed name.
+ */
+export const REMOVE_CONTAINERS = `docker ps -a --format '{{.Names}} {{.Label "slipjay.keep"}}' | awk '$1 !~ /^keep-/ && $2 != "true" { print $1 }' | xargs -r docker rm -f >/dev/null 2>&1 || true`;
+
 /** An SSH failure, as opposed to the remote command's own exit status: ssh exits 255 for its own errors. */
 const sshFailed = (result: BoundedProcessResult) => result.exitCode === 255 && /^(?:ssh|kex_exchange|Connection (?:closed|reset|timed out|refused)|client_loop)\b|\bssh: /m.test(result.stderr);
 
@@ -196,12 +202,12 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
   }
 
   /**
-   * Stops every scope an attempt started, removes every container but the image's `keep-` ones and the remote scratch
+   * Stops every scope an attempt started, removes every container but the image's kept ones and the remote scratch
    * the attempt's commands created, and cleans the checkout's untracked files, so the next attempt starts from none of it.
    * It also drops dangling images, unused volumes and unreachable Git objects, so a long-lived VM's disk stays bounded.
    */
   const cleanScript = `systemctl --user stop 'slipjay-run-*.scope' 2>/dev/null || true
-docker ps -a --format '{{.Names}}' | grep -v '^keep-' | xargs -r docker rm -f >/dev/null 2>&1 || true
+${REMOVE_CONTAINERS}
 if [ -f ${SCRATCH_LIST} ]; then sort -u ${SCRATCH_LIST} | while IFS= read -r path; do [ -n "$path" ] && [ "$path" != / ] && rm -rf -- "$path"; done; rm -f ${SCRATCH_LIST}; fi
 docker image prune -f >/dev/null 2>&1 || true
 docker volume prune -f >/dev/null 2>&1 || true
