@@ -100,6 +100,7 @@ test("an ssh connection failure during setup names boat, not our setup", async (
   const lost = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 255, "ssh: connect to host 198.51.100.1 port 19000: Connection refused"));
   await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: lost.run })), /Remote executor unavailable \(boat\): clean on slipjay-pechhe-yardsmith-0/);
+  assert.ok(lost.boat().includes("extend bx_old --ttl 900"), "a failed setup leaves its VM fifteen minutes, not the attempt's three hours");
 });
 
 test("boat API calls are each bounded, so an unreachable API fails the attempt within a minute", async () => {

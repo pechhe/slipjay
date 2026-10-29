@@ -291,7 +291,10 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.
       const billed = await usage(vm, signal);
       try { return await prepare(); } catch (error) {
-        // A setup that fails still spent the VM's time: the failure carries a reading, so the window's spend counts it.
+        // A failed setup idles its VM as a closed attempt does, best effort, so it stops after IDLE_LIFETIME_S and not the
+        // attempt's lifetime. It still spent the VM's time: the failure carries a reading, so the window's spend counts it.
+        await control(vm, "clean", cleanScript).catch(() => undefined);
+        await boat(["extend", vm.id, "--ttl", String(IDLE_LIFETIME_S)]).catch(() => undefined);
         throw Object.assign(error instanceof Error ? error : new Error(String(error)),
           { remote: { machine: machineInfo, usageBefore: billed, usage: await usage(vm) } satisfies RemoteOpenFailure["remote"] });
       }
