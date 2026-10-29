@@ -246,7 +246,9 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
   if [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile >/tmp/slipjay-install.log 2>&1 || { tail -40 /tmp/slipjay-install.log >&2; exit 1; }; fi
   bun=$(readlink -f "$(command -v bun)")
   echo "runtime $bun $(bun --version) $(sha256sum "$bun" | cut -d' ' -f1)"
-  echo "tree $(${worktreeTree(tree)})"`, { input: await readFile(bundle), timeoutMs: SETUP_TIMEOUT_MS, signal });
+  # An assignment, so a failing git command stops the script under -e and its stderr reaches the error.
+  observed=$(${worktreeTree(tree)})
+  echo "tree $observed"`, { input: await readFile(bundle), timeoutMs: SETUP_TIMEOUT_MS, signal });
           const line = (label: string) => observed.split("\n").findLast((entry) => entry.startsWith(`${label} `))?.slice(label.length + 1) ?? "";
           const observedTree = line("tree");
           if (observedTree !== tree) throw new Error(`Remote executor unavailable (setup): ${vm.name}'s checkout holds tree ${observedTree || "none"} after setup, not the candidate's ${tree}`);
