@@ -127,6 +127,8 @@ export type BoatVerifierOptions = NonNullable<RunnerConfig["boat"]> & {
   /** Total API retry budget while opening a VM, and initial backoff; tests shorten them. */
   openRetryMs?: number;
   openRetryDelayMs?: number;
+  /** How long to wait for a VM's disk to restore and ssh to answer; tests shorten it. */
+  readyTimeoutMs?: number;
 };
 
 export function boatVerification(options: BoatVerifierOptions): RemoteVerification {
@@ -200,26 +202,36 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       }
     };
     const name = poolName(repo, slot);
-    // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
-    // forked again under the same name.
-    const listed = await api(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
-    const named = (listed?.sandboxes ?? []).map(vmOf).filter((entry) => entry.name === name);
-    let vm = named.find((entry) => !STOPPED.includes(entry.state)) ?? named[0];
-    // A second VM under the slot's name is a leftover fork; only one may hold the slot.
-    for (const extra of named) if (extra !== vm) await api(["delete", extra.id, "--yes"], signal).catch(() => undefined);
-    if (!vm) {
-      vm = vmOf(await api(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
-      // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
-      const record = options.pending ? join(options.pending, vm.id) : undefined;
-      if (record) { await mkdir(options.pending!, { recursive: true }); await writeFile(record, name); }
-      await api(["rename", vm.id, name], signal);
-      if (record) await unlink(record).catch(() => undefined);
-      vm = { ...vm, name };
-    } else if (STOPPED.includes(vm.state)) {
-      await api(["resume", vm.id], signal);
-    }
-    await api(["extend", vm.id, "--ttl", String(lifetimeS)], signal);
-    const deadline = Date.now() + READY_TIMEOUT_MS;
+    /**
+     * The slot's VM, resumed when boat stopped it and forked from the image when missing. `broken` is a VM that will no
+     * longer serve the slot: it is left out even while boat still lists it, so a fresh fork takes the slot's name.
+     */
+    const acquire = async (broken?: string): Promise<Vm> => {
+      // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
+      // forked again under the same name.
+      const listed = await api(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
+      const named = (listed?.sandboxes ?? []).map(vmOf).filter((entry) => entry.name === name && entry.id !== broken);
+      let found = named.find((entry) => !STOPPED.includes(entry.state)) ?? named[0];
+      // A second VM under the slot's name is a leftover fork; only one may hold the slot.
+      for (const extra of named) if (extra !== found) await api(["delete", extra.id, "--yes"], signal).catch(() => undefined);
+      if (!found) {
+        found = vmOf(await api(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
+        // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
+        const record = options.pending ? join(options.pending, found.id) : undefined;
+        if (record) { await mkdir(options.pending!, { recursive: true }); await writeFile(record, name); }
+        await api(["rename", found.id, name], signal);
+        if (record) await unlink(record).catch(() => undefined);
+        found = { ...found, name };
+      } else if (STOPPED.includes(found.state)) {
+        await api(["resume", found.id], signal);
+      }
+      await api(["extend", found.id, "--ttl", String(lifetimeS)], signal);
+      return found;
+    };
+    const readyMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+    let vm = await acquire();
+    let deadline = Date.now() + readyMs;
+    let replaced = false;
     for (;;) {
       vm = { ...vmOf(await api(["info", vm.id], signal)), name };
       // A resumed VM answers ssh about a minute before boat has restored its disk, and finishing the restore swaps the
@@ -228,7 +240,17 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
         const probe = await run({ executable: "ssh", args: [...sshArgs(vm), "true"], cwd: tmpdir(), timeoutMs: 20_000, maxOutputBytes: 4096, env: process.env, ...signal ? { abortSignal: signal } : {} });
         if (probe.exitCode === 0) return vm;
       }
-      if (Date.now() > deadline) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${READY_TIMEOUT_MS / 1000}s`);
+      if (Date.now() >= deadline) {
+        // A slot whose disk boat never restores is broken, not merely slow: delete it and fork the image afresh once, so
+        // every later landing on the lane does not wait on the same dead disk. A replacement that also will not restore
+        // fails as infrastructure rather than forking again, since boat starts are rationed.
+        if (replaced || vm.hydrated) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${readyMs / 1000}s`);
+        replaced = true;
+        await api(["delete", vm.id, "--yes"], signal);
+        vm = await acquire(vm.id);
+        deadline = Date.now() + readyMs;
+        continue;
+      }
       if (signal?.aborted) fail(`${name} not reachable`, "attempt cancelled");
       await delay(3000, undefined, { signal });
     }

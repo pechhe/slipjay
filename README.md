@@ -752,7 +752,10 @@ between landings. The runner lists the pool in every state (boat's
 `list` shows only running sandboxes unless asked), so a stopped VM is resumed rather than forked
 again, and a second VM under a slot's name is deleted. A resumed VM answers ssh about a minute before boat has
 restored its disk, and finishing the restore swaps the filesystem under any running command, so the runner sets a VM up
-only once boat reports it `hydrated` (about 65 s after a resume, measured 29 Oct 2026). Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
+only once boat reports it `hydrated` (about 65 s after a resume, measured 29 Oct 2026). A slot boat has not restored and
+answered ssh on within five minutes is broken, not slow: the runner deletes that VM and forks the image afresh under the
+slot's name once, so later landings on the lane do not wait on the same dead disk. A replacement that also will not
+restore fails as infrastructure rather than forking again, since boat starts are rationed. Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
 the runner home, and a restart deletes it, keeping the record until boat confirms. An attempt has its VM to itself. Before the gate the runner stops every scope and
 container an earlier attempt left (all but the image's `keep-*` and `slipjay.keep=true` ones), moves the VM's one checkout to the runner checkout's own
 path, sends the candidate and its base as a Git bundle of only what the VM lacks, sets the

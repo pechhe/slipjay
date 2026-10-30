@@ -86,6 +86,45 @@ test("a resumed VM is not set up until boat has restored its disk", async () => 
   assert.deepEqual(events.slice(0, 3), ["restoring", "restored", "ssh"]);
 });
 
+test("a slot boat never restores is deleted and forked afresh from the image", async () => {
+  const calls: string[][] = [];
+  let slot = "bx_stuck";
+  const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    calls.push([request.executable, ...request.args]);
+    if (request.executable === "ssh") return request.args.at(-1) === "true" ? result("") : result("", 1, "stop here");
+    const [command, id] = request.args;
+    if (command === "list") return result(JSON.stringify({ sandboxes: slot ? [{ id: slot, name: "slipjay-pechhe-yardsmith-0", state: "idle" }] : [] }));
+    if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } }));
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: id !== "bx_stuck" } }));
+    if (command === "delete") slot = "";
+    return result(JSON.stringify({ ok: true }));
+  };
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs: 0 })), /Remote executor unavailable \(setup\): clean on slipjay-pechhe-yardsmith-0/);
+  const boat = () => calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" "));
+  assert.ok(boat().includes("delete bx_stuck --yes"), `a slot whose disk never restores is deleted: ${boat().join(", ")}`);
+  assert.ok(boat().indexOf("delete bx_stuck --yes") < boat().indexOf("fork bx_image --no-env --no-monitoring --ttl 10800 --type default"), "the image is forked again after it");
+  assert.ok(boat().includes("rename bx_new slipjay-pechhe-yardsmith-0"), "the fresh VM takes the slot's name");
+  assert.ok(!boat().some((call) => call.startsWith("resume bx_stuck")), "the dead slot is never resumed again");
+});
+
+test("a replacement slot that also never restores fails as infrastructure, forking only once", async () => {
+  const calls: string[][] = [];
+  let slot = "bx_stuck";
+  const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    calls.push([request.executable, ...request.args]);
+    if (request.executable === "ssh") return result("", 1, "no answer");
+    const [command, id] = request.args;
+    if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: slot, name: "slipjay-pechhe-yardsmith-0", state: "idle" }] }));
+    if (command === "fork") { slot = "bx_new"; return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } })); }
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: false } }));
+    return result(JSON.stringify({ ok: true }));
+  };
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs: 0 })), /slipjay-pechhe-yardsmith-0 not reachable: state idle, disk still restoring/);
+  const boat = calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" "));
+  assert.equal(boat.filter((call) => call.startsWith("fork")).length, 1, "one replacement fork, never a loop");
+  assert.equal(boat.filter((call) => call.startsWith("delete")).length, 1, "only the first broken slot is deleted");
+});
+
 test("a slot with two VMs under its name keeps the running one and deletes the other", async () => {
   const twice = stand([{ id: "bx_stale", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }, { id: "bx_live", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
