@@ -23,6 +23,12 @@ const REMOTE_PATH = `${USER_HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin`;
 /** Runner-host variables that describe the host, not the command, so they never reach the VM. */
 const HOST_ONLY = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", SYSTEMD_SLICE_ENV]);
 const READY_TIMEOUT_MS = 300_000;
+/**
+ * A build machine's disk holds its warm Docker build cache (a 3-minute build against 20+ cold), and a resumed disk that
+ * large can take longer than a gate slot's wait to restore. So a build machine waits this long and is never replaced:
+ * a fresh fork would throw away the cache the wait protects.
+ */
+const BUILD_READY_TIMEOUT_MS = 20 * 60_000;
 /** Bound one boat API call; opening retries share a separate budget. */
 const BOAT_TIMEOUT_MS = 30_000;
 const CONTROL_TIMEOUT_MS = 120_000;
@@ -186,7 +192,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
    * The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped, and
    * given `lifetimeS` to live, after which boat stops it.
    */
-  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false): Promise<Vm> {
+  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false, build = false): Promise<Vm> {
     // Only API failures before setup are retried. The budget spans all calls in this open, with each call bounded
     // by the remaining time. Retrying an ambiguous fork could create a second VM, so a timed-out fork goes to the hold.
     let retryDeadline: number | undefined;
@@ -235,7 +241,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       await api(["extend", found.id, "--ttl", String(lifetimeS)], signal);
       return found;
     };
-    const readyMs = options.readyTimeoutMs ?? READY_TIMEOUT_MS;
+    const readyMs = options.readyTimeoutMs ?? (build ? BUILD_READY_TIMEOUT_MS : READY_TIMEOUT_MS);
     let vm = await acquire();
     let deadline = Date.now() + readyMs;
     let replaced = false;
@@ -250,8 +256,9 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       if (Date.now() >= deadline) {
         // A slot whose disk boat never restores is broken, not merely slow: delete it and fork the image afresh once, so
         // every later landing on the lane does not wait on the same dead disk. A replacement that also will not restore
-        // fails as infrastructure rather than forking again, since boat starts are rationed.
-        if (replaced || vm.hydrated) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${readyMs / 1000}s`);
+        // fails as infrastructure rather than forking again, since boat starts are rationed. A build machine is never
+        // replaced: it waits BUILD_READY_TIMEOUT_MS, then fails, keeping the disk its warm build cache is on.
+        if (build || replaced || vm.hydrated) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${readyMs / 1000}s`);
         replaced = true;
         await api(["delete", vm.id, "--yes"], signal);
         vm = await acquire(vm.id);
@@ -319,7 +326,7 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
     },
     async lease({ repo, pool, gitDirectory, commitId, lifetimeS, signal }): Promise<MachineLease> {
       // The command's own time, then the idle lifetime: a runner that dies mid-command still leaves the VM to stop.
-      const vm = await machine(repo, pool, signal, lifetimeS + BUILD_IDLE_LIFETIME_S);
+      const vm = await machine(repo, pool, signal, lifetimeS + BUILD_IDLE_LIFETIME_S, false, true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       const billed = await usage(vm, signal);
       const scratch = await scratchDirectory();

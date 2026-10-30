@@ -125,6 +125,22 @@ test("a replacement slot that also never restores fails as infrastructure, forki
   assert.equal(boat.filter((call) => call.startsWith("delete")).length, 1, "only the first broken slot is deleted");
 });
 
+test("a build machine whose disk does not restore fails without being replaced, so its warm build cache survives", async () => {
+  const calls: string[][] = [];
+  const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    calls.push([request.executable, ...request.args]);
+    if (request.executable === "ssh") return result("", 1, "no answer");
+    const [command, id] = request.args;
+    if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state: "stopped" }] }));
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "large", sshEndpoint: "198.51.100.1:19000", hydrated: false } }));
+    return result(JSON.stringify({ ok: true }));
+  };
+  const lease = boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs: 0 }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+  await assert.rejects(lease, /slipjay-pechhe-yardsmith-images not reachable: state idle, disk still restoring/);
+  const boat = calls.filter(([executable]) => executable === "boat").map(([, command]) => command);
+  assert.ok(!boat.includes("delete") && !boat.includes("fork"), "the build machine is neither deleted nor forked again");
+});
+
 test("a slot with two VMs under its name keeps the running one and deletes the other", async () => {
   const twice = stand([{ id: "bx_stale", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }, { id: "bx_live", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
