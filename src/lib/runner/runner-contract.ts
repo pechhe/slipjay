@@ -1,4 +1,4 @@
-import type { DeployProjectOutcome, LandingSubmission, Operation, OperationEvent, RunnerConfig, RunnerLimits, RunnerStage } from "./runner-types.ts";
+import type { DeployProjectOutcome, LandingSubmission, Operation, OperationEvent, RunnerConfig, RunnerLimits, RunnerStage, StoredEvent } from "./runner-types.ts";
 
 /**
  * The runner's contract: one long-lived control plane that owns the landing queue
@@ -8,6 +8,13 @@ import type { DeployProjectOutcome, LandingSubmission, Operation, OperationEvent
  *
  * Declarations live in `runner-types.ts`; this module holds the contract's values.
  */
+
+/** A running screen can still be replaced; authoritative admission fences that permission. */
+export function isScreeningLanding(operation: Operation, history: readonly StoredEvent[]): boolean {
+  const started = history.findLast(({ event }) => event.type === "screen_started");
+  const admitted = history.findLast(({ event }) => event.type === "screen_admitted");
+  return operation.kind === "landing" && operation.status === "running" && Boolean(started && (!admitted || started.seq > admitted.seq));
+}
 
 /** API version prefix; every route below sits under it. */
 export const RUNNER_API = "/v1";
@@ -30,7 +37,7 @@ export const candidateBookmark = (changeId: string): string => `slipjay/changes/
  * too. Deploys run in their own lane and are never killed: each project's command
  * ends at its declared deadline.
  */
-export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "verifying", "waiting-for-predecessor", "resetting"];
+export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "screening", "verifying", "waiting-for-predecessor", "resetting"];
 
 /** The reason a killed operation carries; it is never reported as a pass. */
 export const OWNER_KILL_REASON = "killed by the owner, not run to completion";
@@ -113,6 +120,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (Object.values(config.repos).some((repo) => repo.lane !== undefined && (typeof repo.lane !== "string" || !repo.lane.trim()))) return `A repository's "lane" in the runner config must be a non-empty name`;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth !== undefined && repo.verificationDepth !== 1 && repo.verificationDepth !== 2)) return `A repository's "verificationDepth" must be 1 or 2`;
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && repo.lane !== undefined)) return `Depth-two verification requires an isolated repository lane`;
+  if (Object.values(config.repos).some((repo) => repo.screeningLanes !== undefined && !(Number.isSafeInteger(repo.screeningLanes) && repo.screeningLanes >= 0))) return `A repository's "screeningLanes" must be a whole number of at least 0`;
+  if (Object.values(config.repos).some((repo) => repo.screeningLanes && (!repo.verifier || repo.lane !== undefined))) return `Screening lanes require a remote verifier and an isolated repository lane`;
   if (Object.values(config.repos).some((repo) => repo.verifier !== undefined && repo.verifier !== "boat")) return `A repository's "verifier" can only be "boat"`;
   if (Object.values(config.repos).some((repo) => repo.verifier === "boat") && !config.boat?.image?.trim()) return `A repository verifies on boat, but the runner config's "boat.image" names no starting sandbox`;
   if (config.build !== undefined && !/^(?:https:\/\/[^/\s]+|http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?)\/?$/.test(config.build?.origin ?? ""))

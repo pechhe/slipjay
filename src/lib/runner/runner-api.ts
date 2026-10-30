@@ -1,7 +1,7 @@
 import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "../landing/submission-handoff.ts";
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "../landing/repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
-import { candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
 import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
@@ -288,7 +288,7 @@ export function createRunnerHandler(input: {
           if (awaitingAdmission(existing)) return await admit(existing.id, body);
           return json({ operation: existing, reattached: true, ...body.requestId ? { requestId: body.requestId } : {} });
         }
-        if (existing?.status === "running")
+        if (existing?.status === "running" && !isScreeningLanding(existing, input.log.events({ operationId: existing.id })))
           return json({ operation: existing }, 409);
         const repairRefusal = repairAdmission(input.log, body);
         if (repairRefusal) return json({ error: repairRefusal }, 409);
@@ -303,7 +303,7 @@ export function createRunnerHandler(input: {
         catch { return json({ error: "Source retention did not complete; submission was not acknowledged" }, 503); }
         // A queued predecessor may have started or been cancelled while capture awaited I/O.
         const active = input.log.operationsForChange(repo, body.changeId).find((op) => op.status === "queued" || op.status === "running");
-        if (active?.status === "running") return json({ operation: active }, 409);
+        if (active?.status === "running" && !isScreeningLanding(active, input.log.events({ operationId: active.id }))) return json({ operation: active }, 409);
         const changedRepair = repairAdmission(input.log, body);
         if (changedRepair) return json({ error: changedRepair }, 409);
         // Build knows only an operation it admitted, so only that one is named as superseded in its custody.

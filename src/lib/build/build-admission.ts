@@ -1,5 +1,5 @@
 import type { BuildBinding, SubmissionHandoff } from "../landing/submission-handoff.ts";
-import { isLandingSubmission } from "../runner/runner-contract.ts";
+import { isLandingSubmission, isScreeningLanding } from "../runner/runner-contract.ts";
 import type { BuildAdmittedItems, BuildAdmissionRecord, OperationLog, StoredEvent } from "../runner/runner-types.ts";
 import { BUILD_ITEM_UNAVAILABLE, BuildRefusal, readBuildItem } from "./tracker.ts";
 import type { BuildReadAction, BuildReader } from "./tracker.ts";
@@ -106,7 +106,7 @@ export async function settleAdmission(log: OperationLog, admit: BuildAdmitter, o
     log.append(operationId, { type: "build_admitted", sequence: answer.sequence, sessionId: answer.sessionId, recordedAt: answer.recordedAt, ...answer.items ? { items: answer.items } : {} });
     // Only candidates submitted before it: one admitted late after being cancelled never displaces a newer one.
     for (const earlier of log.operationsForChange(repo, changeId))
-      if (earlier.status === "queued" && log.events({ operationId: earlier.id }).find((row) => row.event.type === "submitted")!.seq < submitted.seq)
+      if ((earlier.status === "queued" || isScreeningLanding(earlier, log.events({ operationId: earlier.id }))) && log.events({ operationId: earlier.id }).find((row) => row.event.type === "submitted")!.seq < submitted.seq)
         log.append(earlier.id, { type: "superseded", by: operationId });
   } else if (!log.operation(operationId)?.result) {
     const retryable = RETRYABLE_BUILD_REFUSALS.includes(answer.code);

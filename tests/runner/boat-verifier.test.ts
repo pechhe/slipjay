@@ -33,6 +33,10 @@ test("pool names are stable per repository and slot, and a named machine is neve
   assert.equal(poolName("pechhe/YardSmith", 1), "slipjay-pechhe-yardsmith-1");
   assert.equal(poolName("pechhe/yardsmith", "images"), "slipjay-pechhe-yardsmith-images");
   assert.ok(isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-12"));
+  assert.equal(poolName("pechhe/yardsmith", "2-screen"), "slipjay-pechhe-yardsmith-2-screen");
+  assert.ok(isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-2-screen"));
+  assert.ok(!isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-screen-images"));
+  assert.ok(!isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-screen-0"), "a build machine named screen-0 is never a gate slot");
   assert.ok(!isSlotVm("pechhe/yardsmith", "slipjay-pechhe-yardsmith-images"));
   assert.ok(!isSlotVm("pechhe/yard", "slipjay-pechhe-yardsmith-1"));
 });
@@ -241,6 +245,19 @@ test("restart recovery cleans the gate's slot VMs and never a build machine", as
   await boatVerification({ image: "bx_image", cli: "boat", run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
   const cleaned = pool.calls.filter(([executable]) => executable === "ssh").map((args) => args.find((arg) => arg.startsWith("user@")));
   assert.deepEqual(cleaned, ["user@198.51.100.1"]);
+});
+
+test("screen slots are separate from authoritative slots and recovery cleans every screen slot", async () => {
+  const missing = stand([], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
+  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run: missing.run }).open({
+    repo: "pechhe/yardsmith", slot: 2, screening: true, checkout: "/nonexistent", base: "b".repeat(40),
+    candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal,
+  }));
+  assert.ok(missing.boat().includes("rename bx_new slipjay-pechhe-yardsmith-2-screen"));
+  const pool = stand(Array.from({ length: 3 }, (_, i) => ({ id: `bx_${i}`, name: `slipjay-pechhe-yardsmith-${i}-screen`,
+    state: "idle", sshEndpoint: `198.51.100.${i + 1}:19000` })));
+  await boatVerification({ image: "bx_image", cli: "boat", run: pool.run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
+  assert.equal(pool.calls.filter(([executable]) => executable === "ssh").length, 3);
 });
 
 test("cleaning removes every container but the image's keep- and slipjay.keep ones", async () => {

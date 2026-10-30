@@ -240,8 +240,11 @@ export function createRunnerQueue(input: {
     return { promise, resolve };
   };
   type PrefixTurn = { operation: LandingOperation; slot: number; attempt: number; prepared: ReturnType<typeof deferred<PreparedPrefix | null>>;
-    completed: ReturnType<typeof deferred<boolean>>; invalidation: AbortController; predecessor?: PrefixTurn; remoteRebuilt?: boolean };
+    completed: ReturnType<typeof deferred<boolean>>; invalidation: AbortController; predecessor?: PrefixTurn; remoteRebuilt?: boolean; screenSlot?: number;
+    screen?: { phase: "preparing" | "screening" | "passed" | "authoritative"; ready: ReturnType<typeof deferred<void>>; passedAt?: number } };
   const prefixes = new Map<string, PrefixTurn[]>();
+  const screens = new Map<string, PrefixTurn>();
+  let screenPassOrder = 0;
   const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
   const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
@@ -283,6 +286,9 @@ export function createRunnerQueue(input: {
     return null;
   }
   async function cleanup(operation: LandingOperation, checkout: string, remote: string): Promise<void> {
+    // A replacement of a running screen owns the same remote bookmark now.
+    if (log.operationsForChange(operation.repo, operation.changeId).some((entry) => entry.id !== operation.id
+      && entry.bookmark === operation.bookmark && (entry.status === "queued" || entry.status === "running"))) return;
     try {
       // A candidate this checkout never fetched (cancelled while queued, or interrupted by a
       // restart) has no local bookmark to delete until it is fetched.
@@ -750,6 +756,18 @@ export function createRunnerQueue(input: {
     if (recovering || draining || log.paused() || heldStart) return;
     for (const repo of boatHolds.keys()) probeBoat(repo);
     const open = log.openOperations();
+    // Completed screens compete in completion order; a slow screen owns no queue position.
+    for (const turn of [...screens.values()].filter((turn) => turn.screen?.phase === "passed")
+      .sort((a, b) => a.screen!.passedAt! - b.screen!.passedAt!)) {
+      const operation = turn.operation;
+      if (!admits(false, places(), workers, shortPlace) || lanes.has(laneOf(operation.repo))
+        || prefixes.get(operation.repo)?.length || awaitingReplacement({ ...operation, status: "queued" }, open) || screeningFence(operation, open)) continue;
+      turn.screen!.phase = "authoritative";
+      prefixes.set(operation.repo, [turn]);
+      admitted.set(operation.id, operation);
+      append(operation.id, { type: "screen_admitted", attempt: turn.attempt });
+      turn.screen!.ready.resolve();
+    }
     // Repository lanes whose oldest startable operation found no place: nothing later in them may pass it.
     const behind = new Set<string>();
     for (const operation of open) {
@@ -759,6 +777,27 @@ export function createRunnerQueue(input: {
         continue;
       }
       if (behind.has(laneOf(operation.repo))) continue;
+      const screenCount = configuredRepository(config, operation.repo)?.screeningLanes ?? 0;
+      if (screenCount && operation.kind === "landing" && runnable(operation, open)
+        && !admitted.has(operation.id) && !screens.has(operation.id) && !boatHolds.has(operation.repo)) {
+        const occupied = [...screens.values()].filter((turn) => turn.operation.repo === operation.repo);
+        if (!admits(false, places(), workers, shortPlace) || occupied.length >= screenCount || screeningFence(operation, open)) continue;
+        const slot = Array.from({ length: screenCount }, (_, i) => i).find((i) => !occupied.some((turn) => turn.screenSlot === i))!;
+        const previous = log.events({ operationId: operation.id }).flatMap(({ event }) => event.type === "attempt_started" ? [event.attempt] : []);
+        const turn: PrefixTurn = { operation, slot: 0, screenSlot: slot, attempt: Math.max(0, ...previous) + 1,
+          prepared: deferred(), completed: deferred(), invalidation: new AbortController(), screen: { phase: "preparing", ready: deferred() } };
+        screens.set(operation.id, turn);
+        admitted.set(operation.id, operation);
+        append(operation.id, { type: "screen_started", slot });
+        const pending = processOperation(operation, turn).finally(() => {
+          turn.prepared.resolve(null); turn.completed.resolve(log.operation(operation.id)?.status === "landed");
+          screens.delete(operation.id);
+          prefixes.set(operation.repo, (prefixes.get(operation.repo) ?? []).filter((entry) => entry !== turn));
+          admitted.delete(operation.id); attempts.delete(pending); wakeMain(); wakeDeploys();
+        });
+        attempts.add(pending);
+        continue;
+      }
       const start = startable(operation, open);
       if (!start) continue;
       // A pre-verification waits for its place without holding back the landings behind it.
@@ -783,6 +822,12 @@ export function createRunnerQueue(input: {
       attempts.add(pending);
     }
   }
+  function screeningFence(operation: Operation, open: readonly Operation[]): boolean {
+    const older = open.slice(0, open.findIndex((entry) => entry.id === operation.id));
+    return older.some((entry) => laneOf(entry.repo) === laneOf(operation.repo)
+      && entry.kind !== "landing" && entry.kind !== "deploy" && entry.kind !== "verification")
+      || [...admitted.values()].some((entry) => laneOf(entry.repo) === laneOf(operation.repo) && entry.kind === "reset");
+  }
   function admit(lane: string, operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, short = false): void {
     admitted.set(operation.id, operation);
     if (short) shortAdmitted.add(operation.id);
@@ -797,7 +842,7 @@ export function createRunnerQueue(input: {
   function startable(operation: Operation, open: readonly Operation[]): { short: boolean; prefix: boolean } | undefined {
     if (operation.kind === "landing" && boatHolds.has(operation.repo)) return undefined;
     // `open` is a snapshot: what this wake already admitted still reads as queued there.
-    if (operation.kind === "deploy" || admitted.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
+    if (operation.kind === "deploy" || admitted.has(operation.id) || screens.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
     // An audit's verdict gates promotion, so it and a deploy never run together on this host: a deploy's load fails
     // tests that fit their bounds on a quiet host, and that failure says nothing about the code. The audit starts once
     // the deploys end (which wakes the queue), and deploys wait for it (`auditRunning`).
@@ -825,7 +870,7 @@ export function createRunnerQueue(input: {
    * pre-verification beside its repository lane and a reset of that repository never overlap.
    */
   function resetConflict(operation: Operation): boolean {
-    if (operation.kind === "reset" && (prefixes.get(operation.repo)?.length ?? 0) > 0) return true;
+    if (operation.kind === "reset" && ((prefixes.get(operation.repo)?.length ?? 0) > 0 || [...screens.values()].some((turn) => turn.operation.repo === operation.repo))) return true;
     if (operation.kind === "reset") return lanes.has(admissionLane(laneOf(operation.repo), operation.repo, "release"));
     return (operation.kind === "release" || operation.kind === "verification")
       && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
@@ -846,11 +891,14 @@ export function createRunnerQueue(input: {
     let verificationTimeout: string | undefined;
     const authorityError = () => verificationTimeout ? new Error(verificationTimeout) : new OwnerKill();
     running.set(operation.id, { operation, stage, controller });
+    const stopSuperseded = prefix?.screen ? log.subscribe((row) => {
+      if (row.operationId === operation.id && (row.event.type === "superseded" || row.event.type === "cancelled")) controller.abort();
+    }) : undefined;
     let verdict: OperationEvent | undefined;
     let retryPrefix = false;
     // The audit policy the audited head declared; null when it declares none, undefined until read.
     let auditPolicy: import("../policy/audit-policy.ts").AuditPolicy | null | undefined;
-    const checkout = prefix ? join(home, "verifiers", operation.repo, String(prefix.slot)) : checkoutPath(operation);
+    const checkout = prefix ? join(home, "verifiers", operation.repo, prefix.screenSlot === undefined ? String(prefix.slot) : `${prefix.screenSlot}-screen`) : checkoutPath(operation);
     // Only this attempt shares successful immutable observations. A failed read
     // is retried by the next caller, and a rebuilt prefix starts a fresh scope.
     let landedPolicy: { directory: string; commit: string; value: Awaited<ReturnType<typeof readExactExecutionPolicy>> } | undefined;
@@ -958,17 +1006,18 @@ export function createRunnerQueue(input: {
     /** The remote verifier's machine for this attempt, holding exactly `candidate` on `base`. */
     async function openRemote(base: string, candidate: string, integrationBranch: string, signal: AbortSignal): Promise<{ attempt: RemoteAttempt; started: number }> {
       const started = Date.now();
-      const slot = prefix?.slot ?? 0;
+      const screening = prefix?.screenSlot !== undefined && prefix.screen?.phase !== "authoritative";
+      const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
       progress(`[verify] preparing a remote verifier for ${candidate.slice(0, 12)}`);
       const paused = new AbortController();
       const unsubscribe = log.subscribe(({ event }) => { if (event.type === "paused") paused.abort(); });
       if (log.paused()) paused.abort();
-      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, checkout, base, candidate, integrationBranch, signal: AbortSignal.any([signal, paused.signal]) }).catch((error: RemoteOpenFailure) => {
+      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, screening, checkout, base, candidate, integrationBranch, signal: AbortSignal.any([signal, paused.signal]) }).catch((error: RemoteOpenFailure) => {
         if (paused.signal.aborted && !signal.aborted) throw new BoatPaused("Runner paused while waiting for boat");
         if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
         throw error;
       }).finally(unsubscribe);
-      append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, slot, candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
+      append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
       progress(`[verify] gate runs on ${attempt.executor.host}`);
       return { attempt, started };
     }
@@ -1005,7 +1054,7 @@ export function createRunnerQueue(input: {
       const first = stage === "queued";
       if (!first) append(operation.id, stageDetail());
       stageStarted = Date.now();
-      stage = next;
+      stage = next === "verifying" && prefix?.screen && prefix.screen.phase !== "authoritative" ? "screening" : next;
       if (operation.kind === "verification") {
         clearTimeout(verificationTimer);
         const timeoutMs = verificationStageTimeoutMs ?? (next === "fetching" ? 5 * 60_000 : next === "installing" ? 30 * 60_000 : 60 * 60_000);
@@ -1175,6 +1224,11 @@ export function createRunnerQueue(input: {
             const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]);
             const remote = configuredRepository(config, operation.repo)?.verifier
               ? await openRemote(base, candidate, candidateContext.integrationBranch, abortSignal) : undefined;
+            if (prefix?.screen && prefix.screen.phase !== "authoritative") {
+              prefix.screen.phase = "screening";
+              admitted.delete(operation.id);
+              wakeMain(); wakeDeploys();
+            }
             const verification = await (async () => {
               try {
                 return await runRequiredVerification({
@@ -1241,6 +1295,14 @@ export function createRunnerQueue(input: {
           ...(predecessor ? { predecessor: { operationId: predecessor.artifact.operationId, attempt: predecessor.artifact.attempt, candidate: predecessor.artifact.candidate } } : {}) });
         prefix!.prepared.resolve({ artifact, checkout, overlap });
         const verified = await verifyPreparedCandidate(checkout, prepared, candidateOptions, candidateIO);
+        if (prefix!.screen && prefix!.screen.phase !== "authoritative") {
+          admitted.delete(operation.id);
+          prefix!.screen.phase = "passed";
+          prefix!.screen.passedAt = ++screenPassOrder;
+          setStage("waiting-for-predecessor");
+          wakeMain();
+          await withAuthority(prefix!.screen.ready.promise);
+        }
         if (prefix!.predecessor) {
           setStage("waiting-for-predecessor");
           if (!await withAuthority(prefix!.predecessor.completed.promise)) throw new Error("Exact predecessor did not publish; dependent evidence invalidated");
@@ -1309,7 +1371,7 @@ export function createRunnerQueue(input: {
         verdict = { type: "failed", stage: error.stage, reason: error.message, ...(error.output ? { output: error.output } : {}) };
       }
       else if (error instanceof RequiredVerificationError) verdict = {
-        type: "failed", stage: "verifying", reason: error.message,
+        type: "failed", stage: prefix?.screen && prefix.screen.phase !== "authoritative" ? "screening" : "verifying", reason: error.message,
         ...failedVerification(error.evidence),
       };
       else verdict = { type: "failed", stage, reason: message(error) };
@@ -1342,6 +1404,7 @@ export function createRunnerQueue(input: {
         else prefix.completed.resolve(false);
       }
     } finally {
+      stopSuperseded?.();
       clearTimeout(verificationTimer);
       // Cancellation has reached each subprocess; wait for containment to stop it before reusing the checkout.
       await Promise.allSettled([...pendingCommands]);
@@ -1370,7 +1433,7 @@ export function createRunnerQueue(input: {
       }
       if (verdict?.type === "failed" && operation.kind === "landing")
         await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
-      if (verdict) append(operation.id, verdict);
+      if (verdict && (!prefix?.screen || !log.operation(operation.id)?.result)) append(operation.id, verdict);
       // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
       if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo, operation.kind === "verification" ? operation.id : undefined);
       if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");

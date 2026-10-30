@@ -102,7 +102,7 @@ export function classifyFailure(
   if (event.stage === "rebasing" && event.reason.startsWith("Could not check landing rename safety:")) return fact("infrastructure");
   if (/^(?:late-bound migration artifacts must be generated during landing|declined paths?:)/i.test(event.reason)) return fact("policy");
   if (context.held && ["integrating", "finalizing", "publishing"].includes(event.stage)) return fact("held");
-  const verification = event.stage === "verifying" || context.run?.purpose === "migration_verify";
+  const verification = event.stage === "verifying" || event.stage === "screening" || context.run?.purpose === "migration_verify";
   if (event.stage === "fetching" || (event.stage === "installing" && !verification) || commandKind(command) === "fetch" || commandKind(command) === "install")
     return fact("infrastructure");
   if (event.stage === "rebasing")

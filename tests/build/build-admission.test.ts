@@ -206,6 +206,21 @@ test("a newer candidate replaces the admitted queued one only once Build admits 
   f.log.close(); g.log.close();
 });
 
+test("Build supersedes a running screen only after it admits the replacement", async () => {
+  const f = fixture([admitted(), { outcome: "unavailable", reason: "Build could not be reached" }, admitted()]);
+  try {
+    const first = (await f.submit(submission("a".repeat(40)))).body.operation!.id;
+    f.log.append(first, { type: "screen_started", slot: 0 });
+    f.log.append(first, { type: "stage", stage: "screening" });
+    assert.equal((await f.submit(submission("e".repeat(40)))).status, 503);
+    assert.equal(f.log.operation(first)?.status, "running");
+    assert.equal(f.offered[1]!.supersedesOperationId, first);
+    const retried = await f.submit(submission("e".repeat(40)));
+    assert.equal(retried.status, 200);
+    assert.equal(f.log.operation(first)?.status, "superseded");
+  } finally { f.log.close(); }
+});
+
 test("a runner without Build configuration refuses bound submissions and still accepts unbound ones", async () => {
   const f = fixture(null);
   const refused = await f.submit(submission());

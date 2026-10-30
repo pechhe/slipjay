@@ -11,6 +11,7 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
   const expiredRow = history.find((row) => row.operationId === operation.id && row.event.type === "evidence_expired");
   const expired = expiredRow?.event.type === "evidence_expired" ? { at: expiredRow.at, policy: expiredRow.event.policy } : undefined;
   const attempt = events.findLast((event) => event.type === "attempt_prepared");
+  const screens = events.flatMap((event) => event.type === "stage_detail" && event.stage === "screening" ? [event.durationMs] : []);
   const integrated = events.findLast((event) => event.type === "integrated");
   const intent = events.findLast((event) => event.type === "publication_intent");
   const classification = events.findLast((event) => event.type === "classified");
@@ -70,6 +71,7 @@ export function landingOutcome(operation: LandingOperation, history: StoredEvent
     ...chore ? { chore } : {} } : undefined;
   return { version: 1, operationId: operation.id, repo: operation.repo, changeId: operation.changeId, sourceCommitId: operation.commitId,
     status: operation.status, stage: operation.stage, terminal: Boolean(result), asOfSeq: operation.lastSeq,
+    ...screens.length ? { screening: { durationMs: screens.reduce((total, duration) => total + duration, 0) } } : {},
     submittedAt: operation.submittedAt, ...(operation.finishedAt ? { finishedAt: operation.finishedAt } : {}),
     ...(identity ? { identity } : {}), ...(request ? { requestId: request.requestId } : {}), ...(retained ? { sourceRetention: retained } : {}), ...(expired ? { evidenceExpired: expired } : {}),
     ...(attempt ? { attempt } : {}), publication, ...(failure ? { failure } : {}), ...(classification ? { classification } : {}), runs,

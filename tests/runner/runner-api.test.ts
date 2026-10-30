@@ -193,6 +193,32 @@ test("client operation and event routes still require bearer authentication", as
   } finally { await f.close(); }
 });
 
+test("a running screen can be superseded until authoritative admission", async () => {
+  const f = await fixture();
+  try {
+    const first = await submitted(await f.submit());
+    f.append(first.operation.id, { type: "screen_started", slot: 0 });
+    f.append(first.operation.id, { type: "stage", stage: "fetching" });
+    const second = await submitted(await f.submit(submission("commit-2")));
+    assert.equal(second.superseded, first.operation.id);
+    assert.equal(f.log.operation(first.operation.id)?.status, "superseded");
+    f.append(second.operation.id, { type: "screen_started", slot: 1 });
+    f.append(second.operation.id, { type: "stage", stage: "screening" });
+    const third = await submitted(await f.submit(submission("commit-3")));
+    assert.equal(third.superseded, second.operation.id);
+    f.append(third.operation.id, { type: "screen_started", slot: 0 });
+    f.append(third.operation.id, { type: "stage", stage: "waiting-for-predecessor" });
+    f.append(third.operation.id, { type: "screen_admitted", attempt: 1 });
+    assert.equal((await f.submit(submission("commit-4"))).status, 409);
+    assert.equal(f.log.operation(third.operation.id)?.status, "running");
+    f.append(third.operation.id, { type: "yielded", to: "boat availability" });
+    f.append(third.operation.id, { type: "screen_started", slot: 0 });
+    f.append(third.operation.id, { type: "stage", stage: "screening" });
+    assert.equal((await submitted(await f.submit(submission("commit-4")))).superseded, third.operation.id,
+      "a fresh screen after a yield has its own supersession authority");
+  } finally { await f.close(); }
+});
+
 test("submissions create, reattach, supersede queued work and conflict with running work", async () => {
   const f = await fixture();
   try {

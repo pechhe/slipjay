@@ -264,12 +264,16 @@ function workspaceStarts(events: readonly StoredEvent[], since: number): Workspa
 
 const operationKind = (submitted: OperationHistory["submitted"]): Operation["kind"] => submitted?.kind ?? "landing";
 
-/** A landing's verifying-stage duration when its checks ran: not skipped as a settings landing, not cancelled. */
+/**
+ * A landing's gate duration when its checks ran: not skipped as a settings landing, not cancelled. A screened landing
+ * counts its authoritative rerun when its base moved, and otherwise the screen, which was its gate.
+ */
 function executedVerify(op: OperationHistory): number | undefined {
   if (!isLandingSubmission(op.submitted)) return undefined;
   if (op.events.some((row) => row.event.type === "verification_skipped" || row.event.type === "cancelled")) return undefined;
   if (!op.events.some((row) => row.event.type === "verification_base")) return undefined;
-  const detail = op.events.find((row) => row.event.type === "stage_detail" && row.event.stage === "verifying" && validDuration(row.event.durationMs));
+  const gate = (stage: string) => op.events.find((row) => row.event.type === "stage_detail" && row.event.stage === stage && validDuration(row.event.durationMs));
+  const detail = gate("verifying") ?? gate("screening");
   return detail?.event.type === "stage_detail" ? detail.event.durationMs : undefined;
 }
 

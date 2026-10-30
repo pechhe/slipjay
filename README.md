@@ -813,6 +813,42 @@ verification is removing `verifier` from its entry. With `verifier`, `verificati
 needs no combined host budget, since the gates share no host; each place still holds a
 worker while it prepares and waits.
 
+### Independent screening lanes
+
+A repository verifying on boat can opt into `screeningLanes: N` in its runner
+entry, beside `verifier` and `verificationDepth`. Omitted or `0` keeps the existing
+ordered queue unchanged. Screening requires an isolated repository lane: gates
+must be safe to run independently on distinct VMs. For YardSmith the initial
+setting is `screeningLanes: 3`, `verificationDepth: 1`: three screening machines
+plus the authoritative verification place.
+
+Each independent submission prepares its immutable source on the integration tip
+fetched at screen start, pins the policy and candidate, and runs the same full
+required gate in an exclusive `slipjay-<owner>-<repo>-<n>-screen` boat slot.
+Preparation still reserves an existing host worker; remote gates release that
+reservation so screens do not multiply concurrent fetches or installs on the VPS.
+Screens never integrate, apply migrations, finalize the integration target, run
+post-integration steps or deploy. A failed screen returns the normal failure
+summary and classification immediately, without joining the speculative predecessor
+chain or invalidating another attempt.
+
+Admission to the authoritative lane is **oldest passed screen first**, by completion
+order. A slow screen does not hold passed ones behind it, and a moving tip never
+restarts an in-flight screen. The canonical publisher retains its exact-base and
+source checks: a pass whose prepared base is still current publishes with no
+second gate; a stale pass prepares and verifies again on the exact current tip.
+Evidence from different bases is never reused. Publication remains serial, and
+queued resets, releases and audits retain their fences. Screening is separate from
+`verificationDepth`, which continues to govern ordered speculative attempts.
+
+A screen remains killable. Pausing stops new screens and holds completed screens
+before authoritative admission; a running gate can finish and release its VM.
+Restart recovery cleans screening slots as well as numeric authoritative slots,
+and interrupted operations report the existing clear “land again” outcome.
+Superseded or cancelled screens lose publication authority and stop their own
+commands. Events, outcomes and `slipjay metrics` name the gate's `screening` stage
+and record its duration separately from a later authoritative `verifying` stage.
+
 ### Deploys
 
 Deploy records add `startedAt` (ISO timestamp) and `durationMs` for overall elapsed

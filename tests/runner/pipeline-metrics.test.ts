@@ -279,6 +279,17 @@ test("judges a repository's verify time against its budgets only on enough execu
   assert.equal(pipelineMetrics(undeclared, at(0), { now: NOW }).repositories[0]!.budget.status, "undeclared");
 });
 
+test("a screened landing's gate counts toward the verify budget: the screen, or the authoritative rerun when its base moved", () => {
+  const screened = (id: string, seq: number, screenMs: number, rerunMs?: number) => verifiedLanding(id, seq, 3_600_000, screenMs).map((stored) =>
+    stored.event.type === "stage_detail" ? { ...stored, event: { type: "stage_detail", stage: "screening", durationMs: screenMs } as OperationEvent } : stored)
+    .concat(rerunMs === undefined ? [] : [row(seq * 10 + 9, id, NOW - 3_600_000 + 9, { type: "stage_detail", stage: "verifying", durationMs: rerunMs })]);
+  const ten = Array.from({ length: 10 }, (_, index) => screened(`screen-${index}`, index + 1, 10_000)).flat();
+  const repo = pipelineMetrics(ten, at(0), { now: NOW }).repositories[0]!;
+  assert.deepEqual([repo.verify?.samples, repo.verify?.medianMs, repo.budget.status], [10, 10_000, "within"]);
+  const stale = pipelineMetrics(screened("stale", 30, 10_000, 200_000), at(0), { now: NOW }).repositories[0]!;
+  assert.equal(stale.verify?.medianMs, 200_000, "the rerun on the moved base is the landing's gate");
+});
+
 test("ranks test files from recorded reports, finds growing ones, and judges the per-file budget on serial file-cost runs over their own window", () => {
   const report = (runId: string, files: [string, number][]): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: files.map(([file, ms]) => ({ file, suite: "vitest", ms, status: "passed" })) });
   const cost = (runId: string, files: [string, number][]): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: files.map(([file, ms]) => ({ file, suite: "file-cost", ms, status: "passed" })) });

@@ -560,7 +560,7 @@ export async function controlRunner(location: string, action: "kill" | "pause" |
       : { ok: true, line: `${prefix} nothing running` };
     const subject = subjectOf(body.operation);
     if (response.status === 409) return { ok: false, line: `${prefix} not killed: ${subject} ${body.reason}` };
-    return { ok: true, line: body.operation.stage === "verifying" ? `${prefix} killed ${subject}`
+    return { ok: true, line: (body.operation.stage === "verifying" || body.operation.stage === "screening") ? `${prefix} killed ${subject}`
       : `${prefix} killing ${subject}: it stops when ${body.operation.stage} finishes, before verification` };
   } finally { connection.close(); }
 }

@@ -16,7 +16,7 @@ import type { TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
  * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
  * never recorded: a queued operation shows it while the owner has paused the runner or boat admission is held.
  */
-export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "verifying" | "waiting-for-predecessor" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
+export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "screening" | "verifying" | "waiting-for-predecessor" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
 
 /** Terminal and live states of an operation, derived from its events. */
 export type OperationStatus = "queued" | "running" | "landed" | "released" | "verified" | "deployed" | "reset" | "audited" | "failed" | "declined" | "superseded" | "cancelled";
@@ -146,6 +146,8 @@ export type OperationEvent =
   | { type: "repair_claimed"; claimId: string; tokenSha256: string; source: string; workspace: string; by: string }
   | { type: "repair_released"; claimId: string; by: string; reason: "released" | "revoked" }
   | { type: "repair_proposed"; operationId: string; claimId: string; source: string }
+  | { type: "screen_started"; slot: number }
+  | { type: "screen_admitted"; attempt: number }
   | { type: "attempt_started"; attempt: number; source: string; checkout: string }
   | { type: "attempt_prepared"; attempt: number; source: string; base: string; candidate: string; predecessor?: { operationId: string; attempt: number; candidate: string }; overlap: boolean; checkout: string }
   | { type: "attempt_invalidated"; attempt: number; reason: string }
@@ -164,7 +166,7 @@ export type OperationEvent =
    * `finished` after the gate, with the tree the machine's checkout held then (null when tracked files changed), `failed`
    * when setup failed on a machine it had.
    */
-  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; slot: number; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
+  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; slot: number; screening?: boolean; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
   | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null }
   /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
   | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
@@ -322,6 +324,8 @@ export type LandingOutcome = {
   identity?: Extract<OperationEvent, { type: "identity" }>;
   requestId?: string;
   sourceRetention?: Extract<OperationEvent, { type: "source_retained" }>;
+  /** Completed screening-stage time, retained after authoritative publication. */
+  screening?: { durationMs: number };
   /** When set, retained source, manifest and artifacts no longer exist; the ledger's own record remains. */
   evidenceExpired?: { at: string; policy: "published" | "unadopted" };
   attempt?: Extract<OperationEvent, { type: "attempt_prepared" }>;
@@ -569,8 +573,9 @@ export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: 
  * The runner still prepares the candidate locally; only the gate's commands run remotely.
  */
 export interface RemoteVerification {
-  /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`. */
-  open(input: { repo: string; slot: number; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
+  /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`.
+   * `screening` selects a separate pool, never an authoritative numeric slot. */
+  open(input: { repo: string; slot: number; screening?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */
   probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
@@ -637,6 +642,8 @@ export type RunnerConfig = {
    * share external state (a database, a deploy environment, fixed ports). Each defaults to its own.
    */
   repos: Record<string, { url: string; lane?: string; verificationDepth?: 1 | 2;
+    /** Independent remote screens; absent or zero preserves ordered admission. */
+    screeningLanes?: number;
     /** Run the gate on a remote verifier (see `boat`) instead of this host. Depth two then needs no host budget. */
     verifier?: "boat" }>;
   /**

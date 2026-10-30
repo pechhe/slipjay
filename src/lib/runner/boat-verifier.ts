@@ -52,14 +52,15 @@ const CONTROL_OUTPUT = 1024 * 1024;
 export const shellWord = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
 
 /**
- * A pool VM's name: stable per repository and slot, so a later runner process finds the same one. A gate slot is a
- * number; a build machine's pool (a deployment project's `machine`) is a name, so the two never collide.
+ * A pool VM's name: stable per repository and slot, so a later runner process finds the same one. Numeric slots
+ * belong to the authoritative lane, `<number>-screen` to screening, and other named pools to build machines. A build
+ * machine's pool name starts with a letter (`deployment-policy.ts`), so neither gate form can name one.
  */
 export const poolName = (repo: string, slot: number | string): string => `slipjay-${repo.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${slot}`;
 /** Whether `name` is one of `repo`'s gate slot VMs, which restart recovery cleans; a build machine is not. */
 export const isSlotVm = (repo: string, name: string): boolean => {
   const prefix = poolName(repo, "");
-  return name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length));
+  return name.startsWith(prefix) && /^\d+(?:-screen)?$/.test(name.slice(prefix.length));
 };
 /**
  * Ends every SSH login of an earlier lease still open on a build machine (a runner that died mid-command, a lost
@@ -326,7 +327,8 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
         throw error;
       }
     },
-    async open({ repo, slot, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
+    async open({ repo, slot: inputSlot, screening, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
+      const slot = screening ? `${inputSlot}-screen` : inputSlot;
       const vm = await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.
