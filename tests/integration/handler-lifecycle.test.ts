@@ -60,3 +60,16 @@ test("returning and failing land, promote and policy invocations remove their ow
     stderr.mockRestore();
   }
 });
+
+
+test("land forwards --skip-preflight to the local landing client", async () => {
+  const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+  const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    calls.land.mockImplementationOnce(async (_cwd, options: { skipPreflight?: boolean }) => {
+      assert.equal(options.skipPreflight, true);
+      return { ok: true, operation: { kind: "landing", status: "landed" }, logUrl: "fixture-log" };
+    });
+    await runLand(["--skip-preflight"]);
+  } finally { stdout.mockRestore(); stderr.mockRestore(); }
+});

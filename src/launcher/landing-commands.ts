@@ -7,7 +7,7 @@ import { retiredFieldsWarning } from "../lib/policy/execution-policy.ts";
 import { landingTimingLine } from "../lib/landing/landing-timing.ts";
 import { repairFailedLanding } from "../lib/landing/repair-workspace.ts";
 
-const LAND_USAGE = "Usage: slipjay land [--direct] [--handoff <json-file> | [--session <build-session-id>] [--ticket <n>]...]";
+const LAND_USAGE = "Usage: slipjay land [--direct] [--skip-preflight] [--handoff <json-file> | [--session <build-session-id>] [--ticket <n>]...]";
 
 export async function runPreview(): Promise<void> {
   const preview = await landingPreview();
@@ -63,7 +63,7 @@ export async function runLand(rest: string[]): Promise<void> {
     tickets.push(value);
     flags.splice(index, 2);
   }
-  if (flags.some((flag) => flag !== "--direct")) throw new Error(LAND_USAGE);
+  if (flags.some((flag) => flag !== "--direct" && flag !== "--skip-preflight")) throw new Error(LAND_USAGE);
   // --direct lands the primary checkout itself, for a session explicitly working Direct.
   const location = runnerLocation();
   if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
@@ -76,7 +76,7 @@ export async function runLand(rest: string[]): Promise<void> {
   process.once("SIGINT", stopFollowing);
   try {
     const runner = await landThroughRunner(process.cwd(), {
-      location, handoff, session, tickets, direct: flags.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
+      location, handoff, session, tickets, skipPreflight: flags.includes("--skip-preflight"), direct: flags.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
       onStage: (stage) => timing.stages.push([stage, Date.now()]),
     });
     // stderr, so stdout stays the JSON result.

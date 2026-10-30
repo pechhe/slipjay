@@ -65,7 +65,15 @@ test("repair restores a failed landing whose author directory is gone into a cla
       assert.equal(await readFile(join(setup.workspacePath, "fixed.txt"), "utf8"), "corrected\n");
       assert.equal(changeOf(setup.workspacePath), before.changeId, "the change ID survives the fix");
 
-      const landed = await landThroughRunner(setup.workspacePath, { location, env, onLine: () => {} });
+      const policyPath = join(setup.workspacePath, "slipjay.json");
+      const policy = JSON.parse(await readFile(policyPath, "utf8"));
+      await writeFile(policyPath, JSON.stringify({ ...policy, landingPreflight: {
+        command: [process.execPath, "-e", "process.exit(process.env.LOCAL_PREFLIGHT === 'yes' ? 0 : 2)"],
+      } }));
+      await assert.rejects(landThroughRunner(setup.workspacePath, { location, env, onLine: () => {} }), /Landing refused: preflight .*exited 2/);
+      const lines: string[] = [];
+      const landed = await landThroughRunner(setup.workspacePath, { location, env: { ...env, LOCAL_PREFLIGHT: "yes" }, onLine: (line) => { lines.push(line); } });
+      assert.ok(lines.includes("[preflight] passed"));
       assert.equal(landed.ok, true);
       assert.notEqual(landed.operation.id, operationId);
       assert.equal(f.remoteFile("fixed.txt"), "corrected\n");

@@ -35,6 +35,7 @@ import { callerPids } from "../workspace/workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../workspace/workspace-finalization.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../landing/submission-adoptions.ts";
+import { runLandingPreflight } from "../landing/landing-preflight.ts";
 import { choreLandingNote } from "../landing/landing-note.ts";
 
 type PendingRunnerFact = {
@@ -598,7 +599,7 @@ export async function resendReceipts(location: string, operationId: string, env:
  * `session` and `tickets` shape the handoff a Build-tracked landing writes itself when none is supplied
  * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`, after `WEAVE_FORGE_SESSION_ID`) and further Tickets it completes.
  */
-type LandOptions = { direct?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
+type LandOptions = { direct?: boolean; skipPreflight?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
   location: string; env?: NodeJS.ProcessEnv; resubmitAfterOutcome?: boolean;
   onLine?(line: string): void; onStage?(stage: string): void; onOperation?(operationId: string): void; signal?: AbortSignal };
 /** A landing's detached housekeeping (`startLandedHousekeeping`): its process and log, or why it did not start. */
@@ -621,6 +622,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
   const { context, target: preview } = await landingPreview(cwd, { allowDefaultWorkspace: options.direct });
+  await runLandingPreflight(context.current.root, preview.commitId, { ...options, onLine });
   const remote = publicationRemote(context);
   if (!remote) throw new Error("Runner landing requires a publication remote");
   const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), remote);

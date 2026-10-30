@@ -2,6 +2,8 @@ import type { AuditPolicy } from "./audit-policy.ts";
 import type { DeploymentPolicy } from "./deployment-policy.ts";
 import type { ResetPolicy } from "./post-integration-policy.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
+export type LandingPreflight = { command: string[]; timeoutMs?: number };
+
 export type MigrationCommand = { executable: string; args: string[]; cwd: string | null };
 
 export type MigrationFinalizationPolicy = {
@@ -19,6 +21,8 @@ export type ExecutionPolicy = {
   integrationBranch?: string;
   remote: string | null;
   requiredLandingVerification: VerificationDeclaration[];
+  /** Optional cheap check run locally before the client contacts the runner. */
+  landingPreflight?: LandingPreflight;
   /** The branch `slipjay promote` promotes the integration branch to. */
   releaseBranch?: string;
   /** Checks the exact release candidate must pass; undefined when undeclared. */
@@ -170,6 +174,19 @@ function provenance(value: unknown): ExecutionPolicy["provenance"] {
     return path;
   });
   return { fixturePaths: [...new Set(paths)].sort() };
+}
+
+/** Local argv, with no shell interpolation. Unknown fields are refused to catch typos. */
+function landingPreflight(value: unknown): LandingPreflight | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value) || Object.keys(value).some((key) => key !== "command" && key !== "timeoutMs")
+    || !Array.isArray(value.command) || !value.command.length || value.command.length > MAX_ARGS + 1
+    || value.command.some((arg) => typeof arg !== "string" || arg.length > MAX_ARG_LENGTH || arg.includes("\0"))
+    || !(value.command[0] as string).trim())
+    fail("landingPreflight must be { command: [<executable>, ...args], timeoutMs?: <positive integer> }");
+  if (value.timeoutMs !== undefined && (!Number.isInteger(value.timeoutMs) || (value.timeoutMs as number) <= 0 || (value.timeoutMs as number) > 2_147_483_647))
+    fail("landingPreflight.timeoutMs must be a positive integer no greater than 2147483647");
+  return { command: [...value.command] as string[], ...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs as number }) };
 }
 
 /** `workspaceTeardown`: a bare executable and its args, run with the workspace as cwd before it is removed. */
@@ -337,6 +354,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     integrationBranch: (parsed.integrationBranch as string | null | undefined) ?? undefined,
     remote: declaredPublicationRemote(parsed),
     requiredLandingVerification: landingGate(parsed),
+    ...(parsed.landingPreflight === undefined ? {} : { landingPreflight: landingPreflight(parsed.landingPreflight) }),
     ...releasePolicy(parsed),
     migrationFinalization: migrationFinalization(parsed.migrationFinalization),
     workspaceTeardown: workspaceTeardown(parsed.workspaceTeardown),

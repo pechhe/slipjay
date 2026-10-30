@@ -432,3 +432,15 @@ test("fixture provenance validates literal contained paths and refuses unknown k
     assert.throws(() => parseExecutionPolicy(policy({ provenance })), /provenance/);
   }
 });
+
+test("landingPreflight validates argv, timeout and unknown fields strictly", () => {
+  const parse = (landingPreflight: unknown) => parseExecutionPolicy(JSON.stringify({ version: 1, landingPreflight }));
+  assert.equal(parseExecutionPolicy('{"version":1}').landingPreflight, undefined);
+  assert.deepEqual(parse({ command: ["bun", "run", "check"] }).landingPreflight, { command: ["bun", "run", "check"] });
+  assert.deepEqual(parse({ command: ["./check", ""], timeoutMs: 120_000 }).landingPreflight, { command: ["./check", ""], timeoutMs: 120_000 });
+  for (const value of [null, [], "check", {}, { command: [] }, { command: "bun check" }, { command: [""] },
+    { command: ["  "] }, { command: ["bun", 1] }, { command: ["bun", "\0"] }, { command: ["bun"], timeOutMs: 10 },
+    ...[null, 0, -1, 0.5, "120", 2_147_483_648].map((timeoutMs) => ({ command: ["bun"], timeoutMs }))]) {
+    assert.throws(() => parse(value), /landingPreflight/);
+  }
+});
