@@ -925,8 +925,8 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   deploy then has the repository's build machine leased to it from the runner's remote
   verifier (see [Remote verification on boat](#remote-verification-on-boat)): the boat VM
   `slipjay-<owner>-<name>-<pool>`, forked from the gate's image when missing and resumed when
-  stopped, living for twice the environment's `timeoutMs` and then five idle minutes
-  after which boat stops it: release builds are occasional, so a cold resume costs little. The runner first sends it the deployed commit as a Git bundle of
+  stopped, living for twice the environment's `timeoutMs` and then thirty idle minutes
+  after which boat stops it, so its warm Docker build cache serves a working session's builds. The runner first sends it the deployed commit as a Git bundle of
   what it lacks, into its own bare repository, and gives every command of the deploy
   `SLIPJAY_MACHINE_SSH` (an executable that runs ssh to the VM with the arguments it is
   given: options, then the remote command) and `SLIPJAY_MACHINE_GIT_DIR` (that repository).

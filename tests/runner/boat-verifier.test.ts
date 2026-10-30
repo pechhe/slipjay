@@ -185,17 +185,21 @@ test("a VM forked but never named into its pool is deleted at recovery, retried 
   assert.deepEqual(await readdir(pending), ["bx_stuck"], "an orphan boat would not delete keeps its record");
 });
 
-test("the lease's fence ends an earlier lease's sessions, and refuses the machine while one stays open", async () => {
-  // A stand-in loginctl: this session (7), the desktop (c3), and an earlier lease's session (9) that ends unless refused.
+test("the lease's fence ends an earlier lease's sessions, kills one that ignores its terminate, and refuses the machine while one stays open", async () => {
+  // A stand-in loginctl: this session (7), the desktop (c3), and an earlier lease's session (9), which ends on
+  // terminate, only on SIGKILL, or never.
   const bin = await mkdtemp(join(tmpdir(), "slipjay-fence-"));
-  const fence = (refuse: boolean) => {
-    const state = join(bin, refuse ? "refused" : "ended");
-    execFileSync("sh", ["-c", `cat > ${bin}/loginctl <<'EOF'\n#!/bin/sh\ncase "$1" in\n  list-sessions) echo "7 1000 user - - active no -"; echo "c3 1000 user seat0 tty7 active no -"; [ -e ${state} ] || echo "9 1000 user - - active no -";;\n  terminate-session) ${refuse ? "exit 1" : `touch ${state}`};;\nesac\nEOF\nchmod +x ${bin}/loginctl`]);
-    try { execFileSync("bash", ["-c", `set -euo pipefail\n${FENCE_SCRIPT.replace("seq 1 60", "seq 1 2")}`], { env: { PATH: `${bin}:/usr/bin:/bin`, XDG_SESSION_ID: "7" }, stdio: "pipe" }); return 0; }
+  const fence = (mode: "terminate" | "kill" | "never") => {
+    const state = join(bin, mode);
+    const ends = (when: boolean) => when ? `touch ${state}` : "exit 1";
+    execFileSync("sh", ["-c", `cat > ${bin}/loginctl <<'EOF'\n#!/bin/sh\ncase "$1" in\n  list-sessions) echo "7 1000 user - - active no -"; echo "c3 1000 user seat0 tty7 active no -"; [ -e ${state} ] || echo "9 1000 user - - active no -";;\n  terminate-session) ${ends(mode === "terminate")};;\n  kill-session) ${ends(mode === "kill")};;\nesac\nEOF\nchmod +x ${bin}/loginctl`]);
+    const script = FENCE_SCRIPT.replace("seq 1 10", "seq 1 1").replace("seq 1 50", "seq 1 1");
+    try { execFileSync("bash", ["-c", `set -euo pipefail\n${script}`], { env: { PATH: `${bin}:/usr/bin:/bin`, XDG_SESSION_ID: "7" }, stdio: "pipe" }); return 0; }
     catch (error) { return (error as { status: number }).status; }
   };
-  assert.equal(fence(false), 0, "the earlier session ended");
-  assert.equal(fence(true), 1, "a session that will not end refuses the lease");
+  assert.equal(fence("terminate"), 0, "the earlier session ended");
+  assert.equal(fence("kill"), 0, "a session that ignores its terminate is killed");
+  assert.equal(fence("never"), 1, "a session that will not end refuses the lease");
 });
 
 test("the checkout's tree keeps a tracked file that matches an ignore rule", () => {
@@ -254,7 +258,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   };
   const scratch = await mkdtemp(join(tmpdir(), "boat-scratch-"));
   const lease = await boatVerification({ image: "bx_image", cli: "boat", run, scratch }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory, commitId, lifetimeS: 1500 });
-  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 1800"], "the command's time plus the idle lifetime");
+  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 3300"], "the command's time plus the idle lifetime");
   assert.equal(lease.machine.name, "slipjay-pechhe-yardsmith-images");
   const fence = scripts.findIndex((script) => script.includes("loginctl terminate-session"));
   assert.ok(fence >= 0 && fence < scripts.findIndex((script) => script.includes("cat > /tmp/slipjay-machine.bundle")), "an earlier lease's sessions end before the commit arrives");
@@ -264,7 +268,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   assert.match(ssh, /^#!\/bin\/sh\nexec ssh .*'-p' '19000' 'user@198\.51\.100\.1' "\$@"\n$/);
   billed = 400;
   assert.deepEqual(await lease.close(), { seconds: 300, dollars: 0.003 });
-  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 300", "a build machine idles five minutes");
+  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 1800", "a build machine idles thirty minutes");
   assert.deepEqual(await readdir(scratch), [], "the wrapper goes with the lease");
 });
 

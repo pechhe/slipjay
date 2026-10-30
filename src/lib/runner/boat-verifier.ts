@@ -30,11 +30,12 @@ const CONTROL_TIMEOUT_MS = 120_000;
  * Boat stops a VM when its lifetime runs out, snapshotting its disk for a later resume, so the lifetime is the idle
  * timer: long enough for any attempt while one runs, IDLE_LIFETIME_S once it closes. A runner restart loses no timer.
  * Fifteen minutes keeps a gate VM warm through a burst of landings without billing a quiet hour; a build machine
- * serves occasional release builds, where a cold resume costs little, so it idles only BUILD_IDLE_LIFETIME_S.
+ * keeps its warm Docker build cache between release builds (171 s warm against 25+ min cold), so it idles
+ * BUILD_IDLE_LIFETIME_S: long enough to stay warm through a working session's landings, short of a quiet afternoon.
  */
 const ATTEMPT_LIFETIME_S = 3 * 3600;
 const IDLE_LIFETIME_S = 15 * 60;
-const BUILD_IDLE_LIFETIME_S = 5 * 60;
+const BUILD_IDLE_LIFETIME_S = 30 * 60;
 /** Boat states in which a VM holds no running machine: it resumes from its snapshot. */
 const STOPPED = ["stopped", "stopping", "archived"];
 /** How long recovery keeps retrying to clean the pool after a restart. */
@@ -69,13 +70,16 @@ export const isSlotVm = (repo: string, name: string): boolean => {
  * Ends every SSH login of an earlier lease still open on a build machine (a runner that died mid-command, a lost
  * connection), with the commands and reverse tunnels it held, so a new lease never shares the machine with it. Only
  * seatless sessions other than this one go: the VM's desktop session stays, and the builder's containers and cache are
- * not sessions, so they survive. A session that has already gone needs no ending; one still open after a minute fails
+ * not sessions, so they survive. A session still open ten seconds after its terminate is killed outright (a timed-out
+ * build's commands can ignore the polite signal). A session that has already gone needs no ending; one still open after a minute fails
  * the lease, so the machine is never handed over while an earlier lease may still hold it. It never calls `exit`: under
  * `set -e` a login shell that does runs the VM's ~/.bash_logout, whose failing clear_console would replace its status.
  */
 export const FENCE_SCRIPT = `others() { loginctl list-sessions --no-legend | awk -v me="$XDG_SESSION_ID" '$3 == "user" && $4 == "-" && $1 != me { print $1 }'; }
 for session in $(others); do loginctl terminate-session "$session" 2>/dev/null || true; done
-for _ in $(seq 1 60); do [ -n "$(others)" ] || break; sleep 1; done
+for _ in $(seq 1 10); do [ -n "$(others)" ] || break; sleep 1; done
+for session in $(others); do loginctl kill-session --signal=SIGKILL "$session" 2>/dev/null || true; done
+for _ in $(seq 1 50); do [ -n "$(others)" ] || break; sleep 1; done
 open=$(others | tr '\\n' ' ')
 [ -z "$open" ] || { echo "sessions of an earlier lease are still open: $open" >&2; false; }`;
 /** Where a build machine keeps the commits it is sent: a bare repository of its own, apart from any gate checkout. */
