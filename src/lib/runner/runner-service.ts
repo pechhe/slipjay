@@ -19,6 +19,7 @@ import type { Executor, RunnerConfig } from "./runner-types.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
 import { classifyEvent } from "./failure-classification.ts";
+import { watchRepositoryProjection } from "./runner-watch-repositories.ts";
 import { projectWatchOperation } from "./runner-watch-projection.ts";
 import { shortRepositories } from "./pipeline-metrics.ts";
 import { boatVerification } from "./boat-verifier.ts";
@@ -54,7 +55,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const executor = options.executor ?? localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
   // The ledger records; these are the interpretations the runner reports from it, composed here.
   const log = openOperationLog(join(home, "operations.sqlite"), runnerLogOptions(config, executor),
-    { classify: classifyEvent, landingOutcome, watch: projectWatchOperation, deliveryState, shortRepositories });
+    { classify: classifyEvent, landingOutcome, watch: projectWatchOperation, repositories: watchRepositoryProjection(config), deliveryState, shortRepositories });
   const buildToken = env[BUILD_TOKEN_ENV]?.trim();
   const build = config.build && buildToken ? buildRoute({ origin: config.build.origin, token: buildToken }) : undefined;
   // Landing checks read Build through this runner, each operation with its own short-lived token.
@@ -98,9 +99,11 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   }), { host: config.listen?.host ?? "127.0.0.1", port: options.port ?? config.listen?.port ?? RUNNER_DEFAULT_PORT });
   buildChecks?.serve(server.url);
   // The metrics export goes to HQ shortly after each new event and on its own timer, reading this runner's API like any
-  // client; it shares nothing with the receipt drain.
+  // client. Release state comes from the same ledger-only snapshot as watch; it shares nothing with the receipt drain.
   const relay = config.build && buildToken
-    ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }), subscribe: log.subscribe }) : undefined;
+    ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }),
+      readReleaseState: () => { const { observedAt, repositories } = log.snapshot(config.name ?? hostname()); return { observedAt, repositories }; },
+      subscribe: log.subscribe }) : undefined;
   relay?.start();
   // Retained evidence is bounded: expire it at start and every six hours. One pass at a time. The ledger follows it,
   // so an attempt's evidence is recorded expired before the events explaining it go, and the WAL returns its pages then.

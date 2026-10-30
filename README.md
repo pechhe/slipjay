@@ -1847,10 +1847,10 @@ observations never enter the landing queue.
 **Pipeline metrics relay.** HQ runs where it cannot reach the runner, so a runner with
 `build.origin` and `YARDSMITH_SLIPJAY_BUILD_TOKEN` pushes its own export: at start, five seconds
 after a new ledger event (a burst goes in one pass, and an event during a pass is followed by
-another), and every 30 minutes regardless, it `POST`s pages of `/v1/metrics/events` (`{since, events, nextSeq, hasMore}`) to
+another), and every 30 minutes regardless, it `POST`s pages of `/v1/metrics/events` (`{since, events, nextSeq, hasMore, observedAt, repositories}`) to
 `{origin}/api/build/runner/pipeline` with the same bearer as Forge admission. HQ owns the cursor: a
 pass opens with an empty page to learn it and follows any 409 to the cursor HQ names, so resending
-a stored page is harmless and the relay keeps no state. A page is read again with a lower `limit`
+a stored page is harmless and the relay keeps no state. Each pass includes the watch snapshot's repository release summaries and observation time verbatim, including idle keepalives, so Forge can show release waits without new events. The summary counts toward the same body cap as the events. A page is read again with a lower `limit`
 until its body fits 3 MiB. It shares nothing with the landing queue or the receipt drain; every
 read and POST is aborted after 30 seconds, and a failure is logged to the runner's stderr and
 retried at the next tick.
@@ -1954,6 +1954,27 @@ Every connection attempt emits `connecting`, and a failed attempt emits
 credential or transport error details. Missing credentials are retried inside the
 watch process after 30 seconds; a successful credential is cached while ordinary
 transport retries wait two seconds.
+
+The snapshot's `repositories` lists every configured repository, its configured screening
+places and landing/screen-failure counts since the runner host's local midnight. A
+release entry reports the latest published candidate, the last **successful** production
+deploy separately from its newest unsuccessful or open attempt, recorded health checks,
+the next audit slot and the candidate's current hold. Repository policy is recorded by
+the queue's existing policy discovery and landing/deploy scheduling; until that first
+successful read, its release entry is unknown and reported as null. Watch operations
+carry the landing description's first line once fetched (or the submitted chore title),
+and a one-based screening `lane` until that screen is admitted to authoritative work.
+
+This reporting runs on the runner, not the watch client. Testing a new CLI against an
+older runner does not add snapshot fields: the runner must also run the new source.
+Snapshots use ledger data only, with no git or network calls. A declared deploy
+environment named `images` supplies image-build status: the candidate's latest attempt
+is preferred, otherwise the latest image deploy is shown. A candidate with no image
+attempt yet, or one queued/running, waits on images. Repositories without that
+environment report null.
+Health is null on successful deployments that recorded no health-check timing. The
+reported audit hold uses the same `promotionRefusal` as promotion itself: development
+mode does not currently require a fresh green nightly audit before each promotion.
 
 `GET /v1/queue` returns both ordered lanes and their paused and held facts, recent
 release outcomes and the latest completed staging attempt per repository, including failed attempts and their recorded result. Timing includes `amberAfterMs`, twice the recorded stage median, and the active command deadline; absent evidence returns a null threshold. Missing timing evidence and the hourly

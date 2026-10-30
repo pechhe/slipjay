@@ -324,6 +324,13 @@ export function createRunnerQueue(input: {
     const releaseBase = await jj(checkout, ["log", "-r", `${policy.releaseBranch}@${policy.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "");
     return releaseBase ? readExactExecutionPolicy(join(checkout, ".git"), releaseBase).then((exact) => exact.configuration, () => null) : null;
   }
+  function reportPolicy(repo: string, configuration: Awaited<ReturnType<typeof releasePolicy>>, applied: Awaited<ReturnType<typeof releasePolicy>>): void {
+    if (!configuration) return;
+    const policy = { integrationBranch: configuration.integrationBranch ?? "main", releases: Boolean(configuration.releaseBranch && configuration.deployments?.environments.production),
+      stagingSkipped: skipsStaging(applied), promotionAudit: Boolean(applied?.audit), images: Boolean(configuration.deployments?.environments.images), audit: configuration.audit ? { timeOfDay: configuration.audit.timeOfDay, timeZone: configuration.audit.timeZone } : null };
+    const previous = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "repository_policy" && row.event.repo === repo)?.event;
+    if (previous?.type !== "repository_policy" || JSON.stringify(previous.policy) !== JSON.stringify(policy)) append(RUNNER_CONTROL_ID, { type: "repository_policy", repo, policy });
+  }
   /** Whether the release branch's policy skips staging for this commit: a candidate cannot switch the mode on for itself. */
   const stagingSkipped = async (repo: string, commitId: string): Promise<boolean> => skipsStaging(await releasePolicy(repo, commitId));
   /** What a landing records of the environments its commit declares; nothing when the policy cannot be read. */
@@ -333,13 +340,16 @@ export function createRunnerQueue(input: {
       if (!configuration) return {};
       const applied = await releasePolicy(repo, commitId);
       const skipped = skipsStaging(applied);
+      reportPolicy(repo, configuration, applied);
       return { repo, ...applied ? { process: skipped ? "development" as const : "standard" as const } : {}, declaredEnvironments: Object.keys(configuration.deployments?.environments ?? {}).filter((name) => name !== "staging" || !skipped).sort() };
     } catch { return {}; }
   }
   /** Ask the schedulers about every environment and the reset the commit declares; they decide whether one is due. */
   async function schedule(repo: string, commitId: string, readPolicy = readExactExecutionPolicy): Promise<void> {
     const { configuration } = await readPolicy(join(repoCheckout(repo), ".git"), commitId);
-    const skipped = await stagingSkipped(repo, commitId);
+    const applied = await releasePolicy(repo, commitId);
+    const skipped = skipsStaging(applied);
+    reportPolicy(repo, configuration, applied);
     if (configuration?.deployments) scheduler.consider(repo, skipped
       ? Object.fromEntries(Object.entries(configuration.deployments.environments).filter(([name]) => name !== "staging")) : configuration.deployments.environments);
     // Without a staging deploy to follow, the landing itself is what gets pre-verified.
@@ -367,7 +377,9 @@ export function createRunnerQueue(input: {
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", context.integrationBranch]);
       const head = (await revisionFacts(checkout, `${context.integrationBranch}@${remote}`)).commitId;
       knownHeads.set(repo, head);
-      auditScheduler.consider(repo, (await readExactExecutionPolicy(join(checkout, ".git"), head)).configuration?.audit ?? null);
+      const configuration = (await readExactExecutionPolicy(join(checkout, ".git"), head)).configuration;
+      reportPolicy(repo, configuration, await releasePolicy(repo, head));
+      auditScheduler.consider(repo, configuration?.audit ?? null);
     });
   }
   /** Discover each configured repository's audit; one the remote could not be read for is tried again later. */
@@ -1190,6 +1202,7 @@ export function createRunnerQueue(input: {
       if (prefix || retainedSource) await duplicateLandingSource(checkout, operation.commitId, branch);
       else await jj(checkout, ["edit", operation.commitId]);
       const description = await jj(checkout, ["log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
+      append(operation.id, { type: "landing_title", title: description.split("\n")[0] ?? "" });
       const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
       const identity = log.events({ operationId: operation.id }).findLast((row) => row.event.type === "identity")?.event;
       append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") ?? (identity?.type === "identity" ? identity.spec : undefined) });

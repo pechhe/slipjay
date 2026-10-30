@@ -2,12 +2,19 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import { startRunner } from "../../src/lib/runner/runner-service.ts";
-import { createPipelineRelay, localPipelineReader } from "../../src/lib/build/build-pipeline-relay.ts";
+import { createPipelineRelay, localPipelineReader, PIPELINE_RELAY_INTERVAL_MS } from "../../src/lib/build/build-pipeline-relay.ts";
 import type { PipelinePage } from "../../src/lib/build/build-pipeline-relay.ts";
 
-type Sent = { since: number; events: { seq: number }[]; nextSeq: number; hasMore: boolean };
+type ReleaseState = Pick<import("../../src/lib/runner/runner-types.ts").QueueSnapshot, "observedAt" | "repositories">;
+type Sent = { since: number; events: { seq: number }[]; nextSeq: number; hasMore: boolean } & Partial<ReleaseState>;
+const releaseState = (observedAt = "2026-10-30T13:00:00.000Z"): ReleaseState => ({ observedAt, repositories: [{
+  repo: "fixture/repo", screeningLanes: 3, today: { landed: 2, failedScreens: 1 },
+  release: { integrationBranch: "develop", candidate: { commitId: "candidate", landedAt: observedAt }, stagingSkipped: true,
+    production: { live: null, latestAttempt: null }, images: null, audit: null,
+    waitingOn: { kind: "audit", detail: "The latest audit failed and no cause is recorded." } },
+}] });
 const events = (count: number, size = 0) => Array.from({ length: count }, (_, index) => ({ seq: index + 1, pad: "x".repeat(size) }));
 
 /** The runner's export over `all`, as `GET /v1/metrics/events` pages it. */
@@ -191,4 +198,74 @@ test("a runner whose HQ is unreachable still serves and shuts down promptly", as
     assert.equal(health.status, 200);
     await runner.close();
   } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+
+test("every bounded page carries the watch release state verbatim, including the last page", async () => {
+  const hq = fakeHq(5);
+  const state = releaseState();
+  let observations = 0;
+  const { once, logged } = relay(hq, exportOf(events(40, 1000)), {
+    readReleaseState: () => { observations++; return state; }, maxBodyBytes: 12_000,
+  });
+  await once();
+  assert.equal(observations, 1);
+  assert.equal(hq.state.cursor, 40);
+  assert.ok(hq.state.bodies.filter((body) => body.events.length).length > 1);
+  for (const body of hq.state.bodies) {
+    assert.equal(body.observedAt, state.observedAt);
+    assert.deepEqual(body.repositories, state.repositories);
+    assert.ok(Buffer.byteLength(JSON.stringify(body)) <= 12_000);
+  }
+  assert.equal(hq.state.bodies.at(-1)!.hasMore, false);
+  assert.deepEqual(logged, []);
+});
+
+test("the idle thirty-minute keepalive refreshes repository observations without new events", async () => {
+  vi.useFakeTimers();
+  const hq = fakeHq();
+  let observations = 0;
+  const { instance, logged } = relay(hq, exportOf([]), {
+    readReleaseState: () => releaseState(new Date(Date.UTC(2026, 9, 30, 13, observations++ * 30)).toISOString()),
+  });
+  try {
+    instance.start(); await instance.idle();
+    assert.equal(observations, 1);
+    await vi.advanceTimersByTimeAsync(PIPELINE_RELAY_INTERVAL_MS);
+    await instance.idle();
+    assert.equal(observations, 2);
+    const keepalive = hq.state.bodies.at(-1)!;
+    assert.equal(keepalive.observedAt, "2026-10-30T13:30:00.000Z");
+    assert.deepEqual(keepalive.repositories, releaseState("2026-10-30T13:30:00.000Z").repositories);
+    assert.deepEqual(keepalive.events, []);
+    assert.equal(keepalive.nextSeq, 0);
+    assert.deepEqual(logged, []);
+  } finally { instance.close(); vi.useRealTimers(); }
+});
+
+test("a release event wakes a fresh observation even when the metrics export has no new rows", async () => {
+  const hq = fakeHq();
+  let notify = () => {};
+  let state = releaseState();
+  const { instance } = relay(hq, exportOf([]), { readReleaseState: () => state,
+    subscribe: (listener) => { notify = listener; return () => {}; }, wakeDelayMs: 0 });
+  try {
+    instance.start(); await instance.idle();
+    state = releaseState("2026-10-30T13:01:00.000Z");
+    state.repositories[0]!.release!.waitingOn = { kind: "deploy", detail: null };
+    notify();
+    await waitFor(() => hq.state.bodies.some((body) => body.observedAt === state.observedAt));
+    await instance.idle();
+    assert.deepEqual(hq.state.bodies.at(-1)!.repositories, state.repositories);
+  } finally { instance.close(); }
+});
+
+test("an oversized release summary is logged without bypassing the body cap", async () => {
+  const hq = fakeHq();
+  const state = releaseState();
+  state.repositories[0]!.release!.waitingOn.detail = "x".repeat(5000);
+  const { once, logged } = relay(hq, exportOf([]), { readReleaseState: () => state, maxBodyBytes: 2000 });
+  await once();
+  assert.equal(hq.state.bodies.length, 0);
+  assert.match(logged.join("\n"), /repository summary is larger than 2000 bytes/);
 });

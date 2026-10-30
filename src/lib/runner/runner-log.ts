@@ -42,7 +42,7 @@ export const LEDGER_FACT_MS = 365 * 24 * 60 * 60 * 1000;
  * so a scan for retained evidence stays bounded by the window instead of growing with every submission ever.
  */
 const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEvent["type"]>([
-  ...TERMINAL_EVENT_TYPES, "submitted", "identity", "classified", "integrated", "publication_intent", "held",
+  ...TERMINAL_EVENT_TYPES, "repository_policy", "landing_title", "submitted", "identity", "classified", "integrated", "publication_intent", "held",
   "integration_held", "integration_recovered", "integration_released", "boat_circuit", "verification_passed", "verification_skipped",
   "attempt_prepared", "attempt_invalidated", "audit_head", "audit_cause", "repair_claimed", "repair_released",
   "provenance", "build_admitted", "build_receipt", "evidence_expired", "submission_request"]);
@@ -465,6 +465,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         const row = newestOfType.get(RUNNER_CONTROL_ID, type) as { seq: number } | undefined;
         return row ? [row.seq] : [];
       }));
+      for (const row of db.prepare("SELECT MAX(seq) AS seq FROM events WHERE type = 'repository_policy' GROUP BY json_extract(data, '$.repo')").all() as { seq: number }[]) pinned.add(row.seq);
       // An open boat circuit is live state even after its opening event ages past the history window.
       for (const row of db.prepare("SELECT MAX(seq) AS seq FROM events WHERE type = 'boat_circuit' GROUP BY json_extract(data, '$.repo')").all() as { seq: number }[]) pinned.add(row.seq);
       for (const row of db.prepare("SELECT seq, json_extract(data, '$.commitId') AS commitId FROM events WHERE operation_id = ? AND at <= ?")
@@ -485,7 +486,16 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         const all = (snapshotRows.all() as EventRow[]).map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
         const open = queue().map((op) => projections.watch ? projections.watch(op, all, now) : unwatched(op));
         const repos = (db.prepare("SELECT DISTINCT json_extract(data, '$.repo') AS repo FROM events WHERE type = 'submitted'").all() as { repo: string }[]).map((row) => row.repo);
+        const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+        const reporting = projections.repositories ? (db.prepare(`SELECT seq, operation_id, at, data FROM events WHERE
+          seq IN (SELECT MAX(seq) FROM events WHERE type = 'repository_policy' GROUP BY json_extract(data, '$.repo'))
+          OR (type = 'failed' AND at >= ? AND json_extract(data, '$.stage') = 'screening')
+          OR seq = (SELECT MAX(seq) FROM events WHERE type IN ('submitted', 'stage', 'landed', 'deployed', 'released', 'verified', 'audited',
+            'failed', 'cancelled', 'superseded', 'yielded', 'audit_head', 'audit_cause', 'paused', 'resumed')
+            OR (type = 'progress' AND json_extract(data, '$.line') LIKE 'Not promoting %')) ORDER BY seq`).all(midnight.toISOString()) as EventRow[])
+          .map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent })) : [];
         return { version: 1, runner, seq, observedAt: now.toISOString(),
+          repositories: projections.repositories?.(log, reporting, now) ?? [],
           lanes: { serial: open.filter((op) => op.kind !== "deploy"), deploy: open.filter((op) => op.kind === "deploy") },
           paused: paused(), held: held(),
           recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10).map(withoutRuns),

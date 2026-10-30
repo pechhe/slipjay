@@ -1,3 +1,5 @@
+import type { QueueSnapshot } from "../runner/runner-types.ts";
+
 /** How often the relay pushes with nothing new; HQ treats pipeline data older than three hours as stale. */
 export const PIPELINE_RELAY_INTERVAL_MS = 30 * 60 * 1000;
 /** How long after a new ledger event the relay pushes, so a burst of events goes in one pass. */
@@ -33,6 +35,8 @@ export function createPipelineRelay(options: {
   origin: string; token: string;
   /** The local export, `GET /v1/metrics/events?since=&limit=`; throws when it cannot answer within the signal. */
   readPage(since: number, limit: number, signal: AbortSignal): Promise<PipelinePage>;
+  /** The watch snapshot's ledger-only release projection, captured once per pass (including idle keepalives). */
+  readReleaseState?(): Pick<QueueSnapshot, "observedAt" | "repositories">;
   /** The ledger's new events; each one schedules a pass shortly after it, so HQ follows the runner within seconds. */
   subscribe?(listener: () => void): () => void;
   intervalMs?: number; wakeDelayMs?: number; timeoutMs?: number; maxBodyBytes?: number; fetch?: Fetch; log?(message: string): void;
@@ -49,7 +53,7 @@ export function createPipelineRelay(options: {
   const stopped = new AbortController();
   const bounded = () => AbortSignal.any([stopped.signal, AbortSignal.timeout(timeoutMs)]);
 
-  async function post(page: { since: number; events: unknown[]; nextSeq: number; hasMore: boolean }, body = JSON.stringify(page)): Promise<HqAnswer> {
+  async function post(body: string): Promise<HqAnswer> {
     let response: Response;
     try {
       response = await call(url, { method: "POST", redirect: "error", signal: bounded(), body,
@@ -63,10 +67,10 @@ export function createPipelineRelay(options: {
   }
 
   /** The page after `since`, read again with a lower `limit` until its body fits HQ's cap. */
-  async function boundedPage(since: number) {
+  async function boundedPage(since: number, releaseState: ReturnType<NonNullable<typeof options.readReleaseState>> | undefined) {
     for (let limit = MAX_PAGE_LIMIT; ; limit = Math.floor(limit / 2)) {
       const page = await options.readPage(since, limit, bounded());
-      const body = JSON.stringify({ since, events: page.events, nextSeq: page.nextSeq, hasMore: page.hasMore });
+      const body = JSON.stringify({ since, events: page.events, nextSeq: page.nextSeq, hasMore: page.hasMore, ...releaseState });
       if (Buffer.byteLength(body) <= maxBytes) return { page, body };
       if (limit === 1) throw new Error(`the event after ${since} is larger than ${maxBytes} bytes`);
     }
@@ -74,10 +78,13 @@ export function createPipelineRelay(options: {
 
   /** One pass: ask HQ where it is with an empty page, then send pages from there until the export is caught up. */
   async function pass(): Promise<void> {
+    const releaseState = options.readReleaseState?.();
     let since = 0, rewinds = 0, probing = true;
     for (let pages = 0; pages < MAX_PAGES_PER_PASS && !closed;) {
-      const sending = probing ? { page: { events: [], nextSeq: since, hasMore: false }, body: undefined } : await boundedPage(since);
-      const answer = await post({ since, ...sending.page }, sending.body);
+      const sending = probing ? { page: { events: [], nextSeq: since, hasMore: false },
+        body: JSON.stringify({ since, events: [], nextSeq: since, hasMore: false, ...releaseState }) } : await boundedPage(since, releaseState);
+      if (Buffer.byteLength(sending.body) > maxBytes) throw new Error(`the repository summary is larger than ${maxBytes} bytes`);
+      const answer = await post(sending.body);
       if (answer.kind === "failed") return log(answer.reason);
       if (answer.kind === "rewind") {
         if (++rewinds > MAX_REWINDS_PER_PASS) return log("HQ's cursor kept moving; trying again next time");

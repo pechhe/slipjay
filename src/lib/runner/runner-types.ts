@@ -141,7 +141,11 @@ export type FailureProvenance = {
   fixture: { paths: { path: string; tree: string }[]; truncated?: true } | { unavailable: string };
 };
 
+export type WatchRepositoryPolicy = { integrationBranch: string; releases: boolean; stagingSkipped: boolean; promotionAudit?: boolean; images?: boolean; audit: { timeOfDay: string; timeZone: string } | null };
+
 export type OperationEvent =
+  | { type: "repository_policy"; repo: string; policy: WatchRepositoryPolicy }
+  | { type: "landing_title"; title: string }
   | { type: "provenance"; value: FailureProvenance }
   | { type: "repair_claimed"; claimId: string; tokenSha256: string; source: string; workspace: string; by: string }
   | { type: "repair_released"; claimId: string; by: string; reason: "released" | "revoked" }
@@ -680,6 +684,8 @@ export type RunnerConfig = {
 export type HeldIntegrationState = { repo: string; commitId: string; since: string; reason: string; retries: number; targetReached?: boolean; branch?: string; remote?: string };
 
 export type WatchOperation = Operation & {
+  title?: string;
+  lane?: number;
   stageStartedAt?: string;
   /** The Spec its submitter named: the Build item or Issue the submitting workspace was started for, or a `Spec:` trailer. */
   spec?: number;
@@ -703,14 +709,33 @@ export type OperationLogProjections = {
   landingOutcome?(operation: LandingOperation, history: StoredEvent[]): LandingOutcome;
   /** The watch timing and kill permission a snapshot's lanes report; absent, lanes carry no timing and no kill permission. */
   watch?(operation: Operation, events: readonly StoredEvent[], now: Date): WatchOperation;
+  repositories?(log: OperationLog, events: readonly StoredEvent[], now: Date): WatchRepository[];
   /** Build's receipt-delivery state a snapshot reports; absent, the snapshot reports none. */
   deliveryState?(log: OperationLog): QueueSnapshot["build"];
   /** The repositories whose landings are short at `p90Ms`, keyed as `repositoryKey`, read from the budget-window events; absent, none is short. */
   shortRepositories?(read: (since: Date) => StoredEvent[], now: Date, p90Ms: number): ReadonlySet<string>;
 };
 
+export type WatchRepository = {
+  repo: string; screeningLanes: number; today: { landed: number; failedScreens: number }; release: WatchRelease | null;
+};
+export type WatchRelease = {
+  integrationBranch: string;
+  candidate: { commitId: string; landedAt: string } | null;
+  stagingSkipped: boolean;
+  production: {
+    live: { commitId: string; deployedAt: string; healthy: boolean | null } | null;
+    latestAttempt: { commitId: string; status: "running" | "failed" | "rolled_back"; at: string; reason: string | null } | null;
+  };
+  /** Image builds are deploys to the environment literally named `images`. */
+  images: { commitId: string; status: "built" | "building" | "failed" | "none"; at: string | null; reason: string | null } | null;
+  audit: { latest: { status: "green" | "failed"; commitId: string | null; finishedAt: string } | null; nextRunAt: string | null } | null;
+  waitingOn: { kind: "up_to_date" | "paused" | "images" | "audit" | "verification" | "deploy" | "approval" | "failed"; detail: string | null };
+};
+
 export type QueueSnapshot = {
   version: 1; runner: string; seq: number; observedAt: string;
+  repositories: WatchRepository[];
   lanes: { serial: WatchOperation[]; deploy: WatchOperation[] };
   paused: { by: string; at: string } | null; held: HeldIntegrationState[];
   /** Finished history carries its result but not its runs, which `runner log` and the outcome endpoint keep. */

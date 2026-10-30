@@ -8,8 +8,16 @@ export function projectWatchOperation(operation: Operation, events: readonly Sto
   const samples: number[] = [];
   let stageStartedAt: string | undefined;
   let spec: number | undefined;
+  let title: string | undefined;
+  let lane: number | undefined;
   for (const stored of events) {
     const event = stored.event;
+    if (stored.operationId === operation.id) {
+      if (event.type === "landing_title") title = event.title;
+      if (event.type === "submitted" && (event.kind === undefined || event.kind === "landing")) title ??= event.chore?.title.split("\n")[0];
+      if (event.type === "screen_started") lane = event.slot + 1;
+      if (event.type === "screen_admitted") lane = undefined;
+    }
     if (event.type === "identity" && stored.operationId === operation.id) spec = event.spec;
     if (event.type === "submitted") kinds.set(stored.operationId, event.kind ?? "landing");
     if (event.type === "stage" || (TERMINAL_EVENT_TYPES as readonly string[]).includes(event.type)) {
@@ -33,7 +41,7 @@ export function projectWatchOperation(operation: Operation, events: readonly Sto
   const state = !running ? "unknown" : deadline !== null && now.getTime() > deadline ? "red"
     : amberAfterMs === null || !stageStartedAt ? "unknown" : now.getTime() - Date.parse(stageStartedAt) > amberAfterMs ? "amber" : "normal";
   const allowed = running && operation.kind !== "deploy" && KILLABLE_STAGES.includes(operation.stage);
-  return { ...operation, ...(stageStartedAt ? { stageStartedAt } : {}), ...(spec === undefined ? {} : { spec }),
+  return { ...operation, ...(title ? { title } : {}), ...(operation.status === "running" && lane !== undefined ? { lane } : {}), ...(stageStartedAt ? { stageStartedAt } : {}), ...(spec === undefined ? {} : { spec }),
     timing: { state, medianMs, amberAfterMs, samples: samples.length, commandDeadlineAt: deadline === null ? null : new Date(deadline).toISOString() },
     kill: { allowed, reason: allowed ? null : !running ? "Operation is not running" : operation.kind === "deploy" ? "Deploy operations cannot be killed" : `${operation.stage} is past verification and cannot be killed` } };
 }
