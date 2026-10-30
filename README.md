@@ -745,10 +745,9 @@ runner's environment, which the unit's `bws run` supplies from Bitwarden.
 Each repository has a pool of VMs, one per verification place, named
 `slipjay-<owner>-<name>-<slot>`, forked from the image when missing and resumed when
 stopped. Boat stops a VM when its lifetime runs out, snapshotting its disk for the next resume, so
-the lifetime is the pool's idle timer: three hours while an attempt runs, an hour once it
+the lifetime is the pool's idle timer: three hours while an attempt runs, fifteen minutes once it
 closes, and a runner restart loses no timer. A resumed VM takes one to two and a half minutes to restore its disk
-and answer, longer than most gates' own checks, so the pool stays warm through a working session rather than
-between landings. The runner lists the pool in every state (boat's
+and answer, so fifteen minutes keeps the pool warm through a burst of landings while a quiet gap stops billing. The runner lists the pool in every state (boat's
 `list` shows only running sandboxes unless asked), so a stopped VM is resumed rather than forked
 again, and a second VM under a slot's name is deleted. A resumed VM answers ssh about a minute before boat has
 restored its disk, and finishing the restore swaps the filesystem under any running command, so the runner sets a VM up
@@ -925,8 +924,8 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   deploy then has the repository's build machine leased to it from the runner's remote
   verifier (see [Remote verification on boat](#remote-verification-on-boat)): the boat VM
   `slipjay-<owner>-<name>-<pool>`, forked from the gate's image when missing and resumed when
-  stopped, living for twice the environment's `timeoutMs` and then the idle hour
-  after which boat stops it. The runner first sends it the deployed commit as a Git bundle of
+  stopped, living for twice the environment's `timeoutMs` and then five idle minutes
+  after which boat stops it: release builds are occasional, so a cold resume costs little. The runner first sends it the deployed commit as a Git bundle of
   what it lacks, into its own bare repository, and gives every command of the deploy
   `SLIPJAY_MACHINE_SSH` (an executable that runs ssh to the VM with the arguments it is
   given: options, then the remote command) and `SLIPJAY_MACHINE_GIT_DIR` (that repository).

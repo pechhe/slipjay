@@ -143,7 +143,7 @@ test("an ssh connection failure during setup names boat, not our setup", async (
   const lost = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 255, "ssh: connect to host 198.51.100.1 port 19000: Connection refused"));
   await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: lost.run })), /Remote executor unavailable \(boat\): clean on slipjay-pechhe-yardsmith-0/);
-  assert.ok(lost.boat().includes("extend bx_old --ttl 3600"), "a failed setup leaves its VM an hour, not the attempt's three hours");
+  assert.ok(lost.boat().includes("extend bx_old --ttl 900"), "a failed setup leaves its VM fifteen minutes, not the attempt's three hours");
 });
 
 test("boat API retries are bounded by the opening budget and report an availability failure", async () => {
@@ -226,7 +226,7 @@ test("concurrent gate commands reaching Build share one tunnel per attempt", asy
   assert.ok(!ready.calls.some((call) => call.includes("ExitOnForwardFailure=yes")), "no command opens its own listener");
   await attempt.close();
   assert.ok(ready.calls.some((call) => call.includes("-O") && call.includes("exit")), "the master closes with the attempt");
-  assert.equal(ready.boat().at(-1), "extend bx_old --ttl 3600", "a closed attempt leaves its VM an hour before boat stops it");
+  assert.equal(ready.boat().at(-1), "extend bx_old --ttl 900", "a closed attempt leaves its VM fifteen minutes before boat stops it");
   assert.ok(ready.calls.some((call) => call.join(" ").includes("'\\''+refs/slipjay/boat/0/*:refs/slipjay/boat/0/*'\\''")),
     "the slot's refs are forced, since the next candidate need not descend from one that never landed");
 });
@@ -254,7 +254,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   };
   const scratch = await mkdtemp(join(tmpdir(), "boat-scratch-"));
   const lease = await boatVerification({ image: "bx_image", cli: "boat", run, scratch }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory, commitId, lifetimeS: 1500 });
-  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 5100"], "the command's time plus the idle lifetime");
+  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 1800"], "the command's time plus the idle lifetime");
   assert.equal(lease.machine.name, "slipjay-pechhe-yardsmith-images");
   const fence = scripts.findIndex((script) => script.includes("loginctl terminate-session"));
   assert.ok(fence >= 0 && fence < scripts.findIndex((script) => script.includes("cat > /tmp/slipjay-machine.bundle")), "an earlier lease's sessions end before the commit arrives");
@@ -264,7 +264,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   assert.match(ssh, /^#!\/bin\/sh\nexec ssh .*'-p' '19000' 'user@198\.51\.100\.1' "\$@"\n$/);
   billed = 400;
   assert.deepEqual(await lease.close(), { seconds: 300, dollars: 0.003 });
-  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 3600");
+  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 300", "a build machine idles five minutes");
   assert.deepEqual(await readdir(scratch), [], "the wrapper goes with the lease");
 });
 

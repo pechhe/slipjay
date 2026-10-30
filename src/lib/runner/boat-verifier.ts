@@ -29,9 +29,12 @@ const CONTROL_TIMEOUT_MS = 120_000;
 /**
  * Boat stops a VM when its lifetime runs out, snapshotting its disk for a later resume, so the lifetime is the idle
  * timer: long enough for any attempt while one runs, IDLE_LIFETIME_S once it closes. A runner restart loses no timer.
+ * Fifteen minutes keeps a gate VM warm through a burst of landings without billing a quiet hour; a build machine
+ * serves occasional release builds, where a cold resume costs little, so it idles only BUILD_IDLE_LIFETIME_S.
  */
 const ATTEMPT_LIFETIME_S = 3 * 3600;
-const IDLE_LIFETIME_S = 60 * 60;
+const IDLE_LIFETIME_S = 15 * 60;
+const BUILD_IDLE_LIFETIME_S = 5 * 60;
 /** Boat states in which a VM holds no running machine: it resumes from its snapshot. */
 const STOPPED = ["stopped", "stopping", "archived"];
 /** How long recovery keeps retrying to clean the pool after a restart. */
@@ -312,12 +315,12 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
     },
     async lease({ repo, pool, gitDirectory, commitId, lifetimeS, signal }): Promise<MachineLease> {
       // The command's own time, then the idle lifetime: a runner that dies mid-command still leaves the VM to stop.
-      const vm = await machine(repo, pool, signal, lifetimeS + IDLE_LIFETIME_S);
+      const vm = await machine(repo, pool, signal, lifetimeS + BUILD_IDLE_LIFETIME_S);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       const billed = await usage(vm, signal);
       const scratch = await scratchDirectory();
       const idle = async () => {
-        await boat(["extend", vm.id, "--ttl", String(IDLE_LIFETIME_S)]).catch(() => undefined);
+        await boat(["extend", vm.id, "--ttl", String(BUILD_IDLE_LIFETIME_S)]).catch(() => undefined);
         await rm(scratch, { recursive: true, force: true });
       };
       try {
