@@ -141,7 +141,7 @@ export type FailureProvenance = {
   fixture: { paths: { path: string; tree: string }[]; truncated?: true } | { unavailable: string };
 };
 
-export type WatchRepositoryPolicy = { integrationBranch: string; releases: boolean; stagingSkipped: boolean; promotionAudit?: boolean; images?: boolean; audit: { timeOfDay: string; timeZone: string } | null };
+export type WatchRepositoryPolicy = { integrationBranch: string; releases: boolean; stagingSkipped: boolean; promotionAudit?: boolean; staging?: boolean; images?: boolean; audit: { timeOfDay: string; timeZone: string } | null };
 
 export type OperationEvent =
   | { type: "repository_policy"; repo: string; policy: WatchRepositoryPolicy }
@@ -723,6 +723,8 @@ export type WatchRelease = {
   integrationBranch: string;
   candidate: { commitId: string; landedAt: string } | null;
   stagingSkipped: boolean;
+  /** Staging uses the same ledger-derived live/attempt facts as production; null when skipped or undeclared. */
+  staging: WatchRelease["production"] | null;
   production: {
     live: { commitId: string; deployedAt: string; healthy: boolean | null } | null;
     latestAttempt: { commitId: string; status: "running" | "failed" | "rolled_back"; at: string; reason: string | null } | null;

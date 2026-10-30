@@ -1959,7 +1959,12 @@ The snapshot's `repositories` lists every configured repository, its configured 
 places and landing/screen-failure counts since the runner host's local midnight. A
 release entry reports the latest published candidate, the last **successful** production
 deploy separately from its newest unsuccessful or open attempt, recorded health checks,
-the next audit slot and the candidate's current hold. Repository policy is recorded by
+the next audit slot and the candidate's current hold. `release.staging` reports the same
+`{ live, latestAttempt }` shape as `release.production`: `live` is the last successful
+deploy (`commitId`, `deployedAt`, `healthy`), while `latestAttempt` is a newer running,
+failed or rolled-back attempt (`commitId`, `status`, `at`, `reason`). Each is null
+when there is no such ledger fact. `release.staging` itself is null when staging is
+skipped or the repository declares no staging environment. Repository policy is recorded by
 the queue's existing policy discovery and landing/deploy scheduling; until that first
 successful read, its release entry is unknown and reported as null. Watch operations
 carry the landing description's first line once fetched (or the submitted chore title),

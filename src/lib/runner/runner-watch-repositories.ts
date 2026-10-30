@@ -1,7 +1,7 @@
 import { auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
 import { nextAuditSlot } from "../release/audit-schedule.ts";
 import { repositoryKey } from "./runner-contract.ts";
-import type { OperationLog, RunnerConfig, StoredEvent, WatchRelease, WatchRepository } from "./runner-types.ts";
+import type { DeployOperation, OperationLog, RunnerConfig, StoredEvent, WatchRelease, WatchRepository } from "./runner-types.ts";
 
 /** Cache ledger reads between events; heartbeats only advance the wall-clock schedule. */
 export function watchRepositoryProjection(config: Pick<RunnerConfig, "repos">) {
@@ -33,10 +33,8 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     if (!policy?.releases) return result;
     const candidate = log.lastLanded(repo);
     const deploys = log.deployments(repo, "production");
-    const live = deploys.find((entry) => entry.result?.type === "deployed");
-    const latest = deploys.find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
-    const record = live?.result?.type === "deployed" ? live.result.record : null;
-    const attempt = latest && latest.id !== live?.id && latest.result?.type !== "deployed" ? latest : null;
+    const production = deploymentState(deploys);
+    const stagingDeploys = log.deployments(repo, "staging");
     const imageDeploys = policy.images ? log.deployments(repo, "images").filter((entry) => entry.status !== "superseded" && entry.status !== "cancelled") : [];
     const candidateImages = imageDeploys.find((entry) => entry.commitId === candidate?.commitId);
     const imageDeploy = candidateImages ?? imageDeploys[0];
@@ -52,12 +50,12 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     const verification = candidate ? log.verifications(repo).find((entry) => entry.commitId === candidate.commitId) : undefined;
     const release = candidate ? log.releases(repo).find((entry) => entry.commitId === candidate.commitId) : undefined;
     const candidateAttempt = deploys.find((entry) => entry.commitId === candidate?.commitId);
-    const staging = log.deployments(repo, "staging").find((entry) => entry.commitId === candidate?.commitId);
+    const staging = stagingDeploys.find((entry) => entry.commitId === candidate?.commitId);
     const pendingDeploy = log.openOperations(repo).some((entry) => entry.kind === "release" || entry.kind === "deploy");
     const failed = [verification, release, candidateAttempt, staging, candidateImages].find((entry) => entry?.result?.type === "failed");
     let waitingOn: WatchRelease["waitingOn"];
     if (log.paused()) waitingOn = { kind: "paused", detail: "The runner is paused." };
-    else if (!candidate || candidate.commitId === live?.commitId) waitingOn = { kind: "up_to_date", detail: null };
+    else if (!candidate || candidate.commitId === production.live?.commitId) waitingOn = { kind: "up_to_date", detail: null };
     else if (imagesPending) waitingOn = { kind: "images", detail: null };
     else if (refusal) waitingOn = { kind: "audit", detail: refusal };
     else if (verification?.status === "queued" || verification?.status === "running") waitingOn = { kind: "verification", detail: null };
@@ -73,12 +71,8 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     result.release = {
       integrationBranch: policy.integrationBranch, candidate: candidate ? { commitId: candidate.commitId, landedAt: candidate.at } : null,
       stagingSkipped: policy.stagingSkipped,
-      production: {
-        live: live ? { commitId: live.commitId, deployedAt: live.finishedAt!,
-          healthy: record?.projects.some((project) => project.timings?.health) ? record.projects.every((project) => !project.timings?.health || project.timings.health.outcome === "passed") : null } : null,
-        latestAttempt: attempt ? { commitId: attempt.commitId, status: attempt.result?.type === "failed" ? attempt.result.deployment?.rollback?.automatic ? "rolled_back" : "failed" : "running",
-          at: attempt.finishedAt ?? attempt.startedAt ?? attempt.submittedAt, reason: attempt.result?.type === "failed" ? attempt.result.reason : null } : null,
-      },
+      staging: !policy.stagingSkipped && policy.staging ? deploymentState(stagingDeploys) : null,
+      production,
       images,
       audit: policy.audit ? { latest: summary.latest ? { status: summary.latest.status, commitId: summary.latest.commit, finishedAt: summary.latest.finishedAt } : null,
         nextRunAt: new Date(nextAuditSlot(now.getTime(), policy.audit)).toISOString() } : null,
@@ -86,4 +80,18 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     };
     return result;
   });
+}
+
+/** Keep the last successful deploy separate from a newer open or unsuccessful attempt in either environment. */
+function deploymentState(deploys: DeployOperation[]): WatchRelease["production"] {
+  const live = deploys.find((entry) => entry.result?.type === "deployed");
+  const latest = deploys.find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+  const record = live?.result?.type === "deployed" ? live.result.record : null;
+  const attempt = latest && latest.id !== live?.id && latest.result?.type !== "deployed" ? latest : null;
+  return {
+    live: live ? { commitId: live.commitId, deployedAt: live.finishedAt!,
+      healthy: record?.projects.some((project) => project.timings?.health) ? record.projects.every((project) => !project.timings?.health || project.timings.health.outcome === "passed") : null } : null,
+    latestAttempt: attempt ? { commitId: attempt.commitId, status: attempt.result?.type === "failed" ? attempt.result.deployment?.rollback?.automatic ? "rolled_back" : "failed" : "running",
+      at: attempt.finishedAt ?? attempt.startedAt ?? attempt.submittedAt, reason: attempt.result?.type === "failed" ? attempt.result.reason : null } : null,
+  };
 }

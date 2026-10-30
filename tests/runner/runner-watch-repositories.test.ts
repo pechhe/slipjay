@@ -9,8 +9,8 @@ function fixture() {
   return openOperationLog(":memory:", {}, { watch: projectWatchOperation,
     repositories: watchRepositoryProjection(config) });
 }
-function policy(log: ReturnType<typeof fixture>, development = false, images = false) {
-  log.append("runner", { type: "repository_policy", repo: "a/repo", policy: { integrationBranch: "develop", releases: true, stagingSkipped: development, images,
+function policy(log: ReturnType<typeof fixture>, development = false, images = false, staging = true) {
+  log.append("runner", { type: "repository_policy", repo: "a/repo", policy: { integrationBranch: "develop", releases: true, stagingSkipped: development, staging, images,
     audit: { timeOfDay: "02:00", timeZone: "Europe/London" } } });
 }
 const landing = { type: "submitted" as const, repo: "a/repo", changeId: "change", commitId: "candidate", bookmark: "b", submittedBy: "author" };
@@ -54,6 +54,25 @@ test("failed and rolled back attempts do not replace live production, even with 
     assert.equal(release.production.latestAttempt?.reason, "unhealthy");
     log.append("runner", { type: "paused", by: "owner" });
     assert.equal(log.snapshot("runner").repositories[0]!.release!.waitingOn.kind, "paused");
+  } finally { log.close(); }
+});
+
+test("failed staging attempt preserves the last successful staging deploy", () => {
+  const log = fixture();
+  try {
+    policy(log); publish(log);
+    log.append("staging-a", { ...deploy, environment: "staging", commitId: "A" });
+    log.append("staging-a", { type: "deployed", record: { environment: "staging", commitId: "A", previous: null, changes: [], projects: [{ name: "app", ok: true }] } });
+    log.append("staging-b", { ...deploy, environment: "staging", commitId: "B" });
+    log.append("staging-b", { type: "failed", stage: "deploying", reason: "staging activation failed" });
+    assert.deepEqual(log.snapshot("runner").repositories[0]!.release!.staging, {
+      live: { commitId: "A", deployedAt: log.operation("staging-a")!.finishedAt!, healthy: null },
+      latestAttempt: { commitId: "B", status: "failed", at: log.operation("staging-b")!.finishedAt!, reason: "staging activation failed" },
+    });
+    policy(log, true);
+    assert.equal(log.snapshot("runner").repositories[0]!.release!.staging, null);
+    policy(log, false, false, false);
+    assert.equal(log.snapshot("runner").repositories[0]!.release!.staging, null);
   } finally { log.close(); }
 });
 

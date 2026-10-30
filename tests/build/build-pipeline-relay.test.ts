@@ -11,7 +11,7 @@ type ReleaseState = Pick<import("../../src/lib/runner/runner-types.ts").QueueSna
 type Sent = { since: number; events: { seq: number }[]; nextSeq: number; hasMore: boolean } & Partial<ReleaseState>;
 const releaseState = (observedAt = "2026-10-30T13:00:00.000Z"): ReleaseState => ({ observedAt, repositories: [{
   repo: "fixture/repo", screeningLanes: 3, today: { landed: 2, failedScreens: 1 },
-  release: { integrationBranch: "develop", candidate: { commitId: "candidate", landedAt: observedAt }, stagingSkipped: true,
+  release: { integrationBranch: "develop", candidate: { commitId: "candidate", landedAt: observedAt }, stagingSkipped: true, staging: null,
     production: { live: null, latestAttempt: null }, images: null, audit: null,
     waitingOn: { kind: "audit", detail: "The latest audit failed and no cause is recorded." } },
 }] });

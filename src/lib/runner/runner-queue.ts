@@ -327,7 +327,7 @@ export function createRunnerQueue(input: {
   function reportPolicy(repo: string, configuration: Awaited<ReturnType<typeof releasePolicy>>, applied: Awaited<ReturnType<typeof releasePolicy>>): void {
     if (!configuration) return;
     const policy = { integrationBranch: configuration.integrationBranch ?? "main", releases: Boolean(configuration.releaseBranch && configuration.deployments?.environments.production),
-      stagingSkipped: skipsStaging(applied), promotionAudit: Boolean(applied?.audit), images: Boolean(configuration.deployments?.environments.images), audit: configuration.audit ? { timeOfDay: configuration.audit.timeOfDay, timeZone: configuration.audit.timeZone } : null };
+      stagingSkipped: skipsStaging(applied), staging: Boolean(configuration.deployments?.environments.staging), promotionAudit: Boolean(applied?.audit), images: Boolean(configuration.deployments?.environments.images), audit: configuration.audit ? { timeOfDay: configuration.audit.timeOfDay, timeZone: configuration.audit.timeZone } : null };
     const previous = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "repository_policy" && row.event.repo === repo)?.event;
     if (previous?.type !== "repository_policy" || JSON.stringify(previous.policy) !== JSON.stringify(policy)) append(RUNNER_CONTROL_ID, { type: "repository_policy", repo, policy });
   }
