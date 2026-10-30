@@ -31,7 +31,7 @@ const CONTROL_TIMEOUT_MS = 120_000;
  * timer: long enough for any attempt while one runs, IDLE_LIFETIME_S once it closes. A runner restart loses no timer.
  */
 const ATTEMPT_LIFETIME_S = 3 * 3600;
-const IDLE_LIFETIME_S = 15 * 60;
+const IDLE_LIFETIME_S = 60 * 60;
 /** Boat states in which a VM holds no running machine: it resumes from its snapshot. */
 const STOPPED = ["stopped", "stopping", "archived"];
 /** How long recovery keeps retrying to clean the pool after a restart. */
