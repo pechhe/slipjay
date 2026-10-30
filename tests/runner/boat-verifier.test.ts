@@ -141,6 +141,44 @@ test("a build machine whose disk does not restore fails without being replaced, 
   assert.ok(!boat.includes("delete") && !boat.includes("fork"), "the build machine is neither deleted nor forked again");
 });
 
+/** A boat CLI whose one pool VM is `live`, reporting the given `info` sandbox fields for each id. */
+function degradedBuildMachine(info: (id: string) => Record<string, unknown>) {
+  const calls: string[][] = [];
+  let live = "bx_images";
+  const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    calls.push([request.executable, ...request.args]);
+    if (request.executable === "ssh") return request.args.at(-1) === "true" ? result("") : result("", 1, "stop here");
+    const [command, id] = request.args;
+    if (command === "list") return result(JSON.stringify({ sandboxes: live ? [{ id: live, name: "slipjay-pechhe-yardsmith-images", state: "idle", health: "degraded", hydrated: false }] : [] }));
+    if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "large" } }));
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "slipjay-pechhe-yardsmith-images", state: "idle", type: "large", sshEndpoint: "198.51.100.1:19000", ...info(id ?? "") } }));
+    if (command === "delete") live = "";
+    return result(JSON.stringify({ ok: true }));
+  };
+  const boat = () => calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" "));
+  return { run, boat };
+}
+const leaseImages = (run: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>, readyTimeoutMs: number) =>
+  boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+
+test("a build machine boat reports degraded with its disk unrestored is replaced from the image", async () => {
+  const stuck = { hydrated: false, health: "degraded", healthReason: "hydration stuck: dvol-hydrated: 4 path(s) under '__dockervol__/' still owed" };
+  // The replacement is healthy, so only the setup after the lease (which has no repository) fails, as in the tests above.
+  const machine = degradedBuildMachine((id) => id === "bx_images" ? stuck : { hydrated: true });
+  await assert.rejects(leaseImages(machine.run, 60_000), /Remote executor unavailable \(setup\)/);
+  assert.ok(machine.boat().includes("delete bx_images --yes"), `a degraded build machine is deleted: ${machine.boat().join(", ")}`);
+  assert.ok(machine.boat().includes("fork bx_image --no-env --no-monitoring --ttl 1860 --type default"), "a fresh image is forked with the command's time and idle lifetime");
+  assert.ok(machine.boat().includes("rename bx_new slipjay-pechhe-yardsmith-images"), "the fresh VM takes the machine's name");
+});
+
+test("a replacement build machine that is also degraded fails naming its health and reason, forking only once", async () => {
+  const stuck = { hydrated: false, health: "degraded", healthReason: "hydration stuck: dvol-hydrated: 4 path(s) under '__dockervol__/' still owed" };
+  const machine = degradedBuildMachine(() => stuck);
+  await assert.rejects(leaseImages(machine.run, 60_000), /slipjay-pechhe-yardsmith-images not reachable: state idle, health degraded \(hydration stuck: dvol-hydrated: 4 path\(s\) under '__dockervol__\/' still owed\), disk still restoring/);
+  assert.equal(machine.boat().filter((call) => call.startsWith("fork")).length, 1, "one replacement fork, never a loop");
+  assert.equal(machine.boat().filter((call) => call.startsWith("delete")).length, 1, "only the first degraded machine is deleted");
+});
+
 test("a slot with two VMs under its name keeps the running one and deletes the other", async () => {
   const twice = stand([{ id: "bx_stale", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }, { id: "bx_live", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));

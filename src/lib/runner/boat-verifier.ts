@@ -25,8 +25,9 @@ const HOST_ONLY = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNT
 const READY_TIMEOUT_MS = 300_000;
 /**
  * A build machine's disk holds its warm Docker build cache (a 3-minute build against 20+ cold), and a resumed disk that
- * large can take longer than a gate slot's wait to restore. So a build machine waits this long and is never replaced:
- * a fresh fork would throw away the cache the wait protects.
+ * large can take longer than a gate slot's wait to restore. So a build machine waits this long and is not replaced while
+ * its restore is merely slow: a fresh fork would throw away the cache the wait protects. Boat reports a restore that is
+ * stuck instead of slow as `degraded`, which waiting cannot cure, so that machine is replaced like a slot.
  */
 const BUILD_READY_TIMEOUT_MS = 20 * 60_000;
 /** Bound one boat API call; opening retries share a separate budget. */
@@ -116,7 +117,7 @@ export const REMOVE_CONTAINERS = `docker ps -a --format '{{.Names}} {{.Label "sl
 /** An SSH failure, as opposed to the remote command's own exit status: ssh exits 255 for its own errors. */
 const sshFailed = (result: BoundedProcessResult) => result.exitCode === 255 && /^(?:ssh|kex_exchange|Connection (?:closed|reset|timed out|refused)|client_loop)\b|\bssh: /m.test(result.stderr);
 
-type Vm = { id: string; name: string; state: string; host: string; port: number; size: string; hydrated: boolean };
+type Vm = { id: string; name: string; state: string; host: string; port: number; size: string; hydrated: boolean; health: string; healthReason: string };
 
 /** A loopback port in `url`, which a remote command reaches through a reverse tunnel to the runner host. */
 export const loopbackPort = (url: string | undefined): number | undefined => {
@@ -175,7 +176,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     return { id: String(sandbox.id), name: String(sandbox.name ?? ""), state: String(sandbox.state ?? ""),
       host: at > 0 ? endpoint.slice(0, at) : "", port: at > 0 ? Number(endpoint.slice(at + 1)) : 0, size: String(sandbox.type ?? size),
       // Only boat's explicit word that the disk is restored makes a VM ready: a field it leaves out proves nothing.
-      hydrated: sandbox.hydrated === true };
+      hydrated: sandbox.hydrated === true, health: String(sandbox.health ?? ""), healthReason: String(sandbox.healthReason ?? "") };
   };
   const sshArgs = (vm: Vm) => ["-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
     "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8", "-p", String(vm.port), `user@${vm.host}`];
@@ -253,12 +254,18 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
         const probe = await run({ executable: "ssh", args: [...sshArgs(vm), "true"], cwd: tmpdir(), timeoutMs: 20_000, maxOutputBytes: 4096, env: process.env, ...signal ? { abortSignal: signal } : {} });
         if (probe.exitCode === 0) return vm;
       }
-      if (Date.now() >= deadline) {
+      // Boat calls a restore it cannot finish degraded, and retries it forever; waiting out the ready timeout only re-leases
+      // the same dead disk on every later deploy. So a degraded VM whose disk is not restored is broken now.
+      const stalled = vm.health === "degraded" && !vm.hydrated;
+      if (stalled || Date.now() >= deadline) {
+        const health = stalled ? `, health ${vm.health}${vm.healthReason ? ` (${vm.healthReason})` : ""}` : "";
+        const detail = `state ${vm.state}${health}${vm.hydrated ? "" : ", disk still restoring"}${stalled ? "" : ` after ${readyMs / 1000}s`}`;
         // A slot whose disk boat never restores is broken, not merely slow: delete it and fork the image afresh once, so
         // every later landing on the lane does not wait on the same dead disk. A replacement that also will not restore
-        // fails as infrastructure rather than forking again, since boat starts are rationed. A build machine is never
-        // replaced: it waits BUILD_READY_TIMEOUT_MS, then fails, keeping the disk its warm build cache is on.
-        if (build || replaced || vm.hydrated) fail(`${name} not reachable`, `state ${vm.state}${vm.hydrated ? "" : ", disk still restoring"} after ${readyMs / 1000}s`);
+        // fails as infrastructure rather than forking again, since boat starts are rationed. A build machine is replaced
+        // only when boat reports it degraded: while its restore is merely slow it waits BUILD_READY_TIMEOUT_MS and then
+        // fails, keeping the disk its warm build cache is on.
+        if (build && !stalled || replaced || vm.hydrated) fail(`${name} not reachable`, detail);
         replaced = true;
         await api(["delete", vm.id, "--yes"], signal);
         vm = await acquire(vm.id);
