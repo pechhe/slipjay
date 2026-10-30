@@ -47,7 +47,7 @@ function stand(sandboxes: Record<string, unknown>[], ssh: (args: readonly string
     // Like boat, a plain `list` shows only running sandboxes; `--all` shows every state.
     if (command === "list") return result(JSON.stringify({ sandboxes: request.args.includes("--all") ? sandboxes : sandboxes.filter((vm) => vm.state !== "stopped") }));
     if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } }));
-    if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "", state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000" } }));
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "", state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: true } }));
     return result(JSON.stringify({ ok: true }));
   };
   return { run, calls, boat: () => calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" ")) };

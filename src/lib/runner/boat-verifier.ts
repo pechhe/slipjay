@@ -158,7 +158,8 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
     const at = endpoint.lastIndexOf(":");
     return { id: String(sandbox.id), name: String(sandbox.name ?? ""), state: String(sandbox.state ?? ""),
       host: at > 0 ? endpoint.slice(0, at) : "", port: at > 0 ? Number(endpoint.slice(at + 1)) : 0, size: String(sandbox.type ?? size),
-      hydrated: sandbox.hydrated !== false };
+      // Only boat's explicit word that the disk is restored makes a VM ready: a field it leaves out proves nothing.
+      hydrated: sandbox.hydrated === true };
   };
   const sshArgs = (vm: Vm) => ["-i", key, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
     "-o", "LogLevel=ERROR", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=8", "-p", String(vm.port), `user@${vm.host}`];
