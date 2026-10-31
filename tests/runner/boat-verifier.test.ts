@@ -158,8 +158,33 @@ function degradedBuildMachine(info: (id: string) => Record<string, unknown>) {
   const boat = () => calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" "));
   return { run, boat };
 }
-const leaseImages = (run: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>, readyTimeoutMs: number) =>
-  boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+const leaseImages = (run: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>, readyTimeoutMs?: number) =>
+  boatVerification({ image: "bx_image", cli: "boat", run, ...readyTimeoutMs === undefined ? {} : { readyTimeoutMs } })
+    .lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+
+test("a build machine whose restore outlasts twenty minutes is still waited for, not failed", async () => {
+  // A machine replaced from the image builds its whole large disk: on 31 Oct 2026 that took 21 minutes, 45 s past the
+  // give-up, and the retry on the same VM succeeded. The wait now covers it.
+  const originalNow = Date.now;
+  let now = originalNow();
+  Date.now = () => now;
+  try {
+    let infos = 0;
+    const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+      if (request.executable === "ssh") return request.args.at(-1) === "true" ? result("") : result("", 1, "stop here");
+      const [command, id] = request.args;
+      if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state: "stopped" }] }));
+      if (command === "info") {
+        // Ten minutes, then eleven: twenty-one in all, and restored only on the third reading.
+        now += ++infos === 1 ? 10 * 60_000 : 11 * 60_000;
+        return result(JSON.stringify({ sandbox: { id, name: "slipjay-pechhe-yardsmith-images", state: "idle", type: "large", sshEndpoint: "198.51.100.1:19000", hydrated: infos > 2 } }));
+      }
+      return result(JSON.stringify({ ok: true }));
+    };
+    await assert.rejects(leaseImages(run), /Remote executor unavailable \(setup\)/);
+    assert.equal(infos, 3, "the machine was polled for twenty-one minutes, and only then found restored");
+  } finally { Date.now = originalNow; }
+});
 
 test("a build machine boat reports degraded with its disk unrestored is replaced from the image", async () => {
   const stuck = { hydrated: false, health: "degraded", healthReason: "hydration stuck: dvol-hydrated: 4 path(s) under '__dockervol__/' still owed" };

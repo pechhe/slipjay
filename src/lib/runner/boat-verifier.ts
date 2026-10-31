@@ -27,9 +27,11 @@ const READY_TIMEOUT_MS = 300_000;
  * A build machine's disk holds its warm Docker build cache (a 3-minute build against 20+ cold), and a resumed disk that
  * large can take longer than a gate slot's wait to restore. So a build machine waits this long and is not replaced while
  * its restore is merely slow: a fresh fork would throw away the cache the wait protects. Boat reports a restore that is
- * stuck instead of slow as `degraded`, which waiting cannot cure, so that machine is replaced like a slot.
+ * stuck instead of slow as `degraded`, which waiting cannot cure, so that machine is replaced like a slot. The wait also
+ * bounds a replacement's own restore, which builds the whole of that large disk from the image: one took 21 minutes on
+ * 31 Oct 2026, so twenty minutes failed a deploy 45 s before its disk was ready and a retry on the same VM succeeded.
  */
-const BUILD_READY_TIMEOUT_MS = 20 * 60_000;
+const BUILD_READY_TIMEOUT_MS = 30 * 60_000;
 /** Bound one boat API call; opening retries share a separate budget. */
 const BOAT_TIMEOUT_MS = 30_000;
 const CONTROL_TIMEOUT_MS = 120_000;
