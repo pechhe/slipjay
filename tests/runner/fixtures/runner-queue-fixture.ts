@@ -235,10 +235,9 @@ export async function fixture(migrations = false, release = false, deployments?:
    * Seed a prerequisite: publish a genuine commit straight onto origin's integration branch,
    * bypassing the landing, the way a landing leaves it — parented on the branch's current tip
    * and on top of its tree, so each seed's tree is everything published before it. Seed only
-   * setup no assertion reads. The end-to-end landings it stands in for stay covered, in the two
-   * files that seed, by these cases:
+   * setup no assertion reads. The end-to-end landings it stands in for stay covered by these cases:
    *
-   * `runner-queue-automatic-promotion.test.ts`
+   * `runner-queue-automatic-promotion-ordering.test.ts`
    * - "a verified commit is promoted while a newer green commit has no passed verification, as long as it is the newest that has one"
    * - "a newer commit that passes replaces the verified older one a release was queued for"
    * - "a queued automatic release of a verified commit survives a newer staged commit whose verification then fails"
