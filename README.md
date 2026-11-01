@@ -624,7 +624,10 @@ and held state through the existing recovery path.
   `integrating` on (a release: `publishing`) the kill is refused with exit 1, because
   stopping there could leave the integration target ahead of the remote; it finishes
   on its own. A kill of an operation that is not running (it finished, or has not
-  started) kills nothing and exits 1. Bare `slipjay runner kill` stops the only running
+  started) kills nothing and exits 1. It also ends an operation the ledger still shows running in a
+  killable stage when nothing holds it: no turn, deploy, ending settlement or restart recovery. That is
+  how an operation a failed ledger write left open is cleared, and one it cannot reach reads as
+  `not_running`, or as refused like a live one past verification. Bare `slipjay runner kill` stops the only running
   operation; with several running it kills none, exits 1 and lists the
   `slipjay runner kill <operation>` commands; with none it does nothing.
   `slipjay runner pause` makes the
@@ -657,7 +660,10 @@ and held state through the existing recovery path.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
     It keeps everything for its history window and only lasting facts past it (see Retention), and its
     write-ahead log is checkpointed every five minutes and after each retention pass, so it never sits at a
-    high-water mark. The API is served before a restart's recovery runs, so health and admission answer while
+    high-water mark. An append waits up to five seconds for a competing writer's lock instead of failing the
+    operation it records, and an operation a failed append would leave open settles as failed ("land again")
+    rather than staying running with no work behind it; `runner kill` can also end one the ledger still shows
+    running (see Owner controls). The API is served before a restart's recovery runs, so health and admission answer while
     it does; no queued work starts until recovery finishes.
   - `logs/<operation>.log`: the run logs. A reset's step output goes to the owner-only
     `logs/<operation>.reset-output` beside it, never into the log.

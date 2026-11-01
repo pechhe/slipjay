@@ -248,6 +248,8 @@ export function createRunnerQueue(input: {
   const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
   const running = new Map<string, { operation: Operation; stage: RunnerStage; controller: AbortController }>();
+  /** Operations whose turn has ended and whose settlement is still writing: live to nothing, and not killable. */
+  const ending = new Set<string>();
   const health = (): RunnerHealth => ({ load1: Math.round(loadavg()[0]! * 100) / 100, cpus: availableParallelism(),
     freeMemoryBytes: freemem(), totalMemoryBytes: totalmem(), running: running.size });
   /** Recovery holds every lane: nothing is admitted until it finishes. */
@@ -1427,41 +1429,66 @@ export function createRunnerQueue(input: {
       await Promise.allSettled([...pendingCommands]);
       const token = checkEnvironment && (await checkEnvironment.catch(() => ({} as Record<string, string>)))[BUILD_READ_TOKEN_ENV];
       if (token) buildChecks!.revoke(token);
-      if (stage !== "queued") append(operation.id, stageDetail());
+      // This turn is over: nothing below is work the operation is still doing, so it is no longer
+      // killable and a failing append cannot leave it running with no work behind it. Its settlement
+      // is what ends it, and a kill may not cancel an operation that is already publishing its verdict.
       running.delete(operation.id);
-      // Delete the candidate bookmark before the verdict: an author's repository that fetches
-      // every bookmark after that would otherwise import it and pin the submitted commit.
-      if (!retryPrefix && verdict?.type !== "yielded" && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
-      // This checkout belongs to the runner: leave failed candidates in history,
-      // and start the next turn from the integration (including any held commit).
-      if (integrationBranch) {
-        try { await jj(checkout, ["new", integrationBranch]); }
-        catch (error) {
-          const reason = `Runner checkout could not return to ${integrationBranch}: ${message(error)}`;
-          progress(reason);
-          if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
+      ending.add(operation.id);
+      try {
+        if (stage !== "queued") append(operation.id, stageDetail());
+        // Delete the candidate bookmark before the verdict: an author's repository that fetches
+        // every bookmark after that would otherwise import it and pin the submitted commit.
+        if (!retryPrefix && verdict?.type !== "yielded" && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+        // This checkout belongs to the runner: leave failed candidates in history,
+        // and start the next turn from the integration (including any held commit).
+        if (integrationBranch) {
+          try { await jj(checkout, ["new", integrationBranch]); }
+          catch (error) {
+            const reason = `Runner checkout could not return to ${integrationBranch}: ${message(error)}`;
+            progress(reason);
+            if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
+          }
         }
-      }
-      if (verdict?.type === "landed") {
-        const publishedCommit = verdict.commitId;
-        const integrated = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "integrated" && event.commitId === publishedCommit);
-        verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy),
-          ...integrated?.type === "integrated" && integrated.process ? { process: integrated.process } : {} };
-      }
-      if (verdict?.type === "failed" && operation.kind === "landing")
-        await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
-      if (verdict && (!prefix?.screen || !log.operation(operation.id)?.result)) append(operation.id, verdict);
-      // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
-      if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo, operation.kind === "verification" ? operation.id : undefined);
-      if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
-      if (verdict?.type === "landed")
-        await schedule(operation.repo, verdict.commitId, readLandedPolicy).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
-      // A reset, whatever its verdict, starts the next interval.
-      if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
-      // An audit with a verdict waits for the next scheduled time; one without is due again now. What its head declared decides.
-      if (operation.kind === "audit") {
-        if (auditPolicy === undefined) auditScheduler.reconsider(operation.repo);
-        else auditScheduler.consider(operation.repo, auditPolicy);
+        if (verdict?.type === "landed") {
+          const publishedCommit = verdict.commitId;
+          const integrated = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "integrated" && event.commitId === publishedCommit);
+          verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy),
+            ...integrated?.type === "integrated" && integrated.process ? { process: integrated.process } : {} };
+        }
+        if (verdict?.type === "failed" && operation.kind === "landing")
+          await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
+        if (verdict && (!prefix?.screen || !log.operation(operation.id)?.result)) append(operation.id, verdict);
+        // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
+        if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo, operation.kind === "verification" ? operation.id : undefined);
+        if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
+        if (verdict?.type === "landed")
+          await schedule(operation.repo, verdict.commitId, readLandedPolicy).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
+        // A reset, whatever its verdict, starts the next interval.
+        if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
+        // An audit with a verdict waits for the next scheduled time; one without is due again now. What its head declared decides.
+        if (operation.kind === "audit") {
+          if (auditPolicy === undefined) auditScheduler.reconsider(operation.repo);
+          else auditScheduler.consider(operation.repo, auditPolicy);
+        }
+      } catch (error) {
+        // Ending an operation must never leave it open, but a published landing must not be recorded as
+        // failed and a retry records its own verdict on the fresh attempt. Whatever is left here is
+        // settled by restart recovery, which records a published landing as landed.
+        const reason = `The runner could not finish ending ${operation.id}: ${message(error)}`;
+        console.error(`[runner] ${operation.repo}: ${reason}`);
+        try { progress(reason); } catch { /* the ledger is what failed */ }
+        if (!retryPrefix && !log.operation(operation.id)?.result) {
+          const recorded = verdict ?? { type: "failed" as const, stage, reason: `${reason}; land again` };
+          try { append(operation.id, recorded); }
+          catch {
+            if (recorded.type !== "landed") {
+              try { append(operation.id, { type: "failed", stage, reason: `${reason}; land again` }); }
+              catch (again) { console.error(`[runner] ${operation.repo}: could not record the end of ${operation.id}: ${message(again)}`); }
+            }
+          }
+        }
+      } finally {
+        ending.delete(operation.id);
       }
     }
     if (retryPrefix && prefix) {
@@ -1898,7 +1925,21 @@ export function createRunnerQueue(input: {
       }
       if (!operationId && !running.size && held.length > 1) return { status: "ambiguous", operations: held };
       const target = operationId === undefined ? undefined : running.get(operationId);
-      if (operationId !== undefined && !target) return { status: "not_running", operation: log.operation(operationId) };
+      if (operationId !== undefined && !target) {
+        const operation = log.operation(operationId);
+        // A ledger that could not be written while an operation ended leaves it recorded as running
+        // with no work behind it; the owner's kill still ends it, so it never blocks a relanding.
+        // Not a deploy: `activeDeploys` holds those, not `running`, and a deploy is not killable. Not a
+        // turn that is still settling its verdict, and not restart recovery, which are both already
+        // ending it.
+        if (operation?.status === "running" && operation.kind !== "deploy" && !recovering && !ending.has(operationId)) {
+          if (!KILLABLE_STAGES.includes(operation.stage)) return { status: "refused", operation };
+          append(operationId, { type: "cancelled", reason: OWNER_KILL_REASON });
+          cancelled(operation);
+          return { status: "killed", operation: log.operation(operationId)! };
+        }
+        return { status: "not_running", operation };
+      }
       if (!target && running.size > 1)
         return { status: "ambiguous", operations: [...running.values()].map((entry) => log.operation(entry.operation.id) ?? entry.operation) };
       const entry = target ?? [...running.values()][0];

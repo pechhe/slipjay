@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { COMMAND_ARTIFACT_PAGE_BYTES, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
+import { openOperationLog, newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
 import { runContainment } from "../../src/lib/runner/local-executor.ts";
 import { runnerWorkers } from "../../src/lib/runner/runner-queue.ts";
@@ -83,6 +83,77 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
     f.queue.wake(); await f.queue.idle();
     assert.equal(f.result(retry)?.type, "landed", JSON.stringify(f.result(retry)));
     assert.equal(f.remoteFile("fixed.txt"), "fixed");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a ledger write that fails while an operation ends fails it instead of leaving it running", async () => {
+  const f = await fixture();
+  try {
+    const before = f.main();
+    const id = f.submit(await f.candidate("fail"));
+    const append = f.log.append.bind(f.log);
+    let faulted = false;
+    f.log.append = (operationId, event) => {
+      // The provenance write happens while the failed landing is ending, after its verdict is decided.
+      if (!faulted && operationId === id && event.type === "provenance") { faulted = true; throw new Error("database is locked"); }
+      return append(operationId, event);
+    };
+    f.queue.wake(); await f.queue.idle();
+    assert.ok(faulted, "the ledger write failure was injected");
+    const failure = f.result(id);
+    assert.equal(failure?.type, "failed", JSON.stringify(failure));
+    if (failure?.type !== "failed") throw new Error("Expected failed gate");
+    assert.equal(failure.stage, "verifying");
+    assert.equal(failure.command, command);
+    assert.equal(failure.output, gateFailureOutput);
+    assert.equal(f.main(), before);
+    assert.equal(f.queue.kill(id).status, "not_running", "the operation ended instead of staying running");
+    await rm(join(f.author, "fail"));
+    await writeFile(join(f.author, "fixed.txt"), "fixed\n");
+    const retry = f.submit(await f.push());
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.result(retry)?.type, "landed", JSON.stringify(f.result(retry)));
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("the owner's kill ends an operation the ledger still shows running with no work behind it", async () => {
+  const f = await fixture();
+  try {
+    const id = newOperationId();
+    f.log.append(id, { type: "submitted", ...await f.candidate("kill-orphan.txt") });
+    f.log.append(id, { type: "stage", stage: "installing" });
+    assert.equal(f.log.operation(id)?.status, "running");
+    assert.equal(f.queue.kill(id).status, "killed");
+    assert.deepEqual(f.result(id), { type: "cancelled", reason: OWNER_KILL_REASON });
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a kill while a turn is ending is refused and the turn's own verdict stands", async () => {
+  const f = await fixture();
+  try {
+    const id = f.submit(await f.candidate("fail"));
+    const append = f.log.append.bind(f.log);
+    let ran = false, fired = false;
+    let outcome: ReturnType<typeof f.queue.kill> | undefined;
+    let killed!: () => void;
+    const killAttempted = new Promise<void>((resolve) => { killed = resolve; });
+    f.log.append = (operationId, event) => {
+      if (operationId === id && event.type === "run_finished") ran = true;
+      // The settlement's first write follows the last command: the turn has ended and is still settling.
+      if (!fired && ran && operationId === id && event.type === "stage_detail") {
+        fired = true;
+        const stored = append(operationId, event);
+        queueMicrotask(() => { outcome = f.queue.kill(id); killed(); });
+        return stored;
+      }
+      return append(operationId, event);
+    };
+    f.queue.wake();
+    await killAttempted;
+    assert.ok(fired, "the kill ran while the turn was settling its verdict");
+    assert.equal(outcome?.status, "not_running", JSON.stringify(outcome));
+    await f.queue.idle();
+    assert.equal(f.result(id)?.type, "failed", JSON.stringify(f.result(id)));
   } finally { await f.dispose(); }
 }, 120_000);
 

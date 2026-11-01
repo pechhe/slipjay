@@ -57,6 +57,9 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   const db = new DatabaseSync(path);
   if (path !== ":memory:") {
     db.exec("PRAGMA journal_mode = WAL");
+    // Another writer, such as a second runner or a client's repair, holds the write lock only briefly;
+    // wait it out instead of failing an append, which fails the operation it was recording.
+    db.exec("PRAGMA busy_timeout = 5000");
     // A checkpoint returns the WAL to the pages still in use, but only truncates it within this limit; without
     // one it stays at its high-water mark forever, which is how a 18 MB ledger carried a 105 MB journal.
     db.exec("PRAGMA journal_size_limit = 16777216");

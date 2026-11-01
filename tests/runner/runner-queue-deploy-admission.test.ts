@@ -43,6 +43,31 @@ test("two workers verify beside a deploy, while another deploy of the same repos
   } finally { release(); await f.dispose(); }
 }, 120_000);
 
+test("the owner's kill leaves a running deploy alone and it finishes", async () => {
+  const f = await fixture(false, false, { minIntervalMs: 3_600_000 }, false);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const original = f.executor.run.bind(f.executor);
+  let entered = false;
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("seed.txt"))))?.type, "landed");
+    f.executor.run = async (request) => {
+      if (request.env?.SLIPJAY_DEPLOY_ENVIRONMENT) { entered = true; await held; }
+      return original(request);
+    };
+    const id = newOperationId();
+    f.log.append(id, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "staging", commitId: f.main(), submittedBy: "test" });
+    f.queue.wake();
+    await until(() => entered || undefined);
+    assert.equal(f.log.operation(id)?.status, "running");
+    assert.equal(f.queue.kill(id).status, "not_running", "a deploy is not killable and is left running");
+    assert.equal(f.log.operation(id)?.status, "running");
+    release();
+    await f.queue.idle();
+    assert.equal(f.result(id)?.type, "deployed");
+  } finally { release(); await f.dispose(); }
+}, 120_000);
+
 test("deploy capacity is configurable, per repository, and names its blockers without using landing workers", () => {
   const config = { repos: {}, jj: { "user.name": "Fixture", "user.email": "fixture@example.com" } };
   for (const value of [0, -1, 1.5, NaN, Infinity]) assert.match(runnerConfigProblem({ ...config, deployWorkers: value }) ?? "", /deployWorkers/);

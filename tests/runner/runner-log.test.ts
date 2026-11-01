@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
@@ -150,6 +151,34 @@ test("file log preserves every appended event and increasing global sequence acr
     assert.deepEqual(log.events().slice(-2).map((row) => row.event.type), ["classified", "superseded"]);
     assert.deepEqual(log.events({ operationId: "one" }).map((row) => row.event.type), ["submitted", "queue_snapshot", "classified", "superseded"]);
   } finally {
+    log.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an append waits out a competing writer instead of failing with database is locked", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "runner-log-"));
+  const path = join(directory, "events.sqlite");
+  const log = openLog(path);
+  // Another writer holds the write lock, as a second runner or a client's repair does briefly.
+  const holder = spawn(process.execPath, ["-e", `const { DatabaseSync } = require("node:sqlite");
+    const db = new DatabaseSync(process.argv[1]);
+    db.exec("BEGIN IMMEDIATE");
+    db.exec("INSERT INTO events (operation_id, at, type, data) VALUES ('other', '2026-11-01T00:00:00Z', 'progress', '{}')");
+    console.log("locked");
+    setTimeout(() => db.exec("COMMIT"), Number(process.argv[2]));`, path, "300"], { stdio: ["ignore", "pipe", "inherit"] });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      holder.on("error", reject);
+      holder.stdout!.on("data", (chunk: Buffer) => { if (chunk.toString().includes("locked")) resolve(); });
+    });
+    const started = Date.now();
+    const appended = log.append("one", submission());
+    assert.ok(Date.now() - started >= 200, "the append waited for the other writer instead of surfacing its lock");
+    assert.equal(appended.event.type, "submitted");
+    assert.equal(log.operation("one")?.status, "queued");
+  } finally {
+    holder.kill();
     log.close();
     rmSync(directory, { recursive: true, force: true });
   }
