@@ -1130,8 +1130,8 @@ A promotion is verified before anyone approves it. When staging records a green
 deploy of a commit, the runner queues a **pre-verification** of it. This runs the
 candidate's `requiredReleaseVerification` exactly as a confirm would, in the release
 checkout, and publishes nothing. It is admitted like a release, in arrival order: it
-starts once staging has finished a deploy of the latest landing (which may be a newer
-candidate), no reset of its repository runs and a worker is free, and it neither
+starts once no reset of its repository runs and a worker is free, however many landings
+arrived after its green deploy, and it neither
 waits for the repository's landings nor is stopped by one. Landings, resets and
 other repositories' work that arrive later wait for a free place instead of
 stopping it, so release verification is never starved by a stream of landings, and the

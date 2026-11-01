@@ -227,9 +227,6 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       if (older && (operation.waitingFor === undefined || placeless.has(operation))) operation.waitingFor = label(older);
       else if (placeless.has(operation)) waitingForPlace.set(lane(operation.repo), operation);
     }
-    // A pre-verification waits for staging to catch up with the latest landing, then for a place like any other operation.
-    for (const operation of serial) if (operation.kind === "verification" && operation.status === "queued" && stagingDue(operation.repo))
-      operation.waitingFor = "a staging deploy of the latest landing";
     const boatHolds = new Map<string, string>();
     for (const row of boatRows.all() as { data: string }[]) {
       const event = JSON.parse(row.data) as Extract<OperationEvent, { type: "boat_circuit" }>;
@@ -259,15 +256,6 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       shortClasses = { at: now, short: new Set(projections.shortRepositories(read, new Date(now), shortLandingP90Ms)) };
     }
     return shortClasses.short.has(repositoryKey(repo));
-  }
-  function stagingDue(repo: string): boolean {
-    const latest = lastLanded(repo);
-    // A landing that declares no staging (a development-mode repository's) has no staging deploy to wait for.
-    if (latest === null) return false;
-    const declared = (JSON.parse((landed.get(repo) as { data: string }).data) as { declaredEnvironments?: string[] }).declaredEnvironments;
-    if (declared && !declared.includes("staging")) return false;
-    return !projectIds((deployIds.all(repo, "staging", "staging") as { operation_id: string }[]).map((row) => row.operation_id))
-      .some((entry) => entry.commitId === latest.commitId && entry.result !== undefined);
   }
   /** The lane an operation queues in: its admission lane, or the deploys. */
   const laneOf = (operation: Operation) => queue().filter((entry) => entry.kind === "deploy" ? operation.kind === "deploy"
@@ -536,7 +524,6 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     landings: publishedLandings,
     lastLanded,
     shortRepository,
-    stagingDue,
     paused,
     held,
     buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'

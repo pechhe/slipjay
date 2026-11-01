@@ -111,6 +111,27 @@ test("a green staging deploy pre-verifies its commit, a landing that arrives nei
   } finally { await f.dispose(); }
 }, 180_000);
 
+test("a landing that staging has yet to deploy neither holds a green candidate's pre-verification nor names itself as its blocker", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 3_600_000, production: true });
+  try {
+    // A is setup: seed it and deploy it for real so staging is green on it and its pre-verification passes.
+    const seeded = await f.seedMain({ "a.txt": "a.txt\n" });
+    assert.equal(f.result(await f.deploy(seeded))?.type, "deployed");
+    await f.queue.idle();
+    const a = f.main();
+    // B lands inside the staging interval, so staging stays on A until the interval passes.
+    assert.equal((await f.land(f.submit(await f.candidate("b.txt"))))?.type, "landed");
+    await f.queue.idle();
+    assert.equal(f.log.deployments("fixture/repo", "staging").length, 1, "staging has not deployed B");
+    // A is pre-verified again (as a redeploy of it would queue): only its own green deploy gates it, never B.
+    const again = newOperationId();
+    f.log.append(again, { type: "submitted", kind: "verification", repo: "fixture/repo", commitId: a, submittedBy: "test" });
+    assert.equal(f.log.operation(again)?.waitingFor, undefined, "nothing holds it while a worker is free");
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.log.operation(again)?.status, "verified");
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("a confirm of a commit waits for its running pre-verification and reuses its pass, and one that passed is verified again when staging redeploys it", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });
   try {

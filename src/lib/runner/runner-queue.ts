@@ -129,8 +129,8 @@ export function runnerLogOptions(config: RunnerConfig, executor: Pick<Executor, 
  * A green staging deploy of a promoting repository queues a pre-verification of its
  * commit in the release lane. It is admitted like a release, oldest first, to one of the
  * same places and never beside a reset, so it neither waits for its repository's landings
- * nor is stopped by one that arrives; it starts once staging has deployed the latest
- * landing (which may be a newer candidate).
+ * nor is stopped by one that arrives. It is queued only once its own candidate's staging deploy
+ * is green, so newer landings never hold it; a newer green candidate supersedes it while queued.
  */
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
@@ -866,8 +866,8 @@ export function createRunnerQueue(input: {
     // the deploys end (which wakes the queue), and deploys wait for it (`auditRunning`).
     if (operation.kind === "audit" && (activeDeploys.size || open.some((entry) => entry.kind === "deploy" && entry.status === "running"))) return undefined;
     if (lanes.has(admissionLane(laneOf(operation.repo), operation.repo, operation.kind))) return undefined;
-    // A pre-verification verifies a staged commit in its release lane, outside the depth-two chain, once staging has caught up.
-    if (operation.kind === "verification") return log.stagingDue(operation.repo) ? undefined : { short: false, prefix: false };
+    // A pre-verification verifies its green staged commit in its release lane, outside the depth-two chain.
+    if (operation.kind === "verification") return { short: false, prefix: false };
     const active = prefixes.get(operation.repo) ?? [];
     const depth = configuredRepository(config, operation.repo)?.verificationDepth ?? 1;
     if (operation.kind === "landing" && depth === 2 && laneOf(operation.repo) === operation.repo && (executor.combinedLimits || configuredRepository(config, operation.repo)?.verifier)) {

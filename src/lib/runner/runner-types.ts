@@ -353,7 +353,8 @@ export type ReleaseOperation = OperationFields & { kind: "release"; migrationsRe
  * Release verification of a commit staging deployed, run before the owner approves it so a
  * confirm of the same commit can skip straight to publication. It runs in its repository's
  * release lane, admitted like a release: beside the repository's landings, never beside its
- * reset, and never stopped by either. It starts once staging has deployed the latest landing.
+ * reset, and never stopped by either. Its commit's own green staging deploy queues it, so newer
+ * landings never hold it.
  * It never counts as an approval.
  */
 export type VerificationOperation = OperationFields & { kind: "verification" };
@@ -423,11 +424,6 @@ export interface OperationLog {
   audits(repo: string): AuditOperation[];
   /** The landings a repository published, oldest first, each with the gate evidence of the commit it made. */
   landings(repo: string): PublishedLanding[];
-  /**
-   * Whether staging has yet to finish a deploy of the repository's latest landing: a newer
-   * candidate may be coming, so a pre-verification waits rather than verify one it would replace.
-   */
-  stagingDue(repo: string): boolean;
   /** The latest landing a repository published, if any. */
   lastLanded(repo: string): { commitId: string; at: string } | null;
   /**
