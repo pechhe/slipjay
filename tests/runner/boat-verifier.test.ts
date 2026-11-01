@@ -6,7 +6,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
-import { boatVerification, FENCE_SCRIPT, isSlotVm, loopbackPort, poolName, remoteCommand, REMOVE_CONTAINERS, worktreeTree } from "../../src/lib/runner/boat-verifier.ts";
+import { boatVerification, FENCE_SCRIPT, isSlotVm, loopbackPort, poolName, remoteCommand, REMOVE_CONTAINERS, START_KEPT_CONTAINERS, worktreeTree } from "../../src/lib/runner/boat-verifier.ts";
 
 const result = (stdout: string, exitCode = 0, stderr = ""): BoundedProcessResult => ({ stdout, stderr, stdoutTruncated: false, stderrTruncated: false,
   finishedAt: new Date().toISOString(), exitCode, signal: null, timedOut: false, cancelled: false, outputSha256: "" });
@@ -395,6 +395,22 @@ if [ "$1" = ps ]; then printf 'keep-postgres \\n4c8aqwxmo7iwveog98zdr1jy true\\n
   } finally { await rm(bin, { recursive: true, force: true }); }
 });
 
+
+test("cleaning starts a slipjay.keep container that a restore left stopped", async () => {
+  const bin = await mkdtemp(join(tmpdir(), "fake-docker-"));
+  try {
+    const calls = join(bin, "calls");
+    await writeFile(join(bin, "docker"), `#!/bin/sh
+echo "$@" >> ${calls}
+if [ "$1" = ps ]; then printf '4c8aqwxmo7iwveog98zdr1jy\\n'; fi
+`, { mode: 0o755 });
+    const result = spawnSync("sh", ["-c", START_KEPT_CONTAINERS], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: "utf8" });
+    assert.equal(result.status, 0);
+    const lines = (await readFile(calls, "utf8")).trim().split("\n");
+    assert.match(lines[0] ?? "", /--filter label=slipjay\.keep=true --filter status=created --filter status=exited/);
+    assert.equal(lines[1], "start 4c8aqwxmo7iwveog98zdr1jy");
+  } finally { await rm(bin, { recursive: true, force: true }); }
+});
 
 test("a short boat API outage retries opening and succeeds without repeating a gate", async () => {
   const ready = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],

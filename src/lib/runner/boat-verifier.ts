@@ -116,6 +116,12 @@ export function remoteCommand(request: Pick<BoundedProcessRequest, "executable" 
  */
 export const REMOVE_CONTAINERS = `docker ps -a --format '{{.Names}} {{.Label "slipjay.keep"}}' | awk '$1 !~ /^keep-/ && $2 != "true" { print $1 }' | xargs -r docker rm -f >/dev/null 2>&1 || true`;
 
+/**
+ * Starts every `slipjay.keep=true` container that is not running. Boat's snapshot restore can recreate one without
+ * starting it, and a database service the gate reaches by name then has no address, so every attempt on that VM fails.
+ */
+export const START_KEPT_CONTAINERS = `docker ps -a --filter label=slipjay.keep=true --filter status=created --filter status=exited --format '{{.Names}}' | xargs -r docker start >/dev/null 2>&1 || true`;
+
 /** An SSH failure, as opposed to the remote command's own exit status: ssh exits 255 for its own errors. */
 const sshFailed = (result: BoundedProcessResult) => result.exitCode === 255 && /^(?:ssh|kex_exchange|Connection (?:closed|reset|timed out|refused)|client_loop)\b|\bssh: /m.test(result.stderr);
 
@@ -280,12 +286,13 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
   }
 
   /**
-   * Stops every scope an attempt started, removes every container but the image's kept ones and the remote scratch
+   * Stops every scope an attempt started, removes every container but the image's kept ones, starts a kept one a restore left stopped, and removes the remote scratch
    * the attempt's commands created, and cleans the checkout's untracked files, so the next attempt starts from none of it.
    * It also drops dangling images, unused volumes and unreachable Git objects, so a long-lived VM's disk stays bounded.
    */
   const cleanScript = `systemctl --user stop 'slipjay-run-*.scope' 2>/dev/null || true
 ${REMOVE_CONTAINERS}
+${START_KEPT_CONTAINERS}
 if [ -f ${SCRATCH_LIST} ]; then sort -u ${SCRATCH_LIST} | while IFS= read -r path; do [ -n "$path" ] && [ "$path" != / ] && rm -rf -- "$path"; done; rm -f ${SCRATCH_LIST}; fi
 docker image prune -f >/dev/null 2>&1 || true
 docker volume prune -f >/dev/null 2>&1 || true
