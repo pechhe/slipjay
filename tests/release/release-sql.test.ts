@@ -55,3 +55,19 @@ test("SQL is non-additive when it removes, retypes or deletes, or tightens a tab
     "/* DROP TABLE t; */ select 1; -- truncate t",
   ]) assert.equal(nonAdditiveSql(sql), false, sql);
 });
+
+test("a plain index dropped and created again under its name is a replacement, not a removal", () => {
+  // Drizzle's migration when an index's columns change (YardSmith's 0402, which held automatic promotion on 1 Nov 2026).
+  assert.equal(nonAdditiveSql('DROP INDEX "domain_event_outbox_claim_idx";--> statement-breakpoint\nCREATE INDEX "domain_event_outbox_claim_idx" ON "domain_event_outbox" USING btree ("event_type","status","available_at");'), false);
+  assert.equal(nonAdditiveSql("DROP INDEX IF EXISTS s.k; CREATE INDEX IF NOT EXISTS s.k ON s.t (a);"), false);
+  for (const sql of [
+    'DROP INDEX "k";',
+    'DROP INDEX "k"; CREATE INDEX "other" ON "t" ("a");',
+    // A unique index re-created over existing columns can refuse rows earlier code writes.
+    'DROP INDEX "k"; CREATE UNIQUE INDEX "k" ON "t" ("a");',
+    'DROP INDEX "k", "j"; CREATE INDEX "k" ON "t" ("a");',
+    'DROP INDEX "k" CASCADE; CREATE INDEX "k" ON "t" ("a");',
+    // Created first and dropped after: the migration's net effect removes the index.
+    'CREATE INDEX IF NOT EXISTS "k" ON "t" ("a"); DROP INDEX "k";',
+  ]) assert.equal(nonAdditiveSql(sql), true, sql);
+});

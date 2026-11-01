@@ -1216,7 +1216,9 @@ which are never counted), and SQL ones that drop,
 rename, retype, delete or rewrite something, or tighten what an existing table accepts
 (a heuristic, `nonAdditiveSql` in `src/lib/release/release.ts`: it does not flag tables or
 columns the migration itself adds, or a CHECK dropped and added back under the same
-name as an `IN (...)` list over one column, so an enum that gained a value is additive), and its `next` repeats them: a
+name as an `IN (...)` list over one column, so an enum that gained a value is additive, or a plain index dropped
+and then created again under the same name, as Drizzle writes when an index's columns change; whether the dropped
+index was unique is not in the SQL, so uniqueness removed that way is not flagged), and its `next` repeats them: a
 failed promotion carrying one, including a rerun confirm of it, is left as it is,
 with nothing moved back, for the owner to decide, once its migrations may have changed
 the schema: they were applied or failed part-way, were already in place, an earlier

@@ -216,7 +216,9 @@ const blank = (statement: string): string =>
  * over only those, a CHECK dropped and added back under the same name as an `IN (...)` list
  * over one column (an enum that gained a value; the migration cannot show the old list,
  * and a value it removed fails the constraint if any row holds it), `ON COMMIT DROP`,
- * `DROP NOT NULL`. Tables are told apart by schema; an unqualified one is in `public`.
+ * `DROP NOT NULL`, and a plain index dropped and then created again under the same name (its columns changed;
+ * a unique index it replaces is not seen, so uniqueness removed that way is not flagged).
+ * Tables are told apart by schema; an unqualified one is in `public`.
  *
  * Returns the statements that make `sql` non-additive.
  */
@@ -242,11 +244,23 @@ export function nonAdditiveStatements(sql: string): string[] {
     }
   }
   const widened = new Set([...checkedIn].filter((constraint) => dropped.has(constraint)));
+  // A plain (not unique) index the migration creates, with the first statement creating it: dropping one of that
+  // name before then replaces it, as Drizzle does when an index's columns change; earlier code reads the same rows
+  // through either. Whether the dropped index was unique is not in the SQL, so losing uniqueness this way is not seen.
+  const recreatedIndexes = new Map<string, number>();
+  statements.forEach(({ code }, position) => {
+    for (const match of code.matchAll(new RegExp(String.raw`\bCREATE\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?(${NAME}(?:\s*\.\s*${NAME})?)\s+ON\b`, "gi"))) {
+      const name = qualify(match[1]!);
+      if (!recreatedIndexes.has(name)) recreatedIndexes.set(name, position);
+    }
+  });
   const existing = (table: string | null): boolean => table !== null && !created.has(table);
   const addedOnly = (table: string, columns: string[]): boolean => columns.length > 0 && columns.every((column) => added.get(table)?.has(column));
-  const risky = ({ code, table, clauses }: (typeof statements)[number]): boolean => {
+  const risky = ({ code, table, clauses }: (typeof statements)[number], position: number): boolean => {
     const bare = code.replace(/"[^"]*"/g, "_q");
     if (/\b(?:TRUNCATE|RENAME|MERGE)\b|\bVALIDATE\s+CONSTRAINT\b|\bROW\s+LEVEL\s+SECURITY\b|\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:POLICY|(?:CONSTRAINT\s+)?TRIGGER)\b|\bCREATE\s+OR\s+REPLACE\s+(?:FUNCTION|PROCEDURE)\b/i.test(bare)) return true;
+    const dropIndex = new RegExp(String.raw`^\s*DROP\s+INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+EXISTS\s+)?(${NAME}(?:\s*\.\s*${NAME})?)\s*;?\s*$`, "i").exec(code);
+    if (dropIndex && position < (recreatedIndexes.get(qualify(dropIndex[1]!)) ?? -1)) return false;
     if (/\bDROP\s+(?!CONSTRAINT\b|NOT\s+NULL\b)\w+/i.test(bare)) return true;
     if ([...code.matchAll(new RegExp(String.raw`\bDELETE\s+FROM\s+${TABLE}`, "gi"))].some((match) => existing(qualify(match[1]!)))) return true;
     for (const update of code.matchAll(new RegExp(String.raw`\bUPDATE\s+${TABLE}(?:\s+(?:AS\s+)?(?!SET\b)${NAME})?\s+SET\b`, "gi"))) {
@@ -284,7 +298,7 @@ export function nonAdditiveStatements(sql: string): string[] {
       return !list || !addedOnly(table!, columnList(list.inner));
     });
   };
-  return statements.filter(risky).map(({ text }) => text.trim());
+  return statements.filter((statement, position) => risky(statement, position)).map(({ text }) => text.trim());
 }
 export const nonAdditiveSql = (sql: string): boolean => nonAdditiveStatements(sql).length > 0;
 const CANDIDATE_TRAILER = "Release-Candidate: ";
