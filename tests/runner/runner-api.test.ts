@@ -446,6 +446,38 @@ test("a verification request queues a staging-green commit's pre-verification on
   }
 });
 
+test("a production deploy redeploys the commit production serves, whatever the caller's tip, and waits for an open production deploy", async () => {
+  const f = await fixture();
+  try {
+    const deploy = (body: unknown) => f.request("/deploys", { method: "POST", body: JSON.stringify(body) });
+    const served = "c".repeat(40), tip = "d".repeat(40);
+    const project = { name: "app", ok: true, activated: true, url: "https://example.test" };
+    f.log.append("served", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "production", commitId: served, submittedBy: "promotion" });
+    f.log.append("served", { type: "deployed", record: { environment: "production", commitId: served, previous: null, changes: [], projects: [project] } });
+    // A later production deploy that served nothing does not move what production serves.
+    f.log.append("unserved", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "production", commitId: "e".repeat(40), submittedBy: "promotion" });
+    f.log.append("unserved", { type: "failed", stage: "deploying", reason: "health", deployment: { environment: "production", commitId: "e".repeat(40), previous: served, changes: [], projects: [{ ...project, ok: false, activated: false }] } });
+    const first = await (await deploy({ repo: "Owner/Repo", environment: "production", commitId: tip, submittedBy: "author" })).json() as DeployResponse;
+    assert.equal(first.reattached, false);
+    assert.equal(first.operation.environment, "production");
+    assert.equal(first.operation.commitId, served, "the commit production serves, not the caller's tip");
+    const again = await (await deploy({ repo: "owner/repo", environment: "production", commitId: tip, submittedBy: "author" })).json() as DeployResponse;
+    assert.equal(again.reattached, true);
+    assert.equal(again.operation.id, first.operation.id);
+    // A promotion's deploy of another commit is never superseded by a redeploy.
+    f.log.append(first.operation.id, { type: "cancelled", reason: "test" });
+    f.log.append("promotion", { type: "submitted", kind: "deploy", repo: "owner/repo", environment: "production", commitId: tip, submittedBy: "promotion" });
+    const appended = f.log.events().length;
+    const busy = await deploy({ repo: "owner/repo", environment: "production", commitId: tip, submittedBy: "author" });
+    assert.equal(busy.status, 400);
+    assert.match(((await busy.json()) as { error: string }).error, /production is already deploying dddddddddddd \(promotion\)/);
+    assert.equal(f.log.events().length, appended);
+    assert.equal(f.log.operation("promotion")?.status, "queued");
+  } finally {
+    await f.close();
+  }
+});
+
 test("deploy submissions queue a deploy, reattach to the open deploy of the same commit, supersede a queued older one and list records", async () => {
   const f = await fixture();
   try {
@@ -467,8 +499,8 @@ test("deploy submissions queue a deploy, reattach to the open deploy of the same
     const appended = f.log.events().length;
     const production = await deploy({ ...body, environment: "production" });
     assert.equal(production.status, 400);
-    assert.deepEqual(await production.json(), { error: "production deploys only through slipjay promote" });
-    assert.equal(f.log.events().length, appended, "a production deploy appends nothing");
+    assert.deepEqual(await production.json(), { error: "production deploys a new commit only through slipjay promote, and serves none yet to redeploy" });
+    assert.equal(f.log.events().length, appended, "a production deploy appends nothing while production serves nothing");
     const listed = await (await f.request("/deploys?repo=Owner/Repo&environment=staging")).json() as { operations: Operation[] };
     assert.deepEqual(listed.operations.map((op) => op.id), [newer.operation.id, first.operation.id]);
     assert.equal((await f.request("/deploys")).status, 400);

@@ -1,7 +1,7 @@
 import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "../landing/submission-handoff.ts";
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "../landing/repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
-import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
+import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, servedCommit, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
 import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
@@ -358,10 +358,19 @@ export function createRunnerHandler(input: {
       }
       if (!validDeploy(body))
         return json({ error: "Invalid deploy" }, 400);
-      if (body.environment === "production")
-        return json({ error: "production deploys only through slipjay promote" }, 400);
       const repo = repositoryKey(body.repo);
       const open = input.log.openOperations(repo).filter((op) => op.kind === "deploy" && op.environment === body.environment);
+      if (body.environment === "production") {
+        // A new commit reaches production only through slipjay promote; a deploy request redeploys the commit
+        // production serves, so an environment change applies without a code commit (and without the build machine).
+        const serving = servedCommit(input.log.deployments(repo, "production"));
+        if (!serving)
+          return json({ error: "production deploys a new commit only through slipjay promote, and serves none yet to redeploy" }, 400);
+        const busy = open.find((op) => op.commitId !== serving);
+        if (busy)
+          return json({ error: `production is already deploying ${busy.commitId.slice(0, 12)} (${busy.id}): redeploy once it finishes` }, 400);
+        body.commitId = serving;
+      }
       const same = open.find((op) => op.commitId === body.commitId);
       if (same)
         return json({ operation: same, reattached: true });

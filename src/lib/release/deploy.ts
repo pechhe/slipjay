@@ -108,8 +108,10 @@ export async function runDeploy(input: {
     for (const key of policy.environmentKeys) if (declared[key] !== undefined) env[key] = declared[key];
     Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
     // The machine is the environment's for the whole deploy: its migrations may need it as much as its projects.
+    // A production redeploy of the commit it serves needs none: whatever the machine built for that commit exists already.
     let lease: MachineLease | undefined;
-    if (policy.machine) {
+    if (policy.machine && environment === "production" && commitId === previous) input.onProgress(`[deploy] redeploying ${commitId.slice(0, 12)}, which production serves: no machine leased`);
+    else if (policy.machine) {
       if (!input.lease) throw new Error(`deployments ${environment} names machine ${policy.machine}, but this runner has no remote verifier to lease it from`);
       lease = await input.lease(policy.machine);
       Object.assign(env, lease.env);

@@ -161,6 +161,31 @@ test("an environment that names a machine leases it for the whole deploy, record
     await assert.rejects(deploy(async () => { throw new Error("Remote executor unavailable (boat): boat fork: out of starts"); }), /Remote executor unavailable \(boat\): boat fork: out of starts/);
     assert.deepEqual(commands, [], "a deploy whose machine is unavailable runs nothing, anywhere");
     await assert.rejects(deploy(), /deployments images names machine images, but this runner has no remote verifier/);
+
+    // A redeploy of the commit the environment serves (an environment change) leases nothing, so boat being down cannot stop it.
+    const redeployCommands: BoundedProcessRequest[] = [];
+    const progress: string[] = [];
+    const head = git("rev-parse", "HEAD");
+    const redeployed = await runDeploy({
+      gitDirectory: path.join(repo, ".git"), environment: "production", commitId: head, previous: head, policy,
+      readEnvironment: () => ({}), onProgress: (line) => progress.push(line),
+      lease: async () => { throw new Error("Remote executor unavailable (boat): connection refused"); },
+      run: async (request) => { redeployCommands.push(request); return exited(0, ""); },
+    });
+    assert.deepEqual(redeployed.projects.map((project) => project.ok), [true, true]);
+    assert.deepEqual(redeployCommands.map((request) => request.env?.SLIPJAY_MACHINE_SSH), [undefined, undefined], "no machine for its commands");
+    assert.equal(redeployed.machine, undefined);
+    assert.ok(progress.includes(`[deploy] redeploying ${head.slice(0, 12)}, which production serves: no machine leased`));
+
+    // Only production: another environment's deploy of the commit it has (images, rebuilt by hand) still leases.
+    leased.length = 0;
+    await runDeploy({
+      gitDirectory: path.join(repo, ".git"), environment: "images", commitId: head, previous: head, policy,
+      readEnvironment: () => ({}), onProgress: () => {},
+      lease: async (pool) => { leased.push(pool); return { machine, env: {}, close: async () => ({ seconds: 1, dollars: 0 }) }; },
+      run: async () => exited(0, ""),
+    });
+    assert.deepEqual(leased, ["images"]);
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

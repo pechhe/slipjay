@@ -865,8 +865,12 @@ appears on every project. Activation and rollback retain their serial order.
 fields in `record`. Older records without timings remain readable and printable.
 
 A repository can declare environments the runner deploys. `staging` follows the
-integration branch; `production` deploys only through a promotion (see
-[Release](#release)), never on a schedule or by `slipjay deploy`. Any other environment
+integration branch; `production` takes a new commit only through a promotion (see
+[Release](#release)), never on a schedule. `slipjay deploy production` redeploys the
+commit production serves, whatever the branch tip, so an environment change applies
+without a code commit; it is refused while production serves nothing yet or a production
+deploy of another commit is open, and fails without deploying if production serves another
+commit by the time it starts. Any other environment
 follows the integration branch as `staging` does and says so with
 `"followsIntegrationBranch": true` (a misspelt `staging` is refused): YardSmith's `images`
 builds each landing's container images this way, with a `minIntervalMs` of 0.
@@ -922,7 +926,8 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   prohibits it. Downstream activation commands must honor this flag before their
   own local compensation; declared environment keys cannot override its authority.
 - **Build machine.** An environment may name a `machine` pool (`"machine": "images"`). Its
-  deploy then has the repository's build machine leased to it from the runner's remote
+  deploy then has the repository's build machine leased to it (a production redeploy of the
+  commit production serves leases none, so it runs while boat is down) from the runner's remote
   verifier (see [Remote verification on boat](#remote-verification-on-boat)): the boat VM
   `slipjay-<owner>-<name>-<pool>`, forked from the gate's image when missing and resumed when
   stopped, living for twice the environment's `timeoutMs` and then thirty idle minutes

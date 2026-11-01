@@ -71,7 +71,7 @@ export async function runPromote(args: string[]): Promise<number> {
 const automaticOf = (operation: Operation): AutomaticPromotion | undefined => operation.kind === "release" ? operation.automatic : undefined;
 const automaticNote = (automatic: AutomaticPromotion | undefined): string => automatic ? `  (automatic: ${automatic.setting} "${automatic.value}")` : "";
 
-/** `deploy <environment>`: deploy the integration branch's latest commit now, through the runner, and follow it. */
+/** `deploy <environment>`: deploy the integration branch's latest commit now, through the runner, and follow it; `deploy production` redeploys the commit production serves. */
 export async function runDeploy(args: string[]): Promise<number> {
   if (args.length !== 1 || args[0]!.startsWith("-")) throw new Error("Usage: slipjay deploy <environment>");
   const location = runnerLocation();

@@ -28,7 +28,7 @@ import { postIntegrationPolicy } from "../policy/post-integration-policy.ts";
 import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit, parseExecutionPolicy } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
-import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, servedDeploy } from "./runner-contract.ts";
+import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, recordOf, servedCommit, servedDeploy } from "./runner-contract.ts";
 import { label, newOperationId } from "./runner-log.ts";
 import type { OperationLogOptions } from "./runner-log.ts";
 import { parseFailureOutput } from "./failure-classification.ts";
@@ -488,8 +488,12 @@ export function createRunnerQueue(input: {
       if (!policy) throw new Error(`${operation.commitId.slice(0, 12)} declares no ${operation.environment} deployment`);
       promotes = promotesFrom(exact.configuration);
       // The environment served a commit once any of its projects served it.
-      const earlier = log.deployments(operation.repo, operation.environment).filter((entry) => entry.id !== operation.id).map((entry) => ({ entry, record: recordOf(entry) }));
-      const previous = earlier.find(({ record }) => record?.projects.some(servedDeploy))?.entry.commitId ?? null;
+      const others = log.deployments(operation.repo, operation.environment).filter((entry) => entry.id !== operation.id);
+      const earlier = others.map((entry) => ({ entry, record: recordOf(entry) }));
+      const previous = servedCommit(others);
+      // A production deploy no promotion carries is a redeploy (see /deploys): it deploys only what production serves when it starts.
+      if (operation.environment === "production" && !operation.promotion && operation.commitId !== previous)
+        throw new Error(`production serves ${previous ? previous.slice(0, 12) : "nothing"} now, not ${operation.commitId.slice(0, 12)}: nothing redeployed`);
       const previousUrls = Object.fromEntries(policy.projects.flatMap(({ name }) => {
         const url = earlier.flatMap(({ record }) => record?.projects ?? []).find((project) => project.name === name && servedDeploy(project))?.url;
         return url ? [[name, url]] : [];
@@ -1912,9 +1916,6 @@ export function createRunnerQueue(input: {
   };
 }
 
-/** What a finished deploy put in its environment: every project, or the ones a failed deploy reached. */
-const recordOf = (operation: DeployOperation): DeployRecord | undefined =>
-  operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
 
 /** The legacy fields keep the first failure; `failures` lists every failed check by index, command, outcome and run. */
 function failedVerification(evidence: RequiredVerificationFailureEvidence): Pick<Extract<OperationEvent, { type: "failed" }>, "command" | "output" | "failures"> {

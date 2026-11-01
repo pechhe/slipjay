@@ -50,5 +50,19 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.ok(again?.type === "released" && again.result.status === "released_by", JSON.stringify(again));
     assert.equal(again.deploy, outcome.deploy, "a deployed promotion is not deployed twice");
     assert.equal(f.log.deployments("fixture/repo", "production").length, 1);
+
+    // A redeploy (a production deploy no promotion carries) deploys only what production serves when it starts.
+    const deployed = (await f.lines("deploys.jsonl")).length;
+    const stale = "stale-redeploy";
+    f.log.append(stale, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "production", commitId: red, submittedBy: "test" });
+    f.queue.wake(); await f.queue.idle();
+    const refusedRedeploy = f.result(stale);
+    assert.ok(refusedRedeploy?.type === "failed", JSON.stringify(refusedRedeploy));
+    assert.equal(refusedRedeploy.reason, `production serves ${green.slice(0, 12)} now, not ${red.slice(0, 12)}: nothing redeployed`);
+    assert.equal((await f.lines("deploys.jsonl")).length, deployed, "it ran nothing");
+    const redeploy = "redeploy";
+    f.log.append(redeploy, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "production", commitId: green, submittedBy: "test" });
+    f.queue.wake(); await f.queue.idle();
+    assert.equal(f.result(redeploy)?.type, "deployed", JSON.stringify(f.result(redeploy)));
   } finally { await f.dispose(); }
 }, 180_000);

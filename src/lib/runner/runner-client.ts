@@ -1179,7 +1179,9 @@ export async function deployThroughRunner(cwd: string, options: { environment: s
         submittedBy: `${hostname()}:${cwd}` }) });
     const { operation: submitted, reattached } = (await response.json()) as { operation: DeployOperation; reattached: boolean };
     await rememberOperationRunner(submitted.id, options.location);
-    onLine(`[runner ${connection.name}] ${reattached ? "following the open deploy" : "deploying"} of ${branch} ${commitId.slice(0, 12)} to ${options.environment}`);
+    // Production redeploys the commit it serves, whatever the branch tip is (see the runner's /deploys).
+    const what = submitted.commitId === commitId ? `${branch} ${commitId.slice(0, 12)}` : `${submitted.commitId.slice(0, 12)}, the commit ${options.environment} serves,`;
+    onLine(`[runner ${connection.name}] ${reattached ? "following the open deploy" : "deploying"} of ${what} to ${options.environment}`);
     const operation = await follow(connection.baseUrl, token, submitted, connection.name, onLine, env, options.signal);
     return { operation, logUrl: runLogCommand(operation.id) };
   } finally { connection.close(); }

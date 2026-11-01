@@ -1,4 +1,4 @@
-import type { DeployProjectOutcome, LandingSubmission, Operation, OperationEvent, RunnerConfig, RunnerLimits, RunnerStage, StoredEvent } from "./runner-types.ts";
+import type { DeployOperation, DeployProjectOutcome, DeployRecord, LandingSubmission, Operation, OperationEvent, RunnerConfig, RunnerLimits, RunnerStage, StoredEvent } from "./runner-types.ts";
 
 /**
  * The runner's contract: one long-lived control plane that owns the landing queue
@@ -50,6 +50,14 @@ export const RUNNER_CONTROL_ID = "runner";
 
 /** Proven serving outcome, excluding unconfirmed activation or recovery as a future restore target. */
 export const servedDeploy = (project: DeployProjectOutcome): boolean => project.ok && project.activated !== false && project.activated !== "unknown";
+
+/** What a finished deploy put in its environment: every project, or the ones a failed deploy reached. */
+export const recordOf = (operation: DeployOperation): DeployRecord | undefined =>
+  operation.result?.type === "deployed" ? operation.result.record : operation.result?.type === "failed" ? operation.result.deployment : undefined;
+
+/** The commit an environment serves: the newest deploy any of whose projects served it, from deploys listed newest first. */
+export const servedCommit = (deploys: readonly DeployOperation[]): string | null =>
+  deploys.find((operation) => recordOf(operation)?.projects.some(servedDeploy))?.commitId ?? null;
 
 export const isLandingSubmission = (event: OperationEvent | undefined): event is LandingSubmission =>
   event?.type === "submitted" && (event.kind === undefined || event.kind === "landing");
