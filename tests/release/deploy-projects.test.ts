@@ -167,7 +167,7 @@ test("an environment that names a machine leases it for the whole deploy, record
     const progress: string[] = [];
     const head = git("rev-parse", "HEAD");
     const redeployed = await runDeploy({
-      gitDirectory: path.join(repo, ".git"), environment: "production", commitId: head, previous: head, policy,
+      gitDirectory: path.join(repo, ".git"), environment: "production", commitId: head, previous: head, policy, redeploy: true,
       readEnvironment: () => ({}), onProgress: (line) => progress.push(line),
       lease: async () => { throw new Error("Remote executor unavailable (boat): connection refused"); },
       run: async (request) => { redeployCommands.push(request); return exited(0, ""); },
@@ -176,6 +176,16 @@ test("an environment that names a machine leases it for the whole deploy, record
     assert.deepEqual(redeployCommands.map((request) => request.env?.SLIPJAY_MACHINE_SSH), [undefined, undefined], "no machine for its commands");
     assert.equal(redeployed.machine, undefined);
     assert.ok(progress.includes(`[deploy] redeploying ${head.slice(0, 12)}, which production serves: no machine leased`));
+
+    // A promotion retrying the commit production partly serves is no redeploy: it still leases.
+    leased.length = 0;
+    await runDeploy({
+      gitDirectory: path.join(repo, ".git"), environment: "production", commitId: head, previous: head, policy,
+      readEnvironment: () => ({}), onProgress: () => {},
+      lease: async (pool) => { leased.push(pool); return { machine, env: {}, close: async () => ({ seconds: 1, dollars: 0 }) }; },
+      run: async () => exited(0, ""),
+    });
+    assert.deepEqual(leased, ["images"]);
 
     // Only production: another environment's deploy of the commit it has (images, rebuilt by hand) still leases.
     leased.length = 0;

@@ -505,7 +505,7 @@ export function createRunnerQueue(input: {
       const earlierSchemaChange = earlier.some(({ entry, record }) => entry.commitId === operation.commitId && entry.result
         && (!record || record.migrations?.status === "applied" || record.migrations?.status === "apply_failed"));
       const record = await runDeploy({
-        gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy,
+        gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy, redeploy: !operation.promotion,
         previousUrls, nonAdditive: manual.length > 0, earlierSchemaChange, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
         // The deploy lane runs one deploy per repository, so a repository's machine serves one deploy at a time. Its

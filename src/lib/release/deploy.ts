@@ -83,6 +83,8 @@ export const schemaMayHaveChanged = (declared: boolean, migrations: DeployMigrat
 export async function runDeploy(input: {
   gitDirectory: string; environment: string; commitId: string; previous: string | null;
   policy: DeploymentEnvironment;
+  /** A production deploy no promotion carries: it redeploys the commit production serves, so it leases no machine. */
+  redeploy?: boolean;
   /** The deployment each project served before, for moving traffic back. */
   previousUrls?: Record<string, string>;
   /** The promotion carries migrations that earlier code may not survive (see `nonAdditiveSql`). */
@@ -109,8 +111,9 @@ export async function runDeploy(input: {
     Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
     // The machine is the environment's for the whole deploy: its migrations may need it as much as its projects.
     // A production redeploy of the commit it serves needs none: whatever the machine built for that commit exists already.
+    // A promotion retrying a commit production partly serves still leases, since what failed may need the machine.
     let lease: MachineLease | undefined;
-    if (policy.machine && environment === "production" && commitId === previous) input.onProgress(`[deploy] redeploying ${commitId.slice(0, 12)}, which production serves: no machine leased`);
+    if (policy.machine && input.redeploy && environment === "production" && commitId === previous) input.onProgress(`[deploy] redeploying ${commitId.slice(0, 12)}, which production serves: no machine leased`);
     else if (policy.machine) {
       if (!input.lease) throw new Error(`deployments ${environment} names machine ${policy.machine}, but this runner has no remote verifier to lease it from`);
       lease = await input.lease(policy.machine);
