@@ -6,7 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
-import { project } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { recordWorkspaceActivity } from "../../src/lib/workspace/workspace-eviction.ts";
 
@@ -48,7 +48,7 @@ test("maintain reports an unreadable request instead of nothing to archive or ev
   const reported = JSON.parse(json.stdout) as { requests: Array<{ requestId: string; outcome: string; reason: string }>; evictions: unknown };
   assert.deepEqual(reported.requests.map(({ requestId, outcome }) => ({ requestId, outcome })), [{ requestId: "broken", outcome: "failed" }]);
   assert.match(reported.requests[0]!.reason, /the request file could not be read/);
-  assert.deepEqual(reported.evictions, { results: [], skipped: [] });
+  assert.deepEqual(reported.evictions, { results: [], skipped: [], unretirable: [] });
 });
 
 /**
@@ -68,10 +68,51 @@ test("the hourly pass evicts a checkout idle past its documented 24-hour default
 
     const result = spawnSync("bun", [cli, "maintain", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
     assert.equal(result.status, 0, result.stderr);
-    const reported = JSON.parse(result.stdout) as { evictions: { results: Array<{ name: string; removedPaths: string[] }> } };
+    const reported = JSON.parse(result.stdout) as { evictions: { results: Array<{ name: string; removedPaths: string[] }>; unretirable: unknown[] } };
     assert.deepEqual(reported.evictions.results.map((entry) => entry.name), [name]);
+    assert.deepEqual(reported.evictions.unretirable, [], "a checkout retire can take is not named as unretirable");
     assert.deepEqual(reported.evictions.results[0]!.removedPaths, ["node_modules"]);
     assert.equal(existsSync(join(workspace.workspacePath, "node_modules")), false);
+  } finally {
+    await f.dispose();
+  }
+});
+
+/**
+ * A settled thread's cleanup calls `retire`, and a refusal leaves the checkout behind by
+ * design. Nothing surfaced those: they piled up on a host until someone counted the disk.
+ * The pass must name each idle checkout retire would refuse, and why, in both output modes.
+ */
+test("maintain names idle checkouts that retire would refuse", async () => {
+  const f = await project();
+  try {
+    const workspace = await createWorkspace("maintain-unretirable", f.repo);
+    const root = workspace.workspacePath;
+    const name = workspace.current.name;
+    // A conflict inherited from the base, plus an edit of this checkout's own: the archive
+    // may not record the conflicted file as source, so retirement refuses.
+    await writeFile(join(root, "f.txt"), "one\n");
+    await jj(root, ["commit", "-m", "one"]);
+    const one = (await jj(root, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
+    await jj(root, ["new", "main", "-m", "two"]);
+    await writeFile(join(root, "f.txt"), "two\n");
+    await jj(root, ["commit", "-m", "two"]);
+    const two = (await jj(root, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
+    await jj(root, ["new", one, two, "-m", "inherited conflict"]);
+    await writeFile(join(root, "notes.md"), "mine\n");
+    await recordWorkspaceActivity(name, Date.now() - 25 * HOUR);
+
+    const json = spawnSync("bun", [cli, "maintain", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
+    assert.equal(json.status, 0, json.stderr);
+    const reported = JSON.parse(json.stdout) as { evictions: { unretirable: Array<{ name: string; root: string; reason: string }> } };
+    const entry = reported.evictions.unretirable.find((candidate) => candidate.name === name);
+    assert.ok(entry, json.stdout);
+    assert.equal(entry.root, root);
+    assert.match(entry.reason, /unresolved conflicts, which an archive would record as source/);
+
+    const plain = spawnSync("bun", [cli, "maintain"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.match(plain.stderr, new RegExp(`^cannot retire\\t${name}\\t.*unresolved conflicts`, "m"));
   } finally {
     await f.dispose();
   }

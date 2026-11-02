@@ -10,6 +10,8 @@ import { listWorkspaces, metadataPath, workspaceMetadata } from "./workspace-sta
 
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { generatedPathMatchers, readIntegrationPolicy } from "../policy/execution-policy.ts";
+import { archiveRefusal } from "./workspace-archive.ts";
+import { withinWorkspaceStorage } from "./workspace-lifecycle.ts";
 
 /**
  * Idle eviction: a checkout nobody is using keeps its commits and its binding but
@@ -34,6 +36,11 @@ export type EvictionPlan = {
   root: string;
   action: "evict" | "keep";
   reason: string;
+  /**
+   * Why `retire` would refuse this checkout now, or null when it would not (or the checkout
+   * is not idle past the threshold, so it was not judged).
+   */
+  retirementRefusal: string | null;
   /** Dependency trees the checkout would shed, relative to its root. */
   dependencyPaths: string[];
   /** Declared generated output it would shed too, relative to its root. */
@@ -55,6 +62,11 @@ export type EvictionResult = {
 export type EvictionOutcome = {
   results: EvictionResult[];
   skipped: Array<{ name: string; reason: string }>;
+  /**
+   * Idle checkouts past the threshold that `retire` would refuse, so a retirement a harness
+   * walks away from is visible instead of piling up unseen.
+   */
+  unretirable: Array<{ name: string; root: string; reason: string }>;
 };
 
 /** A checkout's dependency trees: `node_modules` beside each tracked manifest, and at its root. */
@@ -175,24 +187,32 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
   idleMs?: number; now?: number; plan?: boolean; processes?: ProcessWorkingDirectory[] | null;
 } = {}): Promise<{ plans: EvictionPlan[]; outcome: EvictionOutcome }> {
   const context = await workspaceContext(cwd);
-  if (!context) return { plans: [], outcome: { results: [], skipped: [] } };
+  if (!context) return { plans: [], outcome: { results: [], skipped: [], unretirable: [] } };
   const now = options.now ?? Date.now();
   const integrationRoot = resolve(context.integration.root);
   const workspaces = await listWorkspaces(cwd, { readOnly: Boolean(options.plan) });
   const plans: EvictionPlan[] = [];
-  const outcome: EvictionOutcome = { results: [], skipped: [] };
+  const outcome: EvictionOutcome = { results: [], skipped: [], unretirable: [] };
   for (const workspace of workspaces) {
     const root = workspace.root ? resolve(workspace.root) : "";
     if (!root) { outcome.skipped.push({ name: workspace.name, reason: "no checkout on disk" }); continue; }
     // A spare is the pool's cached readiness and a dependency seed for other checkouts.
     if (workspace.metadata?.spare) { outcome.skipped.push({ name: workspace.name, reason: "a pool spare" }); continue; }
     const decision = await decide(workspace, root, integrationRoot, now, options);
+    // A checkout nobody is using that `retire` would refuse is what accumulates: judge it
+    // here, read-only, so the pass names it and why instead of only skipping its eviction.
+    const idleAndFree = ["idle ", "no dependency trees installed"].some((prefix) => decision.reason.startsWith(prefix))
+      && idlePastThreshold(workspace, now, options.idleMs);
+    const retirementRefusal = !idleAndFree ? null
+      : !await withinWorkspaceStorage(root) ? "it is not a workspace SlipJay manages"
+      : (await archiveRefusal(root, integrationRoot, { readOnly: true }).catch(() => null))?.refusal ?? null;
+    if (retirementRefusal !== null) outcome.unretirable.push({ name: workspace.name, root, reason: retirementRefusal });
     const dependencyPaths = decision.evict || decision.reason === "no dependency trees installed"
       ? await dependencyTrees(root) : [];
     const generatedPaths = decision.evict ? await generatedPathsIn(root, integrationRoot).catch(() => []) : [];
     plans.push({
       name: workspace.name, root, action: decision.evict ? "evict" : "keep", reason: decision.reason,
-      dependencyPaths, generatedPaths, sizeBytes: await diskBytes(root),
+      retirementRefusal, dependencyPaths, generatedPaths, sizeBytes: await diskBytes(root),
     });
     if (!decision.evict) { outcome.skipped.push({ name: workspace.name, reason: decision.reason }); continue; }
     if (options.plan) continue;
@@ -280,4 +300,26 @@ async function decide(
     await recordWorkspaceActivity(workspace.name, now);
   }
   return decision;
+}
+
+/**
+ * The newest time the checkout is known to have been touched: its idle clock, or, for a checkout
+ * eviction never clocked (it has no dependency trees, so `decide` starts none), the record's own
+ * creation or update. Without the fallback, a checkout with nothing to evict is never idle.
+ */
+function idleSince(workspace: WorkspaceEntry): number | null {
+  const metadata = workspace.metadata ?? {};
+  // A recorded clock is authoritative: the fallback only stands in where eviction started none.
+  const stamps = [metadata.lastActivityAt, metadata.updatedAt, metadata.claimedAt, metadata.createdAt, metadata.attachedAt]
+    .map((value) => typeof value === "string" ? Date.parse(value) : NaN)
+    .filter((value) => Number.isFinite(value));
+  if (!stamps.length) return null;
+  const recorded = typeof metadata.lastActivityAt === "string" ? Date.parse(metadata.lastActivityAt) : NaN;
+  return Number.isFinite(recorded) ? recorded : Math.max(...stamps);
+}
+
+/** Whether the checkout's last known use is older than the eviction threshold. */
+function idlePastThreshold(workspace: WorkspaceEntry, now: number, idleMs?: number): boolean {
+  const lastActivityAt = idleSince(workspace);
+  return lastActivityAt !== null && now - lastActivityAt >= (idleMs ?? EVICTION_IDLE_MS);
 }

@@ -9,8 +9,8 @@ import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace
 import { stateHome, workspaceHome } from "./workspace-paths.ts";
 import { readIntegrationPolicy } from "../policy/execution-policy.ts";
 import { generatedPathMatchers } from "../policy/execution-policy.ts";
-import { uniqueUntrackedMaterial } from "./workspace-lifecycle.ts";
-import { listWorkspaces } from "./workspace-state.ts";
+import { uniqueUntrackedMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
+import { listWorkspaces, recordedWorkspaceBase, workspaceMetadata } from "./workspace-state.ts";
 
 /**
  * Archive and restore: the half of workspace hygiene that eviction cannot do.
@@ -73,7 +73,7 @@ export const archivePayloadPath = (id: string) => join(archivesHome(), `${id}.ta
  * a checkout SlipJay cannot describe completely is never called preserved.
  */
 export async function archiveRefusal(root: string, integrationRoot: string, options: {
-  limitBytes?: number; limitFiles?: number;
+  limitBytes?: number; limitFiles?: number; readOnly?: boolean;
 } = {}): Promise<ArchiveRefusal> {
   const absolute = resolve(root);
   if (!existsSync(absolute)) return { refusal: "the checkout is not on disk" };
@@ -83,13 +83,26 @@ export async function archiveRefusal(root: string, integrationRoot: string, opti
   if (resolve(context.integration.root) !== resolve(integrationRoot)) {
     return { refusal: "the checkout belongs to a different repository" };
   }
+  // A reporting pass judges the last snapshot, so it never turns an on-disk edit into a commit.
+  const jjFlags = ["--color=never", ...options.readOnly ? ["--ignore-working-copy"] : []];
   // `jj resolve --list` exits non-zero when there is nothing to list: that is clean, not an error.
-  const conflicts = await run("jj", ["--color=never", "resolve", "--list"], { cwd: absolute });
+  const conflicts = await run("jj", [...jjFlags, "resolve", "--list"], { cwd: absolute });
   const conflictsText = `${conflicts.stdout}\n${conflicts.stderr}`.trim();
   if (conflicts.code !== 0 && !/no conflicts found/i.test(conflictsText)) {
     return { refusal: `its conflicts cannot be read: ${conflictsText.split("\n").slice(-1)[0] ?? "unknown error"}` };
   }
-  if (conflicts.stdout.trim()) return { refusal: "it has unresolved conflicts, which an archive would record as source" };
+  // A conflict inherited from the base is not this checkout's own work: the commits it owns
+  // record the same conflicted tree as the base, so preserving them invents no source. An empty
+  // `@` alone proves nothing — an agent may have committed a conflict and then `jj new` left
+  // `@` empty on top — so every owned commit since its recorded start base must be empty too.
+  if (conflicts.stdout.trim()) {
+    const base = await workspaceMetadata(context.current.name).then((metadata) => recordedWorkspaceBase(absolute, metadata)).catch(() => null);
+    // A read-only judgement does not snapshot, so an edit on disk is still this checkout's own.
+    const unsnapshotted = options.readOnly && (await unsnapshottedEdits(absolute, integrationRoot, 1).catch(() => [])).length > 0;
+    if (!await conflictIsInherited(absolute, base, jjFlags) || unsnapshotted) {
+      return { refusal: "it has unresolved conflicts, which an archive would record as source" };
+    }
+  }
   const nested = await nestedRepositories(absolute, integrationRoot);
   if (nested.length) return { refusal: `it holds a nested repository (${nested.slice(0, 3).join(", ")}), whose own history an archive cannot keep` };
   const inventory = await inventoryOf(absolute, integrationRoot).catch(() => null);
@@ -102,6 +115,19 @@ export async function archiveRefusal(root: string, integrationRoot: string, opti
     return { refusal: `its files outside history are ${(bytes / 1024 / 1024).toFixed(0)} MB, over the ${((options.limitBytes ?? ARCHIVE_LIMIT_BYTES) / 1024 / 1024).toFixed(0)} MB an archive keeps` };
   }
   return null;
+}
+
+/**
+ * Whether every commit the checkout owns, from its recorded start base up to `@`, is empty, so
+ * the conflict can only come from that base. One revset, no walk: a non-empty owned commit, or a
+ * base that is no longer an ancestor of `@` (a rewritten or diverged base proves nothing), answers
+ * no and the archive refuses. A checkout with no recorded base cannot prove where its conflict
+ * came from, so it refuses too.
+ */
+async function conflictIsInherited(root: string, base: string | null, jjFlags: string[]): Promise<boolean> {
+  if (base === null) return false;
+  const owned = await run("jj", [...jjFlags, "log", "-r", `(${base}..@ & ~empty()) | (${base} & ~::@)`, "--no-graph", "-T", "commit_id"], { cwd: root });
+  return owned.code === 0 && owned.stdout.trim() === "";
 }
 
 /**

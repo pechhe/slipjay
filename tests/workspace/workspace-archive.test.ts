@@ -69,6 +69,70 @@ test("an archive keeps commits, bytes, modes, links and ignored files, and resto
   assert.ok((await listArchives()).some((entry) => entry.id === archive.id));
 });
 
+/**
+ * A conflict that lives in history: two divergent edits of one file are merged into the
+ * integration head before a checkout starts, so the checkout inherits it from its base and
+ * owns no commit of its own.
+ */
+async function conflictOnIntegrationHead(f: Awaited<ReturnType<typeof project>>) {
+  await writeFile(join(f.repo, "f.txt"), "one\n");
+  await jj(f.repo, ["new", "main", "-m", "one"]);
+  await writeFile(join(f.repo, "f.txt"), "one\n");
+  await jj(f.repo, ["commit", "-m", "one"]);
+  const one = (await jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
+  await jj(f.repo, ["new", "main", "-m", "two"]);
+  await writeFile(join(f.repo, "f.txt"), "two\n");
+  await jj(f.repo, ["commit", "-m", "two"]);
+  const two = (await jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
+  await jj(f.repo, ["new", one, two, "-m", "base conflict"]);
+  await jj(f.repo, ["bookmark", "set", "main", "-r", "@"]);
+}
+
+async function inheritedConflict(f: Awaited<ReturnType<typeof project>>, task: string) {
+  await conflictOnIntegrationHead(f);
+  const workspace = await createWorkspace(task, f.repo);
+  return { ...workspace, root: workspace.workspacePath, name: workspace.current.name };
+}
+
+test("a conflict inherited from its base does not stop an archive", async () => {
+  const f = await project();
+  const workspace = await inheritedConflict(f, "archive-inherited-conflict");
+  assert.match(await jj(workspace.root, ["resolve", "--list"]), /f\.txt/);
+
+  assert.equal(await archiveRefusal(workspace.root, f.repo), null, "an empty change owns no conflicted source");
+  assert.equal(await archiveRefusal(workspace.root, f.repo, { readOnly: true }), null, "and a read-only judgement agrees");
+
+  const archived = await archiveWorkspace(workspace.root, { reason: "test" });
+  assert.ok("archive" in archived, JSON.stringify(archived));
+  assert.equal(archived.archive.commitId, (await jj(workspace.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "commit_id"])).trim());
+});
+
+test("a conflicted commit of its own at @- with an empty @ is still refused", async () => {
+  const f = await project();
+  const workspace = await inheritedConflict(f, "archive-own-conflicted-commit");
+  // The agent commits its own change on top of the inherited conflict, then `jj new` leaves an
+  // empty `@`: `@` being empty says nothing about the commit the checkout owns below it.
+  await writeFile(join(workspace.root, "notes.md"), "mine\n");
+  await jj(workspace.root, ["commit", "-m", "own conflicted commit"]);
+  assert.equal((await jj(workspace.root, ["--ignore-working-copy", "log", "-r", "@", "--no-graph", "-T", "empty"])).trim(), "true");
+  assert.match(await jj(workspace.root, ["resolve", "--list"]), /f\.txt/);
+
+  const refusal = await archiveRefusal(workspace.root, f.repo);
+  assert.match(refusal?.refusal ?? "", /unresolved conflicts/);
+  assert.equal(await archiveRefusal(workspace.root, f.repo, { readOnly: true }).then((r) => r?.refusal ?? ""), refusal?.refusal,
+    "a read-only judgement reaches the same answer");
+});
+
+test("a checkout that has a conflict and its own change is still refused", async () => {
+  const f = await project();
+  const workspace = await inheritedConflict(f, "archive-own-conflict");
+  await writeFile(join(workspace.root, "notes.md"), "mine\n");
+
+  const refusal = await archiveRefusal(workspace.root, f.repo);
+  assert.match(refusal?.refusal ?? "", /unresolved conflicts/);
+  assert.equal(existsSync(join(workspace.root, "notes.md")), true, "a refusal leaves the checkout untouched");
+});
+
 test("a nested repository is refused, leaving the checkout untouched", async () => {
   const f = await project();
   const workspace = await createWorkspace("archive-refuses", f.repo);

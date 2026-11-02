@@ -104,6 +104,7 @@ export async function runEvict(rest: string[]): Promise<void> {
       console.log(`Evicted ${result.name}: ${result.removedPaths.join(", ")}${freed}`);
     }
     for (const skipped of outcome.skipped) console.error(`Kept ${skipped.name}: ${skipped.reason}`);
+    for (const entry of outcome.unretirable) console.error(`cannot retire ${entry.name}: ${entry.reason}`);
     if (!outcome.results.length) console.log("No idle workspace to evict.");
   }
 }
@@ -182,7 +183,10 @@ export async function runMaintain(rest: string[]): Promise<void> {
     if (eviction) {
       for (const result of eviction.results) console.log(`evicted\t${result.name}\t${result.removedPaths.join(", ")}`);
       for (const skipped of eviction.skipped) if (!/used within|pool spare|no activity recorded/.test(skipped.reason)) console.error(`kept\t${skipped.name}\t${skipped.reason}`);
-      if (!outcomes.length && !eviction.results.length) console.log("Nothing to archive or evict.");
+      // A checkout `retire` refuses is one a settled thread's cleanup walked away from: name it
+      // and why, or it stays here for ever with nothing that surfaces it.
+      for (const entry of eviction.unretirable) console.error(`cannot retire\t${entry.name}\t${entry.reason}`);
+      if (!outcomes.length && !eviction.results.length && !eviction.unretirable.length) console.log("Nothing to archive or evict.");
     }
   }
   if (evictionError !== null) {

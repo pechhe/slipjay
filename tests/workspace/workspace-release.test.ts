@@ -7,6 +7,7 @@ import { project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { readReleaseResult, releaseWorkspace, stillArchivedState } from "../../src/lib/workspace/workspace-release.ts";
 import { archiveWorkspace, restoreArchive } from "../../src/lib/workspace/workspace-archive.ts";
+import { jj } from "../../src/lib/infra/workspace-jj.ts";
 
 async function checkoutWithWork(f: Awaited<ReturnType<typeof project>>, task: string) {
   const created = await createWorkspace(task, f.repo);
@@ -33,6 +34,30 @@ test("releasing archives the checkout, retires it, and restores its ignored file
   assert.ok("workspacePath" in restored, JSON.stringify(restored));
   assert.equal(await readFile(join(restored.workspacePath, ".env"), "utf8"), "TOKEN=keep\n");
   assert.equal(await readFile(join(restored.workspacePath, "notes.md"), "utf8"), "release-happy\n");
+});
+
+test("a checkout whose conflict is inherited from its base retires", async () => {
+  const f = await project();
+  // Two divergent edits of one file join on the integration head before the checkout starts,
+  // so the conflict is history's and the checkout owns no commit of its own.
+  await jj(f.repo, ["new", "main", "-m", "one"]);
+  await writeFile(join(f.repo, "notes.md"), "one\n");
+  await jj(f.repo, ["commit", "-m", "one"]);
+  const one = (await jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
+  await jj(f.repo, ["new", "main", "-m", "two"]);
+  await writeFile(join(f.repo, "notes.md"), "two\n");
+  await jj(f.repo, ["commit", "-m", "two"]);
+  const two = (await jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"])).trim();
+  await jj(f.repo, ["new", one, two, "-m", "base conflict"]);
+  await jj(f.repo, ["bookmark", "set", "main", "-r", "@"]);
+  const created = await createWorkspace("release-inherited-conflict", f.repo);
+  const workspace = { root: created.workspacePath, name: created.current.name };
+  assert.match(await jj(workspace.root, ["resolve", "--list"]), /notes\.md/);
+
+  const result = await releaseWorkspace(workspace.root, { operationId: "op-inherited-conflict" });
+
+  assert.equal(result.state, "retired", JSON.stringify(result));
+  assert.equal(existsSync(workspace.root), false, "the checkout is gone");
 });
 
 test("replaying an operation id answers the recorded result instead of releasing again", async () => {
