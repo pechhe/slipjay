@@ -199,18 +199,17 @@ async function sameDirectory(left: string, right: string): Promise<boolean> {
 export async function workspaceContext(cwd: string = process.cwd(), integratedBranch?: string, options: { fetchMissingBookmarks?: boolean } = {}): Promise<WorkspaceContext | null> {
   const currentRoot = await jjWorkspaceRoot(cwd);
   if (!currentRoot) return null;
-  let output: string;
-  try {
-    output = await jj(cwd, [
-      "--ignore-working-copy",
-      "workspace",
-      "list",
-      "-T",
-      'name ++ "\\t" ++ root ++ "\\t" ++ target.change_id() ++ "\\t" ++ target.commit_id() ++ "\\n"',
-    ]);
-  } catch {
-    return null;
-  }
+  // A `.jj` directory means this is a repository, so a failed listing is a repository
+  // SlipJay cannot read (jj missing from PATH, an unreadable store), not somewhere
+  // outside one. Reporting it as null would let an hourly pass read "nothing to do"
+  // while it could not look, and hide the failure for as long as it lasted.
+  const output = await jj(cwd, [
+    "--ignore-working-copy",
+    "workspace",
+    "list",
+    "-T",
+    'name ++ "\\t" ++ root ++ "\\t" ++ target.change_id() ++ "\\t" ++ target.commit_id() ++ "\\n"',
+  ]);
   // The JJ listing carries identity fields only; hasWork is not set here (workspace-jj.d.mts types it required).
   const workspaces = parseWorkspaceList(output) as WorkspaceEntry[];
   // An empty root is an unavailable checkout, never this process cwd.
