@@ -23,10 +23,12 @@ const REMOTE_PATH = `${USER_HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin`;
 /** Runner-host variables that describe the host, not the command, so they never reach the VM. */
 const HOST_ONLY = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", SYSTEMD_SLICE_ENV]);
 /**
- * How long a gate slot may take to answer once boat has it. A resumed or fresh large disk restores in six to eleven
- * minutes (2 Nov 2026: fresh slot forks took 380-660 s), so five minutes failed and replaced healthy slots mid-restore.
+ * How long a gate slot's disk may take to restore before the slot is forked afresh. Measured 2 Nov 2026: a fresh fork of
+ * the image was ready in six to eleven minutes, while resuming a slot whose disk had grown (some 450,000 files) was still
+ * restoring after fifty, so a slow slot is replaced rather than waited for (3.47.1 tried waiting fifteen minutes and every
+ * screen landing then failed as infrastructure).
  */
-const READY_TIMEOUT_MS = 15 * 60_000;
+const READY_TIMEOUT_MS = 300_000;
 /**
  * A build machine's disk holds its warm Docker build cache (a 3-minute build against 20+ cold), and a resumed disk that
  * large can take longer than a gate slot's wait to restore. So a build machine waits this long and is not replaced while
@@ -272,12 +274,12 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       if (stalled || Date.now() >= deadline) {
         const health = stalled ? `, health ${vm.health}${vm.healthReason ? ` (${vm.healthReason})` : ""}` : "";
         const detail = `state ${vm.state}${health}${vm.hydrated ? "" : ", disk still restoring"}${stalled ? "" : ` after ${readyMs / 1000}s`}`;
-        // A machine is replaced only when boat reports its restore stuck (degraded): delete it and fork the image afresh
-        // once, so later work does not wait on the same dead disk. A restore that is merely slow waits out the ready
-        // timeout and then fails without a replacement: a fresh fork restores the whole disk again, slower still, costs a
-        // rationed boat start and throws away the warm caches (2 Nov 2026: fifteen screen slots were replaced in a day).
-        // A replacement that also will not restore fails as infrastructure rather than forking again.
-        if (!stalled || replaced || vm.hydrated) fail(`${name} not reachable`, detail);
+        // A slot whose disk boat never restores is broken, not merely slow: delete it and fork the image afresh once, so
+        // every later landing on the lane does not wait on the same dead disk. A replacement that also will not restore
+        // fails as infrastructure rather than forking again, since boat starts are rationed. A build machine is replaced
+        // only when boat reports it degraded: while its restore is merely slow it waits BUILD_READY_TIMEOUT_MS and then
+        // fails, keeping the disk its warm build cache is on.
+        if (build && !stalled || replaced || vm.hydrated) fail(`${name} not reachable`, detail);
         replaced = true;
         await api(["delete", vm.id, "--yes"], signal);
         vm = await acquire(vm.id);

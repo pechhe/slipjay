@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.48.1
+
+- **A gate slot whose disk is slow to restore is forked afresh again (reverts 3.47.1's slot rule):** waiting up to
+  fifteen minutes for a resumed slot did not pay. On 2 Nov 2026 resumed screen slots with some 450,000 files were still
+  restoring after twenty to fifty minutes, and screen landings failed as infrastructure, while a fresh fork of the image
+  was ready in six to eleven minutes. Slots again wait five minutes and are then replaced once; build machines keep
+  their warm-cache rule.
+
 ## v3.48.0
 
 - **A screen runs behind the screens ahead of it, so a landing that lands as predicted is gated once (SJ-183):**
