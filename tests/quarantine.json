@@ -1,1 +1,7 @@
-[]
+[
+  {
+    "file": "tests/workspace/workspace-adopt-runner-relanding.test.ts",
+    "issue": 6082,
+    "reason": "Confirmed landing-gate flake: the helper coverage check after the replacement landing crashed on a null helper workspace context in two operations (op_00mvs7okyp, op_00mvsydpm3), and the file costs 48.7-77.7s against the 30s budget (SJ-177)"
+  }
+]
