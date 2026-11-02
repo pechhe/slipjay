@@ -28,3 +28,8 @@ export function setFixtureJjSetting(key: string, value: string): void {
   settings.set(key, value);
   write();
 }
+
+/** The user-level value this process's fixtures set for `key`, or undefined while they set none. */
+export function fixtureJjSetting(key: string): string | undefined {
+  return settings.get(key);
+}

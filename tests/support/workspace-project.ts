@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { drainFixtureWorkers } from "./fixture-workers.ts";
 import { setFixtureJjSetting } from "./jj-user-config.ts";
 
@@ -90,6 +91,12 @@ async function stopFixtureProcesses(root: string): Promise<void> {
   }
 }
 
+// JJ's executable path is one setting for the whole file, and a test that overruns its timeout restores after a later
+// test has installed its own. The live wrapper is the innermost live fixture's; with none, the value from before the
+// first, so a fixture's disposal can never leave a deleted path configured.
+const wrappers: string[] = [];
+let wrapperBase = "git";
+
 /** Expose a genuine GitHub origin while JJ's Git subprocesses use the local bare fixture. Restore before disposing it. */
 export async function configureLocalGithubTransport(f: { root: string; repo: string; remote: string }): Promise<{ github: string; restore(): void }> {
   // JJ's internal remote-list must see the real configured GitHub identity. Only
@@ -107,11 +114,19 @@ exec git -c ${quote(`url.${f.remote}.insteadOf=${github}`)} "$@"
 `);
   await chmod(gitWrapper, 0o755);
   // Source and runner clones share this test file's guarded disposable HOME.
+  if (!wrappers.length) wrapperBase = previousGit;
+  wrappers.push(gitWrapper);
   setFixtureJjSetting("git.executable-path", gitWrapper);
   const setOrigin = (url: string) => execFileSync("git", ["-C", f.repo, "remote", "set-url", "origin", url]);
   const restore = () => {
-    try { setOrigin(previousOrigin); }
-    finally { setFixtureJjSetting("git.executable-path", previousGit); }
+    try { if (existsSync(f.repo)) setOrigin(previousOrigin); }
+    finally {
+      const installed = wrappers.indexOf(gitWrapper);
+      if (installed >= 0) wrappers.splice(installed, 1);
+      // A fixture that is gone cannot serve a fetch, so the live wrapper is the innermost one still holding its root.
+      while (wrappers.length && !existsSync(wrappers.at(-1)!)) wrappers.pop();
+      setFixtureJjSetting("git.executable-path", wrappers.at(-1) ?? (isAbsolute(wrapperBase) && !existsSync(wrapperBase) ? "git" : wrapperBase));
+    }
   };
   try { setOrigin(github); }
   catch (error) { restore(); throw error; }

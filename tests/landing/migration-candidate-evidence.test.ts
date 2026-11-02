@@ -32,7 +32,7 @@ test("a failed migration verification reports evidence and rolls generated artif
     assert.match(out.output, /verification evidence/);
     assert.equal(f.remoteMain(), base);
   } finally { await f.dispose(); }
-}, 60000);
+});
 
 
 test("migration failure and progress redact the exact injected command environment", async () => {
@@ -59,4 +59,4 @@ test("migration failure and progress redact the exact injected command environme
       assert.match(progress.join("\n"), /REDACTED/);
     } finally { await migration.rollback(); }
   } finally { await f.dispose(); }
-}, 60000);
+});

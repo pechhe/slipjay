@@ -17,4 +17,4 @@ for (const [name, source, pass] of [
       if (name === "failed generation rollback") assert.match(out.output, /generation evidence/);
     }
   } finally { await f.dispose(); }
-}, 60000);
+});

@@ -118,7 +118,7 @@ for (const verifyFails of [false, true]) test(`real migration commands bind reba
     assert.equal((await revisionFacts(f.workspace, "main")).commitId, integration.commitId);
     assert.equal((await revisionFacts(f.workspace, "@")).empty, true, "rollback restores the empty continuation checkout");
   } finally { await f.dispose(); }
-}, 60000);
+});
 
 const attributionCases = [
   { name: "default origin", remote: undefined, remotes: "origin git@github.com:owner/app.git", description: "Change\n\nIssue: owner/app#12", repository: "owner/app", issue: 12 },

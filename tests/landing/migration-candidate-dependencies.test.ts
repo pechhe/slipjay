@@ -24,7 +24,7 @@ test("the runner prepares dependency drift from final rebase before generating a
     assert.ok(existsSync(f.verified), "the landing gate ran");
     assert.equal(existsSync(f.workspace), false, "the landed workspace was released");
   } finally { await f.dispose(); }
-}, 60000);
+});
 
 test("a frozen preparation failure prevents generation and integration and retains semantic source", async () => {
   const f = await fixture(append);
@@ -40,7 +40,7 @@ test("a frozen preparation failure prevents generation and integration and retai
     assert.equal(f.remoteMain(), base);
     assert.equal(await readFile(join(f.workspace, "schema/source"), "utf8"), "new");
   } finally { await f.dispose(); }
-}, 60000);
+});
 
 test("installation source drift is fenced before generation and restored without integration", async () => {
   const f = await fixture(append);
@@ -55,4 +55,4 @@ test("installation source drift is fenced before generation and restored without
     assert.match(out.output, /Dependency preparation changed the landing candidate's source/);
     assert.equal(f.remoteMain(), base);
   } finally { await f.dispose(); }
-}, 60000);
+});
