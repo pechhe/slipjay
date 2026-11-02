@@ -245,6 +245,7 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
               if (stored.seq <= lastSeq) continue;
               lastSeq = stored.seq;
               if (stored.event.type === "progress" && env.SLIPJAY_RUNNER_VERBOSE === "1") onLine(stored.event.line);
+              if (stored.event.type === "screen_reused") onLine(`[runner ${name}] no second gate: published on screen attempt ${stored.event.attempt} because ${stored.event.reason}`);
               if (stored.event.type === "stage") {
                 operation = { ...operation, stage: stored.event.stage, status: stored.event.stage === "queued" ? "queued" : "running" };
                 show();

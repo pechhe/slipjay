@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.48.0
+
+- **A screen runs behind the screens ahead of it, so a landing that lands as predicted is gated once (SJ-183):**
+  each new screen prepares on its predicted prefix, the candidate of the latest-started screen still expected to
+  publish, instead of on the bare tip. When that prefix publishes, the integration tip is exactly the base the screen
+  ran on, so it publishes on its own screen with no second gate. Before, three screens ran on one tip and every one
+  but the first to publish was gated again: 43 of the 66 YardSmith changes landed on 2 Nov 2026. A screen behind a
+  prefix that fails, is stopped or rebuilt returns to the queue and screens again (its result there is not its
+  verdict); one that conflicts with its prefix screens on the tip alone; a publication the prediction missed still
+  re-gates on the exact tip. Evidence is reused only for the exact base it ran on (Decision #6144). `screen_started`
+  names the screen it runs `behind`, a `screen_reused` event and `slipjay land` say which attempt published with no
+  second gate and why. A slow screen now holds the passed screens behind it until it publishes.
+
 ## v3.47.1
 
 - **A gate slot whose disk is still restoring is no longer replaced:** a slot is deleted and forked afresh only when

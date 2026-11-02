@@ -8,7 +8,7 @@ import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import { landingOutcome } from "../../src/lib/landing/landing-outcome.ts";
 import { pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
 import type { RemoteVerification } from "../../src/lib/runner/runner-types.ts";
-import { fixture, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, jj, test, until } from "./fixtures/runner-queue-fixture.ts";
 
 function controlledRemote() {
   const opened: { slot: number; screening?: boolean; base: string; candidate: string; files: string[]; release(): void }[] = [];
@@ -40,27 +40,37 @@ function controlledRemote() {
   return { remote, opened, closed, releaseAll() { hold = false; for (const entry of opened) entry.release(); } };
 }
 
-test("a failed screen never joins or invalidates the publication queue; a concurrent pass publishes once", async () => {
+const events = (f: Awaited<ReturnType<typeof fixture>>, id: string) => f.log.events({ operationId: id }).map(({ event }) => event);
+
+test("a screen behind a failing screen screens again on the tip; only the pass publishes, once", async () => {
   const r = controlledRemote();
   const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
   try {
+    const base = f.main();
     const failed = f.submit(await f.candidate("fail"));
     const passed = f.submit(await f.candidate("pass.txt"));
     f.queue.wake();
     await until(() => r.opened.length === 2 || undefined);
     assert.deepEqual(r.opened.map((entry) => entry.screening), [true, true]);
     assert.notEqual(r.opened[0]!.slot, r.opened[1]!.slot);
-    assert.equal(r.opened[0]!.base, r.opened[1]!.base);
+    assert.equal(r.opened[0]!.base, base);
+    assert.ok(r.opened[1]!.files.includes("fail"), "the second screen runs behind the first");
     r.releaseAll();
     await f.queue.idle();
     assert.equal(f.result(failed)?.type, "failed");
     assert.equal(f.result(passed)?.type, "landed", JSON.stringify(f.result(passed)));
-    assert.equal(r.opened.length, 2, "current pass uses its original evidence");
-    const failedEvents = f.log.events({ operationId: failed }).map(({ event }) => event);
+    assert.equal(r.opened.length, 3);
+    assert.equal(r.opened[2]!.screening, true);
+    assert.equal(r.opened[2]!.base, base);
+    assert.ok(!r.opened[2]!.files.includes("fail"), "the fresh screen runs on the tip alone");
+    const failedEvents = events(f, failed);
     assert.ok(!failedEvents.some((event) => event.type === "publication_intent"));
     assert.equal(failedEvents.find((event) => event.type === "classified")?.cause, "gate");
-    assert.ok(!f.log.events({ operationId: passed }).some(({ event }) => event.type === "attempt_invalidated"));
-    assert.equal(r.closed.length, 2);
+    const passedEvents = events(f, passed);
+    assert.ok(passedEvents.some((event) => event.type === "yielded"), "its result behind the failed screen is not its verdict");
+    assert.ok(!passedEvents.some((event) => event.type === "classified"));
+    assert.equal(passedEvents.find((event) => event.type === "screen_reused")?.base, base);
+    assert.equal(r.closed.length, 3);
     const metrics = pipelineMetrics(f.log.events(), "1970-01-01T00:00:00.000Z");
     assert.ok((landingOutcome(f.log.operation(passed)! as import("../../src/lib/runner/runner-types.ts").LandingOperation, f.log.events()).screening?.durationMs ?? -1) >= 0);
     assert.ok(metrics.groups.find((group) => group.kind === "landing")?.stages.screening);
@@ -68,7 +78,7 @@ test("a failed screen never joins or invalidates the publication queue; a concur
   } finally { r.releaseAll(); await f.dispose(); }
 });
 
-test("a slow screen holds no passed screen back, and its stale pass reruns on the new exact tip", async () => {
+test("a screen behind a slower one waits for it, then publishes on its own screen with no second gate", async () => {
   const r = controlledRemote();
   const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
   try {
@@ -76,23 +86,123 @@ test("a slow screen holds no passed screen back, and its stale pass reruns on th
     const fast = f.submit(await f.candidate("fast.txt"));
     f.queue.wake();
     await until(() => r.opened.length === 2 || undefined);
-    r.opened.find((entry) => entry.files.includes("fast.txt"))!.release();
-    await until(() => f.result(fast) || undefined);
-    assert.equal(f.result(fast)?.type, "landed");
+    const behind = r.opened.find((entry) => entry.files.includes("fast.txt"))!;
+    assert.ok(behind.files.includes("slow.txt"));
+    behind.release();
+    await until(() => f.log.operation(fast)?.stage === "waiting-for-predecessor" || undefined);
+    assert.equal(f.result(fast), undefined);
     assert.equal(f.result(slow), undefined);
-    const newTip = f.main();
     r.releaseAll();
     await f.queue.idle();
     assert.equal(f.result(slow)?.type, "landed", JSON.stringify(f.result(slow)));
-    assert.equal(r.opened.length, 3);
-    assert.equal(r.opened[2]!.screening, false);
-    assert.equal(r.opened[2]!.base, newTip);
+    assert.equal(f.result(fast)?.type, "landed", JSON.stringify(f.result(fast)));
+    assert.equal(r.opened.length, 2, "neither landing ran its gate a second time");
+    assert.deepEqual(f.log.events().filter(({ event }) => event.type === "landed").map((row) => row.operationId), [slow, fast]);
+    const reused = events(f, fast).find((event) => event.type === "screen_reused");
+    assert.equal(reused?.type === "screen_reused" ? reused.behind : undefined, slow);
+    assert.match(reused?.type === "screen_reused" ? reused.reason : "", /predicted prefix/);
+    assert.ok(!events(f, fast).some((event) => event.type === "attempt_invalidated"));
     assert.equal(f.remoteFile("slow.txt"), "slow.txt");
     assert.equal(f.remoteFile("fast.txt"), "fast.txt");
   } finally { r.releaseAll(); await f.dispose(); }
 });
 
-for (const control of ["kill", "supersede"] as const) test(`${control} during screening closes only its own lease`, async () => {
+test("a publication the prediction did not include re-gates a passed screen on the exact tip", async () => {
+  const r = controlledRemote();
+  const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
+  try {
+    const id = f.submit(await f.candidate("screened.txt"));
+    f.queue.wake();
+    await until(() => r.opened.length === 1 || undefined);
+    const tip = await f.seedMain({ "elsewhere.txt": "elsewhere\n" });
+    r.releaseAll();
+    await f.queue.idle();
+    assert.equal(f.result(id)?.type, "landed", JSON.stringify(f.result(id)));
+    assert.equal(r.opened.length, 2);
+    assert.equal(r.opened[1]!.screening, false);
+    assert.equal(r.opened[1]!.base, tip);
+    assert.ok(!events(f, id).some((event) => event.type === "screen_reused"));
+  } finally { r.releaseAll(); await f.dispose(); }
+});
+
+test("a screen that conflicts with the screen ahead screens on the tip alone, and is re-gated once that one lands", async () => {
+  const r = controlledRemote();
+  const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
+  try {
+    const base = f.main();
+    const ahead = f.submit(await f.candidate("shared.txt"));
+    jj(f.author, ["new", "-m", "Rewrite shared.txt", "main@origin"]);
+    await writeFile(join(f.author, "shared.txt"), "conflicting\n");
+    const conflicting = f.submit(await f.push());
+    f.queue.wake();
+    await until(() => r.opened.length === 2 || undefined);
+    assert.equal(r.opened[1]!.base, base, "the conflicting landing screens on the tip");
+    r.opened[0]!.release();
+    await until(() => f.result(ahead) || undefined);
+    r.releaseAll();
+    await f.queue.idle();
+    assert.equal(f.result(ahead)?.type, "landed");
+    const outcome = f.result(conflicting);
+    assert.equal(outcome?.type, "failed", JSON.stringify(outcome));
+    assert.match(outcome?.type === "failed" ? outcome.reason : "", /conflict/i);
+    const starts = events(f, conflicting).filter((event) => event.type === "screen_started");
+    assert.equal(starts.length, 2);
+    assert.equal(starts[0]?.type === "screen_started" ? starts[0].behind : undefined, ahead);
+    assert.equal(starts[1]?.type === "screen_started" ? starts[1].behind : "x", undefined);
+    assert.ok(events(f, conflicting).some((event) => event.type === "attempt_invalidated" && /Remote integration changed/.test(event.reason)),
+      "its pass on the old tip is re-gated, not published");
+    assert.ok(!events(f, conflicting).some((event) => event.type === "publication_intent"));
+    assert.equal(r.opened.length, 2, "the rebuilt attempt stops at its conflict, before any gate");
+  } finally { r.releaseAll(); await f.dispose(); }
+});
+
+test("a failing screen behind a prefix that lands keeps its verdict and screens no second time", async () => {
+  const r = controlledRemote();
+  const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
+  try {
+    const ahead = f.submit(await f.candidate("ahead.txt"));
+    const failing = f.submit(await f.candidate("fail"));
+    f.queue.wake();
+    await until(() => r.opened.length === 2 || undefined);
+    assert.ok(r.opened[1]!.files.includes("ahead.txt"));
+    r.releaseAll();
+    await f.queue.idle();
+    assert.equal(f.result(ahead)?.type, "landed");
+    assert.equal(f.result(failing)?.type, "failed", JSON.stringify(f.result(failing)));
+    assert.equal(r.opened.length, 2, "its failure behind a prefix that landed is its verdict");
+    assert.ok(!events(f, failing).some((event) => event.type === "yielded"));
+    assert.equal(events(f, failing).find((event) => event.type === "classified")?.cause, "gate");
+  } finally { r.releaseAll(); await f.dispose(); }
+});
+
+test("a screen ahead that changes migrations is not predicted past, and the screen behind it is re-gated on what it published", async () => {
+  const r = controlledRemote();
+  const f = await fixture(true, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
+  try {
+    const base = f.main();
+    const migrating = f.submit(await f.candidate("schema/table.sql"));
+    const behind = f.submit(await f.candidate("plain.txt"));
+    f.queue.wake();
+    await until(() => r.opened.length === 2 || undefined);
+    const second = r.opened.find((entry) => entry.files.includes("plain.txt"))!;
+    assert.equal(second.base, base, "a screen is not predicted past a migration change");
+    assert.ok(!second.files.includes("schema"));
+    r.opened.find((entry) => entry.files.includes("schema"))!.release();
+    await until(() => f.result(migrating) || undefined);
+    assert.equal(f.result(migrating)?.type, "landed", JSON.stringify(f.result(migrating)));
+    const published = f.main();
+    r.releaseAll();
+    await f.queue.idle();
+    assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
+    assert.equal(r.opened.length, 3, "the stale pass ran the gate a second time");
+    assert.equal(r.opened[2]!.screening, false);
+    assert.equal(r.opened[2]!.base, published);
+    assert.ok(events(f, behind).some((event) => event.type === "attempt_invalidated" && /Remote integration changed/.test(event.reason)));
+    assert.ok(!events(f, behind).some((event) => event.type === "screen_reused"));
+  } finally { r.releaseAll(); await f.dispose(); }
+});
+
+for (const control of ["kill", "supersede"] as const) test(`${control} during screening stops its own lease and re-screens the one behind it`, async () => {
   const r = controlledRemote();
   const f = await fixture(false, false, undefined, false, { screeningLanes: 2, workers: 1, remoteVerification: r.remote });
   try {
@@ -102,13 +212,15 @@ for (const control of ["kill", "supersede"] as const) test(`${control} during sc
     await until(() => r.opened.length === 2 || undefined);
     if (control === "kill") assert.equal(f.queue.kill(stopped).status, "killed");
     else f.log.append(stopped, { type: "superseded", by: "replacement" });
-    await until(() => r.closed.length === 1 || undefined);
+    // The survivor ran behind the stopped screen, so it screens again on the tip.
+    await until(() => r.opened.length === 3 || undefined);
     assert.equal(f.result(survivor), undefined);
+    assert.ok(!r.opened[2]!.files.includes("stopped.txt"));
     r.releaseAll();
     await f.queue.idle();
     assert.equal(f.result(stopped)?.type, control === "kill" ? "cancelled" : "superseded");
     assert.equal(f.result(survivor)?.type, "landed");
-    assert.equal(r.closed.length, 2);
+    assert.equal(r.closed.length, 3);
     assert.equal(f.log.events({ operationId: stopped }).filter(({ event }) => event.type === "publication_intent").length, 0);
   } finally { r.releaseAll(); await f.dispose(); }
 });
@@ -157,7 +269,7 @@ test("restart during a screen recovers remote leases and records an interrupted 
   } finally { restarted?.close(); await restarted?.idle(); await f.dispose(); }
 });
 
-test("screens that pass while paused enter the authoritative lane in pass order", async () => {
+test("screens that pass while paused publish in predicted order, each on its own screen", async () => {
   const r = controlledRemote();
   const f = await fixture(false, false, undefined, false, { screeningLanes: 2, workers: 1, remoteVerification: r.remote });
   try {
@@ -175,8 +287,8 @@ test("screens that pass while paused enter the authoritative lane in pass order"
     f.queue.wake();
     await f.queue.idle();
     const published = f.log.events().filter(({ event }) => event.type === "landed").map((row) => row.operationId);
-    assert.deepEqual(published, [secondSubmitted, firstSubmitted]);
-    assert.equal(r.opened.length, 3, "the second published screen reruns after the first moves the tip");
+    assert.deepEqual(published, [firstSubmitted, secondSubmitted]);
+    assert.equal(r.opened.length, 2, "the second screen ran behind the first, so neither reruns");
   } finally { r.releaseAll(); f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "cleanup" }); f.queue.wake(); await f.dispose(); }
 });
 
@@ -211,7 +323,7 @@ test("screen capacity is independent of the host preparation worker limit", asyn
   const f = await fixture(false, false, undefined, false, { screeningLanes: 2, workers: 1, remoteVerification: r.remote });
   try {
     const failed = f.submit(await f.candidate("fail"));
-    f.submit(await f.candidate("second.txt"));
+    const second = f.submit(await f.candidate("second.txt"));
     const third = f.submit(await f.candidate("third.txt"));
     f.queue.wake();
     await until(() => r.opened.length === 2 || undefined);
@@ -223,12 +335,11 @@ test("screen capacity is independent of the host preparation worker limit", asyn
       if (event.stage === "screening") preparing.delete(operationId);
       assert.ok(preparing.size <= 1, "screens share the existing host preparation worker budget");
     }
-    r.opened.find((entry) => entry.files.includes("fail"))!.release();
+    r.opened[0]!.release();
     await until(() => f.result(failed) || undefined);
-    await until(() => r.opened.length === 3 || undefined);
-    assert.equal(r.opened[2]!.slot, r.opened.find((entry) => entry.files.includes("fail"))!.slot, "only the released screen slot is reused");
     r.releaseAll();
     await f.queue.idle();
+    assert.equal(f.result(second)?.type, "landed");
     assert.equal(f.result(third)?.type, "landed");
   } finally { r.releaseAll(); await f.dispose(); }
 });

@@ -150,7 +150,8 @@ export type OperationEvent =
   | { type: "repair_claimed"; claimId: string; tokenSha256: string; source: string; workspace: string; by: string }
   | { type: "repair_released"; claimId: string; by: string; reason: "released" | "revoked" }
   | { type: "repair_proposed"; operationId: string; claimId: string; source: string }
-  | { type: "screen_started"; slot: number }
+  | { type: "screen_started"; slot: number; behind?: string }
+  | { type: "screen_reused"; attempt: number; base: string; candidate: string; behind?: string; reason: string }
   | { type: "screen_admitted"; attempt: number }
   | { type: "attempt_started"; attempt: number; source: string; checkout: string }
   | { type: "attempt_prepared"; attempt: number; source: string; base: string; candidate: string; predecessor?: { operationId: string; attempt: number; candidate: string }; overlap: boolean; checkout: string }
