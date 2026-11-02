@@ -1189,7 +1189,7 @@ Both fields appear on promotion plans that have commits to release.
 branch, at the base the pre-verification ran against (never the candidate's policy), has
 `process: "development"`, the runner skips staging: a landing is pre-verified as soon as it
 publishes (the landing gate was its evidence), its `declaredEnvironments` omit `staging`, and no
-scheduled staging deploy follows it (`slipjay deploy staging` still deploys by hand). The setting is read from the release branch, never the candidate, and a human `slipjay promote --confirm` still needs a staging-green commit; switching to `standard` restores the whole staging flow. It queues a
+scheduled staging deploy follows it (`slipjay deploy staging` still deploys by hand). The setting is read from the release branch, never the candidate. A human `slipjay promote --confirm` skips staging too: it goes straight to production with any commit whose pre-verification passed against the release base, which stands in for the staging deploy, and `slipjay promote` plans the integration head (or `--candidate`) without one. That confirm is how the owner ships what the runner leaves for them, such as non-additive migrations. Switching to `standard` restores the whole staging flow. It queues a
 release by itself of the newest landed candidate whose pre-verification passed, looking back no further than the newest commit already released or
 tried. A newer landing that is still verifying, or whose verification failed, does not hold it
 back, so a stream of landings cannot keep every verified commit from shipping; the newer commit

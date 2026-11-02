@@ -63,7 +63,8 @@ test("a pre-verification whose promotion waits for an open release says which re
     const verification = f.log.verifications(REPO)[0]!;
     assert.equal(verification.status, "verified");
     const lines = f.log.events({ operationId: verification.id }).flatMap((stored) => stored.event.type === "progress" ? [stored.event.line] : []);
-    assert.deepEqual(lines.filter((line) => /^Not promoting /.test(line)), [`Not promoting ${verification.commitId.slice(0, 12)} automatically: a release (${human}) is already open`]);
+    // The human's release now goes on to deploy production (development mode skips staging), which the next consideration also names.
+    assert.equal(lines.filter((line) => /^Not promoting /.test(line))[0], `Not promoting ${verification.commitId.slice(0, 12)} automatically: a release (${human}) is already open`);
   } finally { await f.dispose(); }
 }, 240_000);
 test("a pre-verification that promotes nothing names the release still open for its own commit, not a missing candidate", async () => {

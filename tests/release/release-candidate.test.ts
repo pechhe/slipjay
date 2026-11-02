@@ -3,7 +3,10 @@ import { execFileSync } from "node:child_process";
 import { test } from "vite-plus/test";
 import { confirmRelease, confirmableCandidate, releaseIntegration } from "../../src/lib/release/release.ts";
 import type { PromotionState } from "../../src/lib/release/release.ts";
-import { landFile, releaseProject } from "../support/release-project.ts";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { OperationEvent } from "../../src/lib/runner/runner-types.ts";
+import { landFile, releaseProject, remoteRef } from "../support/release-project.ts";
 import { promotingProject, verificationOf } from "./fixtures/release-fixture.ts";
 
 test("a requested older staging-green commit is planned with the newer green commits it leaves out, and every other commit is refused", async () => {
@@ -140,5 +143,31 @@ test("--candidate is refused when the repository does not ship by promotion, and
     assert.ok(newest.ok && newest.candidate === b);
     const confirm = await confirmableCandidate(f.repo, a, false, older);
     assert.ok(!confirm.ok && /too old to list older green commits/.test(confirm.reason), JSON.stringify(confirm));
+  } finally { await f.dispose(); }
+});
+
+test("in development mode the release base's policy skips staging: the integration head is planned and a confirm needs only its passed pre-verification", async () => {
+  const f = await promotingProject();
+  try {
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+    await f.commit({ "slipjay.json": JSON.stringify({ ...policy, process: "development" }) }, "Run in development mode");
+    // The mode comes from the release base, so the release branch must hold it first.
+    execFileSync("git", ["push", "-q", "origin", "main:refs/heads/release"], { cwd: f.repo, stdio: "pipe" });
+    const head = await f.commit({ "a.txt": "a\n" }, "Add a");
+    const base = remoteRef(f, "release");
+    const noStaging = (verifications: PromotionState["verifications"] = []) => async (): Promise<PromotionState> =>
+      ({ stagingGreen: null, stagingGreenCommits: [], approved: [], verifications });
+
+    const planned = await releaseIntegration(f.repo, { readPromotion: noStaging() });
+    assert.ok(planned.ok && planned.status === "planned", JSON.stringify(planned));
+    assert.equal(planned.candidate, head, "staging deployed nothing, yet the integration head is the candidate");
+    assert.equal(planned.candidateSource, "integration");
+
+    const unverified = await confirmableCandidate(f.repo, head, false, noStaging());
+    assert.ok(!unverified.ok && /No pre-verification of .* passed/.test(unverified.reason), JSON.stringify(unverified));
+
+    const passed = verificationOf(head, "verified", { type: "verified", base, candidate: head, checks: f.checks } as OperationEvent);
+    const confirmable = await confirmableCandidate(f.repo, head, false, noStaging([passed]));
+    assert.ok(confirmable.ok && confirmable.status === "confirmable", JSON.stringify(confirmable));
   } finally { await f.dispose(); }
 });

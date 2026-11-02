@@ -62,7 +62,7 @@ export type ReleaseSummary = {
 /** What a promotion's plan adds: its candidate's pre-verification, and whether an earlier approval covers it. */
 export type PromotionPlan = { verification?: ReleaseVerificationState; approval?: ApprovalCoverage;
   /** `requested` when `--candidate` chose an older staging-green commit; `newerGreen` then names the newer green commits it leaves out, newest first. */
-  candidateSource?: "newest_green" | "requested"; newerGreen?: string[] };
+  candidateSource?: "newest_green" | "integration" | "requested"; newerGreen?: string[] };
 
 export type ReleaseResult =
   | ({ ok: true; status: "up_to_date" } & ReleaseSummary & PromotionPlan)

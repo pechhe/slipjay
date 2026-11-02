@@ -97,12 +97,14 @@ test("development leaves a candidate with non-additive migrations for the owner"
     assert.deepEqual(f.log.deployments(REPO, "production"), []);
     assert.ok(f.log.events({ operationId: f.log.verifications(REPO)[0]!.id }).some((stored) => stored.event.type === "progress" && /non-additive migrations/.test(stored.event.line)));
     assert.deepEqual(f.log.deployments(REPO, "staging"), [], "it was never rehearsed on staging");
-    // A human's confirm is not the runner's own promotion: it still needs the staging deploy that development mode skipped.
+    // The owner decides: their confirm releases it straight to production, on the pre-verification that stands in for staging.
     const confirm = f.submitRelease(f.main());
     await f.land(confirm);
     await f.queue.idle();
     const outcome = f.result(confirm);
-    assert.ok(outcome?.type === "failed" && /Staging is not green/.test(outcome.reason), JSON.stringify(outcome));
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released", JSON.stringify(outcome));
+    assert.deepEqual(outcome.result.verification, { preverified: f.log.verifications(REPO)[0]!.id });
+    assert.deepEqual(f.log.deployments(REPO, "staging"), [], "still never deployed to staging");
   } finally { await f.dispose(); }
 }, 240_000);
 

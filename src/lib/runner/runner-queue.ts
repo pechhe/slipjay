@@ -1568,7 +1568,8 @@ export function createRunnerQueue(input: {
     }
     /**
      * A candidate that declares a production deployment is a promotion: it must be a
-     * commit staging deployed, and once the release branch holds it, production deploys
+     * commit staging deployed (in process "development", one whose pre-verification passed
+     * against the release base, since staging is skipped), and once the release branch holds it, production deploys
      * exactly that commit in the deploy lane, so a slow deploy never holds a landing.
      * Only publication takes the repository lane. The approval is this operation, which
      * only a kill ends once it runs, and staging evidence is never withdrawn, so neither
@@ -1601,7 +1602,9 @@ export function createRunnerQueue(input: {
         return;
       }
       const promotes = Boolean(configuration?.deployments?.environments.production);
-      if (promotes && !(operation.automatic && skipsStaging(configuration)) && !log.deployments(operation.repo, "staging").some((entry) => entry.commitId === operation.commitId && entry.result?.type === "deployed")) {
+      // The release base's policy decides whether staging is skipped; a candidate cannot switch it on for itself.
+      const development = operation.automatic ? skipsStaging(configuration) : await stagingSkipped(operation.repo, operation.commitId);
+      if (promotes && !development && !log.deployments(operation.repo, "staging").some((entry) => entry.commitId === operation.commitId && entry.result?.type === "deployed")) {
         append(operation.id, { type: "failed", stage, reason: `Staging is not green on ${operation.commitId.slice(0, 12)}: production promotes only a commit staging deployed` });
         return;
       }
@@ -1612,6 +1615,8 @@ export function createRunnerQueue(input: {
           // No human approved an automatic promotion: it publishes only what a pre-verification passed against this release base,
           // and never migrations that are not known to be additive.
           if (operation.automatic && !passed) throw new Error(`Not promoted automatically: no pre-verification of ${plan.candidate.slice(0, 12)} passed against ${plan.releaseBranch} ${plan.base.slice(0, 12)}`);
+          // An owner-confirmed promotion in development mode skips staging, so a passed pre-verification stands in for it.
+          if (development && !passed) throw new Error(`Not promoted: no pre-verification of ${plan.candidate.slice(0, 12)} passed against ${plan.releaseBranch} ${plan.base.slice(0, 12)}, which stands in for staging in process "development"`);
           if (operation.automatic && plan.nonAdditiveMigrations.length) throw new Error(`Not promoted automatically: it carries non-additive migrations (${plan.nonAdditiveMigrations.join(", ")}): the owner decides`);
           return passed;
         },

@@ -50,6 +50,8 @@ export type ReleasePlan = {
   checks: VerificationDeclaration[];
   /** The candidate declares a production deployment: it ships by promotion, from a commit staging is green on. */
   promotes: boolean;
+  /** The release base's policy is `process: "development"`: staging is skipped, so a promotion ships a commit whose pre-verification passed against this base instead of one staging deployed. A candidate cannot switch the mode on for itself. */
+  skipsStaging: boolean;
   /** The candidate's production deployment declares `migrations`: the runner applies the promotion's migrations itself. */
   appliesMigrations: boolean;
   /** The candidate declares a nightly `audit`: a promotion waits on an unexplained failing one. */
@@ -389,8 +391,9 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
     if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
   }
   const production = policy.deployments?.environments.production;
+  const { policy: basePolicy } = await readExecutionPolicyAtCommit(root, base).catch(() => ({ policy: null }));
   return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, migrationPaths: artifactPaths, nonAdditiveMigrations, paths: changed, checks,
-    promotes: Boolean(production), appliesMigrations: Boolean(production?.migrations), audits: Boolean(policy.audit) };
+    promotes: Boolean(production), skipsStaging: basePolicy?.process === "development", appliesMigrations: Boolean(production?.migrations), audits: Boolean(policy.audit) };
 }
 
 /** The newest of `approved` the release branch does not hold: approvals it holds shipped. */
@@ -637,13 +640,14 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
     if (plan.promotes) {
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
       let state = await readPromotion();
-      const green = greenCommits(state);
-      if (!green.length) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed." + DEVELOPMENT_HINT);
-      let candidateSource: NonNullable<PromotionPlan["candidateSource"]> = "newest_green";
+      // In development mode there is no staging to be green: the integration branch, or the requested commit, is the candidate.
+      const green = plan.skipsStaging ? [] : greenCommits(state);
+      if (!plan.skipsStaging && !green.length) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed." + DEVELOPMENT_HINT);
+      let candidateSource: NonNullable<PromotionPlan["candidateSource"]> = plan.skipsStaging ? "integration" : "newest_green";
       if (requested === undefined) {
-        if (green[0] !== plan.candidate) plan = await planRelease(cwd, { candidate: green[0] });
+        if (!plan.skipsStaging && green[0] !== plan.candidate) plan = await planRelease(cwd, { candidate: green[0] });
       } else {
-        plan = await planRelease(cwd, { candidate: requestedGreen(green, requested, Boolean(state.stagingGreenCommits)) });
+        plan = await planRelease(cwd, { candidate: plan.skipsStaging ? requested : requestedGreen(green, requested, Boolean(state.stagingGreenCommits)) });
         await requireReleasePrefix(plan);
         candidateSource = "requested";
         if (plan.commits.length && requestVerification && !state.verifications.some((operation) => operation.commitId === plan.candidate)) {
@@ -656,7 +660,7 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
       const delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
       promotion = { ...delta ? { delta } : {}, candidateSource,
-        ...candidateSource === "requested" ? { newerGreen: green.slice(0, green.indexOf(plan.candidate)) } : {},
+        ...candidateSource === "requested" && !plan.skipsStaging ? { newerGreen: green.slice(0, green.indexOf(plan.candidate)) } : {},
         ...plan.commits.length ? { verification: verificationState(plan, verifications), approval: await approvalCoverage(plan, approved) } : {} };
     } else if (plan.audits) {
       // The audit ledger lives on the runner, so an audited release plans only against it.
@@ -686,8 +690,11 @@ export async function confirmableCandidate(cwd: string, confirm: string, migrati
     const plan = await planRelease(cwd, { candidate: confirm });
     if (plan.commits.length && plan.promotes && readPromotion) {
       // Any commit staging is green on may be confirmed, not only the newest; the runner refuses the rest too, but later.
+      // In development mode a passed pre-verification against the release base stands in for staging.
       const state = await readPromotion();
-      if (!greenCommits(state).includes(plan.candidate)) refuse(state.stagingGreenCommits ? `Staging recorded no green deploy of ${short(plan.candidate)}: production promotes only a commit staging deployed`
+      if (plan.skipsStaging) {
+        if (!passedVerification(plan, state.verifications)) refuse(`No pre-verification of ${short(plan.candidate)} passed against ${plan.releaseBranch} ${short(plan.base)}: in \`process: "development"\` a promotion ships only a commit whose pre-verification passed, in place of staging`);
+      } else if (!greenCommits(state).includes(plan.candidate)) refuse(state.stagingGreenCommits ? `Staging recorded no green deploy of ${short(plan.candidate)}: production promotes only a commit staging deployed`
         : `Staging recorded no green deploy of ${short(plan.candidate)} among the commits this runner lists: it is too old to list older green commits, so only the newest can be confirmed`);
       await requireReleasePrefix(plan);
     }
