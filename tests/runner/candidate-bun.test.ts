@@ -72,8 +72,24 @@ test("refuses runtime directories that could shadow unrelated tools", async () =
 });
 
 test("refuses a provisioned binary that reports another version", async () => {
-  await provision("1.2.5", "1.2.6");
-  await assert.rejects(candidateBun(await candidate("wrong-binary", "bun@1.2.5"), environment(), home), /Bun 1.2.5 is not installed/);
+  const binary = await provision("1.2.5", "1.2.6");
+  await assert.rejects(candidateBun(await candidate("wrong-binary", "bun@1.2.5"), environment(), home),
+    (error: Error) => error.message.includes("Bun 1.2.5 is not installed") && error.message.includes(`${binary} reports 1.2.6`));
+});
+
+test("never falls back to a matching global Bun when the provisioned runtime is unusable", async () => {
+  const binary = await provision("1.2.2");
+  await chmod(binary, 0o000);
+  await assert.rejects(candidateBun(await candidate("unusable-provisioned", "bun@1.2.2"), environment(), home),
+    (error: Error) => error.message.includes("Bun 1.2.2 is not installed") && error.message.includes(`provisioned runtime ${binary} cannot be used`));
+});
+
+test("names a provisioned runtime whose probe fails instead of its version pin", async () => {
+  const binary = await provision("1.3.0");
+  await writeFile(binary, `#!${process.execPath}\nconsole.error('probe failed'); process.exit(7);\n`);
+  await chmod(binary, 0o755);
+  await assert.rejects(candidateBun(await candidate("failed-probe", "bun@1.3.0"), environment(), home),
+    (error: Error) => error.message.includes(`could not probe ${binary}`) && error.message.includes("probe failed"));
 });
 
 test("rejects malformed pins before deriving a toolchain path", async () => {

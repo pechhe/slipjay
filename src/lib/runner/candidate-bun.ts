@@ -8,7 +8,7 @@ import type { RuntimeIdentity } from "./runner-types.ts";
 
 const versionOf = (binary: string, env: NodeJS.ProcessEnv) => new Promise<string>((resolve, reject) => {
   execFile(binary, ["--version"], { env, timeout: 5_000, maxBuffer: 1024 }, (error, stdout) => {
-    if (error) reject(new Error(`Could not probe Bun runtime ${binary}: ${error.message}`));
+    if (error) reject(error);
     else resolve(stdout.trim());
   });
 });
@@ -46,10 +46,21 @@ export async function candidateBun(root: string, env: NodeJS.ProcessEnv | undefi
   const version = /^bun@(\d+\.\d+\.\d+)$/.exec(declared)?.[1];
   if (!version) throw new Error(`Candidate Bun runtime requires an exact stable version: ${declared}`);
   const installed = join(home, "toolchains", "bun", version, "bin", "bun");
-  const provisioned = await access(installed, constants.X_OK).then(() => true, () => false);
+  const provision = `Provision ${installed}; the runner never downloads candidate-selected runtimes.`;
+  const provisioned = await access(installed, constants.X_OK).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+    throw new Error(`Bun ${version} is not installed for this candidate: provisioned runtime ${installed} cannot be used (${error.code ?? error.message}). ${provision}`);
+  });
   const binary = provisioned ? installed : await globalBun(env.PATH);
-  if (!binary || await versionOf(binary, env) !== version)
-    throw new Error(`Bun ${version} is not installed for this candidate. Provision ${installed}; the runner never downloads candidate-selected runtimes.`);
+  if (!binary)
+    throw new Error(`Bun ${version} is not installed for this candidate: no provisioned runtime and no Bun on PATH. ${provision}`);
+  let probed: string;
+  try { probed = await versionOf(binary, env); }
+  catch (error) {
+    throw new Error(`Bun ${version} is not installed for this candidate: could not probe ${binary}: ${(error as Error).message}. ${provision}`);
+  }
+  if (probed !== version)
+    throw new Error(`Bun ${version} is not installed for this candidate: ${binary} reports ${probed || "no version"}. ${provision}`);
   const path = await realpath(binary);
   if (provisioned) {
     const directory = dirname(binary);
