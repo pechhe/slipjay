@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.47.0
+
+- **Development mode can batch promotions (`promotionSchedule`):** a release-branch policy may declare
+  `{ "everyMinutes": 30, "from": "08:00", "until": "20:00", "timeZone": "Europe/London" }`; automatic promotion then
+  starts only inside that local-time window and no sooner than `everyMinutes` after the newest release, so the
+  landings between promotions ship together. A held candidate says why on its pre-verification's log and the
+  runner asks again when the next slot opens. `slipjay promote --confirm` is never held and restarts the interval.
+
 ## v3.46.28
 
 - **A deploy can run with a leased build machine (YS-683):** an environment that names `"machine": "<pool>"`

@@ -1,6 +1,7 @@
 import type { AuditPolicy } from "./audit-policy.ts";
 import type { DeploymentPolicy } from "./deployment-policy.ts";
 import type { ResetPolicy } from "./post-integration-policy.ts";
+import type { PromotionSchedule } from "./promotion-schedule.ts";
 import type { VerificationDeclaration } from "./verification-policy.ts";
 export type LandingPreflight = { command: string[]; timeoutMs?: number };
 
@@ -40,6 +41,8 @@ export type ExecutionPolicy = {
   spares?: number;
   /** How much process agents apply to the repository's work; `standard` when undeclared. Only `development` changes SlipJay: the runner then promotes by itself. */
   process?: ProcessLevel;
+  /** When `process: "development"` promotes by itself (see `promotion-schedule.ts`); every pre-verified landing when undeclared. */
+  promotionSchedule?: PromotionSchedule;
   postIntegration?: unknown;
   /** The target the runner resets on a schedule and on demand; undefined when undeclared. */
   reset?: ResetPolicy;
@@ -74,6 +77,7 @@ import { join } from "node:path";
 import { auditPolicy } from "./audit-policy.ts";
 import { deploymentPolicy } from "./deployment-policy.ts";
 import { postIntegrationPolicy, resetPolicy } from "./post-integration-policy.ts";
+import { promotionSchedule } from "./promotion-schedule.ts";
 import { declaredPublicationRemote } from "./source-publication-policy.ts";
 import { normalizeVerificationDeclaration } from "./verification-policy.ts";
 import { runWorkspaceCommand } from "../infra/workspace-command.ts";
@@ -347,6 +351,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   const sharedPaths = sharedPathList(parsed.sharedPaths);
   const spares = spareCount(parsed.spares);
   const level = processLevel(parsed.process);
+  const schedule = promotionSchedule(parsed.promotionSchedule, fail);
   const budgets = timeBudgets(parsed.budgets);
   return {
     ...parsed,
@@ -362,6 +367,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     ...(parsed.sharedPaths === undefined ? {} : { sharedPaths }),
     ...(parsed.spares === undefined ? {} : { spares }),
     ...(parsed.process === undefined ? {} : { process: level }),
+    ...(schedule ? { promotionSchedule: schedule } : {}),
     ...(budgets ? { budgets } : {}),
     ...(deployments ? { deployments } : {}),
     ...(reset ? { reset } : {}),

@@ -1206,6 +1206,20 @@ any release or production deploy in flight, is never released again; a newer ver
 replaces a queued automatic release of an older one, and an automatic release that starts after one
 has passed fails as superseded. Under `standard` and `light` nothing promotes without a human `--confirm`.
 
+**Batched promotion (`promotionSchedule`).** Undeclared, development mode promotes each verified
+landing as soon as it can. A release-branch policy may batch them instead:
+`"promotionSchedule": { "everyMinutes": 30, "from": "08:00", "until": "20:00", "timeZone": "Europe/London" }`.
+The runner then starts an automatic promotion only while the repository's local time is from `from`
+until `until` (a window may cross midnight), and no sooner than `everyMinutes` after the newest
+release, automatic or confirmed; the landings between promotions ship together as the newest
+verified candidate. A candidate it holds says `Not promoting <commit> automatically: waiting for the
+next scheduled promotion: …` on its pre-verification's log, and the runner asks again when the next
+slot opens. The schedule is read, like `process`, from the release base. It never holds an owner:
+to ship now, `slipjay promote` shows the candidate and `slipjay promote --confirm <commit>` promotes
+it at once, which also restarts the interval. It needs a runner on SlipJay 3.47.0 or later: an older
+runner keeps the field without reading it and promotes every verified landing, so restart the runner
+on the new build before relying on it.
+
 When recovery can be proven, a failed production promotion is rolled back
 automatically: production
 keeps (or is moved back to) what it served before, the release branch returns to

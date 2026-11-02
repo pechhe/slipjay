@@ -28,6 +28,7 @@ import { postIntegrationPolicy } from "../policy/post-integration-policy.ts";
 import { EXECUTION_POLICY_PATH, readPolicyTextAtCommit, parseExecutionPolicy } from "../policy/execution-policy.ts";
 import { settingsLanding } from "../policy/policy-settings.ts";
 import { verificationEvidence } from "../policy/verification-policy.ts";
+import { describeSchedule, nextPromotionAt } from "../policy/promotion-schedule.ts";
 import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, recordOf, servedCommit, servedDeploy } from "./runner-contract.ts";
 import { label, newOperationId } from "./runner-log.ts";
 import type { OperationLogOptions } from "./runner-log.ts";
@@ -147,6 +148,8 @@ export function createRunnerQueue(input: {
   boatProbeMs?: number;
   /** Override pre-verification stage deadlines (milliseconds), for embedded runners and tests. */
   verificationStageTimeoutMs?: number;
+  /** The clock a `promotionSchedule` is read against; `Date.now` when absent. */
+  now?: () => number;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /**
@@ -595,6 +598,9 @@ export function createRunnerQueue(input: {
     wakeMain();
   }
   const automaticPromotions = new Map<string, Promise<void>>();
+  /** Per repository, the timer that asks again when its `promotionSchedule` next lets a promotion start. */
+  const scheduledPromotions = new Map<string, ReturnType<typeof setTimeout>>();
+  const now = input.now ?? Date.now;
   /**
    * The commit `process: "development"` promotes: the newest landed commit whose pre-verification passed,
    * looking back no further than the newest commit already released or tried (`except` names a release that does not
@@ -726,6 +732,18 @@ export function createRunnerQueue(input: {
       : "a release or production deploy now holds it");
     const opened = log.openOperations(repo).find((entry) => entry.kind === "release");
     if (opened) return withheld(`a release (${opened.id}) opened while it was decided`);
+    if (base.promotionSchedule) {
+      // The newest release that ran, automatic or confirmed by the owner, starts the interval.
+      const last = log.releases(repo).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+      const due = nextPromotionAt(base.promotionSchedule, last ? Date.parse(last.submittedAt) : undefined, now());
+      if (due > now()) {
+        clearTimeout(scheduledPromotions.get(repo));
+        const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
+        timer.unref?.();
+        scheduledPromotions.set(repo, timer);
+        return withheld(`waiting for the next scheduled promotion: ${describeSchedule(base.promotionSchedule)}`);
+      }
+    }
     const automatic = { setting: "process", value: "development" } as const;
     append(next, { type: "submitted", kind: "release", repo, commitId, migrationsReady: false, submittedBy: `${executor.host}:automatic`, automatic });
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
@@ -1838,6 +1856,8 @@ export function createRunnerQueue(input: {
     for (const hold of boatHolds.values()) { clearTimeout(hold.timer); hold.controller?.abort(); }
     for (const retry of auditDiscovery.values()) clearTimeout(retry);
     auditDiscovery.clear();
+    for (const timer of scheduledPromotions.values()) clearTimeout(timer);
+    scheduledPromotions.clear();
     for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
     recoveryRetries.clear();
   }
