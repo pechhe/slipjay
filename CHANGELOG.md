@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.47.1
+
+- **A gate slot whose disk is still restoring is no longer replaced:** a slot is deleted and forked afresh only when
+  boat reports its restore stuck (`degraded`), as a build machine already was, and a slow restore now waits up to
+  fifteen minutes instead of five. A large disk takes six to eleven minutes to restore, so the five-minute limit
+  replaced fifteen healthy screen slots in one day, each costing a boat start, a slower full restore and its caches.
+
 ## v3.47.0
 
 - **Development mode can batch promotions (`promotionSchedule`):** a release-branch policy may declare
