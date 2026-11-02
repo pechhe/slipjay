@@ -78,6 +78,20 @@ test("a nested repository is refused, leaving the checkout untouched", async () 
   assert.equal(existsSync(join(workspace.workspacePath, "vendor", "inner", ".git")), true);
 });
 
+test("ordinary deep source archives, while a repository nested that deep is still refused", async () => {
+  const f = await project();
+  const workspace = await createWorkspace("archive-deep-source", f.repo);
+  const deep = join(workspace.workspacePath, ...Array.from({ length: 12 }, (_, level) => `level-${level}`));
+  await mkdir(deep, { recursive: true });
+  await writeFile(join(deep, "Source.kt"), "class Source\n");
+
+  assert.equal(await archiveRefusal(workspace.workspacePath, f.repo), null, "a deep source tree is not a nested repository");
+
+  await mkdir(join(deep, ".git"), { recursive: true });
+  const refusal = await archiveRefusal(workspace.workspacePath, f.repo);
+  assert.match(refusal?.refusal ?? "", /nested repository/);
+});
+
 test("an archive over its size limit is refused, and says how big it is", async () => {
   const f = await project();
   const workspace = await createWorkspace("archive-too-big", f.repo);

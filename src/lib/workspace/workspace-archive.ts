@@ -91,8 +91,7 @@ export async function archiveRefusal(root: string, integrationRoot: string, opti
   }
   if (conflicts.stdout.trim()) return { refusal: "it has unresolved conflicts, which an archive would record as source" };
   const nested = await nestedRepositories(absolute, integrationRoot);
-  if (nested.found.length) return { refusal: `it holds a nested repository (${nested.found.slice(0, 3).join(", ")}), whose own history an archive cannot keep` };
-  if (nested.deep) return { refusal: "its directories nest deeper than an archive can prove are free of a nested repository" };
+  if (nested.length) return { refusal: `it holds a nested repository (${nested.slice(0, 3).join(", ")}), whose own history an archive cannot keep` };
   const inventory = await inventoryOf(absolute, integrationRoot).catch(() => null);
   if (inventory === null) return { refusal: "its files outside history cannot be read" };
   if (inventory.length > (options.limitFiles ?? ARCHIVE_LIMIT_FILES)) {
@@ -105,21 +104,18 @@ export async function archiveRefusal(root: string, integrationRoot: string, opti
   return null;
 }
 
-/** Nested `.git`/`.jj` directories below the root: their private history would not survive. */
-const NESTED_SEARCH_DEPTH = 8;
-
 /**
  * Nested `.git`/`.jj` markers below the root, as directories *or* files: a worktree or a
  * submodule points at its parent with a `.git` file, and its own history would not survive
- * this archive. `deep` is set when the walk stopped at its depth bound before it could
- * finish, which the refusal reports rather than reading as clean.
+ * this archive. The walk is unbounded: ordinary source trees nest as deeply as their
+ * language does, so any fixed depth would refuse a checkout that holds no nested
+ * repository at all. Dependencies are the one tree too large to walk and never hold
+ * source a checkout owns.
  */
-async function nestedRepositories(root: string, integrationRoot: string, limit: number = 5): Promise<{ found: string[]; deep: boolean }> {
+async function nestedRepositories(root: string, integrationRoot: string, limit: number = 5): Promise<string[]> {
   const found: string[] = [];
-  let deep = false;
   const walk = async (directory: string, depth: number): Promise<void> => {
     if (found.length >= limit) return;
-    if (depth > NESTED_SEARCH_DEPTH) { deep = true; return; }
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       const path = join(directory, entry.name);
@@ -134,7 +130,7 @@ async function nestedRepositories(root: string, integrationRoot: string, limit: 
     }
   };
   await walk(root, 0);
-  return { found, deep };
+  return found;
 }
 
 export async function inventoryOf(root: string, integrationRoot: string): Promise<string[]> {
