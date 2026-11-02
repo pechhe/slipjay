@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
-import { repositoryProjectCode, run, workspaceContext } from "../infra/workspace-jj.ts";
+import { repositoryProjectCode, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workspaceContext } from "../infra/workspace-jj.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { metadataHome, workspaceHome } from "./workspace-paths.ts";
 import { listWorkspaces, metadataPath, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
@@ -369,6 +369,27 @@ export async function claimSpare(context: WorkspaceContext, name: string, base?:
     });
 }
 
+/**
+ * Rename a spare to the task's name. Another operation on the shared repository can rewrite the
+ * spare's working-copy commit after it was prepared, leaving the checkout stale, and JJ then
+ * refuses the rename; JJ's own recovery moves it on, and the rename is retried. A stale spare
+ * whose files held edits is not clean, so it is left for the sweep and the caller provisions a
+ * fresh workspace instead. Null in that case.
+ */
+async function renameSpareForClaim(
+  spare: WorkspaceEntry,
+  workspaces: WorkspaceEntry[],
+  desired: string,
+): Promise<{ oldName: string; name: string } | null> {
+  try {
+    return await renameListedWorkspace(spare, workspaces, desired);
+  } catch (error) {
+    if (!STALE_WORKING_COPY.test(error instanceof Error ? error.message : String(error))) throw error;
+  }
+  if ((await updateStaleWorkingCopy(spare.root)).recordedEdits) return null;
+  return await renameListedWorkspace(spare, workspaces, desired);
+}
+
 /** A claimed spare's checkout, its new name and what its dependencies need (see `claimSpare`). */
 type ClaimedSpare = { root: string; name: string; dependencies: ReusedDependencies | null; installInputs: string | null };
 
@@ -376,7 +397,9 @@ async function claimReadySpare(context: WorkspaceContext, name: string, base?: s
   const workspaces = await listWorkspaces(context.integration.root);
   const [spare] = newestFirst(await unoccupied(workspaces.filter(isReadySpare)));
   if (!spare) return null;
-  const { name: assigned } = await renameListedWorkspace(spare, workspaces, name);
+  const renamed = await renameSpareForClaim(spare, workspaces, name);
+  if (!renamed) return null;
+  const { name: assigned } = renamed;
   await timed(steps, "jjNew", () => jj(spare.root, ["new", base ?? context.integrationBranch]));
   const installInputs = await timed(steps, "fingerprint", () => installInputFingerprint(spare.root));
   const dependencies = reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | null | undefined, installInputs);

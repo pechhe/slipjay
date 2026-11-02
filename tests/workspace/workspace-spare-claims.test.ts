@@ -1,4 +1,4 @@
-import { jj } from "../support/workspace-project.ts";
+import { jj, project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -6,7 +6,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
-import { readySpares } from "../../src/lib/workspace/workspace-pool.ts";
+import { readySpares, refillPool } from "../../src/lib/workspace/workspace-pool.ts";
 import { spareRecords } from "../../src/lib/workspace/workspace-spares.ts";
 import { bunProject, refill, withMachineSpares } from "./fixtures/workspace-spare-dependencies-fixture.ts";
 
@@ -63,6 +63,31 @@ test("a spare-marked checkout a live process works in is neither claimed, counte
     }
     await waitFor(async () => (await readySpares(f.repo)).some((spare) => spare.root === held.root));
     assert.ok((await spareRecords(f.repo)).some((record) => record.workspacePath === held.root), "once its holder exits the checkout is a spare again");
+  } finally {
+    await f.dispose();
+  }
+}, 240_000);
+
+test("a claim refreshes a spare whose working copy the repository moved past, instead of failing its rename", async () => {
+  const f = await project();
+  try {
+    await refillPool(f.repo, () => undefined);
+    const [spare] = await readySpares(f.repo);
+    assert.ok(spare, "a prepared spare exists");
+    // As on the machine that reported it, a stale working copy is left for an explicit update.
+    jj(f.repo, ["config", "set", "--repo", "snapshot.auto-update-stale", "false"]);
+    // An operation on the shared repository moves it on without the spare's working copy, as a
+    // relanding or a sweep does; the claim then starts with a rename JJ refuses.
+    const added = jj(f.repo, ["op", "log", "--no-graph", "-T", 'self.id() ++ "\\t" ++ description ++ "\\n"'])
+      .split("\n").find((line) => line.includes(`add workspace '${spare.name}'`))!.split("\t")[0]!;
+    jj(f.repo, ["op", "restore", added]);
+    assert.throws(() => jj(spare.root, ["st"]), /working copy is stale/, "the spare is stale");
+
+    const claimed = await createWorkspace("task", f.repo);
+    assert.equal(claimed.pooled, true, "the refreshed spare is claimed");
+    assert.equal(claimed.current.root, spare.root);
+    assert.equal(jj(spare.root, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]).trim(),
+      jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]).trim(), "it starts at the integration head");
   } finally {
     await f.dispose();
   }
