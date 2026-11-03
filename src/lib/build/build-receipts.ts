@@ -325,7 +325,7 @@ export function receiptsOwedTo(log: OperationLog): ReadonlySet<string> {
 export function deliveryState(log: OperationLog): BuildDeliveryState | null {
   const bound = log.buildBound();
   const control = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "build_delivery");
-  if (!bound.length && !control) return null;
+  if (!bound.length && !control && !log.anyBuildBound()) return null;
   const settlements = log.integrationSettlements();
   let pending = 0, parked = 0, oldest: string | null = null;
   for (const { history } of bound) {

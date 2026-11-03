@@ -436,8 +436,10 @@ export interface OperationLog {
   paused(): { by: string; at: string } | null;
   /** Integrations kept locally but not yet published, by repository. */
   held(): HeldIntegrationState[];
-  /** Every Build-bound landing (offered for admission, or declared a chore), with its own events: what receipt delivery reads. */
+  /** Every Build-bound landing (offered for admission, or declared a chore) that may still owe Build an admission or a receipt, or holds a parked one, with its own events: what receipt delivery reads. Settled landings are left out. */
   buildBound(): { operation: LandingOperation; history: StoredEvent[] }[];
+  /** Whether any landing was ever Build-bound, settled or not. */
+  anyBuildBound(): boolean;
   /** Every event settling a held integration (confirmed published, or released unpublished), in ledger order, keyed by `recoveryKey(repo, commitId)`. */
   integrationSettlements(): Map<string, StoredEvent[]>;
   /** Checkpoint the write-ahead log, truncating it to the pages still in use. Safe to call while anything reads. */

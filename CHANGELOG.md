@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.49.0
+
+Spec SJ-186: faster YardSmith landings, and a failure reported as soon as its check fails.
+
+- **The runner's thread is no longer held by queue snapshots:** a snapshot read the whole event history of every
+  Build-bound landing ever made to count what Build is owed, about 1.2 s each, and watchers asked for one after every
+  event. It now reads only landings that may still owe Build something (0.3 s on the 3 Nov ledger, same result), and a
+  snapshot asked for when only a running command's detail has arrived is reused for up to two seconds. The receipt drain
+  reads the same narrower set.
+- **`land` prints a failed check at once:** a `[verify i/n] failed in …` line with the check and its failing tests,
+  while the other checks run on. The final outcome still reports every failed check.
+- **A remote verifier's tree check reuses the checkout's index:** reading what the VM's checkout holds rehashed every
+  file (12 s on YardSmith); starting from the checkout's own index rehashes only files whose stat changed, before and
+  after every gate.
+- **No runner-host install when the VM installs:** a repository that verifies on a remote verifier skips the frozen
+  install in the runner's checkout unless the candidate generates migrations there.
+
 ## v3.48.1
 
 - **A gate slot whose disk is slow to restore is forked afresh again (reverts 3.47.1's slot rule):** waiting up to

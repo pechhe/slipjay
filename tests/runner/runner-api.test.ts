@@ -129,6 +129,38 @@ test("watchers at one ledger position share a queue snapshot, and a new event re
   } finally { await runner.close(); }
 });
 
+test("a running gate's detail events share the queue snapshot for a moment, while a state change refreshes it at once", async () => {
+  const runner = await fixture();
+  try {
+    const build = runner.log.snapshot;
+    let builds = 0;
+    runner.log.snapshot = (...args) => { builds++; return build(...args); };
+    await runner.request("/queue");
+    runner.append("op_detail", { type: "progress", line: "[verify 1/2] bun run check" });
+    await runner.request("/queue");
+    assert.equal(builds, 1, "a progress line alone does not rebuild a fresh snapshot");
+    runner.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    const paused = await (await runner.request("/queue")).json() as { paused: { by: string } | null };
+    assert.equal(builds, 2);
+    assert.equal(paused.paused?.by, "owner", "a pause shows at once");
+  } finally { await runner.close(); }
+});
+
+test("a burst of detail events longer than one read refreshes the queue snapshot rather than hiding a state change behind it", async () => {
+  const runner = await fixture();
+  try {
+    const build = runner.log.snapshot;
+    let builds = 0;
+    runner.log.snapshot = (...args) => { builds++; return build(...args); };
+    await runner.request("/queue");
+    for (let line = 0; line < 200; line++) runner.append("op_detail", { type: "progress", line: `[verify 1/2] line ${line}` });
+    runner.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
+    const paused = await (await runner.request("/queue")).json() as { paused: { by: string } | null };
+    assert.equal(builds, 2);
+    assert.equal(paused.paused?.by, "owner");
+  } finally { await runner.close(); }
+});
+
 test("client operations are attributed to their repository and never enter the work queue", async () => {
   const f = await fixture();
   try {

@@ -22,6 +22,7 @@ import { promotionRefusal } from "../release/audit-ledger.ts";
 import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
+import { isEarlyFailureLine } from "../landing/required-verification.ts";
 import { candidateBookmark, COMMAND_ARTIFACT_LIMIT_BYTES, COMMAND_ARTIFACT_PAGE_BYTES, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest } from "./runner-types.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
@@ -244,7 +245,7 @@ async function follow(baseUrl: string, token: string, initial: Operation, name: 
               const stored = JSON.parse(line.slice(5).trim()) as StoredEvent;
               if (stored.seq <= lastSeq) continue;
               lastSeq = stored.seq;
-              if (stored.event.type === "progress" && env.SLIPJAY_RUNNER_VERBOSE === "1") onLine(stored.event.line);
+              if (stored.event.type === "progress" && (env.SLIPJAY_RUNNER_VERBOSE === "1" || isEarlyFailureLine(stored.event.line))) onLine(stored.event.line);
               if (stored.event.type === "screen_reused") onLine(`[runner ${name}] no second gate: published on screen attempt ${stored.event.attempt} because ${stored.event.reason}`);
               if (stored.event.type === "stage") {
                 operation = { ...operation, stage: stored.event.stage, status: stored.event.stage === "queued" ? "queued" : "running" };

@@ -352,6 +352,55 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       }
       return stored;
   }
+  function unsettledReceipts(): Set<string> {
+    const types = (list: readonly string[]) => list.map((type) => `'${type}'`).join(",");
+    // Only a Build-bound attempt owes a receipt, and a receipt is identified by the attempt and the sequence it answers:
+    // one of the attempt's own keys, or a settlement of the commit it integrated or held. These reads take columns only,
+    // so a pass costs a scan of the key events rather than a parse of every payload behind them.
+    const bound = new Set((db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+      AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL)`).all() as { operation_id: string }[])
+      .map((row) => row.operation_id));
+    const settled = (operation: string, sequence: number) => latest.get(`${operation}\n${sequence}`) === true;
+    // The latest settlement of each receipt stands: one an operator requeued is owed again.
+    const latest = new Map<string, boolean>();
+    for (const row of db.prepare("SELECT operation_id, json_extract(data, '$.sequence') AS sequence, json_extract(data, '$.state') AS state FROM events WHERE type = 'build_receipt' ORDER BY seq").all() as
+      { operation_id: string; sequence: number; state: string }[]) latest.set(`${row.operation_id}\n${row.sequence}`, row.state !== "requeued");
+    const ids = new Set<string>();
+    for (const row of db.prepare(`SELECT operation_id, seq FROM events WHERE type IN (${types(RECEIPT_KEY_EVENT_TYPES)})`).all() as { operation_id: string; seq: number }[])
+      if (bound.has(row.operation_id) && !settled(row.operation_id, row.seq)) ids.add(row.operation_id);
+    // A settlement is matched to the attempt it reconciles by commit — an `integrated` event names its commit, and its
+    // repository only through the submission — and an index keeps that lookup off a scan.
+    const attempts = db.prepare("SELECT DISTINCT operation_id FROM events WHERE type IN ('integrated', 'integration_held') AND json_extract(data, '$.commitId') = ?");
+    for (const settlement of db.prepare(`SELECT seq, json_extract(data, '$.commitId') AS commitId FROM events WHERE type IN (${types(RECEIPT_SETTLEMENT_EVENT_TYPES)})`).all() as
+      { seq: number; commitId: string }[])
+      for (const row of attempts.all(settlement.commitId) as { operation_id: string }[])
+        if (bound.has(row.operation_id) && !settled(row.operation_id, settlement.seq)) ids.add(row.operation_id);
+    return ids;
+  }
+  /**
+   * The Build-bound landings that may still owe Build something: an unanswered admission, an unsettled receipt, or a
+   * parked one. Every other Build-bound landing is settled for good, so readers of what is owed need not parse its
+   * history; on 3 Nov 2026 parsing all of them was 70% of each 1.2 s queue snapshot. Column reads only.
+   */
+  function buildOpen(): Set<string> {
+    const latest = new Map<string, { operation: string; state: string }>();
+    for (const row of db.prepare("SELECT operation_id, json_extract(data, '$.sequence') AS sequence, json_extract(data, '$.state') AS state FROM events WHERE type = 'build_receipt' ORDER BY seq").all() as
+      { operation_id: string; sequence: number; state: string }[]) latest.set(`${row.operation_id}\n${row.sequence}`, { operation: row.operation_id, state: row.state });
+    const delivered = new Set<string>(), parked = new Set<string>();
+    for (const { operation, state } of latest.values()) (state === "parked" ? parked : state === "delivered" ? delivered : undefined)?.add(operation);
+    // As owedReceipts: an admitted landing owes its attempt's receipts, a chore only its one publication, and a landing
+    // Build never admitted owes none beyond its admission.
+    const admitted = new Set((db.prepare("SELECT DISTINCT operation_id FROM events WHERE type = 'build_admitted'").all() as { operation_id: string }[]).map((row) => row.operation_id));
+    const chores = new Set((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.chore') IS NOT NULL").all() as { operation_id: string }[]).map((row) => row.operation_id));
+    const open = new Set([...unsettledReceipts()].filter((id) => admitted.has(id) || chores.has(id) && !delivered.has(id)));
+    for (const row of db.prepare(`SELECT s.operation_id FROM events s WHERE s.type = 'submitted' AND json_extract(s.data, '$.admission') IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM events e WHERE e.operation_id = s.operation_id AND (e.type = 'build_admitted'
+        OR e.type = 'declined' AND json_extract(e.data, '$.build') IS NOT NULL
+        OR e.type = 'build_receipt' AND json_extract(e.data, '$.sequence') = s.seq))`).all() as { operation_id: string }[]) open.add(row.operation_id);
+    for (const operation of parked) open.add(operation);
+    return open;
+  }
+
   const log: OperationLog = {
     append,
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -362,31 +411,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       // A reader holding a snapshot keeps the WAL from truncating; the next pass gets it instead.
       try { db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get(); } catch { /* left for the next pass */ }
     },
-    unsettledReceipts: () => {
-      const types = (list: readonly string[]) => list.map((type) => `'${type}'`).join(",");
-      // Only a Build-bound attempt owes a receipt, and a receipt is identified by the attempt and the sequence it answers:
-      // one of the attempt's own keys, or a settlement of the commit it integrated or held. These reads take columns only,
-      // so a pass costs a scan of the key events rather than a parse of every payload behind them.
-      const bound = new Set((db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
-        AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL)`).all() as { operation_id: string }[])
-        .map((row) => row.operation_id));
-      const settled = (operation: string, sequence: number) => latest.get(`${operation}\n${sequence}`) === true;
-      // The latest settlement of each receipt stands: one an operator requeued is owed again.
-      const latest = new Map<string, boolean>();
-      for (const row of db.prepare("SELECT operation_id, json_extract(data, '$.sequence') AS sequence, json_extract(data, '$.state') AS state FROM events WHERE type = 'build_receipt' ORDER BY seq").all() as
-        { operation_id: string; sequence: number; state: string }[]) latest.set(`${row.operation_id}\n${row.sequence}`, row.state !== "requeued");
-      const ids = new Set<string>();
-      for (const row of db.prepare(`SELECT operation_id, seq FROM events WHERE type IN (${types(RECEIPT_KEY_EVENT_TYPES)})`).all() as { operation_id: string; seq: number }[])
-        if (bound.has(row.operation_id) && !settled(row.operation_id, row.seq)) ids.add(row.operation_id);
-      // A settlement is matched to the attempt it reconciles by commit — an `integrated` event names its commit, and its
-      // repository only through the submission — and an index keeps that lookup off a scan.
-      const attempts = db.prepare("SELECT DISTINCT operation_id FROM events WHERE type IN ('integrated', 'integration_held') AND json_extract(data, '$.commitId') = ?");
-      for (const settlement of db.prepare(`SELECT seq, json_extract(data, '$.commitId') AS commitId FROM events WHERE type IN (${types(RECEIPT_SETTLEMENT_EVENT_TYPES)})`).all() as
-        { seq: number; commitId: string }[])
-        for (const row of attempts.all(settlement.commitId) as { operation_id: string }[])
-          if (bound.has(row.operation_id) && !settled(row.operation_id, settlement.seq)) ids.add(row.operation_id);
-      return [...ids];
-    },
+    unsettledReceipts: () => [...unsettledReceipts()],
     forgetHistory(now = new Date(), keep: ReadonlySet<string> = new Set()) {
       const lasting = [...LASTING_EVENTS].map((type) => `'${type}'`).join(",");
       // Each repository's newest landing is what a deploy, reset or audit reads, so it is never forgotten. A historic
@@ -526,10 +551,13 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     shortRepository,
     paused,
     held,
-    buildBound: () => (db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+    anyBuildBound: () => db.prepare(`SELECT 1 FROM events WHERE type = 'submitted'
+      AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL) LIMIT 1`).get() != null,
+    buildBound: () => { const open = buildOpen(); return (db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
       AND (json_extract(data, '$.admission') IS NOT NULL OR json_extract(data, '$.chore') IS NOT NULL) ORDER BY seq`).all() as { operation_id: string }[])
+      .filter(({ operation_id: id }) => open.has(id))
       .flatMap(({ operation_id: id }) => { const history = events({ operationId: id }); const operation = project(id, history, projections);
-        return operation?.kind === "landing" ? [{ operation, history }] : []; }),
+        return operation?.kind === "landing" ? [{ operation, history }] : []; }); },
     integrationSettlements: () => {
       const settlements = new Map<string, StoredEvent[]>();
       for (const row of db.prepare("SELECT seq, operation_id, at, data FROM events WHERE type IN ('integration_recovered', 'integration_released') ORDER BY seq").all() as EventRow[]) {

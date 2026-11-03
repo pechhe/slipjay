@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink } from "node:fs/promise
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "vite-plus/test";
-import { RequiredVerificationError, runRequiredVerification } from "../../src/lib/landing/required-verification.ts";
+import { isEarlyFailureLine, RequiredVerificationError, runRequiredVerification } from "../../src/lib/landing/required-verification.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 
 /** A check that records the directory it ran in. */
@@ -244,4 +244,26 @@ test("a passing run reports passed commands unchanged", async () => {
     assert.deepEqual(evidence.passed, ["node a", "node b"]);
     assert.equal(evidence.status, "passed");
   } finally { await f.dispose(); }
+});
+
+test("a failed check reports its failing tests while a concurrent check still runs", async () => {
+  const lines: string[] = [];
+  let finishSlow!: () => void;
+  const slowDone = new Promise<void>((resolve) => { finishSlow = resolve; });
+  const s = scripted({ fast: [failing("fast")], slow: [{}] });
+  const run = async (request: BoundedProcessRequest) => {
+    if (request.args[0] === "slow") {
+      // The slow check finishes only once the fast one's failure has been reported.
+      await new Promise<void>((resolve) => { const wait = () => lines.some(isEarlyFailureLine) ? resolve() : setTimeout(wait, 5); wait(); });
+      finishSlow();
+    }
+    return s.run(request);
+  };
+  const error = await failedWith([decl("slow", { concurrent: true }), decl("fast", { concurrent: true })], run, { onProgress: (line: string) => lines.push(line) });
+  await slowDone;
+  const early = lines.find(isEarlyFailureLine)!;
+  assert.match(early, /^\[verify 2\/2\] failed in [\d.]+s: node fast\n/);
+  assert.match(early, /tests\/fast\.test\.ts/);
+  assert.ok(lines.indexOf(early) < lines.findIndex((line) => line.startsWith("[verify 1/2] passed")), "reported before the other check finished");
+  assert.deepEqual(error.evidence.failures.map((failure) => failure.command), ["node fast"], "the final outcome still lists the failure");
 });

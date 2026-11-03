@@ -61,9 +61,16 @@ const SCRATCH_LIST = "~/.slipjay-scratch";
  * The checkout's files as a tree, read through a throwaway index so neither Git's nor jj's state moves: what the gate
  * actually ran against. The index starts from the candidate's `tree`, so a tracked file that matches an ignore rule
  * stays in it, and `add -A` then records every change, deletion and untracked file that is not ignored.
+ *
+ * The throwaway index starts as a copy of the checkout's own, merged with `tree` (`read-tree -m`), so it keeps the file
+ * stat information of every entry whose content matches: `add -A` then rehashes only files whose stat changed, rather
+ * than every file in the tree (12 s against 0.2 s on the YardSmith checkout, 3 Nov 2026). The entries are `tree`'s
+ * either way, and Git rehashes any file whose stat it cannot trust, so the tree written is the same. Without a usable
+ * index it starts from `tree` alone, as before.
  */
 export const worktreeTree = (tree: string) => `index=$(mktemp); trap 'rm -f "$index"' EXIT
-GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)} && GIT_INDEX_FILE="$index" git add -A . && GIT_INDEX_FILE="$index" git write-tree`;
+{ cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null && GIT_INDEX_FILE="$index" git read-tree -m ${shellWord(tree)} 2>/dev/null; } || { : > "$index"; GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)}; }
+GIT_INDEX_FILE="$index" git add -A . && GIT_INDEX_FILE="$index" git write-tree`;
 const SETUP_TIMEOUT_MS = 900_000;
 const CONTROL_OUTPUT = 1024 * 1024;
 

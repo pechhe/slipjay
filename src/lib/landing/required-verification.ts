@@ -98,6 +98,16 @@ function failureMessage(head: string, records: RequiredVerificationCheckRecord[]
   return build(indexCount, blockCount).slice(head.length + 1);
 }
 
+/**
+ * The progress line a failed check writes the moment it finishes, while the other checks still run: the agent can start
+ * on the failing tests at once, rather than when the whole gate ends. The final outcome still reports every failed check.
+ * `slipjay land` prints it whatever its verbosity (`isEarlyFailureLine`).
+ */
+export const earlyFailureLine = (index: number, count: number, command: string, ms: number, summary: string): string =>
+  truncateUtf8(`[verify ${index + 1}/${count}] failed in ${formatDuration(ms)}: ${command}\n${summary}`, EARLY_FAILURE_BYTES);
+const EARLY_FAILURE_BYTES = 4096;
+export const isEarlyFailureLine = (line: string): boolean => /^\[verify \d+\/\d+\] failed in /.test(line);
+
 const formatDuration = (ms: number): string => (ms < 60_000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60_000)}m${Math.round((ms % 60_000) / 1000)}s`);
 
 /**
@@ -163,6 +173,7 @@ export async function runRequiredVerification(input: {
       const record: RequiredVerificationCheckRecord = { checkIndex: index, command: evidence.command,
         outcome: result.timedOut ? "timed_out" : "failed", ...runId, ...(failingTests ? { failingTests } : {}) };
       // A cancelled or unspawnable check is not a finished failure: it ends verification at once.
+      if (evidence.outcome !== "cancelled") onProgress(earlyFailureLine(index, checks.length, evidence.command, Date.now() - started, summary));
       if (evidence.outcome === "cancelled" || evidence.outcome === "spawn_failure") {
         throw new RequiredVerificationError({ ...evidence, failures: [failure], checks: [record] }, summary);
       }

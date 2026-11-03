@@ -14,6 +14,11 @@ import type { BuildReadAction } from "../build/tracker.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
 import type { QueuedLanding, SubmissionConflict } from "../landing/submission-probe.ts";
 
+/** The youngest a shared queue snapshot is rebuilt at when only run detail has arrived since (see queueSnapshot). */
+export const QUEUE_SNAPSHOT_MIN_AGE_MS = 2_000;
+/** Events that report a running command's detail and change no operation's stage or outcome. */
+const RUN_DETAIL_EVENTS: ReadonlySet<string> = new Set(["progress", "run_started", "run_finished", "test_report", "stage_detail", "change_shape", "remote_verification"]);
+
 export function createRunnerHandler(input: {
   log: OperationLog;
   token: string;
@@ -49,12 +54,21 @@ export function createRunnerHandler(input: {
 }): RunnerHandler {
   let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
-  // Every watcher asks for the queue after each event, so build each sequence's snapshot once and
-  // share it; refresh after a second so its clock-derived timing does not go stale.
+  // Every watcher asks for the queue after each event and each heartbeat, so a snapshot is shared rather than built per
+  // request. Building one blocks the runner's only thread (0.3 s with a few thousand operations in the ledger, 3 Nov 2026),
+  // and a running gate appends several run events a second. So when only such run detail has arrived, the snapshot is
+  // rebuilt at most every QUEUE_SNAPSHOT_MIN_AGE_MS: a watcher may see it a moment late, and its next event or heartbeat
+  // brings it. Any other event (a stage, a pause, a terminal outcome) rebuilds it at once.
   let queue: { seq: number; at: number; body: string } | undefined;
   function queueSnapshot(): Response {
     const seq = input.log.latestSeq();
-    if (!queue || queue.seq !== seq || Date.now() - queue.at > 1_000)
+    const age = queue ? Date.now() - queue.at : Infinity;
+    // More events than one read covers counts as a state change, so a long burst never hides one.
+    const onlyRunDetail = () => {
+      const pending = input.log.events({ afterSeq: queue!.seq, limit: 201 });
+      return pending.length <= 200 && pending.every(({ event }) => RUN_DETAIL_EVENTS.has(event.type));
+    };
+    if (!queue || (queue.seq !== seq ? age >= QUEUE_SNAPSHOT_MIN_AGE_MS || !onlyRunDetail() : age > 1_000))
       queue = { seq, at: Date.now(), body: JSON.stringify(input.log.snapshot(input.runnerName)) };
     return new Response(queue.body, { headers: { "content-type": "application/json;charset=utf-8" } });
   }

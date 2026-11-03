@@ -1325,7 +1325,16 @@ export function createRunnerQueue(input: {
         landingPreview: async () => ({ context: candidateContext, target: await revisionFacts(checkout, prefix || retainedSource ? "@" : operation.commitId) }),
         ensureLandingDescription: async (_cwd, _context, target) => target,
         async prepareCandidateDependencies(cwd, candidate, target, onProgress, runCommand) {
-          await recordShape(cwd, candidate.integrationBranch, target.commitId, candidate.configuration.migrationFinalization);
+          const paths = await recordShape(cwd, candidate.integrationBranch, target.commitId, candidate.configuration.migrationFinalization);
+          // When the gate runs on a remote verifier, that VM installs the candidate itself and proves its tree unchanged, so
+          // this checkout needs dependencies only to generate migrations here. Skipping it saves a frozen install (19 to
+          // 80 s on YardSmith) on every other landing.
+          const migration = candidate.configuration.migrationFinalization;
+          const triggers = [...migration?.triggerPaths ?? [], ...migration?.artifactPaths ?? []];
+          if (configuredRepository(config, operation.repo)?.verifier && !paths.some((path) => triggers.some((root) => path === root || path.startsWith(`${root}/`)))) {
+            onProgress?.("[deps] not installed on the runner: the gate's VM installs the candidate, and it generates no migration");
+            return;
+          }
           setStage("installing");
           installSource = await stat(join(cwd, "node_modules")).then(() => "existing" as const, () => "fresh" as const);
           await landingIO.prepareCandidateDependencies(cwd, candidate, target, onProgress, runCommand);

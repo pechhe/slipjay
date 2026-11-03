@@ -45,7 +45,8 @@ test("a repository verifying remotely runs only its gate on the remote machine a
     const runs = events.flatMap((event) => event.type === "run_started" ? [event] : []);
     assert.ok(runs.some((run) => run.purpose === "gate"));
     for (const run of runs) assert.equal(run.host, run.purpose === "gate" ? "boat:fake-0" : runs.find((other) => other.purpose !== "gate")!.host, `${run.purpose} ran where expected`);
-    assert.notEqual(runs.find((run) => run.purpose === "dependencies")?.host, "boat:fake-0", "preparation stays on the runner host");
+    assert.ok(!runs.some((run) => run.purpose === "dependencies"), "the runner's checkout installs nothing: the VM installs the candidate");
+    assert.ok(events.some((event) => event.type === "progress" && event.line.startsWith("[deps] not installed on the runner")));
 
     const remote = events.flatMap((event) => event.type === "remote_verification" ? [event] : []);
     assert.deepEqual(remote.map((event) => event.phase), ["ready", "finished"]);

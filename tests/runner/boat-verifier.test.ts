@@ -295,6 +295,29 @@ test("the checkout's tree keeps a tracked file that matches an ignore rule", () 
   assert.notEqual(read(), tree, "a change to it, or a new file, does not");
 });
 
+test("the checkout's tree is read the same whatever the checkout's own index holds", () => {
+  const repo = execFileSync("mktemp", ["-d"], { encoding: "utf8" }).trim();
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
+  const sh = (script: string) => execFileSync("bash", ["-c", `cd ${repo} && ${script}`]);
+  git("init", "-q");
+  sh("echo a > a.txt && echo b > b.txt");
+  git("add", "."); git("commit", "-qm", "first");
+  const first = git("rev-parse", "HEAD^{tree}");
+  sh("echo a2 > a.txt && rm b.txt && echo c > c.txt");
+  git("add", "-A"); git("commit", "-qm", "second");
+  const second = git("rev-parse", "HEAD^{tree}");
+  const read = (tree: string) => execFileSync("bash", ["-c", `set -euo pipefail\ncd ${repo}\n${worktreeTree(tree)}`], { encoding: "utf8" }).trim();
+  // The index holds the second commit while the working tree is put back to the first, as jj leaves Git's index at the parent.
+  sh("git checkout -q HEAD~1 -- . && rm c.txt");
+  assert.equal(read(first), first, "the working tree, not the index, decides what is read");
+  assert.notEqual(read(second), second);
+  sh("rm .git/index");
+  assert.equal(read(first), first, "without an index it reads from the tree alone");
+  sh("echo changed > a.txt");
+  assert.notEqual(read(first), first, "a changed file is still seen");
+  assert.equal(git("status", "--porcelain").includes("a.txt"), true, "the checkout's own index is untouched");
+});
+
 test("concurrent gate commands reaching Build share one tunnel per attempt", async () => {
   const ready = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result(`runtime /home/user/.bun/bin/bun 1.4.4 ${"a".repeat(64)}\ntree ${"e".repeat(40)}`));

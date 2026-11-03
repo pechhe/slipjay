@@ -245,7 +245,10 @@ therefore leaves a spare's dependencies reusable.
 migration generation or verification, so the gate sees the dependencies of the
 integration tip it verifies against rather than the one the workspace was
 allocated from. An install that edits tracked source is undone and fails the
-landing.
+landing. On a runner whose repository verifies on a remote verifier (a boat VM),
+the runner's own checkout skips that install unless the candidate generates
+migrations there: the VM installs the candidate itself, and proves its tree
+unchanged before and after the gate.
 
 ## Environment contract
 
@@ -506,7 +509,8 @@ and held state through the existing recovery path.
   (`{ "executable", "args"?, "cwd"?, "concurrent"?, "stopOnFailure"? }`), run in the runner's checkout.
   Consecutive `concurrent` checks run together. A failed check (nonzero exit, signal or
   timeout) does not stop the gate: every later check still runs, and one failure reports
-  every failed check in declaration order, led by an index of each check's outcome (passed,
+  every failed check in declaration order (the moment a check fails, `land` prints a
+  `[verify i/n] failed in …` line naming it and its failing tests, while the others run on), led by an index of each check's outcome (passed,
   failed, timed out, accepted by baseline, capability unavailable, not run). The index and
   summaries are capped at about 24,000 characters; the structured record is complete.
   `"stopOnFailure": true` marks a check that later checks depend on, such as an install or
@@ -530,7 +534,7 @@ and held state through the existing recovery path.
   failure, and `slipjay runner log <operation>`, which prints retained operation events from any machine with the location. Interrupting `land` stops following but
   not the landing. Running `land` again in the same workspace reattaches to the same
   operation (or, if it landed meanwhile, finishes the workspace housekeeping, even when the working copy is left empty on integrated history); it never submits twice, and never submits a commit already on the integration branch. While an older commit of the change is running, `land` follows it instead of moving its bookmark, then asks you to land again. Set `SLIPJAY_RUNNER_VERBOSE=1` to see every
-  progress line.
+  progress line; a check's early failure line is printed regardless.
 - **Transport.** The client publishes the change as the bookmark
   `slipjay/changes/<changeId>` and submits it by jj change ID. The runner fetches it
   on its turn and deletes it when the operation closes. Until the operation has a result
