@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.49.2
+
+- **A landing whose gate VM was not ready returns to the queue:** when a gate slot's disk was still restoring after
+  five minutes, the landing failed as infrastructure and an agent had to notice and resubmit (54 landings failed on boat
+  in the seven days to 3 Nov 2026, 31 of them screening or verifying). Such a screen or verification attempt now returns
+  to the queue and runs again, at most twice per landing, with a `[verify]` progress line naming why. It ran none of the
+  candidate's gate commands, so it says nothing about the source; once a gate command has started nothing is retried,
+  and neither is a gate failure, a conflict, a kill, a pause, a refusal such as a plan limit, or a setup fault on a VM
+  boat supplied. A retry spends no extra boat start: it waits again on the slot's existing VM, never deleting or
+  forking one. After the second retry the landing fails as before; deploy and promotion behaviour is unchanged.
+
 ## v3.49.1
 
 - **An overtaken screen restarts at once:** a screen on the integration tip alone (it conflicted with the screen

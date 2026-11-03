@@ -214,7 +214,7 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
    * The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped, and
    * given `lifetimeS` to live, after which boat stops it.
    */
-  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false, build = false): Promise<Vm> {
+  async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false, build = false, reuseOnly = false): Promise<Vm> {
     // Only API failures before setup are retried. The budget spans all calls in this open, with each call bounded
     // by the remaining time. Retrying an ambiguous fork could create a second VM, so a timed-out fork goes to the hold.
     let retryDeadline: number | undefined;
@@ -249,6 +249,8 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       let found = named.find((entry) => !STOPPED.includes(entry.state)) ?? named[0];
       // A second VM under the slot's name is a leftover fork; only one may hold the slot.
       for (const extra of named) if (extra !== found) await api(["delete", extra.id, "--yes"], signal).catch(() => undefined);
+      // A landing's retry spends no boat start beyond resuming: forking the slot afresh is the first attempt's alone.
+      if (!found && reuseOnly) fail(`${name} not reachable`, "no VM holds the slot, and a retry forks none");
       if (!found) {
         found = vmOf(await api(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
         // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
@@ -286,7 +288,10 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
         // fails as infrastructure rather than forking again, since boat starts are rationed. A build machine is replaced
         // only when boat reports it degraded: while its restore is merely slow it waits BUILD_READY_TIMEOUT_MS and then
         // fails, keeping the disk its warm build cache is on.
-        if (build && !stalled || replaced || vm.hydrated) fail(`${name} not reachable`, detail);
+        // Marked: boat supplied no machine for want of a restore, which a landing retries (only by waiting on the same VM,
+        // `reuseOnly`); a refusal such as a plan limit is not marked and fails at once.
+        if (build && !stalled || replaced || vm.hydrated || reuseOnly)
+          throw Object.assign(new Error(`Remote executor unavailable (boat): ${name} not reachable: ${detail.trim()}`), { machineUnavailable: true });
         replaced = true;
         await api(["delete", vm.id, "--yes"], signal);
         vm = await acquire(vm.id);
@@ -392,9 +397,9 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
         throw error;
       }
     },
-    async open({ repo, slot: inputSlot, screening, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
+    async open({ repo, slot: inputSlot, screening, retrying, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
       const slot = screening ? `${inputSlot}-screen` : inputSlot;
-      const vm = await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true);
+      const vm = await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true, false, retrying === true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.
       const billed = await usage(vm, signal);

@@ -50,6 +50,18 @@ const skipsStaging = (configuration: { process?: string } | null | undefined): b
 
 /** How long after the remote could not be read to learn a repository's audit policy the runner tries again. */
 const AUDIT_DISCOVERY_RETRY_MS = 600_000;
+/**
+ * How many times a landing returns to the queue because its remote executor was not ready before any of the candidate's
+ * gate commands ran: a slot whose disk boat had not restored. That is infrastructure, not a verdict on the source, but a
+ * landing failed it outright and an agent had to notice and resubmit (54 landings failed on boat in the seven days to
+ * 3 Nov 2026, 31 of them screening or verifying). A retry waits again on the same VM and forks none, since boat starts
+ * are rationed; the attempt past the bound fails the landing as before. An unanswered boat API holds the repository
+ * instead (see `holdForBoat`), and a refusal such as a plan limit fails at once.
+ */
+const REMOTE_UNAVAILABLE_RETRIES = 2;
+/** What such a landing yields to, and how the ledger counts the retries it already spent. */
+const AWAITING_REMOTE_EXECUTOR = "a remote executor that was not ready";
+
 /** How long after a recovery of a held integration fails the runner queues another, doubling per failure up to the cap. */
 const RECOVERY_RETRY_MS = 30_000;
 const RECOVERY_RETRY_MAX_MS = 900_000;
@@ -1083,6 +1095,14 @@ export function createRunnerQueue(input: {
       }
       return { ...result, runId };
     }
+    /**
+     * Why this attempt's remote executor was never available, when boat supplied no machine for it. None of the
+     * candidate's gate commands ran, so that failure is infrastructure, not evidence about the source: see below.
+     */
+    let remoteUnavailable: string | undefined;
+    /** How many attempts this landing has already returned to the queue for a remote executor that was not ready. */
+    const remoteUnavailableRetries = (): number => log.events({ operationId: operation.id })
+      .filter(({ event }) => event.type === "yielded" && event.to === AWAITING_REMOTE_EXECUTOR).length;
     /** The remote verifier's machine for this attempt, holding exactly `candidate` on `base`. */
     async function openRemote(base: string, candidate: string, integrationBranch: string, signal: AbortSignal): Promise<{ attempt: RemoteAttempt; started: number }> {
       const started = Date.now();
@@ -1092,9 +1112,12 @@ export function createRunnerQueue(input: {
       const paused = new AbortController();
       const unsubscribe = log.subscribe(({ event }) => { if (event.type === "paused") paused.abort(); });
       if (log.paused()) paused.abort();
-      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, screening, checkout, base, candidate, integrationBranch, signal: AbortSignal.any([signal, paused.signal]) }).catch((error: RemoteOpenFailure) => {
+      // Only this open's own failure says no machine was supplied; an earlier one's verdict never carries over.
+      remoteUnavailable = undefined;
+      const attempt = await remoteVerification!.open({ repo: operation.repo, slot, screening, retrying: remoteUnavailableRetries() > 0, checkout, base, candidate, integrationBranch, signal: AbortSignal.any([signal, paused.signal]) }).catch((error: RemoteOpenFailure) => {
         if (paused.signal.aborted && !signal.aborted) throw new BoatPaused("Runner paused while waiting for boat");
         if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
+        remoteUnavailable = error?.machineUnavailable ? message(error) : undefined;
         throw error;
       }).finally(unsubscribe);
       append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
@@ -1508,6 +1531,15 @@ export function createRunnerQueue(input: {
         retryPrefix = false;
         if (!(error instanceof BoatPaused)) holdForBoat(operation.repo, message(error));
         verdict = { type: "yielded", to: error instanceof BoatPaused ? "the runner pause" : "boat availability" };
+      }
+      // A landing whose remote executor was never available ran nothing of the candidate, so it is no verdict on the
+      // source: it returns to the queue a bounded number of times, and the attempt past that bound fails as it did
+      // before. A pause that began meanwhile leaves it queued until the runner resumes.
+      else if (operation.kind === "landing" && remoteUnavailable !== undefined && log.paused()) verdict = { type: "yielded", to: "the runner pause" };
+      else if (operation.kind === "landing" && remoteUnavailable !== undefined && remoteUnavailableRetries() < REMOTE_UNAVAILABLE_RETRIES) {
+        const retried = remoteUnavailableRetries() + 1;
+        progress(`[verify] the remote executor was not ready before any gate command ran: ${remoteUnavailable}; returned to the queue to try again (${retried} of ${REMOTE_UNAVAILABLE_RETRIES})`);
+        verdict = { type: "yielded", to: AWAITING_REMOTE_EXECUTOR };
       }
       else if (error instanceof CandidatePolicyRefusal) verdict = { type: "declined", reason: error.message, paths: [EXECUTION_POLICY_PATH] };
       else if (error instanceof HeldIntegration) {

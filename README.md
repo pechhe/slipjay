@@ -818,10 +818,15 @@ with fresh attempts and no author resubmission. The ledger records `boat_circuit
 events, and a restart retains the hold. An owner can kill a held landing as usual. Gates already
 running keep their existing failure behaviour; a gate failure is never retried for an API outage.
 
-A non-transient refusal (such as a plan limit), or a VM boat cannot reach over SSH, still fails
-as infrastructure with `Remote executor unavailable (boat): …` and boat's own error; a fault in
-the image or setup fails it as `Remote executor unavailable (setup): …`; an SSH connection
-lost during a command fails it as `executor lost`. Moving a repository back to local
+A non-transient refusal (such as a plan limit) fails as infrastructure with `Remote executor
+unavailable (boat): …` and boat's own error. A slot VM that never becomes ready (its disk still
+restoring, SSH not answering) fails the attempt the same way, but a landing does not end on it:
+that attempt ran none of the candidate's gate commands, so it returns to the queue and runs again,
+at most twice per landing, with a `[verify]` progress line naming why. A retry waits on the slot's
+existing VM and never deletes or forks one, so it costs no boat start beyond a resume. The attempt
+past that bound, and any failure once a gate command has started, fails the landing as before. A
+fault in the image or setup on a VM boat supplied fails at once as `Remote executor unavailable
+(setup): …`; an SSH connection lost during a command fails it as `executor lost`. Moving a repository back to local
 verification is removing `verifier` from its entry. With `verifier`, `verificationDepth: 2`
 needs no combined host budget, since the gates share no host; each place still holds a
 worker while it prepares and waits.

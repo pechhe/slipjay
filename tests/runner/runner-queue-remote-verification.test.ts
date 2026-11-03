@@ -9,13 +9,14 @@ import { fixture, test, until } from "./fixtures/runner-queue-fixture.ts";
 
 /** A remote verifier whose "machine" runs commands on this host, recording what the queue asked of it. */
 function fakeRemote(failOpen?: string, treeAfter = "t".repeat(40), billed = true) {
-  const opened: { slot: number; candidate: string; base: string; integrationBranch: string }[] = [];
+  const opened: { slot: number; screening?: boolean; candidate: string; base: string; integrationBranch: string }[] = [];
   let closed = 0;
   const remote: RemoteVerification = {
-    async open({ slot, candidate, base, integrationBranch }): Promise<RemoteAttempt> {
+    async open({ slot, screening, candidate, base, integrationBranch }): Promise<RemoteAttempt> {
       if (failOpen) throw Object.assign(new Error(failOpen), failOpen.includes("(setup)")
-        ? { remote: { machine: { verifier: "boat", id: "bx_fake", name: "slipjay-fixture-repo-0", size: "default", image: "bx_image" }, usageBefore: { seconds: 10, dollars: 0.0001 }, usage: { seconds: 40, dollars: 0.0004 } } } : {});
-      opened.push({ slot, candidate, base, integrationBranch });
+        ? { remote: { machine: { verifier: "boat", id: "bx_fake", name: "slipjay-fixture-repo-0", size: "default", image: "bx_image" }, usageBefore: { seconds: 10, dollars: 0.0001 }, usage: { seconds: 40, dollars: 0.0004 } } }
+        : {});
+      opened.push({ slot, screening, candidate, base, integrationBranch });
       return {
         executor: { host: "boat:fake-0", run: runBoundedProcess, runtime: { name: "bun", version: "9.9.9", path: "/vm/bun", sha256: "f".repeat(64) } },
         machine: { verifier: "boat", id: "bx_fake", name: "slipjay-fixture-repo-0", size: "default", image: "bx_image" },
@@ -29,6 +30,16 @@ function fakeRemote(failOpen?: string, treeAfter = "t".repeat(40), billed = true
     },
   };
   return { remote, opened, closed: () => closed };
+}
+
+/**
+ * A landing's terminal result. A landing that returns to the queue settles its attempt before the queue wakes it again,
+ * so `land` can read no result yet; this wakes the queue and waits for the verdict.
+ */
+async function terminal(f: Awaited<ReturnType<typeof fixture>>, id: string) {
+  f.queue.wake();
+  await f.queue.idle();
+  return until(() => f.result(id) || undefined);
 }
 
 test("a repository verifying remotely runs only its gate on the remote machine and records the machine", async () => {
@@ -62,14 +73,16 @@ test("a repository verifying remotely runs only its gate on the remote machine a
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("a remote verifier that cannot supply a machine fails the landing as infrastructure, naming it, and runs no gate", async () => {
+test("a remote verifier that refuses a machine fails the landing at once as infrastructure, naming it, and runs no gate", async () => {
   const fake = fakeRemote("Remote executor unavailable (boat): boat fork: Start the $20/month Boat plan to create sandboxes");
   const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote });
   try {
-    const failed = await f.land(f.submit(await f.candidate("remote.txt")));
+    const failed = await terminal(f, f.submit(await f.candidate("remote.txt")));
     assert.equal(failed?.type, "failed", JSON.stringify(failed));
     assert.match(failed?.type === "failed" ? failed.reason : "", /Remote executor unavailable \(boat\): boat fork/);
     const events = f.log.events().map(({ event }) => event);
+    assert.equal(events.filter((event) => event.type === "verification_base").length, 1, "a refusal is not retried");
+    assert.ok(!events.some((event) => event.type === "yielded"));
     assert.ok(!events.some((event) => event.type === "run_started" && event.purpose === "gate"), "no gate command ran anywhere");
     const classified = events.find((event) => event.type === "classified");
     assert.equal(classified?.type === "classified" && classified.cause, "infrastructure");
@@ -113,6 +126,79 @@ test("a setup that fails on a machine is recorded with the machine's billing, so
     assert.equal(landing?.remote?.attempts, 0, "no attempt reached the gate");
     assert.equal(landing?.remote?.dollars, 0.0003, "the failed setup's spend, from its readings before and after");
     assert.match(remote[0]?.phase === "failed" ? remote[0].reason : "", /bun install failed/);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+/** The failure the readiness loop in `boat-verifier.ts` throws for a slot whose disk boat never restored. */
+const SLOT_NOT_READY = "Remote executor unavailable (boat): slipjay-fixture-repo-0-screen not reachable: state idle, disk still restoring after 300s";
+
+/** A remote verifier whose VM cannot be supplied for its first `failures` openings, then serves as usual. */
+function unreadyRemote(failures: number) {
+  const fake = fakeRemote();
+  const originalOpen = fake.remote.open;
+  let opens = 0;
+  const retrying: boolean[] = [];
+  fake.remote.open = async (input) => {
+    opens++;
+    retrying.push(input.retrying === true);
+    if (opens <= failures) throw Object.assign(new Error(SLOT_NOT_READY), { machineUnavailable: true });
+    return originalOpen(input);
+  };
+  return { ...fake, opens: () => opens, retrying };
+}
+
+test("a VM that never becomes ready is retried twice on the same slot, forking none, then fails the landing as infrastructure", async () => {
+  const fake = unreadyRemote(3);
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote });
+  try {
+    const failed = await terminal(f, f.submit(await f.candidate("remote.txt")));
+    assert.equal(failed?.type, "failed", JSON.stringify(failed));
+    assert.equal(failed?.type === "failed" ? failed.reason : "", SLOT_NOT_READY);
+    assert.deepEqual(fake.retrying, [false, true, true], "only the first attempt may fork; each retry reuses the slot's VM");
+    const events = f.log.events().map(({ event }) => event);
+    assert.deepEqual(events.flatMap((event) => event.type === "yielded" ? [event.to] : []), ["a remote executor that was not ready", "a remote executor that was not ready"]);
+    assert.deepEqual(events.flatMap((event) => event.type === "progress" && event.line.startsWith("[verify] the remote executor was not ready") ? [event.line.split("; ")[1]] : []),
+      ["returned to the queue to try again (1 of 2)", "returned to the queue to try again (2 of 2)"], "the log says why each retry happened");
+    assert.ok(!events.some((event) => event.type === "run_started" && event.purpose === "gate"), "no gate command ran anywhere");
+    const classified = events.find((event) => event.type === "classified");
+    assert.equal(classified?.type === "classified" && classified.cause, "infrastructure");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a screen whose VM is not ready before any gate command returns to the queue and screens again", async () => {
+  const fake = unreadyRemote(1);
+  const f = await fixture(false, false, undefined, false, { screeningLanes: 1, remoteVerification: fake.remote });
+  try {
+    const id = f.submit(await f.candidate("remote.txt"));
+    const landed = await terminal(f, id);
+    assert.equal(landed?.type, "landed", JSON.stringify(landed));
+    assert.equal(fake.opens(), 2, "the unready slot costs the landing one attempt, not the submission");
+    assert.equal(fake.opened.length, 1);
+    assert.equal(fake.opened[0]!.screening, true, "the retried attempt screens again, on whichever slot is free");
+    const events = f.log.events({ operationId: id }).map(({ event }) => event);
+    assert.deepEqual(events.flatMap((event) => event.type === "yielded" ? [event.to] : []), ["a remote executor that was not ready"]);
+    assert.ok(events.some((event) => event.type === "progress"
+      && event.line === `[verify] the remote executor was not ready before any gate command ran: ${SLOT_NOT_READY}; returned to the queue to try again (1 of 2)`),
+      "the log says why the landing went back to the queue");
+    assert.equal(events.filter((event) => event.type === "run_started" && event.purpose === "gate").length, 1, "the gate ran once, on the machine that was ready");
+    assert.equal(events.filter((event) => event.type === "attempt_started").length, 2);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a remote executor lost after a gate command started is not retried", async () => {
+  const fake = fakeRemote();
+  const originalOpen = fake.remote.open;
+  fake.remote.open = async (input) => {
+    const attempt = await originalOpen(input);
+    return { ...attempt, executor: { ...attempt.executor, run: async () => { throw new Error("executor lost: connection to executor closed"); } } };
+  };
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote });
+  try {
+    const failed = await f.land(f.submit(await f.candidate("remote.txt")));
+    assert.equal(failed?.type, "failed", JSON.stringify(failed));
+    assert.match(failed?.type === "failed" ? failed.reason : "", /executor lost/);
+    assert.equal(fake.opened.length, 1, "a gate that began is never retried");
+    assert.ok(!f.log.events().some(({ event }) => event.type === "yielded"));
   } finally { await f.dispose(); }
 }, 120_000);
 

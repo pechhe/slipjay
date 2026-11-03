@@ -125,6 +125,52 @@ test("a replacement slot that also never restores fails as infrastructure, forki
   assert.equal(boat.filter((call) => call.startsWith("delete")).length, 1, "only the first broken slot is deleted");
 });
 
+test("a machine boat never supplied is marked unavailable, so the runner retries it; a setup fault on one it did supply is not", async () => {
+  let slot = "bx_stuck";
+  const stalled = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    if (request.executable === "ssh") return result("", 1, "no answer");
+    const [command, id] = request.args;
+    if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: slot, name: "slipjay-pechhe-yardsmith-0", state: "idle" }] }));
+    if (command === "fork") { slot = "bx_new"; return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } })); }
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: false } }));
+    return result(JSON.stringify({ ok: true }));
+  };
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: stalled, readyTimeoutMs: 0 })), (error: unknown) =>
+    /not reachable/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === true);
+
+  // A retry waits on the slot's VM again: it neither deletes the unrestored VM nor forks a replacement.
+  const calls: string[] = [];
+  slot = "bx_stuck";
+  const retried = async (request: BoundedProcessRequest) => { if (request.executable !== "ssh") calls.push(request.args[0]!); return stalled(request); };
+  const retryOpen = (verification: ReturnType<typeof boatVerification>) => verification.open({ repo: "pechhe/yardsmith", slot: 0, retrying: true, checkout: "/nonexistent",
+    base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
+  await assert.rejects(retryOpen(boatVerification({ image: "bx_image", cli: "boat", run: retried, readyTimeoutMs: 0 })),
+    (error: unknown) => /not reachable/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === true);
+  assert.ok(!calls.includes("fork") && !calls.includes("delete"), calls.join(" "));
+
+  // A retry that finds no VM in the slot forks none, and fails at once (unmarked) rather than spend a start.
+  calls.length = 0;
+  const empty = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    if (request.executable !== "ssh") calls.push(request.args[0]!);
+    return request.args[0] === "list" ? result(JSON.stringify({ sandboxes: [] })) : result(JSON.stringify({ ok: true }));
+  };
+  await assert.rejects(retryOpen(boatVerification({ image: "bx_image", cli: "boat", run: empty })),
+    (error: unknown) => /a retry forks none/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === undefined);
+  assert.ok(!calls.includes("fork"), calls.join(" "));
+
+  // A refusal is not marked: a plan limit fails the landing at once.
+  const refused = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> =>
+    request.args[0] === "list" ? result(JSON.stringify({ sandboxes: [] }))
+      : request.args[0] === "fork" ? result(JSON.stringify({ error: "Start the $20/month Boat plan to create sandboxes" }), 1) : result(JSON.stringify({ ok: true }));
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: refused })), (error: unknown) =>
+    /Boat plan/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === undefined);
+
+  const supplied = stand([{ id: "bx_ok", name: "slipjay-pechhe-yardsmith-0", state: "idle" }], (args) => args.at(-1) === "true" ? result("") : result("", 1, "no answer"));
+  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: supplied.run })), (error: unknown) =>
+    (error as { machineUnavailable?: boolean }).machineUnavailable === undefined
+      && (error as { remote?: { machine: { id: string } } }).remote?.machine.id === "bx_ok");
+});
+
 test("a build machine whose disk does not restore fails without being replaced, so its warm build cache survives", async () => {
   const calls: string[][] = [];
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {

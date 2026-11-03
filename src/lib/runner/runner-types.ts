@@ -578,7 +578,8 @@ export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: 
 export interface RemoteVerification {
   /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`.
    * `screening` selects a separate pool, never an authoritative numeric slot. */
-  open(input: { repo: string; slot: number; screening?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
+  /** `retrying`: a landing's attempt after one whose machine was not ready; it reuses the slot's VM and forks none. */
+  open(input: { repo: string; slot: number; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */
   probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
@@ -599,8 +600,12 @@ export interface MachineLease {
   close(): Promise<RemoteUsage | null>;
 }
 
-/** An `open` that failed once it had a machine: which machine, and its billing at the failure. */
-export type RemoteOpenFailure = Error & { boatUnavailable?: boolean; remote?: { machine: RemoteMachine; usageBefore: RemoteUsage | null; usage: RemoteUsage | null } };
+/**
+ * An `open` that failed: `boatUnavailable` when boat's API went unanswered, `remote` once it had a machine, and
+ * `machineUnavailable` only when boat's VM never became ready (its disk still restoring), the one failure a landing
+ * retries. A refusal (a plan limit) and a fault in setup or the bundle on a supplied machine stay unmarked and fail at once.
+ */
+export type RemoteOpenFailure = Error & { boatUnavailable?: boolean; machineUnavailable?: boolean; remote?: { machine: RemoteMachine; usageBefore: RemoteUsage | null; usage: RemoteUsage | null } };
 
 export interface RemoteAttempt {
   /** Runs the gate's commands; `runtime` is the Bun they run with there, for command evidence. */
