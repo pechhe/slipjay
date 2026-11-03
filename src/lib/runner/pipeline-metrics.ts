@@ -1,6 +1,6 @@
 import { START_STEPS, type StartStep } from "../workspace/start-steps.ts";
 import { isLandingSubmission, repositoryKey, RUNNER_CONTROL_ID } from "./runner-contract.ts";
-import type { CauseClass, Operation, RunnerStage, StoredEvent } from "./runner-types.ts";
+import type { CauseClass, GatePlacement, Operation, RunnerStage, StoredEvent } from "./runner-types.ts";
 import type { TimeBudgets } from "../policy/execution-policy.ts";
 import { auditSummariesFromEvents, type AuditSummary } from "../release/audit-ledger.ts";
 
@@ -35,7 +35,14 @@ export type OperationGroupMetrics = {
    * is what the provider billed the machines between their first and last reading in the window, idle time included,
    * or null when any reading is missing; `estimatedDollars` prices only the attempts' own time.
    */
-  remote?: { attempts: number; setup: MetricTiming | null; machineMs: number; dollars: number | null; estimatedDollars: number };
+  remote?: { attempts: number; setup: MetricTiming | null; machineMs: number; dollars: number | null; estimatedDollars: number;
+    /**
+     * The same attempts split by where their gate was placed (SJ-189): setup is opening to the candidate held and
+     * installed, gate is from then to the gate's end. Host attempts bill nothing, so `machineMs` and the dollars are boat's.
+     */
+    placements: Partial<Record<GatePlacement, { attempts: number; setup: MetricTiming | null; gate: MetricTiming | null }>>;
+    /** The VM seconds boat billed the gate pool between each machine's first and last reading in the window; null when any reading is missing. */
+    boatVmSeconds: number | null };
 };
 
 /** boat.dev's price of a default (4 vCPU) VM hour, and each size's multiple of it (boat billing, Oct 2026). */
@@ -390,7 +397,8 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
   const selected = [...histories.values()].filter((op) => op.submittedEvent && Number.isFinite(threshold) && eventTime(op.submittedEvent) >= threshold);
   const causes = Object.fromEntries(["gate", "conflict", "infrastructure", "policy", "killed", "paused_out", "held", "superseded", "cancelled"].map((cause) => [cause, 0])) as Record<CauseClass, number>;
   const outcomes: Record<string, number> = {};
-  type Group = { repo: string; kind: Operation["kind"]; operations: number; outcomes: Record<string, number>; stages: Map<RunnerStage, number[]>; commands: Map<string, number[]>; total: number[]; paused: number[]; active: number[]; remoteSetup: number[]; remoteMs: number; remoteDollars: number; billed: Map<string, number[]>; unbilled: number };
+  type Group = { repo: string; kind: Operation["kind"]; operations: number; outcomes: Record<string, number>; stages: Map<RunnerStage, number[]>; commands: Map<string, number[]>; total: number[]; paused: number[]; active: number[]; remoteSetup: number[]; remoteMs: number; remoteDollars: number; billed: Map<string, number[]>; billedSeconds: Map<string, number[]>; unbilled: number;
+    placements: Map<GatePlacement, { setup: number[]; gate: number[] }> };
   const groups = new Map<string, Group>();
   const windows = pauseWindows(events);
   const attemptsByChange = new Map<string, { repo: string; changeId: string; operations: OperationHistory[] }>();
@@ -402,23 +410,36 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
     const submitted = op.submitted!;
     const kind = operationKind(submitted);
     const groupKey = JSON.stringify([submitted.repo, kind]);
-    const group: Group = groups.get(groupKey) ?? { repo: submitted.repo, kind, operations: 0, outcomes: {}, stages: new Map(), commands: new Map(), total: [], paused: [], active: [], remoteSetup: [], remoteMs: 0, remoteDollars: 0, billed: new Map(), unbilled: 0 };
+    const group: Group = groups.get(groupKey) ?? { repo: submitted.repo, kind, operations: 0, outcomes: {}, stages: new Map(), commands: new Map(), total: [], paused: [], active: [], remoteSetup: [], remoteMs: 0, remoteDollars: 0, billed: new Map(), billedSeconds: new Map(), unbilled: 0, placements: new Map() };
     groups.set(groupKey, group);
     group.operations++;
     const terminal = rows.find((row) => isTerminal(row.event.type));
     const outcome = terminal?.event.type ?? "open";
     outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
     group.outcomes[outcome] = (group.outcomes[outcome] ?? 0) + 1;
+    /** The attempt whose gate is running: where it was placed and how long its setup took. */
+    let gating: { placement: GatePlacement; setupMs: number } | undefined;
     for (const row of rows) {
       if (row.event.type === "classified") causes[row.event.cause]++;
-      if (row.event.type === "remote_verification" && row.event.phase === "ready" && validDuration(row.event.setupMs)) group.remoteSetup.push(row.event.setupMs);
-      if (row.event.type === "remote_verification") {
+      if (row.event.type === "remote_verification" && row.event.phase === "ready" && validDuration(row.event.setupMs)) {
+        group.remoteSetup.push(row.event.setupMs);
+        const placement = row.event.placement ?? "boat";
+        const split = group.placements.get(placement) ?? { setup: [], gate: [] };
+        split.setup.push(row.event.setupMs);
+        group.placements.set(placement, split);
+        gating = { placement, setupMs: row.event.setupMs };
+      }
+      if (row.event.type === "remote_verification" && row.event.phase === "finished" && gating && validDuration(row.event.machineMs) && row.event.machineMs >= gating.setupMs)
+        group.placements.get(gating.placement)!.gate.push(row.event.machineMs - gating.setupMs);
+      if (row.event.type === "remote_verification" && row.event.phase !== "ready") gating = undefined;
+      // A host attempt bills nothing: its events carry no reading, and no reading is missing.
+      if (row.event.type === "remote_verification" && row.event.machine.verifier !== "host") {
         for (const reading of row.event.phase === "failed" ? [row.event.usageBefore, row.event.usage] : [row.event.usage]) {
-          if (reading) push(group.billed, row.event.machine.id, reading.dollars);
+          if (reading) { push(group.billed, row.event.machine.id, reading.dollars); push(group.billedSeconds, row.event.machine.id, reading.seconds); }
           else group.unbilled += 1;
         }
       }
-      if (row.event.type === "remote_verification" && row.event.phase === "finished" && validDuration(row.event.machineMs)) {
+      if (row.event.type === "remote_verification" && row.event.phase === "finished" && row.event.machine.verifier !== "host" && validDuration(row.event.machineMs)) {
         group.remoteMs += row.event.machineMs;
         group.remoteDollars += row.event.machineMs / 3_600_000 * BOAT_VM_HOUR_DOLLARS * (BOAT_SIZE_RATE[row.event.machine.size] ?? 1);
       }
@@ -487,9 +508,10 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
       commands: Object.fromEntries([...group.commands].map(([command, values]) => [command, timing(values)!])),
       ...group.remoteSetup.length || group.billed.size || group.unbilled ? { remote: { attempts: group.remoteSetup.length, setup: timing(group.remoteSetup), machineMs: group.remoteMs,
         // A reading boat could not give, or a machine read only once, leaves the window's spend unknown, never $0.
-        dollars: group.unbilled || [...group.billed.values()].some((readings) => readings.length < 2) ? null
-          : Math.round([...group.billed.values()].reduce((sum, readings) => sum + Math.max(...readings) - Math.min(...readings), 0) * 10_000) / 10_000,
-        estimatedDollars: Math.round(group.remoteDollars * 10_000) / 10_000 } } : {},
+        dollars: billedSpan(group.billed, group.unbilled, 10_000),
+        estimatedDollars: Math.round(group.remoteDollars * 10_000) / 10_000,
+        placements: Object.fromEntries([...group.placements].map(([placement, split]) => [placement, { attempts: split.setup.length, setup: timing(split.setup), gate: timing(split.gate) }])),
+        boatVmSeconds: billedSpan(group.billedSeconds, group.unbilled, 1) } } : {},
     })).sort((a, b) => a.repo.localeCompare(b.repo) || a.kind.localeCompare(b.kind)),
     repositories: repositoryMetrics(histories, threshold, now, auditSummariesFromEvents(events, new Date(now))),
     flakes: flakeCandidates(histories, threshold),
@@ -498,6 +520,11 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
     workspaceStarts: workspaceStarts(events, threshold).filter((entry) => !only || repositoryKey(entry.repo) === only),
   };
 }
+
+/** The sum over machines of their last reading less their first, rounded to `1 / scale`; null when any reading is missing or a machine was read once. */
+const billedSpan = (readings: Map<string, number[]>, unbilled: number, scale: number): number | null =>
+  unbilled || [...readings.values()].some((values) => values.length < 2) ? null
+    : Math.round([...readings.values()].reduce((sum, values) => sum + Math.max(...values) - Math.min(...values), 0) * scale) / scale;
 
 const formatTiming = (value: MetricTiming | null | undefined): string => value
   ? `${value.samples} samples, median ${Math.round(value.medianMs)}ms, p90 ${Math.round(value.p90Ms)}ms`
@@ -517,7 +544,12 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     lines.push(`  Queue: total ${formatTiming(group.queue.total)}; active ${formatTiming(group.queue.activeWait)}; paused ${formatTiming(group.queue.paused)}`);
     lines.push(`  Stages: ${Object.entries(group.stages).map(([name, value]) => `${name} ${formatTiming(value)}`).join("; ") || "no samples"}`);
     lines.push(`  Commands: ${Object.entries(group.commands).map(([name, value]) => `${name} ${formatTiming(value)}`).join("; ") || "no samples"}`);
-    if (group.remote) lines.push(`  Remote verifier: ${group.remote.attempts} attempts; setup ${formatTiming(group.remote.setup)}; attempt machine time ${seconds(group.remote.machineMs)} (about $${group.remote.estimatedDollars.toFixed(4)}); ${group.remote.dollars === null ? "billed spend unavailable (boat did not report every reading)" : `billed $${group.remote.dollars.toFixed(4)}, idle time included`}`);
+    if (group.remote) {
+      lines.push(`  Remote verifier: ${group.remote.attempts} attempts; setup ${formatTiming(group.remote.setup)}; attempt machine time ${seconds(group.remote.machineMs)} (about $${group.remote.estimatedDollars.toFixed(4)}); ${group.remote.dollars === null ? "billed spend unavailable (boat did not report every reading)" : `billed $${group.remote.dollars.toFixed(4)}, idle time included`}`);
+      for (const [placement, split] of Object.entries(group.remote.placements))
+        lines.push(`  Gates on ${placement}: ${split.attempts} attempts; setup ${formatTiming(split.setup)}; gate ${formatTiming(split.gate)}`);
+      lines.push(`  Boat VM time billed: ${group.remote.boatVmSeconds === null ? "unavailable (boat did not report every reading)" : seconds(group.remote.boatVmSeconds * 1000)}`);
+    }
   }
   for (const repo of metrics.repositories) {
     lines.push(`${repo.repo} budget: ${repo.budget.status}${repo.budget.over.length ? ` (${repo.budget.over.join(", ")})` : ""}; landing verify over 7 days ${formatTiming(repo.verify)}${repo.budgets ? `; budgets ${JSON.stringify(repo.budgets)}` : ""}`);

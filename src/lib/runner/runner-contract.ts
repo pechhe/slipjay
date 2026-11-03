@@ -131,6 +131,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (Object.values(config.repos).some((repo) => repo.screeningLanes !== undefined && !(Number.isSafeInteger(repo.screeningLanes) && repo.screeningLanes >= 0))) return `A repository's "screeningLanes" must be a whole number of at least 0`;
   if (Object.values(config.repos).some((repo) => repo.screeningLanes && (!repo.verifier || repo.lane !== undefined))) return `Screening lanes require a remote verifier and an isolated repository lane`;
   if (Object.values(config.repos).some((repo) => repo.verifier !== undefined && repo.verifier !== "boat")) return `A repository's "verifier" can only be "boat"`;
+  if (Object.values(config.repos).some((repo) => repo.hostPlaces !== undefined && repo.hostPlaces !== 0 && repo.hostPlaces !== 1)) return `A repository's "hostPlaces" must be 0 or 1`;
+  if (Object.values(config.repos).some((repo) => repo.hostPlaces && !repo.verifier)) return `A repository's "hostPlaces" needs a "verifier": without one, every gate already runs on this host`;
   if (Object.values(config.repos).some((repo) => repo.verifier === "boat") && !config.boat?.image?.trim()) return `A repository verifies on boat, but the runner config's "boat.image" names no starting sandbox`;
   if (config.build !== undefined && !/^(?:https:\/\/[^/\s]+|http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?)\/?$/.test(config.build?.origin ?? ""))
     return `The runner config's "build.origin" must be an https origin, such as "https://hq.example.com", or a loopback http one`;

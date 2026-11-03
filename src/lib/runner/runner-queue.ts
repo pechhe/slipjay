@@ -39,7 +39,8 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-types.ts";
+import { hostMachine, openHostAttempt } from "./host-verifier.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -227,7 +228,7 @@ export function createRunnerQueue(input: {
   function holdForBoat(repo: string, reason: string): void {
     if (!boatHolds.has(repo)) {
       boatHolds.set(repo, { failures: 0 });
-      append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo, state: "open", reason });
+      append(RUNNER_CONTROL_ID, { type: "boat_circuit", repo, state: "open", reason, ...configuredRepository(config, repo)?.hostPlaces === 1 ? { hostPlace: true as const } : {} });
     }
     probeBoat(repo);
   }
@@ -265,6 +266,17 @@ export function createRunnerQueue(input: {
   const prefixes = new Map<string, PrefixTurn[]>();
   const screens = new Map<string, PrefixTurn>();
   let screenPassOrder = 0;
+  /** Each repository's runner-host gate place (`hostPlaces`, SJ-189), by repository key: the operation whose gate holds it. */
+  const hostGates = new Map<string, string>();
+  const hostPlaceFree = (repo: string) => configuredRepository(config, repo)?.hostPlaces === 1 && !hostGates.has(repositoryKey(repo));
+  /**
+   * Whether `repo`'s boat hold keeps its landings from starting. The hold applies to boat-placed gates only: while the
+   * repository's host place is free and none of its landings is already in flight to take it first, one more may start,
+   * and its gate takes that place.
+   */
+  const heldForBoat = (repo: string): boolean => boatHolds.has(repo) && !(hostPlaceFree(repo)
+    && ![...admitted.values(), ...[...screens.values()].map((turn) => turn.operation), ...prefixes.get(repo)?.map((turn) => turn.operation) ?? []]
+      .some((entry) => entry.kind === "landing" && repositoryKey(entry.repo) === repositoryKey(repo)));
   /** Landings whose source conflicts with the prefix predicted for them: they screen on the tip alone. */
   const unpredicted = new Set<string>();
   /** Landings already sent back once because a publication moved past their screen's base: a later move costs a rebuild, as before. */
@@ -868,7 +880,7 @@ export function createRunnerQueue(input: {
       if (behind.has(laneOf(operation.repo))) continue;
       const screenCount = configuredRepository(config, operation.repo)?.screeningLanes ?? 0;
       if (screenCount && operation.kind === "landing" && runnable(operation, open)
-        && !admitted.has(operation.id) && !screens.has(operation.id) && !boatHolds.has(operation.repo)) {
+        && !admitted.has(operation.id) && !screens.has(operation.id) && !heldForBoat(operation.repo)) {
         const occupied = [...screens.values()].filter((turn) => turn.operation.repo === operation.repo);
         if (!admits(false, places(), workers, shortPlace) || occupied.length >= screenCount || screeningFence(operation, open)) continue;
         const slot = Array.from({ length: screenCount }, (_, i) => i).find((i) => !occupied.some((turn) => turn.screenSlot === i))!;
@@ -932,7 +944,7 @@ export function createRunnerQueue(input: {
    * keeps it waiting. A successor always counts as long; a head is short when its repository is.
    */
   function startable(operation: Operation, open: readonly Operation[]): { short: boolean; prefix: boolean } | undefined {
-    if (operation.kind === "landing" && boatHolds.has(operation.repo)) return undefined;
+    if (operation.kind === "landing" && heldForBoat(operation.repo)) return undefined;
     // `open` is a snapshot: what this wake already admitted still reads as queued there.
     if (operation.kind === "deploy" || admitted.has(operation.id) || screens.has(operation.id) || !runnable(operation, open) || resetConflict(operation)) return undefined;
     // An audit's verdict gates promotion, so it and a deploy never run together on this host: a deploy's load fails
@@ -1103,8 +1115,43 @@ export function createRunnerQueue(input: {
     /** How many attempts this landing has already returned to the queue for a remote executor that was not ready. */
     const remoteUnavailableRetries = (): number => log.events({ operationId: operation.id })
       .filter(({ event }) => event.type === "yielded" && event.to === AWAITING_REMOTE_EXECUTOR).length;
+    type GateAttempt = { attempt: RemoteAttempt; started: number; placement: GatePlacement };
+    /**
+     * Where this attempt's gate runs, chosen as its commands are about to run (SJ-189): the repository's runner-host gate
+     * place when it has one and it is free, otherwise the remote verifier. While boat is held, a gate that finds the host
+     * place busy returns to the queue as any boat-held landing does, never opening boat.
+     */
+    async function openGate(base: string, candidate: string, integrationBranch: string, context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, signal: AbortSignal): Promise<GateAttempt> {
+      const key = repositoryKey(operation.repo);
+      if (hostPlaceFree(operation.repo)) {
+        hostGates.set(key, operation.id);
+        try { return await openHost(candidate, context); }
+        catch (error) { hostGates.delete(key); throw error; }
+      }
+      if (configuredRepository(config, operation.repo)?.hostPlaces === 1 && boatHolds.has(operation.repo))
+        throw Object.assign(new Error(`Remote executor unavailable (boat): boat is held and the runner host's gate place is busy`), { boatUnavailable: true });
+      return openRemote(base, candidate, integrationBranch, signal);
+    }
+    /** The runner host's gate place for this attempt: its own checkout, installed and holding exactly `candidate`. */
+    async function openHost(candidate: string, context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>): Promise<GateAttempt> {
+      const started = Date.now();
+      const screening = prefix?.screenSlot !== undefined && prefix.screen?.phase !== "authoritative";
+      const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
+      progress(`[verify] the runner host's gate place is free: the gate runs here, in ${checkout}`);
+      const attempt = await openHostAttempt({ executor, checkout, candidate,
+        install: async () => landingIO.prepareCandidateDependencies(checkout, context, await revisionFacts(checkout, candidate), progress,
+          (request) => run(request, "dependencies")) })
+        .catch((error: unknown) => {
+          append(operation.id, { type: "remote_verification", phase: "failed", machine: hostMachine(executor.host),
+            reason: message(error).slice(0, 2000), usageBefore: null, usage: null });
+          throw error;
+        });
+      append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, placement: "host", slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: null });
+      progress(`[verify] gate runs on ${attempt.executor.host}`);
+      return { attempt, started, placement: "host" };
+    }
     /** The remote verifier's machine for this attempt, holding exactly `candidate` on `base`. */
-    async function openRemote(base: string, candidate: string, integrationBranch: string, signal: AbortSignal): Promise<{ attempt: RemoteAttempt; started: number }> {
+    async function openRemote(base: string, candidate: string, integrationBranch: string, signal: AbortSignal): Promise<GateAttempt> {
       const started = Date.now();
       const screening = prefix?.screenSlot !== undefined && prefix.screen?.phase !== "authoritative";
       const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
@@ -1120,18 +1167,26 @@ export function createRunnerQueue(input: {
         remoteUnavailable = error?.machineUnavailable ? message(error) : undefined;
         throw error;
       }).finally(unsubscribe);
-      append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
+      append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, placement: "boat", slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: attempt.usage });
       progress(`[verify] gate runs on ${attempt.executor.host}`);
-      return { attempt, started };
+      return { attempt, started, placement: "boat" };
     }
     /** Records what the machine's checkout held after the gate; a gate that changed the candidate's files is no evidence for it. */
-    async function closeRemote({ attempt, started }: { attempt: RemoteAttempt; started: number }): Promise<void> {
+    async function closeRemote({ attempt, started, placement }: GateAttempt): Promise<void> {
       try {
         const after = await attempt.finish();
         append(operation.id, { type: "remote_verification", phase: "finished", machine: attempt.machine, ...after, machineMs: Date.now() - started });
         if (after.tree !== attempt.tree)
           throw new Error(`The gate changed ${after.trackedChanges} file(s) of the candidate on ${attempt.executor.host}; its result is not evidence for the candidate`);
-      } finally { await attempt.close(); }
+      } finally {
+        try { await attempt.close(); }
+        finally {
+          if (placement === "host" && hostGates.get(repositoryKey(operation.repo)) === operation.id) {
+            hostGates.delete(repositoryKey(operation.repo));
+            wakeMain();
+          }
+        }
+      }
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
     async function finishIntegration(context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, commitId: string, publisher = checkout, expectedBase?: string): Promise<void> {
@@ -1342,11 +1397,15 @@ export function createRunnerQueue(input: {
             }
             const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : []]);
             const remote = configuredRepository(config, operation.repo)?.verifier
-              ? await openRemote(base, candidate, candidateContext.integrationBranch, abortSignal) : undefined;
+              ? await openGate(base, candidate, candidateContext.integrationBranch, candidateContext, abortSignal) : undefined;
             if (prefix?.screen && prefix.screen.phase !== "authoritative") {
               prefix.screen.phase = "screening";
-              admitted.delete(operation.id);
-              wakeMain(); wakeDeploys();
+              // A screen whose gate runs elsewhere hands back its worker; one in the host place keeps it, so the queue
+              // admits no more host work beside it.
+              if (remote?.placement !== "host") {
+                admitted.delete(operation.id);
+                wakeMain(); wakeDeploys();
+              }
             }
             const verification = await (async () => {
               try {

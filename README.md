@@ -804,7 +804,7 @@ it), which keeps it past boat's 14 days for stopped sandboxes. Pool VMs keep the
 with: make the same change on each idle pool VM in place, which needs no pause, or delete them (paused
 admission, nothing running) for the next attempts to fork the new image.
 
-Nothing falls back to this host. While opening a VM, transient boat API failures (an unreachable
+Nothing falls back to this host, except through its one gate place (below). While opening a VM, transient boat API failures (an unreachable
 API, timeouts or service errors) retry with exponential backoff from two seconds up to thirty
 seconds, within a three-minute retry budget shared across that opening. A timed-out fork is
 not retried in that opening, since boat may already have created the VM. Cancellation interrupts both API
@@ -830,6 +830,38 @@ fault in the image or setup on a VM boat supplied fails at once as `Remote execu
 verification is removing `verifier` from its entry. With `verifier`, `verificationDepth: 2`
 needs no combined host budget, since the gates share no host; each place still holds a
 worker while it prepares and waits.
+
+### The runner host's gate place
+
+A repository verifying on boat can set `hostPlaces: 1` in its runner entry (SJ-189, Decision
+#6249): one gate place on this host. The placement is chosen when an attempt's gate commands are
+about to run, after preparation, so queue admission, screening lanes, depth and preparation are
+unchanged and the place is never held through fetch, rebase or preparation. A gate that finds the
+place free runs in the attempt's own runner checkout (`verifiers/<repo>/<slot>` or
+`<n>-screen`), with no VM to restore; any gate that starts while it is busy opens its boat VM as
+above, so concurrent gates still never share a host. A host attempt does what a VM attempt does:
+it stops any process left with its working directory in the checkout, installs the candidate's
+frozen dependencies through the runner's own install, requires the checkout to hold exactly the
+candidate's tree before the gate and reads it again after (a gate that changed it fails the
+landing), and stops whatever its commands left running there. Its commands run through the
+runner's executor, inside the host-wide budget every run shares; its install is recorded as a
+`dependencies` run, not a gate command. A fault in its setup fails the landing at once as
+`Host executor unavailable (setup): …`, as a setup fault on a VM boat supplied does. A screen whose gate is in the
+host place keeps its worker while the gate runs, so the queue admits no more host work beside it;
+a screen on boat hands it back, as before.
+
+The ledger's `remote_verification` `ready` event records `placement` (`host` or `boat`; earlier
+rows are all boat), and a host attempt's events name the runner host as their machine and carry
+no billing. `slipjay metrics` splits each group's gate attempts by placement, with median setup
+and gate time for each, and reports the boat VM seconds the window's gate attempts were billed.
+
+The boat hold applies to boat-placed gates only. While boat is held, one landing of the repository
+may still start when the host place is free and none of its landings is in flight to take it
+first, and the hold's `waitingFor` says so; a gate that then finds the place busy returns to the
+queue for boat as any held landing does. A retry of a VM that was not ready runs in the host place
+when it finds the place free, and otherwise waits on boat as before. `hostPlaces` is 0 or 1 and
+needs `verifier`; 0 or omitted is boat only, and the place does not count against
+`combinedLimits`.
 
 ### Independent screening lanes
 

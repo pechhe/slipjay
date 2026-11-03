@@ -171,7 +171,8 @@ export type OperationEvent =
    * `finished` after the gate, with the tree the machine's checkout held then (null when tracked files changed), `failed`
    * when setup failed on a machine it had.
    */
-  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; slot: number; screening?: boolean; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
+  /** `placement` is where the attempt's gate was placed when its commands were about to run; rows before SJ-189 lack it and were all `boat`. */
+  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; placement?: GatePlacement; slot: number; screening?: boolean; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
   | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null }
   /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
   | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
@@ -271,7 +272,8 @@ export type OperationEvent =
   | { type: "paused"; by: string }
   | { type: "resumed"; by: string }
   /** Repository-local admission hold while the boat API is unreachable. */
-  | { type: "boat_circuit"; repo: string; state: "open" | "closed"; reason: string }
+  /** `hostPlace`: the repository has a runner-host gate place, which still takes a gate while boat is held. */
+  | { type: "boat_circuit"; repo: string; state: "open" | "closed"; reason: string; hostPlace?: true }
   | { type: "integration_held"; repo: string; commitId: string; reason: string; targetReached?: boolean; branch?: string; remote?: string }
   | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean }
   /** A hold discarded unpublished after reconciliation or proof that its target command never started. */
@@ -564,11 +566,16 @@ export interface Executor {
   recover?(): Promise<void>;
 }
 
+/** Where a remote-verifying repository's gate ran: the runner host's gate place, or a boat VM. */
+export type GatePlacement = "host" | "boat";
+
 /** What the remote machine's provider has billed for it so far: running time, idle included, and its price. */
 export type RemoteUsage = { seconds: number; dollars: number };
 
 /** The remote machine an attempt's gate ran on, as the ledger records it. */
-export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: string; image: string };
+export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: string; image: string }
+  /** A gate placed in the runner host's own gate place (`hostPlaces`): `name` is the runner host. */
+  | { verifier: "host"; id: string; name: string; size: "host"; image: "runner checkout" };
 
 /**
  * Where a repository's gate runs when its runner entry names a `verifier`: a machine the attempt has to itself, whose
@@ -653,7 +660,13 @@ export type RunnerConfig = {
     /** Independent remote screens; absent or zero preserves ordered admission. */
     screeningLanes?: number;
     /** Run the gate on a remote verifier (see `boat`) instead of this host. Depth two then needs no host budget. */
-    verifier?: "boat" }>;
+    verifier?: "boat";
+    /**
+     * With `verifier`, 1 gives the repository one gate place on this host (SJ-189): a gate that finds it free when its
+     * commands are about to run runs them here, in its runner checkout; any other opens the verifier as before. 0 or
+     * absent: the verifier only. The place holds one landing or screening gate and does not count against `combinedLimits`.
+     */
+    hostPlaces?: 0 | 1 }>;
   /**
    * boat.dev VMs for repositories whose `verifier` is `boat`: one per verification place, forked from `image` (a sandbox
    * kept stopped as the starting image) and reached over SSH with `sshKey`. `cli` is the boat CLI, which authenticates

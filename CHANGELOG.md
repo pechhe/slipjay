@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.50.0
+
+Spec SJ-189: a YardSmith landing gates on the runner host when it is free, and on boat only alongside another.
+
+- **A runner-host gate place:** a repository verifying on boat can set `hostPlaces: 1` in its runner entry. A gate that
+  finds the place free as its commands are about to run runs them in its own runner checkout, with no VM to restore; a
+  gate that starts while it is busy opens its boat VM as before, so concurrent gates still never share a host. A lone
+  landing, the one that met a cold pool VM (563 s and 568 s of setup on 3 Nov 2026), no longer waits for boat. A host
+  attempt stops anything left running in its checkout, installs the candidate's frozen dependencies, and requires the
+  candidate's exact tree before and after the gate, as a VM attempt does. A screen in the host place keeps its worker
+  while its gate runs. `hostPlaces` is 0 or 1 and needs `verifier`; 0 or omitted keeps boat only.
+- **The boat hold applies to boat-placed gates only:** while boat is held, a landing can still gate in a free host place,
+  and the hold's `waitingFor` says so. A retry of a VM that was not ready runs in the host place when it finds it free.
+- **Metrics by placement:** the ledger's `remote_verification` `ready` event records `placement` (`host` or `boat`), and
+  `slipjay metrics` splits gate attempts by placement with median setup and gate times, and reports the boat VM seconds
+  the window's gates were billed.
+
 ## v3.49.2
 
 - **A landing whose gate VM was not ready returns to the queue:** when a gate slot's disk was still restoring after

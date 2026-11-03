@@ -230,7 +230,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     const boatHolds = new Map<string, string>();
     for (const row of boatRows.all() as { data: string }[]) {
       const event = JSON.parse(row.data) as Extract<OperationEvent, { type: "boat_circuit" }>;
-      if (event.state === "open") boatHolds.set(event.repo, event.reason);
+      // A repository with a runner-host gate place still gates there while boat is held (SJ-189).
+      if (event.state === "open") boatHolds.set(event.repo, event.hostPlace ? `${event.reason}; a free runner-host gate place still takes a gate` : event.reason);
       else boatHolds.delete(event.repo);
     }
     for (const operation of open) if (operation.kind === "landing" && operation.status === "queued" && boatHolds.has(operation.repo)) {
