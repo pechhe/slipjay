@@ -245,12 +245,18 @@ export function createRunnerQueue(input: {
   type PrefixTurn = { operation: LandingOperation; slot: number; attempt: number; prepared: ReturnType<typeof deferred<PreparedPrefix | null>>;
     completed: ReturnType<typeof deferred<boolean>>; invalidation: AbortController; predecessor?: PrefixTurn; remoteRebuilt?: boolean; screenSlot?: number;
     overlap?: boolean;
+    /** The exact base this attempt prepared on, once prepared. */
+    base?: string;
+    /** The landing whose publication moved the tip past this screen's base, ending this attempt now. */
+    overtakenBy?: string;
     screen?: { phase: "preparing" | "screening" | "passed" | "authoritative"; ready: ReturnType<typeof deferred<void>>; passedAt?: number } };
   const prefixes = new Map<string, PrefixTurn[]>();
   const screens = new Map<string, PrefixTurn>();
   let screenPassOrder = 0;
   /** Landings whose source conflicts with the prefix predicted for them: they screen on the tip alone. */
   const unpredicted = new Set<string>();
+  /** Landings already sent back once because a publication moved past their screen's base: a later move costs a rebuild, as before. */
+  const overtakenOnce = new Set<string>();
   /**
    * The predicted prefix a new screen of `repo` runs behind: the latest-started screen still
    * expected to publish, so a landing that lands as predicted publishes on its own screen's
@@ -263,6 +269,23 @@ export function createRunnerQueue(input: {
       && !turn.invalidation.signal.aborted);
     const tail = alive.at(-1);
     return tail && tail.overlap !== false ? tail : undefined;
+  }
+  /**
+   * A publication just moved `repo`'s integration tip to `tip`. A screen on the tip alone (no predicted
+   * prefix) that prepared on an older base can no longer publish what it verifies: it would run to the
+   * end and then rebuild. Stop it now: it returns to the queue and screens again on the new tip, taking a
+   * place and a prediction like any new screen. Each landing is sent back this way at most once, so a busy
+   * lane cannot keep restarting a slow screen.
+   */
+  function restartOvertakenScreens(repo: string, publishedBy: string, tip: string): void {
+    for (const turn of screens.values()) {
+      if (turn.operation.repo !== repo || turn.operation.id === publishedBy || turn.predecessor || overtakenOnce.has(turn.operation.id)
+        || turn.invalidation.signal.aborted || !turn.base || turn.base === tip
+        || (turn.screen?.phase !== "preparing" && turn.screen?.phase !== "screening")) continue;
+      turn.overtakenBy = publishedBy;
+      overtakenOnce.add(turn.operation.id);
+      turn.invalidation.abort();
+    }
   }
   const attempts = new Set<Promise<void>>();
   /** Running landings, releases and resets, by operation, in their current stage. */
@@ -848,7 +871,7 @@ export function createRunnerQueue(input: {
         const pending = processOperation(operation, turn).finally(() => {
           turn.prepared.resolve(null); turn.completed.resolve(log.operation(operation.id)?.status === "landed");
           screens.delete(operation.id);
-          if (log.operation(operation.id)?.status !== "queued") unpredicted.delete(operation.id);
+          if (log.operation(operation.id)?.status !== "queued") { unpredicted.delete(operation.id); overtakenOnce.delete(operation.id); }
           prefixes.set(operation.repo, (prefixes.get(operation.repo) ?? []).filter((entry) => entry !== turn));
           admitted.delete(operation.id); attempts.delete(pending); wakeMain(); wakeDeploys();
         });
@@ -1212,6 +1235,7 @@ export function createRunnerQueue(input: {
       await jj(checkout, ["bookmark", "set", branch, "-r", `${branch}@${remote}`, "--allow-backwards"]);
       let predecessor: PreparedPrefix | null = null;
       if (prefix?.predecessor) {
+        progress(`[screen] waiting for ${prefix.predecessor.operation.id} ahead to prepare its candidate`);
         predecessor = await withAuthority(prefix.predecessor.prepared.promise);
         if (!predecessor) throw new Error("Predecessor did not prepare a valid prefix");
         if (!predecessor.overlap && prefix.screen) {
@@ -1226,10 +1250,14 @@ export function createRunnerQueue(input: {
           await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch]);
         }
         if (predecessor) {
+          progress(`[screen] importing the candidate of ${predecessor.artifact.operationId} ahead (${predecessor.artifact.candidate.slice(0, 12)} on ${predecessor.artifact.base.slice(0, 12)})`);
           await importLandingArtifact(checkout, predecessor.checkout, predecessor.artifact);
           await jj(checkout, ["bookmark", "set", branch, "-r", predecessor.artifact.candidate]);
         }
       }
+      // A screen on the tip alone has fixed its base here; preparation rebases onto this same commit. Record it
+      // now, so a publication during the install and generation below already overtakes it.
+      if (prefix?.screen && !prefix.predecessor) prefix.base = (await revisionFacts(checkout, branch)).commitId;
       // Read the freshly fetched integration policy, rather than an earlier warm tip.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
@@ -1371,6 +1399,7 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "attempt_prepared", ...artifact, checkout, overlap,
           ...(predecessor ? { predecessor: { operationId: predecessor.artifact.operationId, attempt: predecessor.artifact.attempt, candidate: predecessor.artifact.candidate } } : {}) });
         prefix!.overlap = overlap;
+        prefix!.base = artifact.base;
         prefix!.prepared.resolve({ artifact, checkout, overlap });
         // The screen's own evidence, as opposed to a rebuild that verifies on the authoritative lane.
         const screened = Boolean(prefix!.screen && prefix!.screen.phase !== "authoritative");
@@ -1421,6 +1450,7 @@ export function createRunnerQueue(input: {
           const result = await integratePreparedCandidate(publisher, { ...verified, context: canonical }, candidateOptions, landingIO);
           append(operation.id, { type: "integrated", base: artifact.base, commitId: artifact.candidate, process: (await declaredEnvironments(operation.repo, artifact.candidate, readLandedPolicy)).process });
           await finishIntegration(canonical, artifact.candidate, publisher, artifact.base);
+          restartOvertakenScreens(operation.repo, operation.id, artifact.candidate);
           // Recorded once published, so the ledger never claims a reuse for a publication that failed.
           if (screened) {
             const reason = behind
@@ -1460,8 +1490,9 @@ export function createRunnerQueue(input: {
         }
         leftPrediction = !controller.signal.aborted && (prefix!.invalidation.signal.aborted || !await ahead.completed.promise);
       }
+      const overtaken = prefix?.overtakenBy;
       retryPrefix = Boolean(prefix && !leftPrediction && !controller.signal.aborted && !log.paused()
-        && (prefix.predecessor && !prefix.screen ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
+        && !overtaken && (prefix.predecessor && !prefix.screen ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (verificationTimeout) verdict = { type: "failed", stage, reason: verificationTimeout };
@@ -1471,6 +1502,7 @@ export function createRunnerQueue(input: {
           : `${ahead!.operation.id} ahead will not publish as predicted; screening again`}`);
         verdict = { type: "yielded", to: "a new predicted prefix" };
       }
+      else if (overtaken) verdict = { type: "yielded", to: log.paused() ? "the runner pause" : "the moved integration tip" };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
       else if (operation.kind === "landing" && (error instanceof BoatPaused || (error as RemoteOpenFailure)?.boatUnavailable && remoteVerification?.probe)) {
         retryPrefix = false;
@@ -1488,7 +1520,9 @@ export function createRunnerQueue(input: {
       };
       else verdict = { type: "failed", stage, reason: message(error) };
       if (prefix && verdict?.type !== "landed") {
-        append(operation.id, { type: "attempt_invalidated", attempt: prefix.attempt, reason: message(error) });
+        const reason = overtaken ? `${overtaken} published past this screen's base ${prefix.base?.slice(0, 12)}, so it could not publish what it verified; screening again on the new tip` : message(error);
+        append(operation.id, { type: "attempt_invalidated", attempt: prefix.attempt, reason });
+        if (overtaken) progress(`[screen] ${reason}`);
         prefix.invalidation.abort();
         prefix.prepared.resolve(null);
         if (retryPrefix && prefix.screen) {
@@ -1516,6 +1550,7 @@ export function createRunnerQueue(input: {
           prefix.attempt += 1;
           prefix.prepared = deferred();
           prefix.invalidation = new AbortController();
+          prefix.base = undefined;
           verdict = undefined;
         }
         else prefix.completed.resolve(false);

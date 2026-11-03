@@ -125,7 +125,7 @@ test("a publication the prediction did not include re-gates a passed screen on t
   } finally { r.releaseAll(); await f.dispose(); }
 });
 
-test("a screen that conflicts with the screen ahead screens on the tip alone, and is re-gated once that one lands", async () => {
+test("a screen that conflicts with the screen ahead screens on the tip alone, and restarts on the new tip once that one lands", async () => {
   const r = controlledRemote();
   const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
   try {
@@ -146,11 +146,13 @@ test("a screen that conflicts with the screen ahead screens on the tip alone, an
     assert.equal(outcome?.type, "failed", JSON.stringify(outcome));
     assert.match(outcome?.type === "failed" ? outcome.reason : "", /conflict/i);
     const starts = events(f, conflicting).filter((event) => event.type === "screen_started");
-    assert.equal(starts.length, 2);
+    // Behind the one ahead, then on the tip alone (the conflict), then once more on the tip it published.
+    assert.equal(starts.length, 3);
     assert.equal(starts[0]?.type === "screen_started" ? starts[0].behind : undefined, ahead);
     assert.equal(starts[1]?.type === "screen_started" ? starts[1].behind : "x", undefined);
-    assert.ok(events(f, conflicting).some((event) => event.type === "attempt_invalidated" && /Remote integration changed/.test(event.reason)),
-      "its pass on the old tip is re-gated, not published");
+    assert.ok(events(f, conflicting).some((event) => event.type === "yielded" && event.to === "the moved integration tip"));
+    assert.ok(events(f, conflicting).some((event) => event.type === "attempt_invalidated" && new RegExp(`${ahead} published past this screen's base`).test(event.reason)),
+      "its screen on the old tip stops when the one ahead publishes, rather than running on to a pass it could not publish");
     assert.ok(!events(f, conflicting).some((event) => event.type === "publication_intent"));
     assert.equal(r.opened.length, 2, "the rebuilt attempt stops at its conflict, before any gate");
   } finally { r.releaseAll(); await f.dispose(); }
@@ -175,7 +177,7 @@ test("a failing screen behind a prefix that lands keeps its verdict and screens 
   } finally { r.releaseAll(); await f.dispose(); }
 });
 
-test("a screen ahead that changes migrations is not predicted past, and the screen behind it is re-gated on what it published", async () => {
+test("a screen ahead that changes migrations is not predicted past, and the screen behind it screens again on what it published", async () => {
   const r = controlledRemote();
   const f = await fixture(true, false, undefined, false, { screeningLanes: 3, workers: 1, remoteVerification: r.remote });
   try {
@@ -194,11 +196,11 @@ test("a screen ahead that changes migrations is not predicted past, and the scre
     r.releaseAll();
     await f.queue.idle();
     assert.equal(f.result(behind)?.type, "landed", JSON.stringify(f.result(behind)));
-    assert.equal(r.opened.length, 3, "the stale pass ran the gate a second time");
-    assert.equal(r.opened[2]!.screening, false);
+    assert.equal(r.opened.length, 3, "the overtaken screen stopped and screened once more");
+    assert.equal(r.opened[2]!.screening, true, "a fresh screen, not an authoritative rebuild");
     assert.equal(r.opened[2]!.base, published);
-    assert.ok(events(f, behind).some((event) => event.type === "attempt_invalidated" && /Remote integration changed/.test(event.reason)));
-    assert.ok(!events(f, behind).some((event) => event.type === "screen_reused"));
+    assert.ok(events(f, behind).some((event) => event.type === "attempt_invalidated" && new RegExp(`${migrating} published past this screen's base`).test(event.reason)));
+    assert.equal(events(f, behind).find((event) => event.type === "screen_reused")?.base, published, "it publishes on its fresh screen with no second gate");
   } finally { r.releaseAll(); await f.dispose(); }
 });
 

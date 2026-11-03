@@ -857,7 +857,11 @@ screens whose prefix has published. The canonical publisher retains its exact-ba
 checks: a pass whose prepared base is the current tip publishes with no second gate, and the
 ledger records `screen_reused` with the attempt and why (`slipjay land` prints it); a stale
 pass, such as one whose tip moved by a publication the prediction did not include, prepares and
-verifies again on the exact current tip. Evidence from different bases is never reused
+verifies again on the exact current tip. A screen on the tip alone that is still preparing or
+screening when another landing publishes past its base stops at once and screens again on the
+new tip: it returns to the queue and screens again like a new screen, rather than running on to a
+pass it could not publish. A landing is sent back this way at most once; after that a move costs
+the rebuild above. Evidence from different bases is never reused
 (Decision #6144). Publication remains serial, and queued resets, releases and audits retain
 their fences. Screening is separate from `verificationDepth`, which continues to govern ordered
 speculative attempts.

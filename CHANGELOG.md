@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.49.1
+
+- **An overtaken screen restarts at once:** a screen on the integration tip alone (it conflicted with the screen
+  ahead, or that screen changes migrations or policy) ran its whole gate on a base another landing had already
+  published past, then rebuilt: on 3 Nov one ran 10 minutes past that point. When a landing publishes, a screen still
+  preparing or screening on an older base now stops and returns to the queue to screen again on the new tip, once per
+  landing; the screens behind it re-predict at the same moment.
+- **A screen behind another says what it waits for:** `[screen] waiting for … to prepare` and `[screen] importing the
+  candidate of …` progress lines, so a wait in its fetching stage (8.5 minutes on 3 Nov) shows where it went.
+
 ## v3.49.0
 
 Spec SJ-186: faster YardSmith landings, and a failure reported as soon as its check fails.
