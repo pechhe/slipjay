@@ -593,6 +593,8 @@ export interface RemoteVerification {
   recover?(repos: readonly string[]): Promise<void>;
   /** `repo`'s build machine of `pool`, holding `commitId` from `gitDirectory`, for one command of at most `lifetimeS`. */
   lease?(input: { repo: string; pool: string; gitDirectory: string; commitId: string; lifetimeS: number; signal?: AbortSignal }): Promise<MachineLease>;
+  /** Resume `repo`'s build machine of `pool` and wait until it is ready, leaving it to stop after `lifetimeS`. */
+  warm?(input: { repo: string; pool: string; lifetimeS: number; signal?: AbortSignal }): Promise<void>;
 }
 
 /**

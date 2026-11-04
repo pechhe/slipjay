@@ -538,3 +538,28 @@ test("boat's rate limit is an availability failure, retried and held like an out
     (error: unknown) => Boolean((error as { boatUnavailable?: boolean }).boatUnavailable));
   assert.ok(calls > 1, "retried before giving up");
 });
+
+test("warming a stopped build machine resumes it once, and a lease asked meanwhile waits and only extends it", async () => {
+  let state = "stopped";
+  const boatCalls: string[] = [];
+  const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
+    if (request.executable === "ssh") return request.args.at(-1) === "true" ? result("") : result("", 1, "stop here");
+    const [command, id, ...rest] = request.args;
+    boatCalls.push([command, id, ...rest.filter((arg) => arg !== "--json" && arg !== "--no-update")].join(" "));
+    if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state }] }));
+    if (command === "resume") { await new Promise((resolve) => setTimeout(resolve, 20)); state = "idle"; }
+    if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "slipjay-pechhe-yardsmith-images", state, type: "large", sshEndpoint: "198.51.100.1:19000", hydrated: state === "idle" } }));
+    return result(JSON.stringify({ ok: true }));
+  };
+  const verification = boatVerification({ image: "bx_image", cli: "boat", run });
+  const warmed = verification.warm!({ repo: "pechhe/yardsmith", pool: "images", lifetimeS: 2400 });
+  const leased = verification.lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+  await warmed;
+  // The lease goes on to set the machine up, which this fake refuses: only how it acquired the machine matters here.
+  await assert.rejects(leased, /Remote executor unavailable \(setup\)/);
+  assert.equal(boatCalls.filter((call) => call.startsWith("resume")).length, 1, boatCalls.join("\n"));
+  assert.equal(boatCalls.filter((call) => call.startsWith("fork")).length, 0);
+  const extends_ = boatCalls.filter((call) => call.startsWith("extend"));
+  assert.match(extends_[0] ?? "", /--ttl 2400/, "the warm-up gives the machine its own lifetime first");
+  assert.ok(extends_.slice(1).some((call) => /--ttl 1860/.test(call)), "the lease then extends the running machine for its command and idle time");
+});

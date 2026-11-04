@@ -1269,7 +1269,10 @@ verified candidate. A candidate it holds says `Not promoting <commit> automatica
 next scheduled promotion: …` on its pre-verification's log, and the runner asks again when the next
 slot opens. The schedule is read, like `process`, from the release base. It never holds an owner:
 to ship now, `slipjay promote` shows the candidate and `slipjay promote --confirm <commit>` promotes
-it at once, which also restarts the interval. It needs a runner on SlipJay 3.47.0 or later: an older
+it at once, which also restarts the interval. When production deploys through a build machine
+(`machine`), the runner resumes that machine 25 minutes before a held candidate's slot (or at once when
+the slot is nearer), so the deploy does not wait on the disk restore of a machine boat stopped while
+idle; a warmed machine whose promotion never comes stops 30 minutes after its slot. It needs a runner on SlipJay 3.47.0 or later: an older
 runner keeps the field without reading it and promotes every verified landing, so restart the runner
 on the new build before relying on it.
 

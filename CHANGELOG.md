@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.50.2
+
+- **A scheduled promotion's build machine is warm when it starts:** while `promotionSchedule` holds a candidate and
+  production deploys through a build machine, the runner resumes that machine 25 minutes before the slot (at once when
+  the slot is nearer). The first promotion of a day no longer waits on the disk restore of a machine boat stopped
+  overnight: on 4 Nov 2026 that restore took 12 minutes, and the build on the freshly restored disk then ran twice as
+  long. A warm-up and a deploy's lease acquire the machine one at a time, so neither forks it twice; a warm-up never
+  runs while a release or production deploy is open, nor once the held candidate has shipped (an owner's confirm
+  meanwhile), and a machine whose promotion never comes stops 30 minutes after its slot.
+
 ## v3.50.1
 
 Spec YS-900 (pechhe/yardsmith): a landing gate's timing is kept by the runner.

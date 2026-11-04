@@ -214,6 +214,19 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
    * The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped, and
    * given `lifetimeS` to live, after which boat stops it.
    */
+  /**
+   * Each build machine's acquisitions, one at a time: a warm-up and a deploy's lease each resume the same VM, and two
+   * acquisitions of a missing VM at once would fork it twice. A lease after a warm-up waits for it, then finds the VM
+   * running and only extends it.
+   */
+  const buildTurns = new Map<string, Promise<unknown>>();
+  function buildMachine(repo: string, pool: string, signal: AbortSignal | undefined, lifetimeS: number): Promise<Vm> {
+    const name = poolName(repo, pool);
+    const turn = (buildTurns.get(name) ?? Promise.resolve()).catch(() => undefined).then(() => machine(repo, pool, signal, lifetimeS, false, true));
+    buildTurns.set(name, turn.catch(() => undefined));
+    return turn;
+  }
+
   async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false, build = false, reuseOnly = false): Promise<Vm> {
     // Only API failures before setup are retried. The budget spans all calls in this open, with each call bounded
     // by the remaining time. Retrying an ambiguous fork could create a second VM, so a timed-out fork goes to the hold.
@@ -358,9 +371,13 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
         if ((error as RemoteOpenFailure)?.boatUnavailable) throw error;
       }
     },
+    async warm({ repo, pool, lifetimeS, signal }): Promise<void> {
+      // Resumed and restored now, so a deploy due later finds it ready; it stops by itself after `lifetimeS`.
+      await buildMachine(repo, pool, signal, lifetimeS);
+    },
     async lease({ repo, pool, gitDirectory, commitId, lifetimeS, signal }): Promise<MachineLease> {
       // The command's own time, then the idle lifetime: a runner that dies mid-command still leaves the VM to stop.
-      const vm = await machine(repo, pool, signal, lifetimeS + BUILD_IDLE_LIFETIME_S, false, true);
+      const vm = await buildMachine(repo, pool, signal, lifetimeS + BUILD_IDLE_LIFETIME_S);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       const billed = await usage(vm, signal);
       const scratch = await scratchDirectory();
