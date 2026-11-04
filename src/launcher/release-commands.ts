@@ -24,18 +24,23 @@ export async function runPromote(args: string[]): Promise<number> {
     const plan = await releaseIntegration(process.cwd(), {
       ...options.candidate !== undefined ? { candidate: options.candidate } : {},
       ...location ? { readPromotion: () => readPromotionState(process.cwd(), { location }),
-        requestVerification: (commit: string) => requestVerificationThroughRunner(process.cwd(), { commit, location }) } : {} });
+        requestVerification: async (commit: string) => { await requestVerificationThroughRunner(process.cwd(), { commit, location }); } } : {} });
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
   }
   if (!location) throw new Error("slipjay promote --confirm runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
-  const confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady, () => readPromotionState(process.cwd(), { location }));
+  const following = new AbortController();
+  const stopFollowing = () => following.abort(new Error(`Stopped following; rerun slipjay promote --confirm ${options.confirm} to reattach`));
+  process.once("SIGINT", stopFollowing);
+  let confirmable: Awaited<ReturnType<typeof confirmableCandidate>>;
+  try {
+    confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady, () => readPromotionState(process.cwd(), { location }),
+      async (commit) => { await requestVerificationThroughRunner(process.cwd(), { commit, location, follow: { onLine: (line) => console.error(line), signal: following.signal } }); });
+  } finally { process.removeListener("SIGINT", stopFollowing); }
   if (confirmable.status !== "confirmable") {
     console.log(JSON.stringify(confirmable, null, 2));
     return 1;
   }
-  const following = new AbortController();
-  const stopFollowing = () => following.abort(new Error(`Stopped following; rerun slipjay promote --confirm ${options.confirm} to reattach`));
   process.once("SIGINT", stopFollowing);
   let followed: Awaited<ReturnType<typeof releaseThroughRunner>>;
   try {

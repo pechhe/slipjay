@@ -1276,6 +1276,61 @@ idle; a warmed machine whose promotion never comes stops 30 minutes after its sl
 runner keeps the field without reading it and promotes every verified landing, so restart the runner
 on the new build before relying on it.
 
+**Batch checks at promotion (`batchVerification`, SJ-192).** A development-mode repository may move its broad tests
+from every landing to once per promotion: `"batchVerification": { "machine": "release-check" }` beside
+`promotionSchedule`. Like every promotion setting it is read from the release branch's policy, never the candidate's.
+A landing then queues no pre-verification of its own; its landing gate can stay narrow. When a scheduled promotion
+falls due and something new has landed, the runner freezes the integration head and queues its **batch check**: a
+pre-verification that runs `requiredReleaseVerification` over the combined change from the commit Production serves
+(its last healthy deploy, so a failed deploy or rollback is accounted for; the release branch while nothing is served)
+to that head. Landings after the freeze wait for the next batch. The check runs on the build machine of pool
+`machine`, a boat VM held for it alone (on the runner host when the runner has no remote verifier), and the runner
+resumes that VM, with production's build machine, 25 minutes before the slot, so the check starts warm; with nothing
+new since the last promotion no machine is warmed. A green check promotes and deploys as before; nothing deploys
+without a complete green batch check of the exact commit. `slipjay promote --confirm` of a candidate without one asks
+the runner for its batch check at once, whatever the schedule, follows it to its end and confirms only if it passed;
+an open or passed check of that commit is reused, and a red one refuses. The nightly audit is unchanged.
+A check that changed the source it ran on (a boat VM's tree differs once the check ends, or the host checkout differs
+from the commit) is not evidence for it: the batch fails, routes nothing and is checked again like infrastructure.
+
+Every release verification command (batch checks, their reruns and diagnosis, and pre-verifications alike) is given
+its exact, immutable base and head as `SLIPJAY_RELEASE_BASE` and `SLIPJAY_RELEASE_HEAD`, so a selector never has to
+assume the candidate's parent is the integration branch. A command that reports per-suite verdicts adds `outcomes`
+(`[{ "suite", "outcome": "passed" | "failed" | "missing" }]`) to its test-report manifest; a rerun is then narrowed to
+the failing suites with `SLIPJAY_RELEASE_SUITES` (comma-separated), and `missing` marks a suite the selection does
+not hold at that revision. A command without `outcomes` is rerun whole.
+
+A failed batch is handled in this order:
+
+- **Infrastructure** (the VM never became ready, setup or install failed, a command could not be spawned, or a
+  capability was missing) is never a regression: the batch ends `infrastructure`, routes nothing, and the same head is
+  checked again, at most three complete checks in all.
+- **Flaky:** what failed is rerun once on the same head; if it passes, the batch ends `flaky`, routes nothing, and the
+  head needs another complete green check before it deploys.
+- **Red: diagnosis.** Only what failed is rerun at each landing's commit, in landing order, from the same base. Every
+  landing at which a failing suite goes from passing to failing is a **culprit** (a suite missing at a revision keeps
+  its last state), so a batch with several independent regressions names each. A diagnosis step lost to
+  infrastructure is run once more; lost again, the failure is never blamed on a later landing: it is reported
+  **unattributed**, between the last landing known to pass and the first seen failing, and diagnosis is `incomplete`.
+  Diagnosis never promotes: the commit before the first culprit (or the first landing diagnosis could not see) is queued for a complete batch check of its own and ships only if that passes.
+- **Routing.** Each culprit commit maps to its landing operation in the ledger, and Forge maps that operation to its
+  Spec through its own attempt records (never commit trailers): the runner calls Forge's `recordBatchCheck`, which
+  records a failed `batch_check` run with a blocking finding on that Spec (base and head, culprit commit and operation,
+  failing tests and output) and, while the Spec's lead session is open, a `batch_failure` note T3 delivers to the lead
+  thread. The record is keyed by batch and culprit, so a restart or retry never records it twice; one Forge could not
+  be reached for is sent again later and at startup. A culprit with no Forge association (a chore, or a landing Forge
+  never recorded) is kept on the batch record (`batch_unrouted`) with its commit, operation and workspace. The owner
+  disposes the finding through Forge's usual route (`fix` makes a repair Ticket and reopens the Spec), and the fix lands
+  through the ordinary landing gate. A revert is an ordinary landing too; the runner never reverts.
+
+The ledger records `batch_started` (base, head, machine, landings), each `batch_run` (complete, rerun, diagnosis, with
+its setup time), `batch_outcome`, and `batch_routed` / `batch_unrouted`. `slipjay metrics` reports per repository the
+landing gate's time (verifying, or screening where a landing published without it, plus remote setup), the batch
+checks run and how each ended, the culprits with their Forge items, red batches no green one has followed, the median
+time from a red batch to the next green one, scheduled checks' setup, and how many red batches had a culprit that
+passed its own landing gate. It needs a runner on SlipJay 3.51.0 or later; an older runner ignores the field and
+pre-verifies every landing.
+
 When recovery can be proven, a failed production promotion is rolled back
 automatically: production
 keeps (or is moved back to) what it served before, the release branch returns to

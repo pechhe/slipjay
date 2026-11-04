@@ -24,7 +24,7 @@ import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { isEarlyFailureLine } from "../landing/required-verification.ts";
 import { candidateBookmark, COMMAND_ARTIFACT_LIMIT_BYTES, COMMAND_ARTIFACT_PAGE_BYTES, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest } from "./runner-types.ts";
+import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
@@ -1136,7 +1136,9 @@ export async function readPromotionState(cwd: string, options: { location: strin
  * Ask the runner to pre-verify `commit`, a commit staging is green on that has no pre-verification
  * yet. It does not disturb the queue: the newest green commit's verification is neither superseded nor delayed by it.
  */
-export async function requestVerificationThroughRunner(cwd: string, options: { commit: string; location: string; env?: NodeJS.ProcessEnv }): Promise<void> {
+export async function requestVerificationThroughRunner(cwd: string, options: { commit: string; location: string; env?: NodeJS.ProcessEnv;
+  /** Follow the verification to its end, as a confirm does under `batchVerification`. */
+  follow?: { onLine(line: string): void; signal?: AbortSignal } }): Promise<VerificationOperation> {
   const env = options.env ?? process.env;
   const context = await workspaceContext(cwd);
   if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
@@ -1145,8 +1147,13 @@ export async function requestVerificationThroughRunner(cwd: string, options: { c
   const token = await runnerToken(env);
   const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
   try {
-    await request(connection.baseUrl, token, "/v1/verifications", { method: "POST", headers: { "content-type": "application/json" },
+    const response = await request(connection.baseUrl, token, "/v1/verifications", { method: "POST", headers: { "content-type": "application/json" },
+      ...options.follow?.signal ? { signal: options.follow.signal } : {},
       body: JSON.stringify({ repo, commitId: options.commit, submittedBy: `${hostname()}:${cwd}` } satisfies VerificationRequest) });
+    const { operation, requested } = (await response.json()) as VerificationResponse;
+    if (!options.follow) return operation;
+    options.follow.onLine(`[runner ${connection.name}] ${requested ? "checking" : "following the check of"} ${options.commit.slice(0, 12)} before promoting it`);
+    return await follow(connection.baseUrl, token, operation, connection.name, options.follow.onLine, env, options.follow.signal) as VerificationOperation;
   } finally { connection.close(); }
 }
 

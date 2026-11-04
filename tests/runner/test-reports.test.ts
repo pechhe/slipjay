@@ -151,3 +151,16 @@ test("a run's logs are the regular files under logs/, in path order, a long one 
     assert.deepEqual(await readRetainedLogs(join(root, "missing")), []);
   } finally { await dispose(); }
 });
+
+test("a manifest's suite outcomes are read, and outcomes of another shape are dropped without refusing the rows", async () => {
+  const fixture = await reportDir(async (directory) => {
+    await writeFile(join(directory, TEST_REPORT_MANIFEST), JSON.stringify({ version: 1, reports: [],
+      outcomes: [{ suite: "workbench", outcome: "failed" }, { suite: "weave", outcome: "passed" }, { suite: "atlas", outcome: "missing" }] }));
+  });
+  try {
+    assert.deepEqual(await readTestReports(fixture.directory, fixture.root), { status: "recorded", files: [],
+      outcomes: [{ suite: "workbench", outcome: "failed" }, { suite: "weave", outcome: "passed" }, { suite: "atlas", outcome: "missing" }] });
+    await writeFile(join(fixture.directory, TEST_REPORT_MANIFEST), JSON.stringify({ version: 1, reports: [], outcomes: [{ suite: "workbench", outcome: "red" }] }));
+    assert.deepEqual(await readTestReports(fixture.directory, fixture.root), { status: "recorded", files: [] });
+  } finally { await fixture.dispose(); }
+});

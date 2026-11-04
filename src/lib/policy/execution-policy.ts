@@ -43,6 +43,8 @@ export type ExecutionPolicy = {
   process?: ProcessLevel;
   /** When `process: "development"` promotes by itself (see `promotion-schedule.ts`); every pre-verified landing when undeclared. */
   promotionSchedule?: PromotionSchedule;
+  /** Batch checks at promotion instead of a pre-verification per landing (see `batch-verification.ts`); undefined when undeclared. */
+  batchVerification?: BatchVerification;
   postIntegration?: unknown;
   /** The target the runner resets on a schedule and on demand; undefined when undeclared. */
   reset?: ResetPolicy;
@@ -78,6 +80,7 @@ import { auditPolicy } from "./audit-policy.ts";
 import { deploymentPolicy } from "./deployment-policy.ts";
 import { postIntegrationPolicy, resetPolicy } from "./post-integration-policy.ts";
 import { promotionSchedule } from "./promotion-schedule.ts";
+import { batchVerification, type BatchVerification } from "./batch-verification.ts";
 import { declaredPublicationRemote } from "./source-publication-policy.ts";
 import { normalizeVerificationDeclaration } from "./verification-policy.ts";
 import { runWorkspaceCommand } from "../infra/workspace-command.ts";
@@ -352,6 +355,8 @@ function parsePolicyText(raw: string): ExecutionPolicy {
   const spares = spareCount(parsed.spares);
   const level = processLevel(parsed.process);
   const schedule = promotionSchedule(parsed.promotionSchedule, fail);
+  const batch = batchVerification(parsed.batchVerification, fail);
+  if (batch && !parsed.releaseBranch) fail("declares batchVerification without a releaseBranch");
   const budgets = timeBudgets(parsed.budgets);
   return {
     ...parsed,
@@ -368,6 +373,7 @@ function parsePolicyText(raw: string): ExecutionPolicy {
     ...(parsed.spares === undefined ? {} : { spares }),
     ...(parsed.process === undefined ? {} : { process: level }),
     ...(schedule ? { promotionSchedule: schedule } : {}),
+    ...(batch ? { batchVerification: batch } : {}),
     ...(budgets ? { budgets } : {}),
     ...(deployments ? { deployments } : {}),
     ...(reset ? { reset } : {}),

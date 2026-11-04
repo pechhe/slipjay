@@ -3,7 +3,7 @@ import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim,
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, servedCommit, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
-import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest } from "./runner-types.ts";
+import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
@@ -27,6 +27,8 @@ export function createRunnerHandler(input: {
   readSource?(operation: Extract<Operation, { kind: "landing" }>, signal: AbortSignal): Promise<Response>;
   readManifest?(operation: Extract<Operation, { kind: "landing" }>): Promise<unknown>;
   readArtifact?(operationId: string, runId: string, reference: Extract<CommandArtifact, { status: "retained" }>, offset: number, limit: number): Promise<ArtifactChunk>;
+  /** Under `batchVerification`, the batch check of `commitId` a confirm waits on (queued unless one stands); null for any other repository. */
+  requestBatchCheck?(repo: string, commitId: string): Promise<VerificationResponse | null>;
   /** Wakes the queue: after a submission, and when the owner resumes it. */
   onSubmitted(): void;
   /**
@@ -479,6 +481,9 @@ export function createRunnerHandler(input: {
       if (!validVerification(body))
         return json({ error: "Invalid verification" }, 400);
       const repo = repositoryKey(body.repo);
+      // A batching repository has no staging: its check of a commit is the batch check, asked for by a confirm (SJ-192).
+      const batch = await input.requestBatchCheck?.(repo, body.commitId);
+      if (batch) return json(batch satisfies VerificationResponse);
       if (!input.log.deployments(repo, "staging").some((entry) => entry.commitId === body.commitId && entry.result?.type === "deployed"))
         return json({ error: `Staging is not green on ${body.commitId.slice(0, 12)}` }, 400);
       const existing = input.log.verifications(repo).find((entry) => entry.commitId === body.commitId && entry.status !== "superseded" && entry.status !== "cancelled");

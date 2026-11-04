@@ -330,3 +330,9 @@ test("an admission read that fails fails the whole admission read", async () => 
   };
   await assert.rejects(readAdmittedItems(read as never, "s1", ["t2", "t3", "t4"]), /Build did not answer/);
 });
+
+test("a replayed batch-check record answers with the first record's receipt, which Forge sends in its details", async () => {
+  const receipt = { runId: "run-1", specId: "spec-1", number: 12, findingRef: "batch-regression", noteId: null };
+  const route = buildRoute({ origin: "https://forge.example", token: "t", fetch: async () => new Response(JSON.stringify({ status: "duplicate", code: "batch_check_duplicate", details: { value: receipt } }), { status: 200 }) });
+  assert.deepEqual(await route("recordBatchCheck", {}), { kind: "accepted", value: receipt });
+});

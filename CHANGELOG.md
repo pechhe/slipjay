@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.51.0
+
+Spec SJ-192: a YardSmith landing passes a two-minute check, and each promotion batch runs the full tests and sends any
+failure back to the work that caused it.
+
+- **Batch checks at promotion (`batchVerification`):** opt-in per repository. A development-mode landing no longer
+  queues a pre-verification; when a scheduled promotion falls due the runner freezes the head and runs
+  `requiredReleaseVerification` once, from the commit Production serves to that head, on a boat VM held for it and
+  warmed ahead of the slot. Only a complete green check of the exact commit promotes.
+- **Flaky, infrastructure and red batches:** a failure is rerun once, narrowed to the failing suites; one that passes is
+  flaky and routes nothing; an infrastructure failure is never a regression and is checked again a bounded number of
+  times; a regression is diagnosed landing by landing, naming every culprit, and the commit before the first culprit
+  ships only after its own complete check. A diagnosis step lost to infrastructure twice leaves its failure
+  unattributed rather than blaming the next landing; a check that changed its source is not evidence.
+- **Confirm runs the check:** `slipjay promote --confirm` of a batching candidate without a passed check asks the
+  runner for one now, follows it and confirms only on its pass.
+- **Routing to the culprit's work:** each culprit is recorded on its Forge Spec through Forge's `recordBatchCheck`,
+  once per batch and culprit, with a message to the lead's open thread; one without a Forge association stays on the
+  batch record.
+- **Release environment:** every release check gets `SLIPJAY_RELEASE_BASE` and `SLIPJAY_RELEASE_HEAD`, a rerun
+  `SLIPJAY_RELEASE_SUITES`; the test-report manifest may carry per-suite `outcomes`.
+- **Metrics:** `slipjay metrics` reports the landing gate's time and the batch checks by outcome, culprits with their
+  Forge items, unresolved reds, red-to-green time and scheduled setup.
+
 ## v3.50.3
 
 - **A build machine idles an hour, not thirty minutes:** with promotions batched every 30 minutes, one batch skipped

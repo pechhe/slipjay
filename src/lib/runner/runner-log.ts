@@ -45,7 +45,8 @@ const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEve
   ...TERMINAL_EVENT_TYPES, "repository_policy", "landing_title", "submitted", "identity", "classified", "integrated", "publication_intent", "held",
   "integration_held", "integration_recovered", "integration_released", "boat_circuit", "verification_passed", "verification_skipped",
   "attempt_prepared", "attempt_invalidated", "audit_head", "audit_cause", "repair_claimed", "repair_released",
-  "provenance", "build_admitted", "build_receipt", "evidence_expired", "submission_request"]);
+  "provenance", "build_admitted", "build_receipt", "evidence_expired", "submission_request",
+  "batch_started", "batch_run", "batch_outcome", "batch_routed", "batch_unrouted"]);
 
 /**
  * Open the append-only ledger. `projections` are the interpretations its callers report: classification on

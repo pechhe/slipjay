@@ -53,7 +53,7 @@ export type DeploymentPolicy = { version: 1; environments: Record<string, Deploy
 export const DEPLOYMENT_ENVIRONMENTS = ["staging", "production"] as const;
 const NAME = /^[a-z][a-z0-9-]{0,39}$/;
 /** A machine pool's name: never a number, so it cannot be taken for a gate slot's VM. */
-const MACHINE = /^[a-z][a-z0-9-]{0,29}$/;
+export const MACHINE_POOL = /^[a-z][a-z0-9-]{0,29}$/;
 const HOUR = 3_600_000;
 
 function object(value: unknown, label: string): Record<string, unknown> {
@@ -62,7 +62,7 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function machineName(value: unknown, environment: string): string {
-  if (typeof value !== "string" || !MACHINE.test(value)) throw new Error(`deployments ${environment} names a machine that is not a pool name (a-z, 0-9, -)`);
+  if (typeof value !== "string" || !MACHINE_POOL.test(value)) throw new Error(`deployments ${environment} names a machine that is not a pool name (a-z, 0-9, -)`);
   return value;
 }
 

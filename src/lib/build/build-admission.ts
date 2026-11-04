@@ -129,7 +129,7 @@ export type BuildRouteAnswer =
   | { kind: "accepted"; value: unknown }
   | { kind: "refused"; code: string; message?: string }
   | { kind: "unavailable"; reason: string };
-export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding" | BuildReadAction, input: unknown) => Promise<BuildRouteAnswer>;
+export type BuildRoute = (action: "admitAttempt" | "recordAttempt" | "recordAttemptRun" | "recordChoreLanding" | "recordBatchCheck" | BuildReadAction, input: unknown) => Promise<BuildRouteAnswer>;
 
 /** Build's own sentence for a refusal, which names what it found; bounded, since it is printed and logged. */
 const refusalMessage = (message: unknown): { message?: string } =>
@@ -141,7 +141,7 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
   const url = new URL("/api/build/runner", options.origin).toString();
   return async (action, input) => {
     let response: Response;
-    let body: { status?: unknown; code?: unknown; value?: unknown; details?: { message?: unknown } | null } | null;
+    let body: { status?: unknown; code?: unknown; value?: unknown; details?: { message?: unknown; value?: unknown } | null } | null;
     try {
       response = await call(url, { method: "POST", redirect: "error", signal: AbortSignal.timeout(options.timeoutMs ?? BUILD_ADMISSION_TIMEOUT_MS),
         headers: { "content-type": "application/json", authorization: `Bearer ${options.token}` },
@@ -150,7 +150,8 @@ export function buildRoute(options: { origin: string; token: string; timeoutMs?:
     } catch (error) {
       return { kind: "unavailable", reason: (error as Error).name === "TimeoutError" ? "Build did not answer in time" : "Build could not be reached" };
     }
-    if (response.status === 200 && (body?.status === "succeeded" || body?.status === "duplicate")) return { kind: "accepted", value: body.value ?? null };
+    // A replay answers `duplicate` with the first answer's value in `details` (Forge's recordBatchCheck, SJ-192).
+    if (response.status === 200 && (body?.status === "succeeded" || body?.status === "duplicate")) return { kind: "accepted", value: body.value ?? body.details?.value ?? null };
     // Build's domain answers, and its refusal of a request it will never accept (400 malformed, 413 too large).
     if ([400, 409, 413, 422].includes(response.status) && typeof body?.code === "string" && body.code.trim())
       return { kind: "refused", code: body.code.slice(0, 200), ...refusalMessage(body.details?.message) };

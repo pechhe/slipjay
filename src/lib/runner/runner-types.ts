@@ -172,7 +172,7 @@ export type OperationEvent =
    * when setup failed on a machine it had.
    */
   /** `placement` is where the attempt's gate was placed when its commands were about to run; rows before SJ-189 lack it and were all `boat`. */
-  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; placement?: GatePlacement; slot: number; screening?: boolean; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
+  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; placement?: GatePlacement; slot: number; screening?: boolean; pool?: string; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
   | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null }
   /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
   | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
@@ -227,6 +227,30 @@ export type OperationEvent =
   | { type: "audited"; commit: string; commands: string[]; passed: string[]; skipped: string[]; reused: string[] }
   /** Someone recorded why this failing audit failed, for its whole open failure; the newest record stands. */
   | { type: "audit_cause"; cause: AuditCause; by: string; note?: string }
+  /**
+   * A batch check began (SJ-192): the pre-verification of the frozen `head` measured from `base`, the commit
+   * Production served when it began (the release branch when nothing was served), on `machine`, the pool of the VM
+   * held for it (`host` when the runner has no remote verifier). `landings` are the batch's landings in landing order.
+   */
+  | { type: "batch_started"; base: string; head: string; machine: string; scheduled: boolean; landings: { commitId: string; operationId: string }[] }
+  /** One run of the batch's release checks at `commit`: the complete check, the rerun of what failed, or a diagnosis step. */
+  | { type: "batch_run"; phase: "complete" | "rerun" | "diagnosis"; commit: string; status: "passed" | "failed" | "infrastructure";
+      keys?: string[]; failingTests?: string[]; reason?: string; setupMs?: number; durationMs: number }
+  /**
+   * How the batch check ended. `green` promotes as before; `flaky` failed once and passed its rerun, so it routes
+   * nothing and the head needs another complete check; `infrastructure` is a machine, setup or tooling failure, never
+   * routed; `red` names each culprit landing and the suites that started failing there, and may offer
+   * `shorterCandidate`, which still needs its own complete check.
+   */
+  | { type: "batch_outcome"; outcome: "green" | "flaky" | "infrastructure" | "red"; base: string; head: string; machine: string; reason?: string;
+      keys?: string[]; diagnosis?: "complete" | "incomplete"; shorterCandidate?: string | null;
+      culprits?: { commitId: string; operationId: string; workspace: string | null; keys: string[]; failingTests: string[]; command: string | null; output: string }[];
+      /** Failures first seen past a landing diagnosis could not run at: one of the landings after `after` (null: the base) caused each; none is routed. */
+      unattributed?: { keys: string[]; after: string | null; firstFailing: string }[] }
+  /** A culprit's failure was recorded on its Forge work: `runId` holds the blocking finding, `noteId` the message to its open lead thread. */
+  | { type: "batch_routed"; commitId: string; operationId: string; specId: string; number: number | null; runId: string; noteId: string | null }
+  /** A culprit has no Forge association (a chore, or a landing Forge never recorded): it stays reported here only. */
+  | { type: "batch_unrouted"; commitId: string; operationId: string; reason: string }
   | { type: "stage"; stage: RunnerStage; health?: RunnerHealth;
     /** On a landing's first stage when it was admitted as short: it counts toward `workers + 1`, not toward `workers`. */
     shortLanding?: true }
@@ -586,7 +610,8 @@ export interface RemoteVerification {
   /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`.
    * `screening` selects a separate pool, never an authoritative numeric slot. */
   /** `retrying`: a landing's attempt after one whose machine was not ready; it reuses the slot's VM and forks none. */
-  open(input: { repo: string; slot: number; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
+  /** `pool` names a held VM of its own (a batch check's, SJ-192) instead of a gate slot; it shares warm-ups' turns like a build machine. */
+  open(input: { repo: string; slot: number; pool?: string; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */
   probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */

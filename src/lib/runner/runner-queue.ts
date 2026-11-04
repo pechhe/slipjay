@@ -18,7 +18,11 @@ import { createAuditScheduler } from "../release/audit-scheduler.ts";
 import { runReset } from "../release/reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "../release/deploy.ts";
 import { readExactExecutionPolicy } from "../release/post-integration-source.ts";
-import { confirmRelease, passedVerification, returnRelease, verifyRelease } from "../release/release.ts";
+import { confirmRelease, passedVerification, planRelease, returnRelease, verifyRelease } from "../release/release.ts";
+import { boundedKeys, boundedOutput, boundedTests, runBatchCheck, type BatchCheckRecord, type BatchLanding, type BatchRun, type BatchScope, type SuiteState } from "../release/batch-check.ts";
+import { RELEASE_BASE_ENV, RELEASE_ENV_KEYS, RELEASE_HEAD_ENV, RELEASE_SUITES_ENV } from "../policy/batch-verification.ts";
+import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
+import type { BuildRouteAnswer } from "../build/build-admission.ts";
 import type { BuildReader } from "../build/tracker.ts";
 import { BUILD_CONTEXT_ENV, BUILD_READ_TOKEN_ENV, buildCheckContext } from "../build/build-check-access.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
@@ -40,7 +44,7 @@ import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation } from "./runner-types.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -70,6 +74,9 @@ const AWAITING_REMOTE_EXECUTOR = "a remote executor that was not ready";
 const BUILDER_WARM_LEAD_MS = 25 * 60_000;
 /** How long a warmed build machine stays up after the promotion it was warmed for was due, if that promotion never comes. */
 const BUILDER_WARM_IDLE_S = 30 * 60;
+/** A check changed the source it ran on, or its machine's tree could not be read back: its result is not evidence for that source. */
+class GateDrift extends Error {}
+
 /** When to resume the build machine for a promotion due at `due`: `BUILDER_WARM_LEAD_MS` before it, or now when nearer. */
 export const builderWarmAt = (due: number, now: number): number => Math.max(now, due - BUILDER_WARM_LEAD_MS);
 
@@ -173,8 +180,17 @@ export function createRunnerQueue(input: {
   verificationStageTimeoutMs?: number;
   /** The clock a `promotionSchedule` is read against; `Date.now` when absent. */
   now?: () => number;
+  /**
+   * Records a batch-check culprit on its Forge work (Forge's `recordBatchCheck` runner action, SJ-192); absent, a
+   * culprit is reported on the batch record only.
+   */
+  recordBatchCheck?: (input: BatchCheckRecord) => Promise<BuildRouteAnswer>;
+  /** How long after Forge could not be reached a culprit is sent again. */
+  batchRouteRetryMs?: number;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
+  /** A confirm's batch check of a commit under `batchVerification`; null for a repository that does not batch. */
+  requestBatchCheck(repo: string, commitId: string): Promise<VerificationResponse | null>;
   /**
    * Start nothing more, now or later in this process: recovery could not stop the commands a previous process left, so
    * no checkout is safe to reuse. The runner still answers reads; a restart is what clears it.
@@ -430,8 +446,11 @@ export function createRunnerQueue(input: {
     reportPolicy(repo, configuration, applied);
     if (configuration?.deployments) scheduler.consider(repo, skipped
       ? Object.fromEntries(Object.entries(configuration.deployments.environments).filter(([name]) => name !== "staging")) : configuration.deployments.environments);
-    // Without a staging deploy to follow, the landing itself is what gets pre-verified.
-    if (skipped && promotesFrom(configuration) && !log.verifications(repo).some((entry) => entry.commitId === commitId)) queueVerification(repo, commitId);
+    // Without a staging deploy to follow, the landing itself is what gets pre-verified, unless the release branch
+    // batches its checks (SJ-192): then the next scheduled promotion checks the batch, and is armed now.
+    const batched = skipped && Boolean(applied?.batchVerification);
+    if (skipped && promotesFrom(configuration) && !batched && !log.verifications(repo).some((entry) => entry.commitId === commitId)) queueVerification(repo, commitId);
+    if (batched && promotesFrom(configuration)) void promoteAutomatically(repo);
     resetScheduler.consider(repo, configuration?.reset ?? null);
     auditScheduler.consider(repo, configuration?.audit ?? null);
   }
@@ -662,41 +681,67 @@ export function createRunnerQueue(input: {
    * of it is already queued or running. A running one finishes. One that passed is verified
    * again: the release branch may have moved since, which a confirm would not reuse it across.
    */
-  function queueVerification(repo: string, commitId: string): void {
+  function queueVerification(repo: string, commitId: string, by: "staging" | "batch" | "confirm" = "staging"): string {
     const existing = log.verifications(repo);
-    if (existing.some((entry) => entry.commitId === commitId && (entry.status === "queued" || entry.status === "running"))) return;
+    const open = existing.find((entry) => entry.commitId === commitId && (entry.status === "queued" || entry.status === "running"));
+    if (open) return open.id;
     const id = newOperationId();
     for (const stale of existing.filter((entry) => entry.status === "queued")) append(stale.id, { type: "superseded", by: id });
-    append(id, { type: "submitted", kind: "verification", repo, commitId, submittedBy: `${executor.host}:staging` });
+    append(id, { type: "submitted", kind: "verification", repo, commitId, submittedBy: `${executor.host}:${by}` });
     wakeMain();
+    return id;
+  }
+  /**
+   * A confirm's batch check of `commitId` (SJ-192): the open one stands, and so does a passed or red one measured from
+   * the base Production still serves with no promotion since; otherwise one is queued now, whatever the schedule. Null when the release base does not batch.
+   */
+  async function requestBatchCheck(repo: string, commitId: string): Promise<VerificationResponse | null> {
+    const base = await releasePolicy(repo, commitId);
+    if (base?.process !== "development" || !base.batchVerification) return null;
+    const latest = log.verifications(repo).find((entry) => entry.commitId === commitId && entry.status !== "superseded" && entry.status !== "cancelled");
+    // An ended check stands only against the base it measured: a promotion since, or Production serving another commit, makes it stale.
+    const current = async (check: VerificationOperation): Promise<boolean> => {
+      if (log.releases(repo).some((release) => release.result?.type === "released" && release.submittedAt > check.submittedAt)) return false;
+      const started = log.events({ operationId: check.id }).map((row) => row.event).find((event) => event.type === "batch_started");
+      return started?.type === "batch_started" && started.base === await servedBase(repo, repoCheckout(repo));
+    };
+    if (latest && (latest.status === "queued" || latest.status === "running")) return { operation: latest, requested: false };
+    if (latest && (latest.status === "verified" || batchOutcomeOf(latest.id)?.outcome === "red") && await current(latest)) return { operation: latest, requested: false };
+    const id = queueVerification(repo, commitId, "confirm");
+    return { operation: log.operation(id) as VerificationOperation, requested: true };
   }
   const automaticPromotions = new Map<string, Promise<void>>();
   /** Per repository, the timer that asks again when its `promotionSchedule` next lets a promotion start. */
   const scheduledPromotions = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Per repository, the timer that resumes its build machine ahead of a scheduled promotion (`builderWarmAt`). */
+  /** Per repository and pool, the timer that resumes a machine ahead of a scheduled promotion (`builderWarmAt`). */
   const builderWarmups = new Map<string, ReturnType<typeof setTimeout>>();
+  const warmupKey = (repo: string, pool: string) => `${repo}\0${pool}`;
+  function clearWarmups(repo: string): void {
+    for (const [key, timer] of builderWarmups) if (key.startsWith(`${repo}\0`)) { clearTimeout(timer); builderWarmups.delete(key); }
+  }
   /**
    * Resume `repo`'s build machine of `pool` in time for a promotion due at `due`, so its deploy does not wait on the disk
    * restore of a machine boat stopped while idle (12 minutes on 4 Nov 2026, before a build that then ran twice as slow).
    * Skipped while a release or production deploy is open: that deploy holds the machine, and warming would shorten its
    * lifetime; and once no candidate is held for the slot any more, as after the owner promoted it meanwhile. The machine stops by itself an idle period after `due` when the promotion does not come.
    */
-  function warmBuilder(repo: string, pool: string, due: number): void {
+  function warmBuilder(repo: string, pool: string, due: number, wanted: () => boolean = () => Boolean(promotionCandidate(repo))): void {
     if (!remoteVerification?.warm) return;
-    clearTimeout(builderWarmups.get(repo));
+    const key = warmupKey(repo, pool);
+    clearTimeout(builderWarmups.get(key));
     const timer = setTimeout(() => {
-      builderWarmups.delete(repo);
+      builderWarmups.delete(key);
       if (closed || draining) return;
       if (log.openOperations(repo).some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
-      // Only for a candidate still held for its slot: one the owner promoted meanwhile, or one that shipped, needs no machine.
-      if (!scheduledPromotions.has(repo) || !promotionCandidate(repo)) return;
+      // Only for work still held for its slot: a candidate the owner promoted meanwhile, or one that shipped, needs no machine.
+      if (!scheduledPromotions.has(repo) || !wanted()) return;
       const lifetimeS = Math.ceil(Math.max(0, due - now()) / 1000) + BUILDER_WARM_IDLE_S;
       console.error(`[runner] ${repo}: resuming its ${pool} build machine for the promotion due ${new Date(due).toISOString()}`);
       void remoteVerification.warm!({ repo, pool, lifetimeS })
         .catch((error: unknown) => { console.error(`[runner] ${repo}: its ${pool} build machine could not be warmed: ${message(error)}`); });
     }, Math.max(0, builderWarmAt(due, now()) - now()));
     timer.unref?.();
-    builderWarmups.set(repo, timer);
+    builderWarmups.set(key, timer);
   }
   const now = input.now ?? Date.now;
   /**
@@ -798,6 +843,11 @@ export function createRunnerQueue(input: {
     const choice = promotionCandidate(repo);
     // The pre-verification that woke this consideration is answered whether or not it is the candidate.
     if (after && after !== choice?.verification.id) await explain(after, choice?.commitId);
+    // A batching release branch checks its newest landing when the promotion falls due; a candidate that already passed promotes as before.
+    if (!choice) {
+      const releaseBase = await releasePolicy(repo, newest.commitId);
+      if (releaseBase?.process === "development" && releaseBase.batchVerification && !missingPromotion(releaseBase)) return considerBatch(repo, newest.commitId, releaseBase);
+    }
     // A newest landing whose verification failed is left behind, and says why.
     const failed = log.verifications(repo).find((entry) => entry.commitId === newest.commitId && entry.status === "failed");
     if (failed && !log.releases(repo).some((entry) => entry.commitId === failed.commitId) && (await releasePolicy(repo, failed.commitId))?.process === "development")
@@ -845,13 +895,60 @@ export function createRunnerQueue(input: {
       }
     }
     // Promoting now: its deploy acquires the machine itself, so a warm-up for a later slot is no longer wanted.
-    clearTimeout(builderWarmups.get(repo));
-    builderWarmups.delete(repo);
+    clearWarmups(repo);
     const automatic = { setting: "process", value: "development" } as const;
     append(next, { type: "submitted", kind: "release", repo, commitId, migrationsReady: false, submittedBy: `${executor.host}:automatic`, automatic });
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
     console.error(`[runner] ${repo}: promoting ${commitId.slice(0, 12)} automatically (process: "development")`);
     wakeMain();
+  }
+  /** How a batch check ended, from its own record; undefined while it has none (it never ran, or predates SJ-192). */
+  const batchOutcomeOf = (operationId: string) => log.events({ operationId }).map((row) => row.event)
+    .findLast((event): event is Extract<OperationEvent, { type: "batch_outcome" }> => event.type === "batch_outcome");
+  /** How many complete checks of one head a flaky or infrastructure failure may cost before the runner stops asking again. */
+  const BATCH_ATTEMPTS = 3;
+  /**
+   * `batchVerification` (SJ-192): the newest landing has no passing batch check. When the scheduled promotion is due,
+   * freeze it as the batch head and queue its batch check; before then, ask again at the due time and warm the batch
+   * machine (and the build machine) ahead of it. Nothing new since the last promotion warms nothing. A red batch waits
+   * for a new landing; a flaky or infrastructure failure checks the same head again, a bounded number of times.
+   */
+  async function considerBatch(repo: string, head: string, base: NonNullable<Awaited<ReturnType<typeof releasePolicy>>>): Promise<void> {
+    if (standsFor(repo, head)) return;
+    if (log.openOperations(repo).some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
+    const checks = log.verifications(repo).filter((entry) => entry.commitId === head);
+    if (checks.some((entry) => entry.status === "queued" || entry.status === "running")) return;
+    const failed = checks.filter((entry) => entry.status === "failed");
+    const latest = checks.find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+    if (latest?.status === "failed") {
+      const outcome = batchOutcomeOf(latest.id)?.outcome;
+      // A red batch (or a failure before the check could run) is answered by a new landing, not by checking it again.
+      if (outcome !== "flaky" && outcome !== "infrastructure") return;
+      if (failed.length >= BATCH_ATTEMPTS) {
+        const line = `Not checking ${head.slice(0, 12)} again: ${failed.length} batch checks of it ended flaky or by infrastructure`;
+        if (!log.events({ operationId: latest.id }).some((row) => row.event.type === "progress" && row.event.line === line)) append(latest.id, { type: "progress", line });
+        return;
+      }
+    }
+    if (base.promotionSchedule) {
+      const last = log.releases(repo).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+      const due = nextPromotionAt(base.promotionSchedule, last ? Date.parse(last.submittedAt) : undefined, now());
+      if (due > now()) {
+        clearTimeout(scheduledPromotions.get(repo));
+        const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
+        timer.unref?.();
+        scheduledPromotions.set(repo, timer);
+        // Warm only while the head still waits for its check: a promotion of it meanwhile needs neither machine.
+        const pending = () => { const last = log.lastLanded(repo); return Boolean(last && !standsFor(repo, last.commitId)); };
+        warmBuilder(repo, base.batchVerification!.machine, due, pending);
+        const pool = base.deployments?.environments.production?.machine;
+        if (pool) warmBuilder(repo, pool, due, pending);
+        return;
+      }
+    }
+    clearWarmups(repo);
+    console.error(`[runner] ${repo}: the scheduled promotion is due; batch-checking ${head.slice(0, 12)}`);
+    queueVerification(repo, head, "batch");
   }
   /** Supersede the queued automatic releases of commits other than `keep`, which `by` replaces. */
   function supersedeAutomaticReleases(repo: string, keep: string, by: string): void {
@@ -1104,6 +1201,8 @@ export function createRunnerQueue(input: {
       const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
       if ((purpose === "migration_generate" || purpose === "migration_verify") && request.env?.SLIPJAY_MIGRATION_CONTEXT)
         runEnvironment!.SLIPJAY_MIGRATION_CONTEXT = request.env.SLIPJAY_MIGRATION_CONTEXT;
+      // A release check's base and head (and a rerun's suites) are the runner's own, never the host environment's.
+      if (!privateRun) for (const key of RELEASE_ENV_KEYS) if (request.env?.[key]) runEnvironment![key] = request.env[key];
       // A gate command may report per-file test timings into its own directory (see test-reports.ts).
       const reports = runPurpose === "gate" && !privateRun ? join(scratch, "test-reports", runId) : undefined;
       if (reports) {
@@ -1217,7 +1316,7 @@ export function createRunnerQueue(input: {
         const after = await attempt.finish();
         append(operation.id, { type: "remote_verification", phase: "finished", machine: attempt.machine, ...after, machineMs: Date.now() - started });
         if (after.tree !== attempt.tree)
-          throw new Error(`The gate changed ${after.trackedChanges} file(s) of the candidate on ${attempt.executor.host}; its result is not evidence for the candidate`);
+          throw new GateDrift(`The gate changed ${after.trackedChanges} file(s) of the candidate on ${attempt.executor.host}; its result is not evidence for the candidate`);
       } finally {
         try { await attempt.close(); }
         finally {
@@ -1873,7 +1972,7 @@ export function createRunnerQueue(input: {
         return;
       }
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
-        onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal,
+        onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(await servedBase(operation.repo, checkout), operation.commitId), abortSignal: controller.signal,
         preverified: (plan) => {
           const passed = passedVerification(plan, log.verifications(operation.repo))?.id ?? null;
           // No human approved an automatic promotion: it publishes only what a pre-verification passed against this release base,
@@ -1905,7 +2004,11 @@ export function createRunnerQueue(input: {
     }
     /** Pre-verify the candidate as a confirm would, recording what passed against which release base. */
     async function verify(): Promise<OperationEvent> {
-      const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, ...(environment ? { environment } : {}), abortSignal: controller.signal });
+      const releaseBase = await releasePolicy(operation.repo, operation.commitId);
+      const base = await servedBase(operation.repo, checkout);
+      // A batching release branch checks the batch on its own machine and diagnoses a failure (SJ-192).
+      if (releaseBase?.process === "development" && releaseBase.batchVerification && base) return batchVerify(releaseBase.batchVerification.machine, base);
+      const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(base, operation.commitId), abortSignal: controller.signal });
       // A kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks, nonAdditiveMigrations: result.nonAdditiveMigrations };
@@ -1913,6 +2016,191 @@ export function createRunnerQueue(input: {
         ...failedVerification(result.evidence) };
       return { type: "failed", stage, reason: result.reason };
     }
+    /**
+     * The batch check of `operation.commitId`, the frozen head, measured from `base`, the commit Production serves
+     * (SJ-192, `release/batch-check.ts`). Each commit it runs at gets a fresh attempt on the held `machine` (the runner
+     * host when it has no remote verifier); the complete check and its rerun share the head's. Only a complete green
+     * check of the exact head verifies it; anything else fails it, saying how, and a red batch routes its culprits.
+     */
+    async function batchVerify(machine: string, base: string): Promise<OperationEvent> {
+      const plan = await planRelease(checkout, { candidate: operation.commitId }).catch((error: unknown) => error as Error);
+      if (plan instanceof Error) return { type: "failed", stage, reason: message(plan) };
+      if (!plan.commits.length) return { type: "failed", stage, reason: `${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}` };
+      const head = plan.candidate;
+      const between = new Set((await jj(checkout, ["log", "--no-graph", "-r", `::${head} ~ ::${base}`, "-T", 'commit_id ++ "\\n"'])).split("\n").filter(Boolean));
+      const landings: BatchLanding[] = log.landings(operation.repo).filter((entry) => between.has(entry.commitId)).map((entry) => ({ commitId: entry.commitId, operationId: entry.operationId }));
+      const placed = remoteVerification ? machine : "host";
+      append(operation.id, { type: "batch_started", base, head, machine: placed, scheduled: operation.submittedBy.endsWith(":batch"), landings });
+      progress(`[batch] checking ${landings.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`);
+      let open: { commit: string; gate?: GateAttempt } | undefined;
+      const releaseMachine = async () => {
+        const held = open?.gate;
+        open = undefined;
+        if (held) await closeRemote(held);
+      };
+      const runAt = async (commit: string, scope: BatchScope | null): Promise<BatchRun> => {
+        let setupMs: number | undefined;
+        try {
+          if (open?.commit !== commit) {
+            await releaseMachine();
+            const started = Date.now();
+            await jj(checkout, ["new", commit]);
+            open = { commit };
+            if (remoteVerification) open.gate = { attempt: await remoteVerification.open({ repo: operation.repo, slot: 0, pool: machine, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, signal: controller.signal })
+              .catch((error: RemoteOpenFailure) => {
+                if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
+                throw error;
+              }), started, placement: "boat" };
+            if (open.gate) append(operation.id, { type: "remote_verification", phase: "ready", machine: open.gate.attempt.machine, placement: "boat", slot: 0, pool: machine, candidate: commit, tree: open.gate.attempt.tree, setupMs: Date.now() - started, usage: open.gate.attempt.usage });
+            setStage("installing");
+            const via = open.gate?.attempt.executor;
+            await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand: (request) => run(request, "dependencies", via), env: releaseEnvironment(base, commit)() });
+            setupMs = Date.now() - started;
+          }
+        } catch (error) {
+          if (controller.signal.aborted) throw authorityError();
+          // The previous commit's checks changed its source: none of this batch's results is evidence.
+          if (error instanceof GateDrift) throw error;
+          await releaseMachine().catch(() => undefined);
+          return { status: "infrastructure", reason: `setup at ${commit.slice(0, 12)} failed: ${message(error).slice(0, 1000)}` };
+        }
+        setStage("verifying");
+        const via = open!.gate?.attempt.executor;
+        const indexes = scope ? scope.checks : plan.checks.map((_, index) => index);
+        const runIds: string[] = [];
+        let failure: RequiredVerificationError | undefined;
+        try {
+          await runRequiredVerification({ root: checkout, checks: indexes.map((index) => plan.checks[index]), environment: releaseEnvironment(base, commit, scope?.suites),
+            onProgress: progress, abortSignal: controller.signal,
+            run: async (request) => { const result = await run(request, "gate", via); if (result.runId) runIds.push(result.runId); return result; } })
+            .then((evidence) => { if (evidence.gaps.length) throw new Error(`release checks did not run in full: ${evidence.gaps.map((gap) => gap.command).join("; ")}`); });
+        } catch (error) {
+          if (controller.signal.aborted) throw authorityError();
+          if (!(error instanceof RequiredVerificationError) || error.evidence.outcome === "spawn_failure")
+            return { status: "infrastructure", reason: `release checks at ${commit.slice(0, 12)} could not run: ${message(error).slice(0, 1000)}`, ...setupMs === undefined ? {} : { setupMs } };
+          failure = error;
+        }
+        // On the host, the checkout must still hold the commit's tree (a boat machine is compared when it is released).
+        if (!open!.gate) {
+          const drift = await jj(checkout, ["diff", "--from", commit, "--to", "@", "--summary"]);
+          if (drift) {
+            await jj(checkout, ["restore", "--from", commit, "--into", "@"]);
+            throw new GateDrift(`The release checks changed the source of ${commit.slice(0, 12)}; their results are not evidence for it:\n${drift}`);
+          }
+        }
+        const ran = new Set(runIds);
+        const events = log.events({ operationId: operation.id }).map((row) => row.event);
+        const suites: Record<string, SuiteState> = {};
+        for (const event of events) if (event.type === "test_report" && ran.has(event.runId) && event.status === "recorded")
+          for (const entry of event.outcomes ?? []) if (suites[entry.suite] !== "failed") suites[entry.suite] = entry.outcome;
+        if (!failure) return { status: "passed", suites, ...setupMs === undefined ? {} : { setupMs } };
+        const failingTests = events.flatMap((event) => event.type === "run_finished" && ran.has(event.runId) ? event.failingTests ?? [] : []);
+        return { status: "failed", failedChecks: failure.evidence.failures.map((entry) => indexes[entry.checkIndex]!), command: failure.evidence.command,
+          suites, failingTests: boundedTests(failingTests), output: boundedOutput(failure.message), ...setupMs === undefined ? {} : { setupMs } };
+      };
+      let outcome: Awaited<ReturnType<typeof runBatchCheck>>;
+      const notEvidence = (error: unknown): OperationEvent => {
+        append(operation.id, { type: "batch_outcome", outcome: "infrastructure", base, head, machine: placed, reason: message(error).slice(0, 2000) });
+        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} is not evidence for it: ${message(error)}` };
+      };
+      try {
+        outcome = await runBatchCheck({ head, landings, run: (commit, scope) => runAt(commit, scope),
+          onRun: ({ phase, commit, run: result, durationMs }) => append(operation.id, { type: "batch_run", phase, commit, status: result.status, durationMs,
+            ...result.setupMs === undefined ? {} : { setupMs: result.setupMs },
+            ...result.status === "failed" ? { keys: boundedKeys(Object.entries(result.suites).filter(([, state]) => state === "failed").map(([suite]) => suite)), failingTests: result.failingTests } : {},
+            ...result.status === "infrastructure" ? { reason: result.reason } : {} }) });
+      } catch (error) {
+        await releaseMachine().catch((closing: unknown) => progress(`[batch] the batch machine could not be released: ${message(closing)}`));
+        if (error instanceof GateDrift) return notEvidence(error);
+        throw error;
+      }
+      // Releasing the last machine compares its tree: a check that changed the source, or a machine whose tree cannot be read, proves nothing.
+      try { await releaseMachine(); } catch (error) { return notEvidence(error); }
+      const recorded = { base, head, machine: placed };
+      if (outcome.outcome === "green") {
+        append(operation.id, { type: "batch_outcome", outcome: "green", ...recorded });
+        return { type: "verified", base: plan.base, candidate: head, checks: plan.checks, nonAdditiveMigrations: plan.nonAdditiveMigrations };
+      }
+      if (outcome.outcome === "infrastructure") {
+        append(operation.id, { type: "batch_outcome", outcome: "infrastructure", ...recorded, reason: outcome.reason });
+        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} did not run (infrastructure, not a regression): ${outcome.reason}` };
+      }
+      if (outcome.outcome === "flaky") {
+        append(operation.id, { type: "batch_outcome", outcome: "flaky", ...recorded, keys: boundedKeys(outcome.keys) });
+        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed and passed on its rerun; nothing is routed, and the head needs a complete green check before it deploys` };
+      }
+      const culprits = outcome.culprits.map((culprit) => ({ ...culprit, keys: boundedKeys(culprit.keys), workspace: log.operation(culprit.operationId)?.submittedBy ?? null }));
+      append(operation.id, { type: "batch_outcome", outcome: "red", ...recorded, keys: boundedKeys(outcome.keys), diagnosis: outcome.diagnosis,
+        shorterCandidate: outcome.shorterCandidate, culprits, ...outcome.unattributed.length ? { unattributed: outcome.unattributed.map((entry) => ({ ...entry, keys: boundedKeys(entry.keys) })) } : {},
+        ...outcome.reason ? { reason: outcome.reason } : {} });
+      // The part of the batch before the first culprit ships only after its own complete check passes.
+      if (outcome.shorterCandidate) queueVerification(operation.repo, outcome.shorterCandidate, "batch");
+      trackRoute(operation.id);
+      const named = culprits.map((culprit) => `${culprit.commitId.slice(0, 12)} (${culprit.operationId}: ${culprit.keys.join(", ")})`).join("; ");
+      const unnamed = outcome.unattributed.map((entry) => `${entry.keys.join(", ")} started failing between ${entry.after?.slice(0, 12) ?? base.slice(0, 12)} and ${entry.firstFailing.slice(0, 12)}, where diagnosis could not run`).join("; ");
+      return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} failed: ${outcome.keys.join(", ")}; ${culprits.length ? `culprits ${named}` : "no culprit found"}`
+        + (unnamed ? `; unattributed: ${unnamed}` : "")
+        + (outcome.shorterCandidate ? `; ${outcome.shorterCandidate.slice(0, 12)}, before the first culprit, is checked next` : "") };
+    }
+  }
+  /** The base a release check is measured from: the commit Production serves, or the release branch while nothing is served. */
+  async function servedBase(repo: string, directory: string): Promise<string | null> {
+    const served = servedCommit(log.deployments(repo, "production"));
+    if (served) return served;
+    const context = await workspaceContext(directory).catch(() => null);
+    const branch = context?.configuration.releaseBranch;
+    if (!branch) return null;
+    return (await revisionFacts(directory, `${branch}@${context.configuration.remote ?? "origin"}`).catch(() => null))?.commitId ?? null;
+  }
+  /** The environment of a release check of `head`: its base and head, and the suites a rerun narrows to (`batch-verification.ts`). */
+  const releaseEnvironment = (base: string | null, head: string, suites?: readonly string[]) => (): NodeJS.ProcessEnv => ({
+    ...(environment?.() ?? process.env), ...base ? { [RELEASE_BASE_ENV]: base } : {}, [RELEASE_HEAD_ENV]: head,
+    ...suites?.length ? { [RELEASE_SUITES_ENV]: suites.join(",") } : {} });
+  /** Culprits whose record is on its way to Forge, so two passes never send one twice at once. */
+  const routing = new Set<string>();
+  const batchRouteRetryMs = input.batchRouteRetryMs ?? 300_000;
+  /**
+   * Record each culprit of a red batch on its own Forge work, once: Forge keys the record by batch and culprit, and
+   * the ledger says which it already answered. A culprit Forge has no association for stays reported here only; one
+   * Forge could not be reached for is sent again later, and at startup.
+   */
+  async function routeBatch(operationId: string): Promise<void> {
+    const operation = log.operation(operationId);
+    const events = log.events({ operationId });
+    const outcome = events.map((row) => row.event).findLast((event) => event.type === "batch_outcome");
+    const started = events.find((row) => row.event.type === "batch_started");
+    const ended = events.findLast((row) => row.event.type === "batch_outcome");
+    if (!operation || outcome?.type !== "batch_outcome" || outcome.outcome !== "red" || !started || !ended) return;
+    const answered = new Set(events.flatMap((row) => row.event.type === "batch_routed" || row.event.type === "batch_unrouted" ? [row.event.commitId] : []));
+    let retry = false;
+    for (const culprit of outcome.culprits ?? []) {
+      const key = `${operationId}\0${culprit.commitId}`;
+      if (answered.has(culprit.commitId) || routing.has(key)) continue;
+      routing.add(key);
+      try {
+        const reference = { commitId: culprit.commitId, operationId: culprit.operationId };
+        if (!input.recordBatchCheck) { append(operationId, { type: "batch_unrouted", ...reference, reason: "this runner has no Forge route" }); continue; }
+        const answer = await input.recordBatchCheck({ repository: operation.repo, batchId: operationId, occurredAt: ended.at, startedAt: started.at, endedAt: ended.at,
+          base: outcome.base, head: outcome.head, culprit: reference, failingTests: culprit.failingTests, failedSuites: culprit.keys, command: culprit.command, output: culprit.output });
+        if (answer.kind === "accepted") {
+          const value = (answer.value ?? {}) as { runId?: unknown; specId?: unknown; number?: unknown; noteId?: unknown };
+          append(operationId, { type: "batch_routed", ...reference, specId: String(value.specId ?? ""), number: typeof value.number === "number" ? value.number : null,
+            runId: String(value.runId ?? ""), noteId: typeof value.noteId === "string" ? value.noteId : null });
+        } else if (answer.kind === "refused") append(operationId, { type: "batch_unrouted", ...reference, reason: `${answer.code}${answer.message ? `: ${answer.message}` : ""}` });
+        else retry = true;
+      } catch (error) {
+        retry = true;
+        console.error(`[runner] ${operation.repo}: batch culprit ${culprit.commitId.slice(0, 12)} could not be routed: ${message(error)}`);
+      } finally { routing.delete(key); }
+    }
+    if (retry && !closed) setTimeout(() => { if (!closed) trackRoute(operationId); }, batchRouteRetryMs).unref?.();
+  }
+  /** Routing in flight, which `idle` waits for. */
+  const routes = new Set<Promise<void>>();
+  function trackRoute(operationId: string): void {
+    const pending = routeBatch(operationId).catch((error: unknown) => console.error(`[runner] batch ${operationId} could not be routed: ${message(error)}`))
+      .finally(() => routes.delete(pending));
+    routes.add(pending);
   }
   async function freezeProvenance(id: string, checkout: string, failure: Extract<OperationEvent, { type: "failed" }>,
     checked?: { candidate: string; base: string }, policy?: Pick<import("../policy/execution-policy.ts").ExecutionPolicy, "migrationFinalization" | "provenance">): Promise<void> {
@@ -2132,6 +2420,7 @@ export function createRunnerQueue(input: {
     }).finally(wakeMain);
   }
   return {
+    requestBatchCheck,
     wake() {
       wakeMain();
       wakeDeploys();
@@ -2156,6 +2445,8 @@ export function createRunnerQueue(input: {
         // A hold nothing else will publish: the landing that held it ended, and Build refuses a reland while it is held.
         recoverHeld(repo);
         await reconcileVerification(repo);
+        // A red batch whose culprits Forge never answered is sent again.
+        for (const verification of log.verifications(repo)) if (verification.status === "failed") trackRoute(verification.id);
         await promoteAutomatically(repo);
         await scheduleLatest(repo);
       }
@@ -2177,11 +2468,11 @@ export function createRunnerQueue(input: {
     async idle() {
       for (;;) {
         if (recovering) await recovering;
-        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values()]);
+        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...routes]);
         const lane = deploying;
         await lane;
         await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));
-        if (!recovering && !lanes.size && !attempts.size && !discoveries.size && !activeDeploys.size && lane === deploying) return;
+        if (!recovering && !lanes.size && !attempts.size && !discoveries.size && !activeDeploys.size && !routes.size && lane === deploying) return;
       }
     },
     close() {

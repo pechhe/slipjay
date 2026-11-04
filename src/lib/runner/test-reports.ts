@@ -17,6 +17,12 @@
  *     "unusedPermitMs": n, "idleMs": n, "lockWaitMs": n,
  *     "suites": [{ "name": "<suite>", "queueMs": n, "startMs": n, "finishMs": n, "permits": n }] }
  *
+ * `outcomes`, also additive (SJ-192), is each suite's own verdict, so a failed run says which suites failed and a
+ * rerun can be narrowed to them (`SLIPJAY_RELEASE_SUITES`); `missing` is a suite asked for that the command's selection
+ * does not hold at this revision:
+ *
+ *   "outcomes": [{ "suite": "<name>", "outcome": "passed" | "failed" | "missing" }]
+ *
  * Only `wallMs` and `suites` are required; a timing that does not fit this shape is dropped, never
  * a reason to refuse the run's rows. `suite` separates measurements that must never pool: a
  * landing's selected run, an audit's complete one, and the file-cost run that measures one
@@ -58,9 +64,13 @@ export type GateTiming = {
   wallMs: number; concurrency?: number; criticalSuite?: string; serialTailMs?: number;
   unusedPermitMs?: number; idleMs?: number; lockWaitMs?: number; suites: GateSuiteTiming[];
 };
+/** One suite's own verdict in a run (`outcomes`). */
+export type SuiteOutcome = { suite: string; outcome: "passed" | "failed" | "missing" };
+const SUITE_OUTCOMES = ["passed", "failed", "missing"] as const;
+const MAX_OUTCOMES = 500;
 /** What one run's reports said. */
 export type TestReportReading =
-  | { status: "recorded"; files: TestFileRow[]; truncated?: boolean; selection?: TestSelectionKind; timing?: GateTiming }
+  | { status: "recorded"; files: TestFileRow[]; truncated?: boolean; selection?: TestSelectionKind; timing?: GateTiming; outcomes?: SuiteOutcome[] }
   /** The command wrote no manifest, as an install or a type check does: no rows, and no zero-duration samples. */
   | { status: "missing" }
   /** A malformed report keeps no rows, so a partial one never reads as a complete run. */
@@ -130,6 +140,17 @@ export function gateTiming(value: unknown): GateTiming | undefined {
   return kept;
 }
 
+/** The manifest's `outcomes`, or undefined when absent or not of the contract's shape: never a reason to refuse the rows. */
+function suiteOutcomes(value: unknown): SuiteOutcome[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_OUTCOMES) return undefined;
+  const kept: SuiteOutcome[] = [];
+  for (const entry of value as { suite?: unknown; outcome?: unknown }[]) {
+    if (!entry || !suiteName(entry.suite) || !(SUITE_OUTCOMES as readonly unknown[]).includes(entry.outcome)) return undefined;
+    kept.push({ suite: entry.suite as string, outcome: entry.outcome as SuiteOutcome["outcome"] });
+  }
+  return kept;
+}
+
 /** A path the manifest names, refused when it leaves `base`. */
 function contained(base: string, path: unknown, label: string): string {
   if (typeof path !== "string" || !path || isAbsolute(path)) throw new Error(`${label} must be a relative path`);
@@ -149,8 +170,9 @@ export async function readTestReports(directory: string, root: string): Promise<
   const files: TestFileRow[] = [];
   let selection: TestSelectionKind | undefined;
   let timing: GateTiming | undefined;
+  let outcomes: SuiteOutcome[] | undefined;
   try {
-    const manifest = JSON.parse(manifestText) as { version?: unknown; selection?: unknown; timing?: unknown; reports?: unknown };
+    const manifest = JSON.parse(manifestText) as { version?: unknown; selection?: unknown; timing?: unknown; reports?: unknown; outcomes?: unknown };
     if (manifest.version !== 1) throw new Error("manifest is not version 1");
     if (!Array.isArray(manifest.reports)) throw new Error("manifest is not versioned with a reports list");
     // `selection` is additive to version 1, so a reader that predates it ignores it. A kind the contract
@@ -160,6 +182,7 @@ export async function readTestReports(directory: string, root: string): Promise<
       if (typeof kind === "string" && (TEST_SELECTION_KINDS as readonly string[]).includes(kind)) selection = kind as TestSelectionKind;
     }
     timing = gateTiming(manifest.timing);
+    outcomes = suiteOutcomes(manifest.outcomes);
     for (const [index, entry] of manifest.reports.entries()) {
       const report = entry as { format?: unknown; path?: unknown; suite?: unknown; cwd?: unknown };
       const label = `report ${index + 1}`;
@@ -178,7 +201,7 @@ export async function readTestReports(directory: string, root: string): Promise<
   } catch (error) {
     return { status: "malformed", reason: (error as Error).message };
   }
-  const described = { ...(selection ? { selection } : {}), ...(timing ? { timing } : {}) };
+  const described = { ...(selection ? { selection } : {}), ...(timing ? { timing } : {}), ...(outcomes ? { outcomes } : {}) };
   if (files.length > MAX_FILES) return { status: "recorded", files: files.slice(0, MAX_FILES), truncated: true, ...described };
   return { status: "recorded", files, ...described };
 }

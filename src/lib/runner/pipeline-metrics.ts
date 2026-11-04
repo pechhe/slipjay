@@ -1,3 +1,4 @@
+import { batchMetrics, formatBatchMetrics, type BatchMetrics } from "./batch-metrics.ts";
 import { START_STEPS, type StartStep } from "../workspace/start-steps.ts";
 import { isLandingSubmission, repositoryKey, RUNNER_CONTROL_ID } from "./runner-contract.ts";
 import type { CauseClass, GatePlacement, Operation, RunnerStage, StoredEvent } from "./runner-types.ts";
@@ -91,6 +92,8 @@ export type PipelineMetrics = {
   attempts: ChangeAttempts[];
   held: HeldMetric[];
   workspaceStarts: WorkspaceStartMetric[];
+  /** Batch checks and the landing gate's time, per repository (`batch-metrics.ts`). */
+  batches: BatchMetrics[];
 };
 
 type OperationHistory = {
@@ -113,7 +116,7 @@ const LISTED_FILES = 10;
 const GROWTH_RATIO = 1.2;
 const GROWTH_MIN_SAMPLES = 3;
 
-const timing = (values: number[]): MetricTiming | null => {
+export const timing = (values: number[]): MetricTiming | null => {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -539,6 +542,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
     attempts,
     held,
     workspaceStarts: workspaceStarts(events, threshold).filter((entry) => !only || repositoryKey(entry.repo) === only),
+    batches: batchMetrics(events, threshold, timing, only),
   };
 }
 
@@ -589,6 +593,7 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     if (repo.testFilesOverBudget.length) lines.push(`  Test files over budget: ${repo.testFilesOverBudget.map((file) => `${file.suite} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
     if (repo.costCandidates.length) lines.push(`  Cost candidates: ${repo.costCandidates.length} file(s), slowest ${repo.costCandidates.slice(0, 5).map((file) => `${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
   }
+  lines.push(...formatBatchMetrics(metrics.batches ?? []));
   lines.push(flakeLine("Confirmed flakes", metrics.flakes.filter((candidate) => candidate.confirmed)));
   lines.push(flakeLine("Flake candidates", metrics.flakes.filter((candidate) => !candidate.confirmed)));
   lines.push(`Attempts: ${metrics.attempts.length ? metrics.attempts.map((attempt) => `${attempt.repo}/${attempt.changeId} ${attempt.attempts}${attempt.landed ? " until landed" : " open"}`).join("; ") : "none"}`);

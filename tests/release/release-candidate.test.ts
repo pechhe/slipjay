@@ -171,3 +171,34 @@ test("in development mode the release base's policy skips staging: the integrati
     assert.ok(confirmable.ok && confirmable.status === "confirmable", JSON.stringify(confirmable));
   } finally { await f.dispose(); }
 });
+
+test("under batchVerification a confirm without a passed check asks the runner for the candidate's batch check, waits for it and confirms only on its pass", async () => {
+  const f = await promotingProject();
+  try {
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+    await f.commit({ "slipjay.json": JSON.stringify({ ...policy, process: "development", batchVerification: { machine: "release-check" } }) }, "Batch in development mode");
+    execFileSync("git", ["push", "-q", "origin", "main:refs/heads/release"], { cwd: f.repo, stdio: "pipe" });
+    const head = await f.commit({ "a.txt": "a\n" }, "Add a");
+    const base = remoteRef(f, "release");
+    let verifications: PromotionState["verifications"] = [];
+    const read = async (): Promise<PromotionState> => ({ stagingGreen: null, stagingGreenCommits: [], approved: [], verifications });
+    const asked: string[] = [];
+
+    // The check passes: the confirm goes ahead with the exact candidate.
+    const confirmable = await confirmableCandidate(f.repo, head, false, read, async (commit) => {
+      asked.push(commit);
+      verifications = [verificationOf(head, "verified", { type: "verified", base, candidate: head, checks: f.checks } as OperationEvent)];
+    });
+    assert.ok(confirmable.ok && confirmable.status === "confirmable", JSON.stringify(confirmable));
+    assert.deepEqual(asked, [head]);
+
+    // A passed check stands: nothing is asked again.
+    assert.ok((await confirmableCandidate(f.repo, head, false, read, async (commit) => { asked.push(commit); })).ok);
+    assert.equal(asked.length, 1);
+
+    // The check fails: the confirm is refused.
+    verifications = [];
+    const refused = await confirmableCandidate(f.repo, head, false, read, async () => { verifications = [verificationOf(head, "failed")]; });
+    assert.ok(!refused.ok && /No pre-verification of .* passed/.test(refused.reason), JSON.stringify(refused));
+  } finally { await f.dispose(); }
+});

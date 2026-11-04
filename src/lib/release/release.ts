@@ -52,6 +52,8 @@ export type ReleasePlan = {
   promotes: boolean;
   /** The release base's policy is `process: "development"`: staging is skipped, so a promotion ships a commit whose pre-verification passed against this base instead of one staging deployed. A candidate cannot switch the mode on for itself. */
   skipsStaging: boolean;
+  /** The release base also declares `batchVerification` (SJ-192): the pre-verification a promotion needs is the runner's batch check of the candidate. */
+  batchesChecks: boolean;
   /** The candidate's production deployment declares `migrations`: the runner applies the promotion's migrations itself. */
   appliesMigrations: boolean;
   /** The candidate declares a nightly `audit`: a promotion waits on an unexplained failing one. */
@@ -393,7 +395,8 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   const production = policy.deployments?.environments.production;
   const { policy: basePolicy } = await readExecutionPolicyAtCommit(root, base).catch(() => ({ policy: null }));
   return { root, remote, integrationBranch, releaseBranch, base, candidate, commits, migrationArtifacts, migrationPaths: artifactPaths, nonAdditiveMigrations, paths: changed, checks,
-    promotes: Boolean(production), skipsStaging: basePolicy?.process === "development", appliesMigrations: Boolean(production?.migrations), audits: Boolean(policy.audit) };
+    promotes: Boolean(production), skipsStaging: basePolicy?.process === "development",
+    batchesChecks: basePolicy?.process === "development" && Boolean(basePolicy.batchVerification), appliesMigrations: Boolean(production?.migrations), audits: Boolean(policy.audit) };
 }
 
 /** The newest of `approved` the release branch does not hold: approvals it holds shipped. */
@@ -685,13 +688,20 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
  * On the author's machine, before a confirm goes to the runner: the full id of the
  * approved candidate, or the refusal the runner would return for it.
  */
-export async function confirmableCandidate(cwd: string, confirm: string, migrationsReady: boolean, readPromotion?: () => Promise<PromotionState>): Promise<{ ok: true; status: "confirmable"; candidate: string; remote: string } | ReleaseResult> {
+export async function confirmableCandidate(cwd: string, confirm: string, migrationsReady: boolean, readPromotion?: () => Promise<PromotionState>,
+  /** Under `batchVerification`, runs the candidate's batch check on the runner (or follows the one already open) to its end. */
+  batchCheck?: (candidate: string) => Promise<void>): Promise<{ ok: true; status: "confirmable"; candidate: string; remote: string } | ReleaseResult> {
   try {
     const plan = await planRelease(cwd, { candidate: confirm });
     if (plan.commits.length && plan.promotes && readPromotion) {
       // Any commit staging is green on may be confirmed, not only the newest; the runner refuses the rest too, but later.
       // In development mode a passed pre-verification against the release base stands in for staging.
-      const state = await readPromotion();
+      let state = await readPromotion();
+      // A batching repository checks a candidate only when its promotion is due; a confirm asks for that check now and waits for it.
+      if (plan.skipsStaging && plan.batchesChecks && batchCheck && !passedVerification(plan, state.verifications)) {
+        await batchCheck(plan.candidate);
+        state = await readPromotion();
+      }
       if (plan.skipsStaging) {
         if (!passedVerification(plan, state.verifications)) refuse(`No pre-verification of ${short(plan.candidate)} passed against ${plan.releaseBranch} ${short(plan.base)}: in \`process: "development"\` a promotion ships only a commit whose pre-verification passed, in place of staging`);
       } else if (!greenCommits(state).includes(plan.candidate)) refuse(state.stagingGreenCommits ? `Staging recorded no green deploy of ${short(plan.candidate)}: production promotes only a commit staging deployed`

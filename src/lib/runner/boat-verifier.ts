@@ -415,9 +415,10 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
         throw error;
       }
     },
-    async open({ repo, slot: inputSlot, screening, retrying, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
-      const slot = screening ? `${inputSlot}-screen` : inputSlot;
-      const vm = await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true, false, retrying === true);
+    async open({ repo, slot: inputSlot, pool, screening, retrying, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
+      const slot = pool ?? (screening ? `${inputSlot}-screen` : inputSlot);
+      // A named pool (a batch check's VM, SJ-192) takes turns with its warm-ups, as a build machine does, and is never forked afresh while it is merely slow.
+      const vm = pool ? await buildMachine(repo, pool, signal, ATTEMPT_LIFETIME_S) : await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true, false, retrying === true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.
       const billed = await usage(vm, signal);
