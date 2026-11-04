@@ -202,9 +202,10 @@ export const fetchIntegration = (cwd: string, remote: string, branch: string, { 
 
 /** Push the integration bookmark and confirm the remote-tracking bookmark contains the artifact. */
 export async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string, expectedBase?: string): Promise<LandingPublication> {
+  // The exact-base check reads two bookmarks; neither depends on the checkout's files.
   if (expectedBase !== undefined) {
-    const local = await revisionFacts(cwd, branch);
-    const tracked = await revisionFacts(cwd, `${branch}@${remote}`);
+    const local = await revisionFacts(cwd, branch, { ignoreWorkingCopy: true });
+    const tracked = await revisionFacts(cwd, `${branch}@${remote}`, { ignoreWorkingCopy: true });
     if (local.commitId !== commitId || tracked.commitId !== expectedBase)
       return { ok: false, status: "push_failed", remote, branch, commitId, reason: "Exact publication candidate or expected remote base changed; retained integration requires reconciliation" };
   }

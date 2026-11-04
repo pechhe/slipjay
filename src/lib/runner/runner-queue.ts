@@ -1000,7 +1000,9 @@ export function createRunnerQueue(input: {
       const operation = turn.operation;
       // A screen behind a predicted prefix publishes only once that prefix has.
       if (turn.predecessor && screens.get(turn.predecessor.operation.id) === turn.predecessor) continue;
-      if (!admits(false, places(), workers, shortPlace) || lanes.has(laneOf(operation.repo))
+      // Its gate has passed: what is left is seconds of publication, and the repository lane already takes those in turn.
+      // Where a combined budget bounds what runs, it needs no worker place, so it never queues behind another gate.
+      if ((!shortPlace && !admits(false, places(), workers, shortPlace)) || lanes.has(laneOf(operation.repo))
         || prefixes.get(operation.repo)?.length || awaitingReplacement({ ...operation, status: "queued" }, open) || screeningFence(operation, open)) continue;
       turn.screen!.phase = "authoritative";
       prefixes.set(operation.repo, [turn]);
@@ -1427,7 +1429,7 @@ export function createRunnerQueue(input: {
       // A commit integrated by an earlier turn but never published (a failed push, or
       // a restart after finalization) may already be applied to the external target.
       // Finish it before anything moves the bookmark: dropping it would orphan that state.
-      if (!prefix && await jj(checkout, ["log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
+      if (!prefix && await jj(checkout, ["--ignore-working-copy", "log", "-r", `${branch} ~ ::${branch}@${remote}`, "--no-graph", "-T", "commit_id"])) {
         const held = (await revisionFacts(checkout, branch)).commitId;
         if (!log.held().some((entry) => entry.repo === operation.repo && entry.commitId === held))
           append(operation.id, { type: "integration_held", repo: operation.repo, commitId: held, reason: "An earlier integration is not yet published" });
@@ -1477,7 +1479,8 @@ export function createRunnerQueue(input: {
       // A screen on the tip alone has fixed its base here; preparation rebases onto this same commit. Record it
       // now, so a publication during the install and generation below already overtakes it.
       if (prefix?.screen && !prefix.predecessor) prefix.base = (await revisionFacts(checkout, branch)).commitId;
-      // Read the freshly fetched integration policy, rather than an earlier warm tip.
+      // Read the freshly fetched integration policy, rather than an earlier warm tip. It may rename the
+      // integration branch, so this resolves the branch again rather than only reading its policy.
       context = await workspaceContext(checkout);
       if (!context) throw new Error("Runner checkout context is unavailable");
       provenancePolicy = context.configuration;
@@ -1496,20 +1499,22 @@ export function createRunnerQueue(input: {
       if (!retainedSource) await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]);
       // Drop earlier candidates; never the published integration, which a candidate on an older base does not contain.
       await jj(checkout, ["abandon", "-r", `mutable() ~ ::${sourceRevision} ~ ::${branch}@${remote} ~ ${RETAINED_ARTIFACT_REVISIONS}`]);
-      const commits = await jj(checkout, ["log", "-r", sourceRevision, "--no-graph", "-T", 'commit_id ++ "\\n"']);
+      const commits = await jj(checkout, ["--ignore-working-copy", "log", "-r", sourceRevision, "--no-graph", "-T", 'commit_id ++ "\\n"']);
       if (commits !== operation.commitId) throw new Error(`Candidate bookmark ${operation.bookmark} does not resolve to submitted commit ${operation.commitId}`);
-      const visible = await jj(checkout, ["log", "-r", `change_id(${operation.changeId})`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
+      const visible = await jj(checkout, ["--ignore-working-copy", "log", "-r", `change_id(${operation.changeId})`, "--no-graph", "-T", 'commit_id ++ "\\n"']);
       if (!prefix && !retainedSource && (visible.split("\n").filter(Boolean).length !== 1 || visible !== operation.commitId))
         throw new Error(`Submitted change ${operation.changeId} must have exactly one visible commit matching ${operation.commitId}`);
       if (prefix || retainedSource) await duplicateLandingSource(checkout, operation.commitId, branch);
       else await jj(checkout, ["edit", operation.commitId]);
-      const description = await jj(checkout, ["log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
+      const description = await jj(checkout, ["--ignore-working-copy", "log", "-r", operation.commitId, "--no-graph", "-T", "description"]);
       append(operation.id, { type: "landing_title", title: description.split("\n")[0] ?? "" });
       const trailer = (name: string) => { const value = new RegExp(`^${name}:\\s*#?(\\d+)\\s*$`, "m").exec(description)?.[1]; return value ? Number(value) : undefined; };
       const identity = log.events({ operationId: operation.id }).findLast((row) => row.event.type === "identity")?.event;
       append(operation.id, { ...(identity?.type === "identity" ? identity : { type: "identity", submitterKind: "unknown", submitterId: operation.submittedBy, workspace: "unknown", machine: operation.submittedBy }), type: "identity", ticket: trailer("Ticket"), spec: trailer("Spec") ?? (identity?.type === "identity" ? identity.spec : undefined) });
       await validateCandidatePolicy(checkout, operation.commitId);
-      await recordShape(checkout, context.integrationBranch, operation.commitId, context.configuration.migrationFinalization);
+      // The change's shape is recorded from the prepared candidate, by prepareCandidateDependencies and
+      // verification: `branch..submitted source` also counts what other landings changed while the
+      // submission waited, so it is neither the change's size nor a cheaper reading of it.
       const candidateContext = context;
       const candidateOptions = {
         onCandidate: (candidate: string, base: string) => { checkedCandidate = { candidate, base }; },

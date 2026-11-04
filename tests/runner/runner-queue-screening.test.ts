@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
-import { readdir, writeFile } from "node:fs/promises";
+import { readdir, rm, writeFile } from "node:fs/promises";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { createRunnerQueue } from "../../src/lib/runner/runner-queue.ts";
@@ -77,6 +77,29 @@ test("a screen behind a failing screen screens again on the tip; only the pass p
     assert.equal(f.log.events().filter(({ event }) => event.type === "publication_intent").length, 1);
   } finally { r.releaseAll(); await f.dispose(); }
 });
+
+test("a passed screen publishes while another repository's gate holds every worker", async () => {
+  const r = controlledRemote();
+  const holdingGate = (root: string) => `const fs=require("node:fs");while(fs.existsSync(${JSON.stringify(join(root, "hold-gates"))})&&!fs.existsSync("unheld"))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,50);`;
+  const f = await fixture(false, false, undefined, false, { screeningLanes: 3, workers: 1, other: true, remoteVerification: r.remote, gates: (root) => [holdingGate(root)] });
+  const holdFile = join(f.root, "hold-gates");
+  try {
+    await writeFile(holdFile, "");
+    const screen = f.submit(await f.candidate("unheld"));
+    f.queue.wake();
+    await until(() => r.opened.length === 1 || undefined);
+    const other = f.submit(await f.candidate("other.txt", f.otherAuthor, "fixture/other"));
+    f.queue.wake();
+    await until(() => f.log.operation(other)?.status === "running" || undefined);
+    r.releaseAll();
+    await until(() => f.result(screen) || undefined);
+    assert.equal(f.result(screen)?.type, "landed", JSON.stringify(f.result(screen)));
+    assert.equal(f.result(other), undefined, "the other repository's gate still holds the only worker");
+    await rm(holdFile, { force: true });
+    await f.queue.idle();
+    assert.equal(f.result(other)?.type, "landed", JSON.stringify(f.result(other)));
+  } finally { r.releaseAll(); await rm(holdFile, { force: true }); await f.dispose(); }
+}, 120_000);
 
 test("a screen behind a slower one waits for it, then publishes on its own screen with no second gate", async () => {
   const r = controlledRemote();

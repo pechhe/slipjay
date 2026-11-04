@@ -124,7 +124,12 @@ async function checked(
   return result.stdout.trim();
 }
 
-/** A checked `jj --color=never` call: its trimmed stdout, or a CommandError. */
+/**
+ * A checked `jj --color=never` call: its trimmed stdout, or a CommandError.
+ * `--ignore-working-copy` is safe on a read, which records no operation. On a command that records
+ * one it leaves the working copy stale, and the next command that snapshots then refuses until
+ * `jj workspace update-stale` runs, so mutations always snapshot first.
+ */
 export async function jj(cwd: string, args: string[], options: Record<string, unknown> = {}): Promise<string> {
   return await checked("jj", ["--color=never", ...args], { cwd, ...options });
 }

@@ -46,6 +46,9 @@ the runner's `limits` bound concurrent runs together.
   it runs and is admitted in arrival order like a release, so a stream of landings can
   neither delay its start for long nor stop it; the workers bound the total, so it
   never adds a place beyond them.
+- **Publishing a passed screen.** With a combined budget, a landing whose screen has passed publishes as soon as its
+  repository lane is free, without waiting for a worker place: its gate is done and publication takes seconds. It
+  counts as a place while it publishes, so nothing new starts beside it until it has.
 - **Short landings.** With a combined budget, a landing of a short repository may start
   while other operations hold every worker: at most `workers` operations other than
   short landings run at once, and at most `workers + 1` in the worker pool.

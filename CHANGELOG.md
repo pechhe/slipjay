@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.51.3
+
+- **A landing that passed its gate publishes at once:** it gave up its worker place when its screen passed, then queued
+  behind other gates for a place to do seconds of publication (15 to 20 s with nothing ahead of it on 4 Nov 2026). With a
+  combined budget it now needs only its repository lane.
+- **A landing's fetching stage reads less:** its bookmark and commit reads (`develop ~ ::develop@origin`, the resolved
+  candidate, the change's visible copies, the description) no longer snapshot the checkout's tree: 4 reads saved about
+  90 ms each on a loaded host. `--ignore-working-copy` stays off every command
+  that records an operation, because that leaves the working copy stale and the next snapshotting command refuses.
+- **The change shape is measured once, from the prepared candidate:** `branch..submitted source` also counts what other
+  landings changed while the submission waited (48 files where the rebased candidate held 3), and the reading cost 2.1 s
+  of one YardSmith landing's fetching stage on 4 Nov 2026. The prepared candidate's shape is recorded by dependency
+  preparation and by verification for every landing, and is the shape the metrics already kept.
+
 ## v3.51.2
 
 Spec SJ-194: a prepared spare's dependencies are checked, not only fingerprinted.
