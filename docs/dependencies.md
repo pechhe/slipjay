@@ -8,7 +8,7 @@ Short map for dependency updates. The repository is authoritative; fix this file
 - `slipjay.json` landing verification runs `bun install --frozen-lockfile`.
 - The shared runner selects a preinstalled exact Bun from each candidate pin;
   provision its version in the runner toolchains directory before moving the pin
-  (README, Candidate Bun runtime). The shared global Bun need not change.
+  ([Candidate Bun runtime](runner.md#candidate-bun-runtime)). The shared global Bun need not change.
 
 ## Clusters
 
