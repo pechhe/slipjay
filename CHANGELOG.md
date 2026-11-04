@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.50.3
+
+- **A build machine idles an hour, not thirty minutes:** with promotions batched every 30 minutes, one batch skipped
+  for want of a candidate stopped the machine, and the next promotion waited on its disk restore (12 minutes on 4 Nov
+  2026) and built on a cold disk. An idle hour keeps it warm through one skipped batch; a quiet afternoon still stops it.
+
 ## v3.50.2
 
 - **A scheduled promotion's build machine is warm when it starts:** while `promotionSchedule` holds a candidate and

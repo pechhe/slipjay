@@ -46,11 +46,12 @@ const CONTROL_TIMEOUT_MS = 120_000;
  * timer: long enough for any attempt while one runs, IDLE_LIFETIME_S once it closes. A runner restart loses no timer.
  * Fifteen minutes keeps a gate VM warm through a burst of landings without billing a quiet hour; a build machine
  * keeps its warm Docker build cache between release builds (171 s warm against 25+ min cold), so it idles
- * BUILD_IDLE_LIFETIME_S: long enough to stay warm through a working session's landings, short of a quiet afternoon.
+ * BUILD_IDLE_LIFETIME_S: an hour, so a batched promotion schedule (every 30 minutes) that skips one batch for want of a
+ * candidate still finds it warm, while a quiet afternoon stops it.
  */
 const ATTEMPT_LIFETIME_S = 3 * 3600;
 const IDLE_LIFETIME_S = 15 * 60;
-const BUILD_IDLE_LIFETIME_S = 30 * 60;
+const BUILD_IDLE_LIFETIME_S = 60 * 60;
 /** Boat states in which a VM holds no running machine: it resumes from its snapshot. */
 const STOPPED = ["stopped", "stopping", "archived"];
 /** How long recovery keeps retrying to clean the pool after a restart. */
