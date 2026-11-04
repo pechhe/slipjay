@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.50.1
+
+Spec YS-900 (pechhe/yardsmith): a landing gate's timing is kept by the runner.
+
+- **Gate timing in the test-report manifest:** a gate can add an optional `timing` object to
+  `slipjay-test-reports.json` (wall time, critical suite, serial tail, unused permit time, idle time, lock wait and
+  each suite's queue, start, finish and permits). The runner keeps it on the run's `test_report` event for host and boat
+  gates alike, so a gate's time no longer lives only on the machine that ran it; a timing that does not fit the shape is
+  dropped and the run's rows are kept. `slipjay metrics` names each repository's critical suites over the budget window,
+  with their median serial tail, and the gates' lock wait.
+
 ## v3.50.0
 
 Spec SJ-189: a YardSmith landing gates on the runner host when it is free, and on boat only alongside another.

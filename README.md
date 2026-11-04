@@ -1369,7 +1369,13 @@ directory of its own. A command that writes reports there, with a manifest
 gets one `{file, suite, ms, status}` row per test file in its run's evidence. `selection` is
 optional and additive, so a writer can name how the gate chose its tests without the runner
 that reads it having landed first; the gate writes it, and metrics report landing verify
-time split into related-selection (representative) and complete-selection runs. A test
+time split into related-selection (representative) and complete-selection runs. `timing`,
+as additive (`{"wallMs":n,"concurrency":n,"criticalSuite":"<suite>","serialTailMs":n,"unusedPermitMs":n,"idleMs":n,"lockWaitMs":n,"suites":[{"name":"<suite>","queueMs":n,"startMs":n,"finishMs":n,"permits":n}]}`,
+only `wallMs` and `suites` required), is where a gate that schedules its own suites says where
+its time went: the runner keeps it on the run's `test_report` event whether the gate ran on
+the host or on boat, drops one that does not fit that shape without touching the run's rows,
+and metrics name each repository's critical suites with their median serial tail and the
+gates' lock wait. A test
 file's samples are its executed (not skipped) rows within one operation kind and suite, so a
 landing's related run, the audit's complete one and the `file-cost` measurement are listed
 apart and never pooled. A test

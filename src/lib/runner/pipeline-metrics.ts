@@ -63,6 +63,11 @@ export type RepositoryMetrics = {
   verify: MetricTiming | null;
   /** The same verify stage split by how the gate chose its tests: a related run is a representative landing. */
   verifyBySelection: { related: MetricTiming | null; complete: MetricTiming | null };
+  /**
+   * Where those landings' gates spent their time, from the timing a gate wrote into its report manifest: how often
+   * each suite was the critical one (finished last) with its median serial tail, and the gate's wait for its CPU lock.
+   */
+  gateCriticalPath: { timed: number; suites: Array<{ suite: string; landings: number; serialTail: MetricTiming | null }>; lockWait: MetricTiming | null };
   budget: BudgetStatus;
   /** Gate and audit commands by what their reports said; `missing` counts those that wrote none. */
   reports: { recorded: number; malformed: number; missing: number };
@@ -297,11 +302,11 @@ function budgetStatus(budgets: TimeBudgets | null, verify: MetricTiming | null, 
 
 /** Each repository's verify time against its latest recorded budgets, and its test files from executed reports. */
 function repositoryMetrics(histories: Map<string, OperationHistory>, since: number, now: number, audits: Map<string, AuditSummary>): RepositoryMetrics[] {
-  type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
+  type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; timed: number; critical: Map<string, { landings: number; tails: number[] }>; lockWait: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
   const repos = new Map<string, Repo>();
   const repoOf = (name: string): Repo => {
     let repo = repos.get(name);
-    if (!repo) { repo = { budgets: null, budgetSeq: -1, verify: [], verifyRelated: [], verifyComplete: [], recorded: 0, malformed: 0, missing: 0, files: new Map(), cost: new Map() }; repos.set(name, repo); }
+    if (!repo) { repo = { budgets: null, budgetSeq: -1, verify: [], verifyRelated: [], verifyComplete: [], timed: 0, critical: new Map(), lockWait: [], recorded: 0, malformed: 0, missing: 0, files: new Map(), cost: new Map() }; repos.set(name, repo); }
     return repo;
   };
   for (const op of [...histories.values()].sort((a, b) => (a.submittedEvent?.seq ?? 0) - (b.submittedEvent?.seq ?? 0))) {
@@ -320,6 +325,18 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
       if (selection?.event.type === "test_report" && selection.event.status === "recorded") {
         if (selection.event.selection === "related") repo.verifyRelated.push(verify);
         else if (selection.event.selection === "complete") repo.verifyComplete.push(verify);
+      }
+      for (const row of op.events) {
+        if (row.event.type !== "test_report" || row.event.status !== "recorded" || !row.event.timing) continue;
+        const { criticalSuite, serialTailMs, lockWaitMs } = row.event.timing;
+        repo.timed++;
+        if (criticalSuite) {
+          const entry = repo.critical.get(criticalSuite) ?? { landings: 0, tails: [] };
+          entry.landings++;
+          if (serialTailMs !== undefined) entry.tails.push(serialTailMs);
+          repo.critical.set(criticalSuite, entry);
+        }
+        if (lockWaitMs !== undefined) repo.lockWait.push(lockWaitMs);
       }
     }
     if (!(submittedAt >= since)) continue;
@@ -374,7 +391,11 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
     const costCandidates = limit === undefined ? [] : files.filter((file) => file.suite !== FILE_COST_SUITE && file.medianMs > (limit * 1000) / 2).sort((a, b) => b.medianMs - a.medianMs).slice(0, COST_CANDIDATES);
     const verify = timing(repo.verify);
     return {
-      repo: name, budgets: repo.budgets, verify, verifyBySelection: { related: timing(repo.verifyRelated), complete: timing(repo.verifyComplete) }, budget: budgetStatus(repo.budgets, verify, overBudget.length),
+      repo: name, budgets: repo.budgets, verify, verifyBySelection: { related: timing(repo.verifyRelated), complete: timing(repo.verifyComplete) },
+      gateCriticalPath: { timed: repo.timed, lockWait: timing(repo.lockWait),
+        suites: [...repo.critical].map(([suite, entry]) => ({ suite, landings: entry.landings, serialTail: timing(entry.tails) }))
+          .sort((a, b) => b.landings - a.landings || a.suite.localeCompare(b.suite)) },
+      budget: budgetStatus(repo.budgets, verify, overBudget.length),
       reports: { recorded: repo.recorded, malformed: repo.malformed, missing: repo.missing },
       slowestTestFiles: [...files].sort((a, b) => b.medianMs - a.medianMs).slice(0, LISTED_FILES),
       growingTestFiles: growing,
@@ -554,6 +575,10 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
   for (const repo of metrics.repositories) {
     lines.push(`${repo.repo} budget: ${repo.budget.status}${repo.budget.over.length ? ` (${repo.budget.over.join(", ")})` : ""}; landing verify over 7 days ${formatTiming(repo.verify)}${repo.budgets ? `; budgets ${JSON.stringify(repo.budgets)}` : ""}`);
     lines.push(`  Verify by selection: related ${formatTiming(repo.verifyBySelection.related)}; complete ${formatTiming(repo.verifyBySelection.complete)}`);
+    if (repo.gateCriticalPath.timed) {
+      const { timed, suites, lockWait } = repo.gateCriticalPath;
+      lines.push(`  Gate critical path over ${timed} timed gates: ${suites.map(({ suite, landings, serialTail }) => `${suite} ${landings}${serialTail ? ` (serial tail median ${seconds(serialTail.medianMs)})` : ""}`).join("; ") || "none named"}; lock wait ${formatTiming(lockWait)}`);
+    }
     lines.push(`  Test reports: ${repo.reports.recorded} recorded, ${repo.reports.malformed} malformed, ${repo.reports.missing} missing`);
     if (repo.audit) {
       const { lastGreen, overdue, openFailure, escapes } = repo.audit;

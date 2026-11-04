@@ -10,7 +10,15 @@
  *
  * `selection` is optional and additive: a writer that omits it, and a reader that predates it,
  * keep working exactly as before, so a new gate can describe itself without the runner that
- * reads it having to land first. `suite` separates measurements that must never pool: a
+ * reads it having to land first. `timing`, as additive, is where a gate that schedules suites of
+ * its own says where its time went:
+ *
+ *   "timing": { "wallMs": n, "concurrency": n, "criticalSuite": "<name>", "serialTailMs": n,
+ *     "unusedPermitMs": n, "idleMs": n, "lockWaitMs": n,
+ *     "suites": [{ "name": "<suite>", "queueMs": n, "startMs": n, "finishMs": n, "permits": n }] }
+ *
+ * Only `wallMs` and `suites` are required; a timing that does not fit this shape is dropped, never
+ * a reason to refuse the run's rows. `suite` separates measurements that must never pool: a
  * landing's selected run, an audit's complete one, and the file-cost run that measures one
  * file at a time are three different suites.
  *
@@ -43,9 +51,16 @@ export type TestFileRow = { file: string; suite: string; ms: number; status: "pa
 /** How the gate chose the tests a landing verified: the whole suite, the import graph, or nothing. */
 export const TEST_SELECTION_KINDS = ["complete", "related", "none"] as const;
 export type TestSelectionKind = (typeof TEST_SELECTION_KINDS)[number];
+/** One suite a gate scheduled: when it waited, started and finished, from the gate's start, and its permits. */
+export type GateSuiteTiming = { name: string; queueMs: number; startMs: number; finishMs: number; permits: number };
+/** Where a gate's time went: its wall time, its critical path (the suite that finished last) and its idle capacity. */
+export type GateTiming = {
+  wallMs: number; concurrency?: number; criticalSuite?: string; serialTailMs?: number;
+  unusedPermitMs?: number; idleMs?: number; lockWaitMs?: number; suites: GateSuiteTiming[];
+};
 /** What one run's reports said. */
 export type TestReportReading =
-  | { status: "recorded"; files: TestFileRow[]; truncated?: boolean; selection?: TestSelectionKind }
+  | { status: "recorded"; files: TestFileRow[]; truncated?: boolean; selection?: TestSelectionKind; timing?: GateTiming }
   /** The command wrote no manifest, as an install or a type check does: no rows, and no zero-duration samples. */
   | { status: "missing" }
   /** A malformed report keeps no rows, so a partial one never reads as a complete run. */
@@ -86,6 +101,35 @@ export function parseTestReport(source: string, format: TestReportFormat): Parse
   return [...files.values()];
 }
 
+const MAX_TIMED_SUITES = 1_000;
+const TIMING_NUMBERS = ["concurrency", "serialTailMs", "unusedPermitMs", "idleMs", "lockWaitMs"] as const;
+const duration = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const suiteName = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200;
+
+/** A manifest's `timing`, kept only when it fits the contract's shape; unknown fields are not kept. */
+export function gateTiming(value: unknown): GateTiming | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const timing = value as Record<string, unknown>;
+  if (!duration(timing.wallMs) || !Array.isArray(timing.suites) || timing.suites.length > MAX_TIMED_SUITES) return undefined;
+  const suites: GateSuiteTiming[] = [];
+  for (const entry of timing.suites) {
+    const suite = (entry ?? {}) as Record<string, unknown>;
+    if (!suiteName(suite.name) || !duration(suite.queueMs) || !duration(suite.startMs) || !duration(suite.finishMs) || !duration(suite.permits)) return undefined;
+    suites.push({ name: suite.name, queueMs: Math.round(suite.queueMs), startMs: Math.round(suite.startMs), finishMs: Math.round(suite.finishMs), permits: suite.permits });
+  }
+  const kept: GateTiming = { wallMs: Math.round(timing.wallMs), suites };
+  for (const key of TIMING_NUMBERS) {
+    if (timing[key] === undefined) continue;
+    if (!duration(timing[key])) return undefined;
+    kept[key] = Math.round(timing[key]);
+  }
+  if (timing.criticalSuite !== undefined) {
+    if (!suiteName(timing.criticalSuite)) return undefined;
+    kept.criticalSuite = timing.criticalSuite;
+  }
+  return kept;
+}
+
 /** A path the manifest names, refused when it leaves `base`. */
 function contained(base: string, path: unknown, label: string): string {
   if (typeof path !== "string" || !path || isAbsolute(path)) throw new Error(`${label} must be a relative path`);
@@ -104,8 +148,9 @@ export async function readTestReports(directory: string, root: string): Promise<
   }
   const files: TestFileRow[] = [];
   let selection: TestSelectionKind | undefined;
+  let timing: GateTiming | undefined;
   try {
-    const manifest = JSON.parse(manifestText) as { version?: unknown; selection?: unknown; reports?: unknown };
+    const manifest = JSON.parse(manifestText) as { version?: unknown; selection?: unknown; timing?: unknown; reports?: unknown };
     if (manifest.version !== 1) throw new Error("manifest is not version 1");
     if (!Array.isArray(manifest.reports)) throw new Error("manifest is not versioned with a reports list");
     // `selection` is additive to version 1, so a reader that predates it ignores it. A kind the contract
@@ -114,6 +159,7 @@ export async function readTestReports(directory: string, root: string): Promise<
       const kind = (manifest.selection as { kind?: unknown } | null)?.kind;
       if (typeof kind === "string" && (TEST_SELECTION_KINDS as readonly string[]).includes(kind)) selection = kind as TestSelectionKind;
     }
+    timing = gateTiming(manifest.timing);
     for (const [index, entry] of manifest.reports.entries()) {
       const report = entry as { format?: unknown; path?: unknown; suite?: unknown; cwd?: unknown };
       const label = `report ${index + 1}`;
@@ -132,8 +178,9 @@ export async function readTestReports(directory: string, root: string): Promise<
   } catch (error) {
     return { status: "malformed", reason: (error as Error).message };
   }
-  if (files.length > MAX_FILES) return { status: "recorded", files: files.slice(0, MAX_FILES), truncated: true, ...(selection ? { selection } : {}) };
-  return { status: "recorded", files, ...(selection ? { selection } : {}) };
+  const described = { ...(selection ? { selection } : {}), ...(timing ? { timing } : {}) };
+  if (files.length > MAX_FILES) return { status: "recorded", files: files.slice(0, MAX_FILES), truncated: true, ...described };
+  return { status: "recorded", files, ...described };
 }
 
 /** The regular files under `directory`'s `logs/`, in path order, at most MAX_LOGS of them. Never throws. */

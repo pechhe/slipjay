@@ -351,6 +351,29 @@ test("splits a landing's verify time by how the gate selected its tests, so a re
   assert.match(text, /Verify by selection: related 4 samples, median 75000ms, p90 90000ms; complete 4 samples, median 330000ms, p90 360000ms/);
 });
 
+test("names each landing gate's critical suite, its serial tail and the gate's lock wait, from the timing the gate reported", () => {
+  const timed = (runId: string, criticalSuite: string, serialTailMs: number, lockWaitMs: number): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: [],
+    timing: { wallMs: 200_000, criticalSuite, serialTailMs, lockWaitMs, suites: [{ name: criticalSuite, queueMs: 0, startMs: 0, finishMs: 200_000, permits: 2 }] } });
+  const events = [
+    ...verifiedLanding("weave-1", 1, 3_600_000, 200_000, [timed("w1", "yardsmith-weave", 40_000, 0)]),
+    ...verifiedLanding("weave-2", 2, 3_600_000, 200_000, [timed("w2", "yardsmith-weave", 60_000, 2_000)]),
+    ...verifiedLanding("workbench", 3, 3_600_000, 200_000, [timed("b1", "workbench", 100_000, 4_000)]),
+    // A gate that wrote no timing counts in the verify time and in no critical path.
+    ...verifiedLanding("untimed", 4, 3_600_000, 200_000, [{ type: "test_report", runId: "plain", status: "recorded", files: [] }]),
+  ];
+  const repo = pipelineMetrics(events, at(0), { now: NOW }).repositories[0]!;
+  assert.deepEqual(repo.gateCriticalPath, {
+    timed: 3,
+    lockWait: { samples: 3, medianMs: 2_000, p90Ms: 4_000 },
+    suites: [
+      { suite: "yardsmith-weave", landings: 2, serialTail: { samples: 2, medianMs: 50_000, p90Ms: 60_000 } },
+      { suite: "workbench", landings: 1, serialTail: { samples: 1, medianMs: 100_000, p90Ms: 100_000 } },
+    ],
+  });
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, at(0), { now: NOW })),
+    /Gate critical path over 3 timed gates: yardsmith-weave 2 \(serial tail median 50\.0s\); workbench 1 \(serial tail median 100\.0s\); lock wait 3 samples, median 2000ms, p90 4000ms/);
+});
+
 test("a test file's samples are its executed runs in one operation kind: skipped rows and the audit's runs are kept out of a landing's, and its budget", () => {
   const report = (runId: string, ms: number, status: "passed" | "skipped"): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: [{ file: "tests/a.test.ts", suite: "vitest", ms, status }] });
   const audit = (id: string, seq: number, ms: number): StoredEvent[] => [

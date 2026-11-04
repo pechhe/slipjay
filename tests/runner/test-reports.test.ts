@@ -96,6 +96,44 @@ test("a manifest's optional selection is kept, and a kind the contract does not 
   }
 });
 
+test("a manifest's optional gate timing is kept in the contract's shape, and a malformed one is dropped without its rows", async () => {
+  const suites = [{ name: "workbench", queueMs: 93_274.4, startMs: 93_277, finishMs: 641_193, wallMs: 547_916, permits: 4 }];
+  const timing = { wallMs: 641_194, concurrency: 6, criticalSuite: "workbench", serialTailMs: 109_302, unusedPermitMs: 219_189, idleMs: 5, lockWaitMs: 1_200, suites, extra: "not kept" };
+  const kept = { wallMs: 641_194, concurrency: 6, criticalSuite: "workbench", serialTailMs: 109_302, unusedPermitMs: 219_189, idleMs: 5, lockWaitMs: 1_200,
+    suites: [{ name: "workbench", queueMs: 93_274, startMs: 93_277, finishMs: 641_193, permits: 4 }] };
+  const cases: [string, unknown, unknown][] = [
+    ["complete", timing, kept],
+    ["required fields only", { wallMs: 10, suites: [] }, { wallMs: 10, suites: [] }],
+    ["absent", undefined, undefined],
+    ["negative wall", { ...timing, wallMs: -1 }, undefined],
+    ["suite without a name", { ...timing, suites: [{ ...suites[0], name: "" }] }, undefined],
+    ["non-numeric lock wait", { ...timing, lockWaitMs: "1s" }, undefined],
+    ["not an object", "641s", undefined],
+  ];
+  for (const [name, value, expected] of cases) {
+    const fixture = await reportDir(async (directory, root) => {
+      await writeFile(join(directory, "vitest.json"), JSON.stringify({ testResults: [{ name: join(root, "tests/x.test.ts"), startTime: 0, endTime: 5, status: "passed" }] }));
+      await writeFile(join(directory, TEST_REPORT_MANIFEST), JSON.stringify({ version: 1, ...(value === undefined ? {} : { timing: value }), reports: [{ format: "vitest-json", path: "vitest.json", suite: "vitest", cwd: "." }] }));
+    });
+    try {
+      const reading = await readTestReports(fixture.directory, fixture.root);
+      assert.equal(reading.status, "recorded", name);
+      assert.equal(reading.status === "recorded" ? reading.files.length : 0, 1, name);
+      assert.deepEqual(reading.status === "recorded" ? reading.timing : "missing", expected, name);
+    } finally { await fixture.dispose(); }
+  }
+});
+
+test("a gate that ran no reporting suite still has its timing kept", async () => {
+  const fixture = await reportDir(async (directory) => {
+    await writeFile(join(directory, TEST_REPORT_MANIFEST), JSON.stringify({ version: 1, timing: { wallMs: 2_000, suites: [{ name: "@yardsmith/brand typecheck", queueMs: 0, startMs: 0, finishMs: 2_000, permits: 1 }] }, reports: [] }));
+  });
+  try {
+    const reading = await readTestReports(fixture.directory, fixture.root);
+    assert.deepEqual(reading, { status: "recorded", files: [], timing: { wallMs: 2_000, suites: [{ name: "@yardsmith/brand typecheck", queueMs: 0, startMs: 0, finishMs: 2_000, permits: 1 }] } });
+  } finally { await fixture.dispose(); }
+});
+
 test("a run's logs are the regular files under logs/, in path order, a long one read from its end", async () => {
   const { directory, root, dispose } = await reportDir(async (directory, root) => {
     await mkdir(join(directory, TEST_REPORT_LOGS, "static"), { recursive: true });
