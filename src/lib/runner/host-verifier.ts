@@ -1,8 +1,12 @@
 import { readdir, readlink, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "../infra/bounded-process.ts";
 import { worktreeTree } from "./boat-verifier.ts";
 import type { Executor, RemoteAttempt, RemoteMachine } from "./runner-types.ts";
+
+/** The git-dir entry holding this checkout's last refreshed tree index, outside `.git/index`, which jj rewrites. */
+const TREE_INDEX = "slipjay-tree-index";
 
 /**
  * A gate in the runner host's own gate place (SJ-189, Decision #6249): a repository whose gate otherwise runs on a
@@ -22,10 +26,12 @@ export async function openHostAttempt(input: {
   const { executor, checkout, candidate, install } = input;
   const machine = hostMachine(executor.host);
   await stopCheckoutProcesses(checkout);
-  const tree = await gitOutput(checkout, ["rev-parse", `${candidate}^{tree}`]);
+  const [tree = "", index = ""] = (await gitOutput(checkout, ["rev-parse", `${candidate}^{tree}`, "--git-path", TREE_INDEX])).split("\n");
+  /** Where this checkout keeps the refreshed index an earlier read left, so the second read hashes only what the gate touched. */
+  const cache = index ? resolve(checkout, index) : undefined;
   try {
     await install();
-    const observed = await checkoutTree(checkout, tree);
+    const observed = await checkoutTree(checkout, tree, cache);
     if (observed !== tree) throw new Error(`Host executor unavailable (setup): ${checkout} holds tree ${observed || "none"} after setup, not the candidate's ${tree}`);
   } catch (error) {
     await stopCheckoutProcesses(checkout).catch(() => undefined);
@@ -34,7 +40,7 @@ export async function openHostAttempt(input: {
   return {
     executor, machine, tree, usage: null,
     async finish() {
-      const now = await checkoutTree(checkout, tree);
+      const now = await checkoutTree(checkout, tree, cache);
       if (now === tree) return { tree, trackedChanges: 0, usage: null };
       const changed = (await gitOutput(checkout, ["diff", "--name-only", tree, now]).catch(() => "")).split("\n").filter(Boolean).length;
       return { tree: null, trackedChanges: Math.max(changed, 1), usage: null };
@@ -56,8 +62,8 @@ async function gitOutput(cwd: string, args: string[]): Promise<string> {
 }
 
 /** The checkout's files as a tree, exactly as a boat VM reads its own (`worktreeTree`). */
-async function checkoutTree(checkout: string, tree: string): Promise<string> {
-  const result = await runBoundedProcess({ executable: "bash", args: ["-c", worktreeTree(tree)], cwd: checkout, timeoutMs: CONTROL_TIMEOUT_MS, maxOutputBytes: CONTROL_OUTPUT, env: process.env });
+async function checkoutTree(checkout: string, tree: string, cache?: string): Promise<string> {
+  const result = await runBoundedProcess({ executable: "bash", args: ["-c", worktreeTree(tree, cache)], cwd: checkout, timeoutMs: CONTROL_TIMEOUT_MS, maxOutputBytes: CONTROL_OUTPUT, env: process.env });
   if (result.exitCode !== 0) throw new Error(`Host executor unavailable (setup): could not read ${checkout}'s tree: ${result.stderr.trim().slice(-1000)}`);
   return result.stdout.trim().split("\n").at(-1) ?? "";
 }

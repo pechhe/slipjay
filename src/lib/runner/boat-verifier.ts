@@ -63,15 +63,30 @@ const SCRATCH_LIST = "~/.slipjay-scratch";
  * actually ran against. The index starts from the candidate's `tree`, so a tracked file that matches an ignore rule
  * stays in it, and `add -A` then records every change, deletion and untracked file that is not ignored.
  *
- * The throwaway index starts as a copy of the checkout's own, merged with `tree` (`read-tree -m`), so it keeps the file
- * stat information of every entry whose content matches: `add -A` then rehashes only files whose stat changed, rather
- * than every file in the tree (12 s against 0.2 s on the YardSmith checkout, 3 Nov 2026). The entries are `tree`'s
- * either way, and Git rehashes any file whose stat it cannot trust, so the tree written is the same. Without a usable
- * index it starts from `tree` alone, as before.
+ * That index keeps the file stat information of every entry whose content matches the worktree, so `add -A` rehashes
+ * only the files whose stat changed rather than every file in the tree (12 s against 0.2 s on the YardSmith checkout,
+ * 3 Nov 2026), and Git rehashes any file whose stat it cannot trust, so the tree written is the same. `add -A` runs
+ * before the merge for that reason: `read-tree -m` refuses to replace an entry the worktree no longer matches
+ * ("Entry … not uptodate. Cannot merge"), which would send every file back through a rehash. Without a usable index it
+ * starts from `tree` alone, as before.
+ *
+ * `cache` is where an earlier read left its refreshed index: copying it is what makes a later read of the same
+ * checkout cheap. The checkout's own index cannot serve that purpose there: jj writes a colocated repository's index
+ * from trees alone, with no file stat information at all (measured: every one of the YardSmith checkout's 13,269
+ * entries zeroed), so it never saves a rehash. A read that finds no cache yet hashes every file once, then leaves one.
  */
-export const worktreeTree = (tree: string) => `index=$(mktemp); trap 'rm -f "$index"' EXIT
-{ cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null && GIT_INDEX_FILE="$index" git read-tree -m ${shellWord(tree)} 2>/dev/null; } || { : > "$index"; GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)}; }
-GIT_INDEX_FILE="$index" git add -A . && GIT_INDEX_FILE="$index" git write-tree`;
+export const worktreeTree = (tree: string, cache?: string) => `index=$(mktemp); trap 'rm -f "$index"' EXIT
+${cache ? `{ cp ${shellWord(cache)} "$index"; } 2>/dev/null || true
+` : ""}[ -s "$index" ] || cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null || true
+if [ -s "$index" ]; then
+  GIT_INDEX_FILE="$index" git add -A . || exit 1
+  GIT_INDEX_FILE="$index" git read-tree -m ${shellWord(tree)} 2>/dev/null || { : > "$index"; GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)}; }
+else
+  GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)} || exit 1
+fi
+GIT_INDEX_FILE="$index" git add -A . && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1${cache ? `
+{ cp "$index" ${shellWord(cache)}.new && mv ${shellWord(cache)}.new ${shellWord(cache)}; } 2>/dev/null || true` : ""}
+echo "$tree"`;
 const SETUP_TIMEOUT_MS = 900_000;
 const CONTROL_OUTPUT = 1024 * 1024;
 

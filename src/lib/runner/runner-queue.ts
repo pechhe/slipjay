@@ -385,8 +385,10 @@ export function createRunnerQueue(input: {
       && entry.bookmark === operation.bookmark && (entry.status === "queued" || entry.status === "running"))) return;
     try {
       // A candidate this checkout never fetched (cancelled while queued, or interrupted by a
-      // restart) has no local bookmark to delete until it is fetched.
-      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", operation.bookmark]).catch(() => {});
+      // restart) has no local bookmark to delete until it is fetched. One this landing already
+      // fetched needs no second round trip to the remote: the bookmark to delete is known here.
+      if (!await revisionExists(checkout, `${operation.bookmark}@${remote}`))
+        await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", operation.bookmark]).catch(() => {});
       await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]).catch(() => {});
       await jj(checkout, ["bookmark", "delete", operation.bookmark]);
       await jj(checkout, ["git", "push", "--remote", remote, "--bookmark", operation.bookmark]);

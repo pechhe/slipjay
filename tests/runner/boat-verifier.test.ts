@@ -364,6 +364,52 @@ test("the checkout's tree is read the same whatever the checkout's own index hol
   assert.equal(git("status", "--porcelain").includes("a.txt"), true, "the checkout's own index is untouched");
 });
 
+// The host gate place reads a checkout's tree twice per landing, and jj writes that checkout's own index from trees
+// alone, so it never saves a rehash. A cached index an earlier read left is what makes the second read cheap; it must
+// not decide what the read returns.
+test("a cached tree read hashes only what changed, and still sees every change", () => {
+  const repo = execFileSync("mktemp", ["-d"], { encoding: "utf8" }).trim();
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
+  const sh = (script: string) => execFileSync("bash", ["-c", `cd ${repo} && ${script}`]);
+  git("init", "-q");
+  sh("printf '*.log\\n' > .gitignore && echo kept > tracked.log && echo a > a.txt && echo b > b.txt");
+  git("add", ".gitignore", "a.txt", "b.txt"); git("add", "-f", "tracked.log"); git("commit", "-qm", "first");
+  const tree = git("rev-parse", "HEAD^{tree}");
+  const cache = join(repo, ".git", "slipjay-tree-index");
+  const read = () => execFileSync("bash", ["-c", `set -euo pipefail\ncd ${repo}\n${worktreeTree(tree, cache)}`], { encoding: "utf8" }).trim().split("\n").at(-1);
+  const checkoutIndex = () => git("ls-files", "--debug");
+  const first = checkoutIndex();
+  assert.equal(read(), tree, "a first read, with no cache yet, reads the worktree");
+  assert.equal(checkoutIndex(), first, "and leaves the checkout's own index alone");
+  assert.equal(read(), tree, "a second read reuses the cache it left");
+  sh("echo changed > a.txt");
+  assert.notEqual(read(), tree, "a file the gate changed is still seen, cache and all");
+  sh("git checkout -- a.txt");
+  assert.equal(read(), tree, "and its restoration reads as the candidate again");
+  sh("echo new > c.txt");
+  assert.notEqual(read(), tree, "an untracked file that is not ignored is still seen");
+  sh("rm c.txt");
+  sh("echo noise > other.log");
+  assert.equal(read(), tree, "an ignored file is still not part of the tree");
+  sh("rm tracked.log");
+  assert.notEqual(read(), tree, "a tracked file that matches an ignore rule is seen gone");
+  sh("git checkout -- tracked.log");
+  assert.equal(read(), tree, "and seen back");
+  // A cache written from another checkout is only a stat cache: this worktree still decides.
+  const other = execFileSync("mktemp", ["-d"], { encoding: "utf8" }).trim();
+  const otherGit = (...args: string[]) => execFileSync("git", ["-C", other, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
+  otherGit("init", "-q");
+  execFileSync("bash", ["-c", `cd ${other} && echo elsewhere > a.txt && echo b > b.txt`]);
+  otherGit("add", "."); otherGit("commit", "-qm", "other");
+  const otherTree = otherGit("rev-parse", "HEAD^{tree}");
+  otherGit("rev-parse", "--git-path", "slipjay-tree-index");
+  execFileSync("bash", ["-c", `cd ${other} && ${worktreeTree(otherTree, join(other, ".git", "slipjay-tree-index"))}`], { encoding: "utf8" });
+  execFileSync("bash", ["-c", `cp ${join(other, ".git", "slipjay-tree-index")} ${cache}`]);
+  assert.equal(read(), tree, "another checkout's cache cannot claim this worktree matches");
+  sh("echo changed > b.txt");
+  assert.notEqual(read(), tree, "and a change is still seen through it");
+});
+
 test("concurrent gate commands reaching Build share one tunnel per attempt", async () => {
   const ready = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result(`runtime /home/user/.bun/bin/bun 1.4.4 ${"a".repeat(64)}\ntree ${"e".repeat(40)}`));

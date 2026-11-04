@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.51.1
+
+- **A host gate place hashes only what changed:** jj writes a colocated repository's Git index with no file stat data,
+  so each of a landing's two reads of its checkout's tree hashed every file (13.3 s and 5.8 s on a YardSmith landing,
+  4 Nov 2026). The refreshed index now stays in the checkout's git dir for the next read (0.27 s each, measured on a
+  13k-file checkout), and it still proves the same tree. A landing's cleanup fetches the candidate bookmark only when
+  the checkout does not know it, and reading the facts of an exact commit id no longer snapshots the working copy.
+
 ## v3.51.0
 
 Spec SJ-192: a YardSmith landing passes a two-minute check, and each promotion batch runs the full tests and sends any
