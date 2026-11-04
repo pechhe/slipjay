@@ -24,7 +24,8 @@ test("a claimed spare reuses its dependencies when the refresh leaves install in
 
     const created = await createWorkspace("task", f.repo);
     assert.equal(created.pooled, true);
-    const { installAttempts, ...readiness } = created.readiness as { installAttempts?: Record<string, unknown>[] };
+    const { installAttempts, trees, ...readiness } = created.readiness as { installAttempts?: Record<string, unknown>[]; trees?: string[] };
+    assert.deepEqual(trees, ["package.json"], "the claim keeps the trees the install checked, so the next claim re-checks them");
     assert.deepEqual(installAttempts, provisioned.installAttempts, "the claim retains its provisioning install evidence");
     assert.equal(installAttempts?.at(-1)?.outcome, "success");
     assert.deepEqual({ ...readiness, installInputs: undefined },

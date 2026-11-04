@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { outputLines } from "../infra/verification-failure.ts";
 import { migrationCommandFailure } from "../landing/migration-command-evidence.ts";
+import { dependencyTreeDamage, describeDependencyTreeDamage, type DependencyTreeDamage } from "./dependency-tree.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
 import { timed } from "./start-steps.ts";
 import type { StartSteps } from "./start-steps.ts";
@@ -61,6 +62,18 @@ async function missingLockedBunVersion(workspacePath: string, output: string): P
     if (lock.includes(JSON.stringify(`${match[2]}@${match[1]}`))) return true;
   }
   return false;
+}
+
+/**
+ * Damage in the workspace's installed `node_modules` trees (see dependency-tree.ts), or null when they are usable
+ * or absent. A tree that cannot be inspected is not called usable.
+ */
+export async function installedTreeDamage(workspacePath: string, options: { trees?: string[] } = {}): Promise<DependencyTreeDamage | null> {
+  // `trees` are the manifests whose `node_modules` an install recorded: a claim passes them to skip listing the
+  // tracked manifests (a JJ call that costs more than the scan) without skipping any workspace package's tree.
+  // Absent (a record from before they were kept), the tracked manifests are listed.
+  const manifests = options.trees ?? await trackedManifests(workspacePath) ?? ["package.json"];
+  return await dependencyTreeDamage(workspacePath, manifests, { required: Boolean(options.trees) }).catch(() => ({ paths: [join(workspacePath, "node_modules")], total: 1 }));
 }
 
 /** The workspace's tracked `package.json` paths, relative to its root, or null when JJ cannot list them. */
@@ -159,6 +172,13 @@ async function cloneNodeModules(source: string, workspacePath: string): Promise<
   return created.length ? created : null;
 }
 
+/** Remove every `node_modules` tree beside `manifests`; hard links into the store or a sibling stay with their other owners. */
+async function removeNodeModules(workspacePath: string, manifests?: string[]): Promise<void> {
+  for (const manifest of manifests ?? await trackedManifests(workspacePath) ?? ["package.json"]) {
+    await rm(join(workspacePath, dirname(manifest), "node_modules"), { recursive: true, force: true });
+  }
+}
+
 /**
  * Move the `node_modules` tree beside each of `manifests` (repository-relative `package.json`
  * paths) from `source` to the same place in `target`, where it has none yet. Each move is a rename,
@@ -191,6 +211,13 @@ export async function moveNodeModules(source: string, target: string, manifests:
  * verification, and if it fails on a seeded tree the clone is discarded and the
  * install repeated from scratch. `installInputs` is the workspace's fingerprint when
  * the caller has already computed it for this tree.
+ *
+ * Neither the fingerprint nor an install's success shows the tree is usable (see dependency-tree.ts), so
+ * a seed is checked before it is cloned and the installed tree is checked before it is reported ready.
+ * Damage found after an install is repaired once, by removing the workspace's own `node_modules`
+ * trees (unlinking only, never writing through a shared inode) and installing again without a seed;
+ * damage that survives is an error naming the paths. `discardTrees` repairs known damage the same way,
+ * without the install over it first.
  */
 export async function prepareWorkspaceDependencies(workspacePath: string, options: {
   quiet?: boolean; recordInputs?: boolean; env?: NodeJS.ProcessEnv;
@@ -199,10 +226,16 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   /** Roots whose `node_modules` may seed this install, given the workspace's install-input fingerprint. */
   seedFrom?: (installInputs: string) => AsyncIterable<string> | Iterable<string>;
   installInputs?: string | null;
+  /** Remove the workspace's `node_modules` first and install without a seed: its tree is known to be damaged. */
+  discardTrees?: boolean;
   /** A start's step timing, which records the fingerprints this takes (see start-steps.ts). */
   steps?: StartSteps;
 } = {}): Promise<{
   state: "ready" | "not_required"; packageManager: string | null; installInputs: string | null; seeded?: true; cloneMs?: number;
+  /** The tree was damaged and was reinstalled from scratch. */
+  repaired?: true;
+  /** The `package.json` paths whose `node_modules` this workspace now holds (see `installedTreeDamage`). */
+  trees?: string[];
   installAttempts?: Record<string, unknown>[];
 }> {
   const inputs = options.installInputs !== undefined ? options.installInputs
@@ -212,9 +245,21 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
   if (!options.quiet) console.log(`[deps] ${dependencyCommand.command} install in ${basename(workspacePath)}...`);
   let seeded: string[] | null = null;
   let cloneMs: number | undefined;
-  if (inputs && options.seedFrom && !existsSync(join(workspacePath, "node_modules"))) {
+  let repaired = false;
+  if (options.discardTrees) {
+    await removeNodeModules(workspacePath);
+    repaired = true;
+  }
+  if (inputs && options.seedFrom && !options.discardTrees && !existsSync(join(workspacePath, "node_modules"))) {
     try {
+      const manifests = await trackedManifests(workspacePath);
       for await (const source of options.seedFrom(inputs)) {
+        // The source's install inputs match, which says nothing of its bytes: a damaged tree would be cloned onward.
+        const damage = manifests && await dependencyTreeDamage(source, manifests).catch(() => ({ paths: [source], total: 1 }));
+        if (!manifests || damage) {
+          if (damage) console.error(`[deps] ${basename(workspacePath)}: not seeding from ${source}, whose dependencies are incomplete (${damage.total}, e.g. ${damage.paths[0]})`);
+          continue;
+        }
         const cloneStarted = performance.now();
         seeded = await cloneNodeModules(source, workspacePath).catch(() => null);
         if (seeded) cloneMs = Math.round(performance.now() - cloneStarted);
@@ -256,15 +301,32 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
     result = await install();
   }
   const damage = dependencyCommand.command === "bun" ? await bunStoreDamage(workspacePath, options.env ?? process.env) : null;
-  if (result.code !== 0) {
-    const failure = migrationCommandFailure([dependencyCommand.command, ...args].join(" "), result, workspacePath, options.env ?? process.env, "Dependency");
+  const failed = (failedResult: Awaited<ReturnType<typeof install>>): never => {
+    const failure = migrationCommandFailure([dependencyCommand.command, ...args].join(" "), failedResult, workspacePath, options.env ?? process.env, "Dependency");
     failure.evidence.installAttempts = installAttempts;
     failure.message += `\nInstall attempts: ${JSON.stringify(installAttempts)}`;
     if (damage) failure.message += `\n${damage}`;
     throw failure;
-  }
+  };
+  if (result.code !== 0) failed(result);
   // A frozen install can report success over a store it did not repair.
   if (damage) throw new Error(damage);
+  // ... and over a package directory that lost its files. Repair once, from scratch, then refuse.
+  const manifests = await trackedManifests(workspacePath) ?? ["package.json"];
+  let treeDamage = await dependencyTreeDamage(workspacePath, manifests);
+  if (treeDamage) {
+    console.error(`[deps] ${basename(workspacePath)}: ${treeDamage.total} installed package(s) lack a manifest, e.g. ${treeDamage.paths[0]}; reinstalling from scratch`);
+    await removeNodeModules(workspacePath, manifests);
+    seeded = null;
+    repaired = true;
+    result = await install();
+    if (result.code !== 0) failed(result);
+    treeDamage = await dependencyTreeDamage(workspacePath, manifests);
+    if (treeDamage) {
+      throw new Error(`${describeDependencyTreeDamage(workspacePath, treeDamage)}\nA reinstall from scratch did not restore them: the package store may be damaged for these packages. Install attempts: ${JSON.stringify(installAttempts)}`);
+    }
+  }
+  const trees = manifests.filter((manifest) => existsSync(join(workspacePath, dirname(manifest), "node_modules")));
   const installed = options.recordInputs && inputs && await timed(options.steps, "fingerprint", () => installInputFingerprint(workspacePath));
-  return { state: "ready", installAttempts, packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true, cloneMs: cloneMs! } : {}) };
+  return { state: "ready", installAttempts, packageManager: dependencyCommand.command, installInputs: installed && installed === inputs ? inputs : null, ...(seeded ? { seeded: true, cloneMs: cloneMs! } : {}), ...(repaired ? { repaired: true as const } : {}), ...(trees ? { trees } : {}) };
 }

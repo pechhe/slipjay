@@ -1,5 +1,28 @@
 # Changelog
 
+## v3.51.2
+
+Spec SJ-194: a prepared spare's dependencies are checked, not only fingerprinted.
+
+- **An incomplete `node_modules` is no longer ready or cloned onward:** T3 spares arrived with package directories
+  that had lost their files (`vfile@6.0.3` held `lib/` and an empty readme, no `package.json`), because a frozen
+  pnpm install exits zero over such a directory and the spare's record still matched its install inputs; later spares
+  were hard-link clones of it. Readiness now includes a structural check: every installed package directory holds a
+  parseable `package.json` (pnpm `.pnpm` entries, Bun `.bun` entries, hoisted, scoped and nested packages; links and
+  metadata-only packages are fine). It does not prove each file intact, and the original cause of the damage is still
+  unknown.
+- **Where it applies:** a seed is checked before it is cloned and a damaged one is skipped; a claim of a prepared
+  spare checks the root tree and installs instead of reusing a damaged one; an install's result is checked before it
+  is recorded ready. Damage after an install is repaired once by removing the workspace's own `node_modules` trees
+  (unlinking only) and installing again without a seed; damage that survives fails with the paths named.
+- **Existing damaged spares:** each pool refill now reinstalls any ready spare whose tree fails the check, under the
+  pool reservation a refresh uses. Claimed workspaces are never touched.
+- Healthy trees keep fingerprint reuse. The check also follows each dependency link inside a virtual store and each
+  link from a workspace package into it, so a deleted dependency is damage too, and a directory it cannot read is
+  reported rather than taken as empty. A claim re-checks the trees the install recorded (`trees` in the spare's
+  record) without listing manifests: about 0.4 s of CPU on a T3 spare (1,866 store entries, 360 package trees) and
+  10 ms on this repository's.
+
 ## v3.51.1
 
 - **A host gate place hashes only what changed:** jj writes a colocated repository's Git index with no file stat data,

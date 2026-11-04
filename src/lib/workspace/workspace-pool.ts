@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
+import { installedTreeDamage, prepareWorkspaceDependencies } from "./workspace-dependencies.ts";
 import { repositoryProjectCode, run, STALE_WORKING_COPY, updateStaleWorkingCopy, workspaceContext } from "../infra/workspace-jj.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { metadataHome, workspaceHome } from "./workspace-paths.ts";
@@ -30,6 +30,7 @@ export interface ReusedDependencies {
   packageManager: string | null;
   installInputs: string;
   reused: true;
+  trees?: string[];
   installAttempts?: Record<string, unknown>[];
 }
 
@@ -39,6 +40,8 @@ interface PreparedDependencies {
   state?: string;
   packageManager?: string | null;
   installInputs?: string | null;
+  /** The `package.json` paths whose `node_modules` were installed and checked, so a claim re-checks those trees without listing manifests. */
+  trees?: string[];
 }
 
 
@@ -109,10 +112,10 @@ export async function refreshDependencies(integrationRoot: string, workspacePath
     if (installed.installInputs) {
       const context = await workspaceContext(workspacePath);
       if (!context) throw new Error(`Workspace disappeared while recording dependency readiness: ${workspacePath}`);
-      const { state, packageManager, installInputs, installAttempts } = installed;
+      const { state, packageManager, installInputs, installAttempts, trees } = installed;
       // Publish the seed before releasing the lock: the next install must be able to find it.
       const name = context.current.name;
-      await writeWorkspaceJson(metadataPath(name), { ...await workspaceMetadata(name), preparedDependencies: { state, packageManager, installInputs, installAttempts } });
+      await writeWorkspaceJson(metadataPath(name), { ...await workspaceMetadata(name), preparedDependencies: { state, packageManager, installInputs, installAttempts, trees } });
     }
     return installed;
   }, { waitMs: INSTALL_WAIT_MS });
@@ -124,7 +127,7 @@ export async function refreshDependencies(integrationRoot: string, workspacePath
  * repository's refill gets its turn between spares. A spare being prepared is never a seed,
  * so a start's install beside it never clones a partial tree.
  */
-async function refillDependencies(integrationRoot: string, workspacePath: string, options: { installInputs?: string | null } = {}) {
+async function refillDependencies(integrationRoot: string, workspacePath: string, options: { installInputs?: string | null; discardTrees?: boolean } = {}) {
   return withWorkspaceTransaction("refill", async () => {
     // Timed inside the lock: waiting for another repository's refill is not this spare's cost.
     const started = performance.now();
@@ -133,9 +136,9 @@ async function refillDependencies(integrationRoot: string, workspacePath: string
   }, { waitMs: REFILL_WAIT_MS });
 }
 
-const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; steps?: StartSteps }) =>
+const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; discardTrees?: boolean; steps?: StartSteps }) =>
   prepareWorkspaceDependencies(workspacePath, {
-    quiet: options.quiet, recordInputs: true, installInputs: options.installInputs, steps: options.steps,
+    quiet: options.quiet, recordInputs: true, installInputs: options.installInputs, discardTrees: options.discardTrees, steps: options.steps,
     seedFrom: dependencySeeds(integrationRoot, workspacePath),
   });
 
@@ -201,10 +204,10 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<Provi
     }
     await linkSharedPaths(root, workspacePath);
     const handedOver = Boolean((await workspaceMetadata(name))?.dependencyHandover);
-    const { state, packageManager, installInputs, seeded, cloneMs, dependencyMs, installAttempts } = await refillDependencies(root, workspacePath);
+    const { state, packageManager, installInputs, seeded, cloneMs, dependencyMs, installAttempts, trees } = await refillDependencies(root, workspacePath);
     const dependencySource: DependencySource = state === "not_required" ? "none" : seeded ? "clone" : handedOver ? "handover" : "install";
     const { preparingPid: _done, dependencyHandover: _handover, ...metadata } = (await workspaceMetadata(name)) ?? {};
-    await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: { state, packageManager, installInputs, installAttempts } });
+    await writeWorkspaceJson(metadataPath(name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: { state, packageManager, installInputs, installAttempts, trees } });
     return {
       provisioned: true, workspacePath, name, project: await repositoryProjectCode(root), integrationRoot: root,
       dependencySource, dependencyMs, installAttempts, ...(dependencySource === "clone" ? { cloneMs } : {}),
@@ -241,7 +244,10 @@ export async function refreshSpares(cwd: string): Promise<SpareRefresh[]> {
   // Unknown inputs prove nothing reusable, so a claim installs whatever is done here.
   if (!headInputs) return [];
   const spares = newestFirst(await readySpares(root));
-  const covering = spares.find((spare) => reusableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | undefined, headInputs));
+  let covering: WorkspaceEntry | undefined;
+  for (const spare of spares) {
+    if (await usableDependencies(spare.root, spare.metadata?.preparedDependencies as PreparedDependencies | undefined, headInputs)) { covering = spare; break; }
+  }
   if (covering) {
     if (covering !== spares[0]) await withWorkspaceTransaction(`pool:${root}`, async () => {
       const metadata = await workspaceMetadata(covering.name);
@@ -263,10 +269,10 @@ export async function refreshSpares(cwd: string): Promise<SpareRefresh[]> {
       const installInputs = await installInputFingerprint(spare.root);
       let outcome: SpareRefresh["dependencies"] = "reused";
       let current: PreparedDependencies | undefined = prepared;
-      if (!reusableDependencies(spare.root, prepared, installInputs)) {
+      if (!await usableDependencies(spare.root, prepared, installInputs)) {
         const installed = await refillDependencies(root, spare.root, { installInputs });
         outcome = installed.seeded ? "seeded" : "installed";
-        current = { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs, installAttempts: installed.installAttempts };
+        current = { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs, installAttempts: installed.installAttempts, trees: installed.trees };
       }
       const { preparingPid: _done, ...metadata } = (await workspaceMetadata(spare.name)) ?? {};
       await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(), preparedDependencies: current });
@@ -312,6 +318,45 @@ export async function retireExcessSpares(cwd: string): Promise<string[]> {
   return excess;
 }
 
+/**
+ * Repair ready spares whose installed dependencies are damaged, which their recorded readiness cannot show:
+ * each is reserved under the pool lock like a refresh, so no claim takes it, and reinstalled from scratch.
+ * A spare that cannot be repaired stays unprepared with the failure reported, and a later refill adopts it again.
+ * Never touches a claimed workspace, which is not a ready spare. Returns the spares repaired.
+ */
+export async function repairDamagedSpares(cwd: string, report: (outcome: object) => void = () => {}): Promise<string[]> {
+  const context = await workspaceContext(cwd);
+  if (!context) return [];
+  const root = context.integration.root;
+  const repaired: string[] = [];
+  for (const spare of await readySpares(root)) {
+    if ((spare.metadata?.preparedDependencies as PreparedDependencies | undefined)?.state !== "ready") continue;
+    const damage = await installedTreeDamage(spare.root);
+    if (!damage) continue;
+    const reserved = await withWorkspaceTransaction(`pool:${root}`, async () => {
+      const metadata = await workspaceMetadata(spare.name);
+      if (metadata?.spare !== true || metadata.prepared !== true) return null; // claimed meanwhile
+      await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, prepared: false, preparingPid: process.pid });
+      return metadata;
+    });
+    if (!reserved) continue;
+    try {
+      const installInputs = await installInputFingerprint(spare.root);
+      const installed = await refillDependencies(root, spare.root, { installInputs, discardTrees: true });
+      const { preparingPid: _done, ...metadata } = (await workspaceMetadata(spare.name)) ?? {};
+      await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, prepared: true, preparedAt: new Date().toISOString(),
+        preparedDependencies: { state: installed.state, packageManager: installed.packageManager, installInputs: installed.installInputs, installAttempts: installed.installAttempts, trees: installed.trees } });
+      repaired.push(spare.name);
+      report({ repaired: spare.name, damaged: damage.total, example: damage.paths[0] });
+    } catch (error) {
+      const metadata = await workspaceMetadata(spare.name);
+      if (metadata) await writeWorkspaceJson(metadataPath(spare.name), { ...metadata, preparingPid: null }).catch(() => {});
+      report({ repairFailed: spare.name, damaged: damage.total, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return repaired;
+}
+
 /** How long a refill waits for an earlier refill of its repository, or for another refill's install, on this machine. */
 const REFILL_WAIT_MS = 60 * 60_000;
 
@@ -328,6 +373,7 @@ export async function refillPool(root: string, report: (outcome: object) => void
     // Named so a spare-marked checkout a thread is using is visible, not silently left out.
     for (const { workspaceName, holders } of (await poolSpares(integrationRoot)).held) report({ held: workspaceName, holders });
     for (const retired of await retireExcessSpares(root)) report({ retired });
+    await repairDamagedSpares(root, report);
     for (;;) {
       const outcome = await provisionSpare(root);
       report(outcome);
@@ -347,7 +393,13 @@ function reusableDependencies(root: string, prepared: PreparedDependencies | nul
   if (!prepared?.installInputs || (prepared.state !== "ready" && prepared.state !== "not_required")) return null;
   if (prepared.state === "ready" && !existsSync(join(root, "node_modules"))) return null;
   if (current !== prepared.installInputs) return null;
-  return { state: prepared.state, packageManager: prepared.packageManager ?? null, installInputs: prepared.installInputs, installAttempts: prepared.installAttempts, reused: true };
+  return { state: prepared.state, packageManager: prepared.packageManager ?? null, installInputs: prepared.installInputs, installAttempts: prepared.installAttempts, trees: prepared.trees, reused: true };
+}
+
+/** `reusableDependencies`, and the installed tree is still usable (see dependency-tree.ts). */
+async function usableDependencies(root: string, prepared: PreparedDependencies | null | undefined, current: string | null): Promise<ReusedDependencies | null> {
+  const reusable = reusableDependencies(root, prepared, current);
+  return reusable && (reusable.state !== "ready" || !await installedTreeDamage(root, { trees: reusable.trees })) ? reusable : null;
 }
 
 /**
@@ -361,12 +413,20 @@ function reusableDependencies(root: string, prepared: PreparedDependencies | nul
  */
 export async function claimSpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
   // The pool is held only briefly (a claim, or a refill registering a name), so a short wait suffices.
-  return await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base, steps), { waitMs: 3000 })
+  const claimed = await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base, steps), { waitMs: 3000 })
     // Busy, or unable to tell a free spare from a held checkout: the caller provisions a fresh workspace.
     .catch((error: unknown) => {
       if ((error as { code?: string } | null | undefined)?.code === "ELOCKED" || error instanceof ProcessesUnreadableError) return null;
       throw error;
     });
+  // Outside the pool lock, which a scan of the tree would hold up. The fingerprint and the recorded state say the
+  // install was once done, not that the tree still is; a damaged one is installed over (and repaired) by the caller.
+  const damage = claimed?.dependencies && await installedTreeDamage(claimed.root, { trees: claimed.dependencies.trees });
+  if (claimed && damage) {
+    console.error(`[deps] ${claimed.name}: prepared dependencies are incomplete (${damage.total}, e.g. ${damage.paths[0]}); not reusing them`);
+    return { ...claimed, dependencies: null };
+  }
+  return claimed;
 }
 
 /**
