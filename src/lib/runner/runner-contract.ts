@@ -101,6 +101,9 @@ export const RUNNER_DEFAULT_SHORT_LANDING_SECONDS = 180;
 /** The systemd slice every run's scope joins, so one set of limits covers every gate, deploy and their children. */
 export const RUNNER_SLICE = "slipjay.slice";
 
+/** The slice's share of a full CPU against its siblings, which default to 100: it only matters when the host has no spare. */
+export const RUNNER_CPU_WEIGHT = 400;
+
 /**
  * The systemd user slice a runner command and its processes belong to, set in its environment. A
  * command that starts a systemd user scope of its own passes it as `--slice` (or a child slice of

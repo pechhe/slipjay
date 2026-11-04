@@ -5,7 +5,7 @@ import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "../infra/bounded-process.ts";
-import { RUNNER_DEFAULT_LIMITS, RUNNER_SLICE, SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
+import { RUNNER_CPU_WEIGHT, RUNNER_DEFAULT_LIMITS, RUNNER_SLICE, SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 import type { Executor, RunnerLimits } from "./runner-types.ts";
 
 /** Where a runner keeps commands and their budget: see `localExecutor`. */
@@ -64,10 +64,11 @@ export function localExecutor({ host = hostname(), env = process.env, limits = {
   };
   const { memoryHigh, memoryMax, cpuQuota, tasksMax } = { ...RUNNER_DEFAULT_LIMITS, ...limits };
   // Runtime properties: they last until the user manager restarts, and each runner start sets them again.
-  // Refuse execution if the shared budget cannot be enforced; never run uncapped.
+  // Refuse execution if the shared budget cannot be enforced; never run uncapped. Its CPU weight puts the gates ahead
+  // of the host's other work when the CPU is full, so a busy host slows the agents before it slows every landing.
   let sliced: Promise<void> | undefined;
   const enforce = () => sliced ??= (nested ? Promise.resolve({ failure: null }) : systemctl(["set-property", "--runtime", budget,
-    `MemoryHigh=${memoryHigh}`, `MemoryMax=${memoryMax}`, `CPUQuota=${cpuQuota}`, `TasksMax=${tasksMax}`])).then(({ failure }) => {
+    `MemoryHigh=${memoryHigh}`, `MemoryMax=${memoryMax}`, `CPUQuota=${cpuQuota}`, `CPUWeight=${RUNNER_CPU_WEIGHT}`, `TasksMax=${tasksMax}`])).then(({ failure }) => {
     if (failure === null) return;
     sliced = undefined;
     throw new Error(`SlipJay runner: could not enforce the limits of ${budget}: ${failure}`);

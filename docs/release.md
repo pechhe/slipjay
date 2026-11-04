@@ -147,7 +147,10 @@ verified candidate. A candidate it holds says `Not promoting <commit> automatica
 next scheduled promotion: …` on its pre-verification's log, and the runner asks again when the next
 slot opens. The schedule is read, like `process`, from the release base. It never holds an owner:
 to ship now, `slipjay promote` shows the candidate and `slipjay promote --confirm <commit>` promotes
-it at once, which also restarts the interval. When production deploys through a build machine
+it at once, which also restarts the interval. Instead of an interval, `"promotionSchedule": { "at": ["00:00", "12:00", "18:00"], "timeZone": "Europe/London" }`
+promotes at fixed times of the local day: each stays open for an hour, once, so a candidate ready or a check re-run within
+that hour still ships in its slot, and later than that a candidate waits for the next time. An owner's promotion leaves
+the next time in place. When production deploys through a build machine
 (`machine`), the runner resumes that machine 25 minutes before a held candidate's slot (or at once when
 the slot is nearer), so the deploy does not wait on the disk restore of a machine boat stopped while
 idle; a warmed machine whose promotion never comes stops 30 minutes after its slot. It needs a runner on SlipJay 3.47.0 or later: an older

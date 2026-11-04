@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.51.4
+
+- **Fixed promotion times:** `"promotionSchedule": { "at": ["00:00", "12:00", "18:00"], "timeZone": "Europe/London" }`
+  promotes at those times of the local day instead of on an interval. Each stays open for an hour, once, so a candidate
+  ready or a check re-run within that hour still ships in its slot; later than that a candidate waits for the next time.
+- **Landing gates come first on a full host:** `slipjay.slice` now has a CPU weight of 400 against its siblings' default
+  100, because the host's CPU was saturated (14 of 14 cores, 4 Nov 2026) and gates competed evenly with everything else.
+
 ## v3.51.3
 
 - **A landing that passed its gate publishes at once:** it gave up its worker place when its screen passed, then queued
