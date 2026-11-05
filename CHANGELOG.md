@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.52.0
+
+- **A workspace can name the Forge project its chores file in:** `slipjay attach-project <owner/name>` (or `--clear`)
+  records it, `slipjay start` clears it, and `slipjay land` says where the chore will file and freezes the project in the
+  submitted chore, so a replayed receipt files where the landing said. With none recorded, a chore files in the
+  repository's own project, as before.
+
 ## v3.51.5
 
 - **`slipjay land` keeps following on a busy host:** if the runner takes more than 5 seconds to record that a client is
@@ -86,8 +93,7 @@ failure back to the work that caused it.
 ## v3.50.3
 
 - **A build machine idles an hour, not thirty minutes:** with promotions batched every 30 minutes, one batch skipped
-  for want of a candidate stopped the machine, and the next promotion waited on its disk restore (12 minutes on 4 Nov
-  2026) and built on a cold disk. An idle hour keeps it warm through one skipped batch; a quiet afternoon still stops it.
+  for want of a candidate stopped the machine, and the next promotion waited on its disk restore (12 minutes on 4 Nov 2026) and built on a cold disk. An idle hour keeps it warm through one skipped batch; a quiet afternoon still stops it.
 
 ## v3.50.2
 
@@ -427,6 +433,7 @@ v3.46.7 was never tagged; its entry below ships in this release.
   same change), `jj describe` resolved that revset to an immutable submitted copy and failed with `Commit … is immutable`, so the
   conflict probe skipped its check for every such submission (seen on `pechhe/yardsmith`). The candidate's commit id is now read with
   `jj log` first and described by id. The new test is a smoke test on a stack with a divergent change; it passes on the earlier code too, so the failure itself was reproduced only against a copy of the runner's probe checkout.
+
 ## v3.46.3
 
 - **A partially written checkout is named, not reported as edited or unlanded work:** a workspace missing most of the tracked files
@@ -435,6 +442,7 @@ v3.46.7 was never tagged; its entry below ships in this release.
   `remove` now read the last snapshot and the disk, name the missing and expected tracked-file counts, and snapshot and remove nothing;
   the message says how to inspect the last snapshot, restore the checkout (`slipjay start --base <workspace>@`) or delete it
   (`remove --discard`). Files outside a sparse checkout's patterns no longer count as edited. A few deleted files remain ordinary edits.
+
 ## v3.46.2
 
 - **Large retained descriptions no longer break landing assembly:** assembling a submitted stack or merge into its landing
@@ -592,8 +600,7 @@ v3.46.7 was never tagged; its entry below ships in this release.
 
 - **Additive migrations shipped with Drizzle metadata go before the health checks too (Build #4408, SJ-55):** v3.39.3
   migrated first only when every migration file was SQL, but a promotion's migration files are everything changed under
-  `artifactPaths`, so Drizzle's `meta/*_snapshot.json` and `meta/_journal.json` beside an additive migration (YardSmith
-  0352) put it back on the late order. The order now follows the plan's one additivity classification
+  `artifactPaths`, so Drizzle's `meta/*_snapshot.json` and `meta/_journal.json` beside an additive migration (YardSmith 0352) put it back on the late order. The order now follows the plan's one additivity classification
   (`nonAdditiveMigrations`), as rollback does; a deploy that does not know its files still migrates last. That
   classification now skips JSON metadata and counts any other migration file that is not SQL as not additive, since it
   cannot be read: such a file migrates last, and a failed promotion carrying it now waits for the owner instead of rolling back.
@@ -648,8 +655,7 @@ v3.46.7 was never tagged; its entry below ships in this release.
 ## v3.38.0
 
 - **A short landing gets past busy workers (Build #3010):** with a systemd budget, a landing of a repository
-  whose verify-stage p90 over the last 7 days is at most `shortLandingP90Seconds` (runner config, default
-  180) may start while long operations hold every worker: at most `workers` long operations and `workers + 1`
+  whose verify-stage p90 over the last 7 days is at most `shortLandingP90Seconds` (runner config, default 180) may start while long operations hold every worker: at most `workers` long operations and `workers + 1`
   in all. On 18 Oct an agent-config landing that verifies in seconds waited 75 minutes for workers held by T3
   Code and YardSmith; over 16–19 Oct agent-config, splay and T3 Code waited about 6 hours in total that way.
   Releases, resets, audits, pre-verifications, recoveries and depth-two successors still count as long, and
@@ -896,7 +902,6 @@ v3.46.7 was never tagged; its entry below ships in this release.
   no live process uses it; anything else is kept with what to do. State recorded for a repository
   that no longer exists, and integrated-artifact evidence left by test fixtures in the temporary
   directory, now converge. `SweepResult` gains `orphans` (#81).
-
 
 ## v3.25.0
 
