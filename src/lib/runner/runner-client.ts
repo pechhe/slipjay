@@ -819,7 +819,9 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       await landingRequestIdentity(context, location, repo, target.commitId, requestId ?? true);
     }
     await rememberOperationRunner(operation.id, location);
-    await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached });
+    // A client fact is telemetry: a slow or unreachable runner must not end a landing it already holds.
+    await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached }).catch((error: unknown) =>
+      onLine(`warning: the runner did not record this follow-up (${error instanceof Error ? error.message : String(error)}); the landing is still followed here`));
     options.onOperation?.(operation.id);
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.

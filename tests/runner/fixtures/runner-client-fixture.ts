@@ -37,11 +37,15 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     const streamRequests: number[] = [];
     let droppedSeq = 0;
     const requestIds: string[] = [];
+    // A client fact's acknowledgement is held this long after the runner records it, as a loaded runner does.
+    let eventPostDelayMs = 0;
     // The next submission fails in transport: `lost` after the runner recorded it, `unreceived` before it saw it.
     let failNextSubmission: "lost" | "unreceived" | undefined;
     // The next submission is refused with an error and no operation, as a pre-queue refusal is; `before` runs as the runner answers.
     let refuseNextSubmission: (() => void) | undefined;
     const route = async (request: Request) => {
+      const isEventPost = request.method === "POST" && new URL(request.url).pathname.endsWith("/events");
+      const heldFact = isEventPost ? ((await request.clone().json()) as { fact?: { kind?: string } }).fact?.kind === "land_follow" : false;
       if (request.method === "GET" && new URL(request.url).pathname.endsWith("/events")) {
         streamRequests.push(Number(new URL(request.url).searchParams.get("after")));
         if (dropStream && streamRequests.length === 1) {
@@ -61,6 +65,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
       if (failing === "unreceived") return new Response("bad gateway", { status: 502 });
       if (failing === "lost") { await handler(request); return new Response("bad gateway", { status: 502 }); }
       const response = await handler(request);
+      if (heldFact && eventPostDelayMs) await new Promise((resolve) => setTimeout(resolve, eventPostDelayMs));
       if (loseSubmissionResponse && isSubmission && requestIds.length === 1) {
         const body = await response.json() as { operation: Operation };
         append(body.operation.id, { type: "failed", stage: "verifying", reason: "fixture gate failed before response recovery" });
@@ -85,6 +90,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     return { ...f, cwd, workspaceName: workspace.current.name, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
       setKill: (outcome: KillOutcome) => { killed = outcome; },
       killRequests, requestIds,
+      delayEventPost: (ms: number) => { eventPostDelayMs = ms; },
       failNextSubmission: (how: "lost" | "unreceived") => { failNextSubmission = how; },
       refuseNextSubmission: (before: () => void = () => {}) => { refuseNextSubmission = before; },
       dispose: async () => {

@@ -122,6 +122,24 @@ test("a landing the runner finds would conflict is reported as not submitted, wi
   } finally { await f.dispose(); }
 });
 
+test("a follow-up fact the runner is slow to acknowledge does not end the landing", async () => {
+  const f = await fixture();
+  try {
+    // The fact's acknowledgement outlasts its 5s budget, as on a runner under load.
+    f.delayEventPost(6000);
+    const running = landThroughRunner(f.cwd, f.options);
+    await waitFor(() => f.log.events().some((stored) => stored.event.type === "client" && stored.event.fact.kind === "land_follow"));
+    const op = f.log.openOperations()[0]!;
+    const state = await Promise.race([
+      running.then(() => "followed", (error: unknown) => `rejected: ${error instanceof Error ? error.message : String(error)}`),
+      new Promise((resolve) => setTimeout(() => resolve("still following"), 5500)),
+    ]);
+    assert.equal(state, "still following");
+    f.append(op.id, { type: "cancelled", reason: "fixture done" });
+    assert.equal((await running).operation.id, op.id);
+  } finally { await f.dispose(); }
+}, 60_000);
+
 test("a submission the runner refused is not pinned, so a retry goes to the current runner location", async () => {
   const f = await fixture(false, false, 401);
   let reached = 0;

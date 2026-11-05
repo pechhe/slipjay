@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.51.5
+
+- **`slipjay land` keeps following on a busy host:** if the runner takes more than 5 seconds to record that a client is
+  following a landing, the command warns and carries on to the real verdict. It used to stop with `The operation timed
+  out.` while the landing stayed queued (5 Nov 2026, load 40 to 65).
+
 ## v3.51.4
 
 - **Fixed promotion times:** `"promotionSchedule": { "at": ["00:00", "12:00", "18:00"], "timeZone": "Europe/London" }`
