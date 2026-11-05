@@ -20,7 +20,7 @@ const record = (overrides: Partial<BuildAdmissionRecord["binding"]> = {}, repair
   specBodyHash: "f".repeat(64), helperRevisions: ["e".repeat(40)], repairsOperationId, supersedes: null });
 
 /** A landing whose ledger is exactly `events`, after a `submitted` row carrying `submitted`. */
-function operation(log: OperationLog, submitted: { admission?: BuildAdmissionRecord; chore?: { title: string; helperRevisions: string[] } }, events: OperationEvent[], admitted = Boolean(submitted.admission)) {
+function operation(log: OperationLog, submitted: { admission?: BuildAdmissionRecord; chore?: { title: string; helperRevisions: string[]; project?: string } }, events: OperationEvent[], admitted = Boolean(submitted.admission)) {
   const id = newOperationId();
   const change = "k".repeat(32);
   log.append(id, { type: "submitted", repo: "owner/repo", changeId: change, commitId: "a".repeat(40), bookmark: candidateBookmark(change), submittedBy: "author", ...submitted });
@@ -216,6 +216,20 @@ test("only a declared chore is reported as one: replay cannot make another, and 
     publishedRevision: "d".repeat(40), title: "Bump dependencies" } }]);
   const outcome = log.operation(chore)!;
   assert.ok(outcome.kind === "landing" && outcome.outcome?.build?.admission === "unassociated" && outcome.outcome.build.receipts === "delivered");
+  drain.close(); log.close();
+});
+
+test("a chore's Forge project comes from what its submission froze, not from the workspace", async () => {
+  const log = openLog(":memory:");
+  operation(log, { chore: { title: "Tidy PropSmith", helperRevisions: [], project: "owner/project" } }, [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },
+    { type: "landed", base: "b".repeat(40), commitId: "d".repeat(40), branch: "main", remote: "origin" }]);
+  const sent: { action: string; input: { project?: string; repository?: string } }[] = [];
+  const route: BuildRoute = (action, input) => { sent.push({ action, input: input as { project?: string } }); return Promise.resolve({ kind: "accepted", value: null }); };
+  const drain = createReceiptDrain({ log, route });
+  drain.wake(); await drain.idle();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.input.project, "owner/project");
+  assert.equal(sent[0]!.input.repository, "owner/repo", "the runner's fact still names the repository that published");
   drain.close(); log.close();
 });
 

@@ -30,6 +30,8 @@ export type BuildHandoffRequest = {
   source: string; description: string;
   /** The workspace's Build item, or null for a chore. */
   issueNumber: number | null;
+  /** The Forge project the workspace names (`attach-project`), carried if the landing is a chore. */
+  forgeProject?: string | undefined;
   /** Further Tickets of the same Spec the landing completes. */
   tickets: number[];
   /** The lead's open Build session, from `--session` or `WEAVE_FORGE_SESSION_ID` (formerly `HQ_FORGE_SESSION_ID`, `HQ_BUILD_SESSION_ID`). */
@@ -56,6 +58,9 @@ export function noDeliveryRoute(spec: BuildItem): string {
     : spec.status === "accepted" ? `accepted work is not reopened, so a later defect is new linked work: ${chore}` : chore;
 }
 
+const unassociated = (request: BuildHandoffRequest): { unassociated: true; project?: string } =>
+  ({ unassociated: true, ...request.forgeProject ? { project: request.forgeProject } : {} });
+
 /** The binding for a landing of Build item `issueNumber`, or the chore statement when it has none. */
 async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { unassociated: true }> {
   const { issueNumber, tickets, read } = request;
@@ -63,7 +68,7 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
     if (tickets.length) throw new Error("--ticket needs a workspace with a Build item: start it with --issue <n> or attach-issue <n>");
     // A session id says the landing is a Spec's: landing it as a chore would leave the Spec unlanded without a word.
     if (request.sessionId?.trim()) throw new Error(`A Build session needs a workspace with a Build item: attach the Spec with attach-issue <n> (or start it with --issue <n>), or drop --session/${BUILD_SESSION_ENV} to land a chore`);
-    return { unassociated: true };
+    return unassociated(request);
   }
   const named = await item(read, { number: issueNumber }, `#${issueNumber}`);
   const spec = named.kind === "spec" ? named
@@ -86,7 +91,7 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
     if (tickets.length)
       throw new Error(`Landing Build #${issueNumber} cannot be a delivery of Spec #${spec.number}, which is ${spec.status}, and Build would refuse the bind (bind_status_invalid): ${noDeliveryRoute(spec)}`);
     request.onNoDelivery?.(`Build #${issueNumber}'s Spec #${spec.number} is ${spec.status}, so Build takes no delivery of this landing: ${noDeliveryRoute(spec)}`);
-    return { unassociated: true };
+    return unassociated(request);
   }
   const sessionId = request.sessionId?.trim();
   if (!sessionId)

@@ -71,4 +71,7 @@ test("a malformed Build binding is refused", () => {
   // The only other shape is the explicit statement that the work belongs to no Spec.
   assert.equal(validSubmissionHandoff({ ...base, build: { unassociated: true } }), true);
   for (const build of [{ unassociated: false }, { unassociated: true, specId: binding().specId }]) assert.equal(validSubmissionHandoff({ ...base, build }), false);
+  // It may name the Forge project the chore files in, by that project's key and nothing else.
+  assert.equal(validSubmissionHandoff({ ...base, build: { unassociated: true, project: "owner/project" } }), true);
+  for (const project of ["bare", "", "a/b/c", 7, null]) assert.equal(validSubmissionHandoff({ ...base, build: { unassociated: true, project } }), false, String(project));
 });

@@ -103,6 +103,8 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   await assert.rejects(request({ issueNumber: null, tickets: [11] }), /--ticket needs a workspace with a Build item/);
   await assert.rejects(request({ issueNumber: null }), /Build session needs a workspace with a Build item: attach the Spec with attach-issue/, "a session with no Build item is refused, not landed as a chore");
   assert.deepEqual((await request({ issueNumber: null, sessionId: "  " })).build, { unassociated: true }, "a blank session is no session");
+  assert.deepEqual((await request({ issueNumber: null, sessionId: "  ", forgeProject: "owner/project" })).build, { unassociated: true, project: "owner/project" }, "a chore carries its workspace's Forge project");
+  assert.deepEqual((await request({ issueNumber: 50, forgeProject: "owner/project" })).build, { unassociated: true, project: "owner/project" }, "so does a chore from a Landed Spec's workspace");
   // A Spec Build takes no delivery of still takes the fix, from the workspace it was found in, as a chore its lead attaches.
   assert.deepEqual((await request({ issueNumber: 50 })).build, { unassociated: true }, "a Landed Spec's own workspace lands as a chore");
   assert.deepEqual((await request({ issueNumber: 50, sessionId: undefined })).build, { unassociated: true });

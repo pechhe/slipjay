@@ -1,3 +1,4 @@
+import { workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
 import { configureLocalGithubTransport, jj, project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn } from "node:child_process";
@@ -168,6 +169,27 @@ test("start rejects an unknown flag, help, a missing task and an invalid Issue n
     }
     assert.deepEqual(jj(f.repo, ["workspace", "list", "-T", 'name ++ "\\n"']).split("\n").filter(Boolean), ["default"], "no workspace was created");
     assert.equal(await readFile(join(f.repo, "README.md"), "utf8"), "fixture\n");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("attach-project names a workspace's Forge project, and a later start of that workspace clears it", async () => {
+  const f = await project();
+  try {
+    const session = await createWorkspace("session", f.repo);
+    const recorded = async () => (await workspaceMetadata(session.current.name))?.forgeProject;
+    assert.equal((await slipjay(session.workspacePath, ["attach-project", "owner/project"])).code, 0);
+    assert.equal(await recorded(), "owner/project");
+    assert.equal((await slipjay(session.workspacePath, ["attach-project", "owner/other"])).code, 0);
+    assert.equal(await recorded(), "owner/other", "the latest acquisition replaces what was there");
+    assert.notEqual((await slipjay(session.workspacePath, ["attach-project", "bare"])).code, 0);
+    assert.equal((await slipjay(session.workspacePath, ["attach-project", "--clear"])).code, 0);
+    assert.equal(await recorded(), undefined);
+    assert.notEqual((await slipjay(f.repo, ["attach-project", "owner/project"])).code, 0, "never on the integration checkout");
+    await slipjay(session.workspacePath, ["attach-project", "owner/project"]);
+    assert.equal((await slipjay(session.workspacePath, ["start", "resume this workspace"])).code, 0);
+    assert.equal(await recorded(), undefined, "a start hands over no earlier project");
   } finally {
     await f.dispose();
   }

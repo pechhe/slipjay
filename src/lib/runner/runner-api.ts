@@ -329,7 +329,7 @@ export function createRunnerHandler(input: {
         // A Build-bound candidate replaces the queued one only once Build admits it; until then that one waits.
         if (active && !admission) input.log.append(active.id, { type: "superseded", by: id });
         const chore = body.handoff && build && !isBuildBinding(build)
-          ? { title: body.handoff.intent, helperRevisions: [...new Set(body.handoff.helpers.map((helper) => helper.revision))] } : undefined;
+          ? { title: body.handoff.intent, helperRevisions: [...new Set(body.handoff.helpers.map((helper) => helper.revision))], ...build.project ? { project: build.project } : {} } : undefined;
         input.log.append(id, { type: "submitted", repo, changeId: body.changeId, commitId: body.commitId, bookmark: body.bookmark, submittedBy: body.submittedBy,
           ...body.handoff ? { handoffSha256: handoffDigest(body.handoff) } : {}, ...admission ? { admission } : {}, ...chore ? { chore } : {} });
         if (retained) input.log.append(id, retained);

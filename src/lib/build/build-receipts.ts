@@ -33,6 +33,8 @@ export type BuildRunInput = {
 export type BuildChoreInput = {
   unassociated: true; repository: string; operationId: string; sequence: number; occurredAt: string; candidateRevision: string;
   baseRevision: string | null; verifiedRevision: string | null; helperRevisions: string[]; publishedRevision: string; process?: "development" | "standard"; title: string;
+  /** The Forge project the chore files in; Forge files it in the repository's own when this is absent or cannot apply. */
+  project?: string;
 };
 
 /**
@@ -141,7 +143,7 @@ export function owedReceipts(operation: LandingOperation, history: readonly Stor
       operationId: operation.id, sequence: row.seq, occurredAt: row.at, candidateRevision: operation.commitId, baseRevision: base,
       verifiedRevision: verifiedBefore(events, terminal.seq), helperRevisions: submitted.chore.helperRevisions, publishedRevision: commitId,
       ...row.event.type === "landed" && row.event.process ? { process: row.event.process } : late?.process ? { process: late.process } : {},
-      title: submitted.chore.title.slice(0, 2000) } }];
+      title: submitted.chore.title.slice(0, 2000), ...submitted.chore.project ? { project: submitted.chore.project } : {} } }];
   }
   if (!submitted.admission || !events.some((row) => row.event.type === "build_admitted")) return [];
   const record: BuildAdmissionRecord = submitted.admission;

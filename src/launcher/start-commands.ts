@@ -1,7 +1,7 @@
 import { recordClientFactsInBackground } from "../lib/runner/runner-client.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
 import { hostname } from "node:os";
-import { createWorkspace, unusedWorkspaceStartRefusal, resolveStartBase, readySpares, startSpareRefill } from "../lib/slipjay.ts";
+import { createWorkspace, setWorkspaceForgeProject, unusedWorkspaceStartRefusal, resolveStartBase, readySpares, startSpareRefill } from "../lib/slipjay.ts";
 import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
 import type { Readable } from "node:stream";
@@ -98,6 +98,8 @@ export async function runStart(rest: string[]): Promise<void> {
       ...options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {},
       ...options.attemptId ? { attemptId: options.attemptId } : {},
     });
+    // An acquisition starts with no Forge project of its own: what a reused workspace served before must not carry over.
+    await setWorkspaceForgeProject(result.workspacePath, null);
     // The runner is told in the background: a slow or unreachable one never delays the workspace.
     await recordClientFactsInBackground(result.workspacePath, [
       { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },

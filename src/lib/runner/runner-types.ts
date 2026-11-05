@@ -192,7 +192,7 @@ export type OperationEvent =
       /** Build-bound: the queue starts it only after `build_admitted`. `supersedes` is the admitted operation it replaces in Build's custody. */
       admission?: BuildAdmissionRecord;
       /** Declared by its author as belonging to no Spec: once published, reported to Build as a chore landing. */
-      chore?: { title: string; helperRevisions: string[] } }
+      chore?: { title: string; helperRevisions: string[]; project?: string } }
   /** Build could not answer admission; the ledger timestamp records when the reason changed. Does not settle admission. */
   | { type: "admission_unavailable"; reason: string }
   /** Build admitted this operation's `submitted` fact at `sequence`, its ledger sequence. */
@@ -799,7 +799,9 @@ export type RepairProof = { operationId: string; claimId: string; token: string 
  */
 export type BuildBinding = { specId: string; ticketIds: string[]; bodyRevision: number | null; bindGeneration: number; sessionId: string };
 /** The author's explicit statement that this work belongs to no Spec: once published, Build records it as a chore. */
-export type BuildUnassociated = { unassociated: true };
+export type BuildUnassociated = { unassociated: true;
+  /** The Forge project the chore files in, when its workspace names one; else the repository's own. Frozen here, so a replayed receipt files where the landing said. */
+  project?: string };
 
 /** Author reports are provenance, never runner verification or repair authority. */
 export type SubmissionHandoff = {

@@ -36,6 +36,9 @@ function validBuildBinding(value: unknown): value is BuildBinding {
     && typeof binding.sessionId === "string" && UUID.test(binding.sessionId);
 }
 
+/** A Forge project's `owner/name` key, as Forge registers it. */
+export const FORGE_PROJECT_KEY = /^[^\s/]{1,100}\/[^\s/]{1,100}$/;
+
 export function validSubmissionHandoff(value: unknown): value is SubmissionHandoff {
   const object = (v: unknown): v is Record<string, unknown> => Boolean(v) && typeof v === "object" && !Array.isArray(v);
   const keys = (v: Record<string, unknown>, names: string[]) => Object.keys(v).length === names.length && names.every((name) => name in v);
@@ -44,7 +47,7 @@ export function validSubmissionHandoff(value: unknown): value is SubmissionHando
   const list = (v: unknown, test: (v: unknown) => boolean) => Array.isArray(v) && v.length <= 32 && v.every(test);
   const { build, ...required } = object(value) ? value : { build: undefined };
   if (!object(value) || !keys(required, ["version", "source", "intent", "scope", "spec", "helpers", "checks", "reviews", "toolchain", "gaps"])) return false;
-  if ("build" in value && !validBuildBinding(build) && !(object(build) && keys(build, ["unassociated"]) && build.unassociated === true)) return false;
+  if ("build" in value && !validBuildBinding(build) && !(object(build) && keys(build, "project" in build ? ["unassociated", "project"] : ["unassociated"]) && build.unassociated === true && (!("project" in build) || (typeof build.project === "string" && FORGE_PROJECT_KEY.test(build.project))))) return false;
   if (value.version !== 1 || !revision(value.source) || !text(value.intent) || !list(value.scope, (v) => text(v)) || !list(value.gaps, (v) => text(v))) return false;
   const spec = value.spec;
   if (spec !== null && (!object(spec) || !keys(spec, ["ref", "bodySha256", "snapshot"]) || !text(spec.ref, 300)

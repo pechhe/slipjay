@@ -1,6 +1,7 @@
 import { adoptWorkspace } from "../lib/workspace/workspace-adopt.ts";
-import { attachWorkspaceIssue, inspectWorkspaces, readWorkspaceMode, workspaceContext, writeWorkspaceMode, refillPool, readySpares, spareAllowance, describeRetention, retainedWorkspaceMaterial, readLandedRecord, readLandingState } from "../lib/slipjay.ts";
+import { attachWorkspaceIssue, setWorkspaceForgeProject, inspectWorkspaces, readWorkspaceMode, workspaceContext, writeWorkspaceMode, refillPool, readySpares, spareAllowance, describeRetention, retainedWorkspaceMaterial, readLandedRecord, readLandingState } from "../lib/slipjay.ts";
 import { workspaceMetadata } from "../lib/workspace/workspace-state.ts";
+import { FORGE_PROJECT_KEY } from "../lib/landing/submission-handoff.ts";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
@@ -59,6 +60,13 @@ export async function runAttachIssue(rest: string[]): Promise<void> {
   const issueNumber = Number(rest[0]);
   const result = await attachWorkspaceIssue(process.cwd(), issueNumber);
   console.log(`Attached Issue #${result.issueNumber} to jj:${result.workspaceName}.`);
+}
+
+export async function runAttachProject(rest: string[]): Promise<void> {
+  const [project, ...extra] = rest;
+  if (!project || extra.length || (project !== "--clear" && !FORGE_PROJECT_KEY.test(project))) throw new Error("Usage: slipjay attach-project <owner/name> | --clear");
+  await setWorkspaceForgeProject(process.cwd(), project === "--clear" ? null : project);
+  console.log(project === "--clear" ? "This workspace's chores file in the repository's own Forge project." : `This workspace's chores file in Forge project ${project}.`);
 }
 
 export async function runAdopt(rest: string[]): Promise<void> {

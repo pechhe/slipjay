@@ -711,7 +711,8 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
             helpers: [], checks: [], reviews: [], toolchain: [], gaps: [],
           } : undefined;
           const written = await buildLandingHandoff({ source: target.commitId, description: target.description, issueNumber: typeof issueNumber === "number" ? issueNumber : null,
-            tickets: options.tickets ?? [], sessionId: options.session ?? buildSessionFrom(env), read: (action, input) => readBuildThroughRunner(action, input, env), onNoDelivery: (message) => onLine(`[build] ${message}`) });
+            forgeProject: typeof metadata?.forgeProject === "string" ? metadata.forgeProject : undefined, tickets: options.tickets ?? [], sessionId: options.session ?? buildSessionFrom(env), read: (action, input) => readBuildThroughRunner(action, input, env), onNoDelivery: (message) => onLine(`[build] ${message}`) });
+          if (written.build && "unassociated" in written.build) onLine(`[build] this chore files in Forge project ${written.build.project ?? repo}`);
           return prepared(written);
         }, undefined, async (id) => {
           const accepted = await operationRunnerLocation(id, env) ?? location;

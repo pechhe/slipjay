@@ -11,7 +11,7 @@
 // Workspaces: context, assignment, state and housekeeping (launcher, extension, CLI, hooks, desktop).
 export { explicitIssueNumber, projectPrefix, revisionFacts, taskWorkspaceName, workspaceContext, workspaceHasUnintegratedWork } from "./infra/workspace-jj.ts";
 export {
-  assertWorkspaceMutationAllowed, attachWorkspaceIssue, findWorkspace, inspectWorkspace, inspectWorkspaces, landingStatePaths,
+  assertWorkspaceMutationAllowed, attachWorkspaceIssue, setWorkspaceForgeProject, findWorkspace, inspectWorkspace, inspectWorkspaces, landingStatePaths,
   listWorkspaces, readLandedRecord, readLandingState, readWorkspaceMode, renameWorkspace, workspaceContinuationState, writeWorkspaceMode,
 } from "./workspace/workspace-state.ts";
 export { createWorkspace, findIssueWorkspace, recoverIssueWorkspace, resolveStartBase, unusedWorkspaceStartRefusal } from "./workspace/workspace-create.ts";

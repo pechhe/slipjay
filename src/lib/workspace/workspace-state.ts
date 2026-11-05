@@ -319,6 +319,21 @@ async function attachWorkspaceIssueUnlocked(cwd: string, issueNumber: number): P
   return metadata;
 }
 
+/**
+ * Records the Forge project a workspace's chores file in, or clears it with null. Each acquisition sets it anew, so a
+ * reused workspace never files under the project it served before. A project sharing a repository needs it; no record
+ * means the repository's own project.
+ */
+export async function setWorkspaceForgeProject(cwd: string, project: string | null): Promise<void> {
+  const context = await workspaceContext(cwd);
+  if (!context || context.current.name === "default") throw new Error("A Forge project attaches only to an isolated JJ workspace");
+  await withWorkspaceTransaction(`association:${context.integration.root}`, async () => {
+    const { forgeProject: _previous, ...metadata } = (await workspaceMetadata(context.current.name)) ?? {};
+    await mkdir(metadataHome(), { recursive: true, mode: 0o700 });
+    await writeFile(metadataPath(context.current.name), JSON.stringify({ ...metadata, ...project ? { forgeProject: project } : {} }, null, 2), { mode: 0o600 });
+  });
+}
+
 /** Top-level landing-state sidecar path for a workspace. */
 export function statePath(workspaceName: string): string {
   return join(stateHome(), `${workspaceName}.json`);
