@@ -39,10 +39,19 @@ async function stubSystemctl(body: string): Promise<{ bin: string; log: string }
   return { bin, log };
 }
 
-/** The arms of a host whose runner unit exists and whose effective ExecStart is `execStart`. */
-const runnerUnitArms = (execStart: string): string => `  *" cat "*) exit 0;;
-  *" show "*) echo 'ExecStart={ path=/usr/bin/bws ; argv[]=${execStart} }'; exit 0;;
+/**
+ * The arms of a host whose runner unit exists and whose effective ExecStart is `execStart`. Like a real
+ * user manager, it answers only a caller whose environment names the runtime directory.
+ */
+const runnerUnitArms = (execStart: string): string => `  *) [ -n "$XDG_RUNTIME_DIR" ] || { echo "Failed to connect to bus: No medium found" >&2; exit 1; };;
+esac
+case "$*" in
+  *" show "*) echo LoadState=loaded; echo 'ExecStart={ path=/usr/bin/bws ; argv[]=${execStart} }'; exit 0;;
   *restart*) exit 0;;`;
+
+/** The arms of a host with systemd and no runner unit. */
+const noUnitArms = `  *" show "*) echo LoadState=not-found; exit 0;;
+  *) exit 1;;`;
 
 /** What `scripts/setup-runner.sh` writes: the runner slot, never the client's command or slot. */
 const runnerSlotCommand = (): string => `/usr/bin/bws run -- ${join(runnerSlotPath(), "src/launcher/workspace.ts")} runner serve`;
@@ -51,7 +60,7 @@ const runnerSlotCommand = (): string => `/usr/bin/bws run -- ${join(runnerSlotPa
 const clientCommand = (): string => `/usr/bin/bws run -- ${commandLinkPath()} runner serve`;
 
 let noUnitBin = "";
-beforeAll(async () => { noUnitBin = (await stubSystemctl(`  *) exit 1;;`)).bin; });
+beforeAll(async () => { noUnitBin = (await stubSystemctl(noUnitArms)).bin; });
 
 // The whole file shares one disposable HOME, and every test here is about the machine's state in it:
 // start each from a machine that has never upgraded, and one whose runner unit this suite owns.
@@ -60,6 +69,7 @@ beforeEach(async () => {
   // The adopted command too: it points into the slot that was just removed.
   await rm(dirname(dirname(commandLinkPath())), { recursive: true, force: true });
   process.env.PATH = `${noUnitBin}:${BASE_PATH}`;
+  process.env.XDG_RUNTIME_DIR ??= "/run/user/fixture";
 });
 
 /** Run `work` with `bin` first on PATH, as a host with that `systemctl` would. */
@@ -333,21 +343,21 @@ test("a client upgrade refuses to adopt the command while the runner unit runs s
   } finally { await f.dispose(); }
 });
 
-test("adoption reads the unit files when systemd cannot show the effective command", async () => {
+test("a client upgrade leaves the command alone when systemd cannot say what the runner unit runs", async () => {
   const f = await project();
   try {
-    await landSlipjayTree(f, "9.9.9");
+    const commit = await landSlipjayTree(f, "9.9.9");
     await setConfiguredUpgradeSource(f.repo);
     await mkdir(dirname(commandLinkPath()), { recursive: true });
-    // `show` answers nothing, as on an older systemd; the unit file still says the runner follows the command.
-    const unit = await stubSystemctl(`  *" cat "*) echo "# /home/fixture/.config/systemd/user/slipjay-runner.service"; echo "ExecStart=/usr/bin/bws run -- ${commandLinkPath()} runner serve"; exit 0;;
-  *" show "*) exit 1;;`);
+    // The user manager does not answer, as when the bus is unreachable: that is not a host without a unit.
+    const unit = await stubSystemctl(`  *) echo "Failed to connect to bus: No medium found" >&2; exit 1;;`);
 
     const outcome = await withPath(unit.bin, () => upgradeMachine({ install: noInstall }));
     assert.equal(outcome.action, "upgraded");
+    assert.equal(outcome.to, commit);
     assert.equal(outcome.command, null);
-    assert.match(outcome.reason ?? "", /scripts\/setup-runner\.sh/);
-    assert.equal(existsSync(commandLinkPath()), false);
+    assert.match(outcome.reason ?? "", /systemd could not say what the slipjay-runner unit runs.*Failed to connect to bus/);
+    assert.equal(existsSync(commandLinkPath()), false, "a runner that may follow the command is never moved by a client upgrade");
   } finally { await f.dispose(); }
 });
 
@@ -394,7 +404,7 @@ test("a runner upgrade refuses on a host with no runner unit", async () => {
   try {
     await landSlipjayTree(f, "9.9.9");
     await setConfiguredUpgradeSource(f.repo);
-    const unit = await stubSystemctl(`  *" cat "*) exit 1;;`);
+    const unit = await stubSystemctl(noUnitArms);
 
     await withPath(unit.bin, async () => {
       await assert.rejects(upgradeMachine({ slot: "runner", install: noInstall }), /No slipjay-runner unit/);

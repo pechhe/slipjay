@@ -251,18 +251,30 @@ async function verifyInstall(target: string): Promise<void> {
   } finally { await rm(probe, { recursive: true, force: true }); }
 }
 
+/** What this host's runner unit runs, or that it has none, or that systemd could not say. */
+type RunnerUnit = { state: "none" } | { state: "unit"; execStart: string } | { state: "unknown"; reason: string };
+
 /**
- * The runner unit's effective `ExecStart`, as systemd resolves it (drop-ins included), or null when
- * this host has no runner unit. Where `show` cannot answer, the unit files are read instead.
+ * `systemctl --user` with the caller's environment. The user manager is reached through `XDG_RUNTIME_DIR`,
+ * which the sanitized command environment drops: without it every query fails ("Failed to connect to bus"),
+ * as it did on peach-live on 6 Nov 2026. The local executor passes it the same way.
  */
-async function runnerUnitExecStart(): Promise<string | null> {
-  const shown = await runWorkspaceCommand("systemctl", ["--user", "show", "-p", "ExecStart", "slipjay-runner.service"], { timeoutMs: 30_000 });
-  const line = shown.code === 0 ? shown.stdout.trim() : "";
-  // An absent unit shows an empty property rather than failing on some systemd versions.
-  if (line && line !== "ExecStart=") return line;
-  const files = await runWorkspaceCommand("systemctl", ["--user", "cat", "slipjay-runner.service"], { timeoutMs: 30_000 });
-  if (files.code !== 0) return null;
-  return files.stdout.split(/\r?\n/).find((text) => /^\s*ExecStart=/.test(text))?.trim() ?? null;
+const userSystemctl = (args: readonly string[], timeoutMs = 30_000) =>
+  runWorkspaceCommand("systemctl", ["--user", ...args], { env: process.env, timeoutMs });
+
+/**
+ * The runner unit's effective `ExecStart`, as systemd resolves it (drop-ins included). Only Linux hosts
+ * run the runner, so another platform (the Mac) has no unit; a Linux systemd that does not answer is
+ * `unknown`, never "no unit", so a guard built on this fails closed.
+ */
+async function runnerUnit(): Promise<RunnerUnit> {
+  if (process.platform !== "linux") return { state: "none" };
+  const shown = await userSystemctl(["show", "-p", "LoadState", "-p", "ExecStart", "slipjay-runner.service"]);
+  if (shown.code !== 0) return { state: "unknown", reason: lastLine(shown) || `systemctl exited ${shown.code}` };
+  const field = (name: string) => shown.stdout.split(/\r?\n/).find((line) => line.startsWith(`${name}=`))?.slice(name.length + 1).trim() ?? "";
+  if (field("LoadState") === "not-found") return { state: "none" };
+  const execStart = field("ExecStart");
+  return execStart ? { state: "unit", execStart } : { state: "unknown", reason: "systemd shows the unit with no ExecStart" };
 }
 
 /** Whether the unit's command runs the runner slot's launcher: the only code a runner may run. */
@@ -281,8 +293,9 @@ async function adoptCommand(): Promise<{ command: string | null; refusal: string
   const link = commandLinkPath();
   // A machine with no bun global bin keeps running whatever put `slipjay` on its PATH.
   if (!existsSync(dirname(link))) return { command: null, refusal: null, changed: false };
-  const execStart = await runnerUnitExecStart();
-  if (execStart && !runsRunnerSlot(execStart)) return { command: null, refusal: `not adopted: ${setupRunnerRefusal(execStart)}`, changed: false };
+  const unit = await runnerUnit();
+  if (unit.state === "unknown") return { command: null, refusal: `not adopted: systemd could not say what the slipjay-runner unit runs (${unit.reason})`, changed: false };
+  if (unit.state === "unit" && !runsRunnerSlot(unit.execStart)) return { command: null, refusal: `not adopted: ${setupRunnerRefusal(unit.execStart)}`, changed: false };
   const target = join(currentSlotPath(), LAUNCHER);
   const before = await linkTarget(link);
   if (before === target) return { command: target, refusal: null, changed: false };
@@ -292,14 +305,15 @@ async function adoptCommand(): Promise<{ command: string | null; refusal: string
 
 /** Refuse a runner upgrade on a host that has no unit to restart: its slot is only for a runner host. */
 async function assertRunnerUnit(): Promise<void> {
-  const unit = await runWorkspaceCommand("systemctl", ["--user", "cat", "slipjay-runner.service"], { timeoutMs: 30_000 });
-  if (unit.code !== 0) throw new Error("No slipjay-runner unit on this host: a runner install upgrades only where "
-    + `scripts/setup-runner.sh installed the unit (${lastLine(unit) || "no unit"})`);
+  const unit = await runnerUnit();
+  if (unit.state === "none") throw new Error("No slipjay-runner unit on this host: a runner install upgrades only where "
+    + "scripts/setup-runner.sh installed the unit");
+  if (unit.state === "unknown") throw new Error(`systemd could not say whether this host has a slipjay-runner unit: ${unit.reason}`);
 }
 
 /** Restart the unit onto the runner slot. It finishes any integration in flight first (see docs/runner.md). */
 async function restartRunnerUnit(): Promise<void> {
-  const restarted = await runWorkspaceCommand("systemctl", ["--user", "restart", "slipjay-runner.service"], { timeoutMs: 120_000 });
+  const restarted = await userSystemctl(["restart", "slipjay-runner.service"], 120_000);
   if (restarted.code !== 0) throw new Error(`the runner unit did not restart: ${lastLine(restarted) || `exit ${restarted.code}`}`);
 }
 
@@ -401,13 +415,13 @@ export async function upgradeMachine(options: UpgradeOptions = {}): Promise<Upgr
   // A runner slot is only in effect once the unit runs it: prove the unit's command is the runner's
   // install before restarting onto it, so a runner never runs the client's slot.
   if (slot === "runner" && (action === "upgraded" || action === "rolled-back" || action === "current")) {
-    const execStart = await runnerUnitExecStart();
-    if (!execStart) {
+    const unit = await runnerUnit();
+    if (unit.state !== "unit") {
       action = "failed";
-      reason = "could not read the slipjay-runner unit's ExecStart, so what the runner would run is unproven; run scripts/setup-runner.sh";
-    } else if (!runsRunnerSlot(execStart)) {
+      reason = `could not read the slipjay-runner unit's ExecStart (${unit.state === "unknown" ? unit.reason : "no unit"}), so what the runner would run is unproven`;
+    } else if (!runsRunnerSlot(unit.execStart)) {
       action = "failed";
-      reason = setupRunnerRefusal(execStart);
+      reason = setupRunnerRefusal(unit.execStart);
     } else if (action !== "current") {
       try { await (options.restart ?? restartRunnerUnit)(); }
       catch (error) { action = "failed"; reason = message(error); }
