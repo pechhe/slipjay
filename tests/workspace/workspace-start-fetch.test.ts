@@ -1,6 +1,7 @@
 import { jj, project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
@@ -13,9 +14,13 @@ import { withWorkspaceTransaction } from "../../src/lib/infra/workspace-transact
 function landElsewhere(f: { root: string; remote: string }, file: string) {
   const other = join(f.root, "other");
   const git = (args: string[], cwd = other) => execFileSync("git", args, { cwd, stdio: "pipe" });
-  git(["clone", "-q", f.remote, other], f.root);
-  git(["config", "user.name", "Fixture"]);
-  git(["config", "user.email", "fixture@example.com"]);
+  // A second landing from the same machine reuses its clone.
+  if (existsSync(other)) git(["pull", "-q", "origin", "main"]);
+  else {
+    git(["clone", "-q", f.remote, other], f.root);
+    git(["config", "user.name", "Fixture"]);
+    git(["config", "user.email", "fixture@example.com"]);
+  }
   execFileSync("node", ["-e", `require("node:fs").writeFileSync(${JSON.stringify(join(other, file))}, "elsewhere\\n")`]);
   git(["add", "."]);
   git(["commit", "-qm", "Landed elsewhere"]);
@@ -142,5 +147,22 @@ test("a start base is refused when it is the caller's working copy or names seve
     await assert.rejects(resolveStartBase(lead, "@"), /working copy/);
     await assert.rejects(resolveStartBase(lead, "@ | @-"), /exactly one commit/);
     await assert.rejects(createWorkspace("helper", f.repo, { base: parentOf(lead), issueNumber: 7 }), /new workspace/);
+  } finally { await f.dispose(); }
+});
+
+test("a start moves a primary checkout with nothing of its own onto what it fetched, and leaves one with edits", async () => {
+  const f = await project();
+  try {
+    const landed = landElsewhere(f, "elsewhere.txt");
+    await createWorkspace("first", f.repo);
+    assert.equal(parentOf(f.repo), landed, "the primary checkout runs what landed elsewhere");
+
+    await writeFile(join(f.repo, "local-edit.txt"), "mine\n");
+    const old = new Date(Date.now() - 60_000);
+    for (const name of await readdir(startFetchHome())) await utimes(join(startFetchHome(), name), old, old);
+    landElsewhere(f, "again.txt");
+    await createWorkspace("second", f.repo);
+    assert.equal(parentOf(f.repo), landed, "a checkout someone is editing stays where it is");
+    assert.equal(await readFile(join(f.repo, "local-edit.txt"), "utf8"), "mine\n");
   } finally { await f.dispose(); }
 });

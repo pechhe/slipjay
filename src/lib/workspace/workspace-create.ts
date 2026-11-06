@@ -14,7 +14,8 @@ import {
   workspaceMetadata,
 } from "./workspace-state.ts";
 import { readIntegrationPolicy, UNDECLARED_POLICY } from "../policy/execution-policy.ts";
-import { fetchIntegration, publicationRemote } from "../landing/landing-steps.ts";
+import { fetchIntegration, landingIO, publicationRemote } from "../landing/landing-steps.ts";
+import { primaryCheckoutDisposition } from "../landing/landing-candidate.ts";
 import { forgetMissingCheckout, missingCheckoutRefusal } from "./workspace-lifecycle.ts";
 import { startHousekeeping } from "./workspace-housekeeping.ts";
 import { beginAttempt, updateAttempt } from "./workspace-attempts.ts";
@@ -473,11 +474,27 @@ async function refreshIntegration(context: WorkspaceContext) {
     if (fetched.code === 0) {
       await mkdir(startFetchHome(), { recursive: true, mode: 0o700 });
       await writeFile(marker, "");
+      await followIntegration(context);
       return;
     }
     const detail = (fetched.stderr || fetched.stdout).trim().split(/\r?\n/).at(-1);
     console.error(`[fetch] could not refresh ${context.integrationBranch} from ${remote}${detail ? `: ${detail}` : ""}; starting from the local branch`);
   });
+}
+
+/**
+ * Move the primary checkout onto the integration head a start has just fetched, as the
+ * hourly `maintain` does, so a machine nobody lands from runs landed code (its tools run
+ * from that checkout) within a start rather than an hour. Only a checkout with nothing of
+ * its own moves; edits, unlanded commits and conflicts stay put. It never waits: a landing
+ * holding the integration lock moves the checkout itself. Best effort, like the fetch.
+ */
+async function followIntegration(context: WorkspaceContext) {
+  await withWorkspaceTransaction(
+    `integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
+    () => primaryCheckoutDisposition(context, landingIO, { carryEdits: false }),
+    { wait: false },
+  ).catch(() => undefined);
 }
 
 /**
