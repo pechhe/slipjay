@@ -284,10 +284,18 @@ and held state through the existing recovery path.
   Elsewhere, such as macOS, only the run's process group is killed: after every
   command, and at the next start for a command the runner home records as running when
   the runner was killed. Tools that leave the process group are out of reach there.
-- **A release that breaks the runner.** The runner runs the SlipJay version
-  installed on its host, so a broken release cannot land its own fix. Reinstall the
-  previous tag there (`bun add -g github:pechhe/slipjay#v<previous>`), restart the
-  runner unit, then land the fix.
+- **A release that breaks the runner.** The runner runs the SlipJay install in its own
+  slot (`~/.slipjay/runner-install`), so a broken release cannot land its own fix. Put
+  the install it replaced back there (`slipjay upgrade --runner --rollback`, which
+  restarts the unit), then land the fix. A client upgrade never changes that slot, and
+  `upgrade --runner` refuses to restart a unit whose `ExecStart` does not run the runner
+  install: it says so and names `scripts/setup-runner.sh`.
+- **A host that already runs the runner.** Its unit runs `~/.bun/bin/slipjay`, so the
+  client's adoption of that command would move the runner's code too, and it is refused
+  until the unit runs the runner install. Run `slipjay upgrade --runner` (which builds
+  the runner install and reports the unit is not yet pointed at it), then
+  `scripts/setup-runner.sh` with the same repositories (it points the unit at the runner
+  install and restarts it), then `slipjay upgrade` to adopt the client command.
 - <a id="state"></a>**State.** The runner's own state lives in `~/.slipjay/runner`:
   - `config.json`: the name, the listen port, the repositories, keyed `owner/name` with their git URL,
     and `jj`: settings set as repository config in every warm checkout. It must name `user.name` and
@@ -347,13 +355,14 @@ and held state through the existing recovery path.
   point each machine's location at it (`"runner": "ssh://<new host>"`, or
   `http://127.0.0.1:7787` on the host itself), and `slipjay runner resume`: the pause
   moved with the log.
-- <a id="setup"></a>**Setup.** On the runner host, with `slipjay`, `jj`, `bws` and `corepack` installed and the
-  Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved:
+- <a id="setup"></a>**Setup.** On the runner host, with `jj`, `bws`, `bun` and `corepack` installed, the
+  Bitwarden secret `SLIPJAY_RUNNER_TOKEN` saved and a runner install in place
+  (`slipjay upgrade --runner`, from a checkout; see [Install](../README.md#install)):
   `scripts/setup-runner.sh pechhe/YardSmith=git@github.com:pechhe/YardSmith.git`.
   The commit identity comes from `SLIPJAY_RUNNER_USER_NAME` and `SLIPJAY_RUNNER_USER_EMAIL`,
-  else git's global user. It writes the config and a systemd user unit that runs `bws run -- slipjay runner
-  serve` with `Restart=always`, and enables lingering so the unit survives logout and
-  reboot. Logs: `journalctl --user -u slipjay-runner`. The unit's PATH starts with corepack shims
+  else git's global user. It writes the config and a systemd user unit that runs
+  `bws run -- ~/.slipjay/runner-install/src/launcher/workspace.ts runner serve` with
+  `Restart=always`, and enables lingering so the unit survives logout and reboot. Logs: `journalctl --user -u slipjay-runner`. The unit's PATH starts with corepack shims
   for pnpm, so each repository installs with the pnpm its `packageManager` pins, whatever pnpm
   is installed globally; re-run the script to add them to an existing unit.
 - <a id="candidate-bun-runtime"></a>**Candidate Bun runtime.** For an exact stable `packageManager: "bun@x.y.z"`, each

@@ -1,11 +1,12 @@
 /**
- * This machine's settings, `~/.slipjay/config.json`: where its runner is (`runner`) and
- * the per-repository spare limits (`spares`, keyed by integration checkout path). The one
- * reader and writer of that file; every other key in it is kept as written.
+ * This machine's settings, `~/.slipjay/config.json`: where its runner is (`runner`), the
+ * integration checkout it upgrades from (`upgradeSource`) and the per-repository spare limits
+ * (`spares`, keyed by integration checkout path). The one reader and writer of that file; every
+ * other key in it is kept as written.
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { spareCount } from "./execution-policy.ts";
 import { RUNNER_LOCATION_ENV } from "../runner/runner-env.ts";
 import { machineConfigPath } from "../workspace/workspace-paths.ts";
@@ -32,6 +33,14 @@ export function readMachineConfig(): Record<string, unknown> {
 /** The runner location the file records, or null. */
 export function configuredRunner(config: Record<string, unknown> = readMachineConfig()): string | null {
   return typeof config.runner === "string" && config.runner ? config.runner : null;
+}
+
+/**
+ * The integration checkout this machine upgrades from: the repository whose landings it installs, and
+ * the checkout its fetch reads. Null when it names none, which leaves automatic upgrades off.
+ */
+export function configuredUpgradeSource(config: Record<string, unknown> = readMachineConfig()): string | null {
+  return typeof config.upgradeSource === "string" && config.upgradeSource ? config.upgradeSource : null;
 }
 
 /** The file's spare limits, by integration checkout path; a malformed map or count fails rather than being ignored. */
@@ -94,6 +103,12 @@ export async function updateMachineConfig(update: (config: Record<string, unknow
 export async function setConfiguredRunner(location: string | null): Promise<void> {
   if (location !== null) validRunnerLocation(location);
   await updateMachineConfig(({ runner: _previous, ...rest }) => location === null ? rest : { ...rest, runner: location });
+}
+
+/** Record (or with null, clear) the integration checkout this machine upgrades from. */
+export async function setConfiguredUpgradeSource(path: string | null): Promise<void> {
+  if (path !== null && !isAbsolute(path)) throw new Error(`upgradeSource must be an absolute path: ${path}`);
+  await updateMachineConfig(({ upgradeSource: _previous, ...rest }) => path === null ? rest : { ...rest, upgradeSource: path });
 }
 
 /** Record (or with null, clear) this machine's spare limit for a repository; it only ever lowers the declared count. */

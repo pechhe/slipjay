@@ -1,13 +1,13 @@
 import { runnerLocation } from "../lib/runner/runner-client.ts";
 import { workspaceContext, spareAllowance } from "../lib/slipjay.ts";
 import { machineConfigPath } from "../lib/workspace/workspace-paths.ts";
-import { checkoutIdentity, machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setMachineSpareLimit } from "../lib/policy/machine-config.ts";
+import { checkoutIdentity, configuredUpgradeSource, machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setConfiguredUpgradeSource, setMachineSpareLimit } from "../lib/policy/machine-config.ts";
 import { setPolicy, showPolicy } from "../lib/policy/policy-command.ts";
 import { retiredFieldsWarning } from "../lib/policy/execution-policy.ts";
 import { resolve } from "node:path";
 import { integrationRoot } from "./command-context.ts";
 
-const CONFIG_USAGE = "Usage: slipjay config [--json] | config set runner <location> | config set spares <0-8> [--repo <integration checkout>] | config unset <runner|spares> [--repo <integration checkout>]";
+const CONFIG_USAGE = "Usage: slipjay config [--json] | config set runner <location> | config set upgradeSource <integration checkout> | config set spares <0-8> [--repo <integration checkout>] | config unset <runner|upgradeSource|spares> [--repo <integration checkout>]";
 
 /** `config`: this machine's runner location and spare limits, each with where it comes from. */
 export async function runConfig(args: string[]): Promise<number> {
@@ -16,6 +16,7 @@ export async function runConfig(args: string[]): Promise<number> {
     if (args.length > 1) throw new Error(CONFIG_USAGE);
     const config = readMachineConfig();
     const runner = runnerSetting(process.env, config);
+    const upgradeSource = configuredUpgradeSource(config);
     const context = await workspaceContext().catch(() => null);
     const roots = [...new Set([...context ? [checkoutIdentity(context.integration.root)] : [], ...Object.keys(machineSpareLimits(config)).map(checkoutIdentity)])];
     const spares = await Promise.all(roots.map(async (repository) => {
@@ -23,9 +24,10 @@ export async function runConfig(args: string[]): Promise<number> {
       const allowance = repositoryContext ? await spareAllowance(repositoryContext) : null;
       return { repository, declared: allowance?.declared ?? null, machineLimit: machineSpareLimit(repository, config), effective: allowance?.spares ?? null, source: allowance?.source ?? null };
     }));
-    if (action === "--json") console.log(JSON.stringify({ path: machineConfigPath(), runner, spares }, null, 2));
+    if (action === "--json") console.log(JSON.stringify({ path: machineConfigPath(), runner, upgradeSource, spares }, null, 2));
     else {
       console.log(`runner: ${runner.value ?? "(none)"} (${runner.source === "environment" ? `from SLIPJAY_RUNNER${runner.overriddenByEnvironment ? `, overriding ${runner.file}` : ""}` : runner.source === "file" ? machineConfigPath() : "unset"})`);
+      console.log(`upgradeSource: ${upgradeSource ?? "(none)"} (${upgradeSource ? machineConfigPath() : "unset"})`);
       for (const entry of spares) {
         const declaredAt = entry.source ? ` on ${entry.source.integrationBranch}${entry.source.commitId ? ` at ${entry.source.commitId.slice(0, 12)}` : ""}` : "";
         console.log(`spares: ${entry.repository}: ${entry.effective ?? "?"} (declared ${entry.declared ?? "?"}${declaredAt}, machine limit ${entry.machineLimit ?? "none"})`);
@@ -43,6 +45,13 @@ export async function runConfig(args: string[]): Promise<number> {
     const runner = runnerSetting();
     console.log(JSON.stringify({ runner }));
     if (runner.overriddenByEnvironment) console.error(`SLIPJAY_RUNNER overrides this setting in the current environment (${runner.value})`);
+    return 0;
+  }
+  if (key === "upgradeSource" && repoIndex < 0 && values.length === (action === "set" ? 1 : 0)) {
+    // The setting names the integration checkout, so it is resolved and checked like `--repo` is.
+    const source = action === "set" ? await integrationRoot(resolve(values[0]!)) : null;
+    await setConfiguredUpgradeSource(source);
+    console.log(JSON.stringify({ upgradeSource: configuredUpgradeSource() }));
     return 0;
   }
   if (key === "spares" && values.length === (action === "set" ? 1 : 0)) {

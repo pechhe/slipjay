@@ -44,6 +44,9 @@ the full contracts, including configuration, refusal conditions and recovery.
 | Checkout mode (`slipjay mode`) | `~/.slipjay/mode.json` |
 | New isolated workspaces | `~/.slipjay/workspaces` |
 | Removed checkouts awaiting deletion | `~/.slipjay/trash` |
+| Installed code, one directory per landed commit | `~/.slipjay/installs` |
+| The install the `slipjay` command runs, and the one it replaced | `~/.slipjay/current`, `~/.slipjay/current.previous` |
+| The install the runner service runs, and the one it replaced | `~/.slipjay/runner-install`, `~/.slipjay/runner-install.previous` |
 | Cutover record | `~/.slipjay/cutover.json` |
 
 In v2.0.0, `slipjay cutover` moves state from `~/.slipway` to `~/.slipjay` once. The
@@ -137,10 +140,13 @@ rather than by hand, and this machine's own settings with `slipjay config`.
   prove:** that a new or edited check passes. That is first shown when a later landing runs it;
   a broken check blocks the repository's landings until it is fixed, which the same fast path
   can do.
-- **`slipjay config [--json]`, `config set runner <location>`, `config set spares <0-8> [--repo <path>]`, `config unset <runner|spares> [--repo <path>]`.**
-  Reads and writes `~/.slipjay/config.json`, keeping its other keys. `--json` reports `runner`
+- **`slipjay config [--json]`, `config set runner <location>`, `config set upgradeSource <path>`, `config set spares <0-8> [--repo <path>]`, `config unset <runner|upgradeSource|spares> [--repo <path>]`.**
+  Reads and writes `~/.slipjay/config.json`, keeping its other keys. `upgradeSource` is this
+  machine's integration checkout, which `upgrade` fetches and installs from (see [Install](#install));
+  setting it resolves and checks the checkout the way `--repo` does, and without it `upgrade` refuses
+  and automatic upgrades are off. `--json` reports `runner`
   (`value`, `source`: `environment`, `file` or `unset`, the `file` value, and whether
-  `SLIPJAY_RUNNER` overrides it) and, for the current repository and each one with a limit,
+  `SLIPJAY_RUNNER` overrides it), `upgradeSource` (the path, or null) and, for the current repository and each one with a limit,
   `declared`, `machineLimit` and `effective` spares. A spare limit only lowers the declared count
   and the next refill applies it; `--repo` defaults to the current repository's integration
   checkout. Changing the runner location does not move or cancel operations already submitted:
@@ -316,24 +322,91 @@ consumer requires a SlipJay version that implements this environment contract.
 
 ## Install
 
-Releases are git tags. Nothing is published to npm.
+Nothing is published: SlipJay installs itself from a checkout of this repository, and
+the first install is the one step done by hand.
 
 ```sh
-bun add -g github:pechhe/slipjay#v3.42.0
-slipjay status
+git clone https://github.com/pechhe/slipjay ~/projects/slipjay
+cd ~/projects/slipjay
+bun src/launcher/workspace.ts config set upgradeSource ~/projects/slipjay
+bun src/launcher/workspace.ts upgrade
 ```
 
-To upgrade, remove the installed tag first, since `bun add -g` (even with `--force`)
-keeps it otherwise, and check the version:
+`upgradeSource` names this machine's integration checkout: the checkout whose
+integration branch it fetches to learn what landed, and whose landings it installs.
+`slipjay upgrade` then:
+
+1. fetches that checkout's integration branch and takes the commit the remote
+   publishes;
+2. builds that commit's tree into `~/.slipjay/installs/<commit>` — `git archive`, then
+   `bun install --frozen-lockfile` — unless it is already built;
+3. verifies the build by running its launcher: `--version`, then `status --json` in a
+   temporary directory that is no repository;
+4. swaps the `~/.slipjay/current` symlink onto it, keeping the install it replaced as
+   `~/.slipjay/current.previous`.
+
+An upgrade needs `git` and `tar` beside Bun: the install is a `git archive` of the
+commit, unpacked.
+
+Only then does anything point at the new code: a build or verification that fails
+leaves the slot, and the `slipjay` command, where they were, and says why. An
+`upgrade --json` reports `slot`, `from`, `to`, `action` (`upgraded`, `current`,
+`rolled-back`, `busy` or `failed`), `reason` and the `command` the `slipjay` command
+now runs. `busy` is the hourly pass finding another upgrade already building that
+commit: it does not wait for it, and the rest of the pass runs.
+
+The first upgrade also adopts the machine: `~/.bun/bin/slipjay` becomes a link to
+`~/.slipjay/current/src/launcher/workspace.ts`, replacing the bun global package link
+it may have been, so everything on `PATH` — agents, T3 Code, cron, launchd — runs the
+current install. `bun add -g` no longer owns it. A later upgrade whose adoption failed
+tries again, including one that finds the slot already current.
+
+Adoption is refused, with the install still upgraded, on a host whose `slipjay-runner`
+unit runs anything but the runner install — an existing runner unit runs
+`~/.bun/bin/slipjay`, so adopting would make the runner follow the client slot too. The
+outcome says so and names what to run; see [the runner host](#the-runner-host).
+
+Clients keep themselves current:
+
+- the hourly `maintain` pass upgrades first and reports the outcome as `upgrade`;
+- a landing of this machine's `upgradeSource` starts one once it publishes;
+- `start` starts one at most every ten minutes.
+
+Each runs detached, so none delays the command that started it, and each logs to
+`~/.slipjay/state/upgrade.log`.
+
+`slipjay upgrade --rollback` returns the slot to the install it replaced
+(`current.previous`), and leaves the one it left as the previous in its turn, so the
+same command again undoes itself. Two installs are kept for the slots; older ones are
+removed after 7 days.
+
+### The runner host
+
+The runner service runs its own slot, `~/.slipjay/runner-install`, which only a
+deliberate upgrade moves:
 
 ```sh
-bun remove -g @pechhe/slipjay && bun add -g github:pechhe/slipjay#<tag>
-slipjay --version
+slipjay upgrade --runner              # install the integration head, then restart the unit
+slipjay upgrade --runner --rollback   # put back the install it replaced, then restart
 ```
 
-On a runner host, restart the unit afterwards (`systemctl --user restart slipjay-runner`): it finishes any integration
-in flight first (see [Runner](#runner)). That needs a release with the #3360 fix and the unit `scripts/setup-runner.sh`
-now writes; until a host has both, wait until `slipjay watch --json` shows nothing running.
+`--runner` refuses on a host without a `slipjay-runner` unit, and it only restarts the
+unit once the unit's own `ExecStart` runs the runner slot: a unit that runs anything
+else is reported, naming `scripts/setup-runner.sh`, and nothing restarts. The restart
+finishes any integration in flight first (see [Runner](#runner)). `scripts/setup-runner.sh`
+writes the unit to run the runner slot, so a client upgrade never changes the code the
+runner runs and never restarts it; `~/.slipjay/runner` stays the runner's own state
+(`config.json`, `stop-runner.sh`, the corepack shims).
+
+A host that already runs the runner — its unit still runs `~/.bun/bin/slipjay` — moves
+in this order, because the client's adoption waits for the unit to stop following that
+command:
+
+```sh
+slipjay upgrade --runner        # builds the runner install (reports that the unit still needs setup)
+scripts/setup-runner.sh …       # points the unit at the runner install and restarts it
+slipjay upgrade                 # adopts the client command, now that the unit no longer follows it
+```
 
 Never clear Bun's package cache (`bun pm cache rm`) to upgrade: projects that set
 `globalStore = true` link every checkout's packages into it, so clearing it breaks
@@ -342,8 +415,6 @@ and landing say how to repair them.
 
 From Slipway, remove it first (`bun remove -g @pechhe/slipway`) and run
 `slipjay cutover` once after installing.
-
-The repository is public, so the `github:` tag form needs no authentication.
 
 ## CLI
 
@@ -354,7 +425,8 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | Command | Effect |
 | --- | --- |
 | `status` | Mode, current workspace and its Issue, integration checkout, landing state and this machine's spare count (JSON). |
-| `config [--json]`, `config set\|unset <runner\|spares> …` | This machine's runner location and spare limits, each with its source (see [Settings](#settings)). |
+| `config [--json]`, `config set\|unset <runner\|upgradeSource\|spares> …` | This machine's runner location, upgrade source and spare limits, each with its source (see [Settings](#settings)). |
+| `upgrade [--runner] [--rollback] [--json]` | Install this machine's integration head into the client slot (`~/.slipjay/current`), or with `--runner` the runner slot, and point the `slipjay` command at it (see [Install](#install)). It fetches `upgradeSource`, builds and verifies the install, and only then swaps the slot, keeping what it replaced as `previous`; `--rollback` swaps back. A machine with no `upgradeSource` is refused, naming how to set it; `--runner` is refused without a `slipjay-runner` unit, and otherwise restarts it. `--json` prints one object (`slot`, `from`, `to`, `action`: `upgraded`, `current`, `rolled-back`, `busy` or `failed`, `reason`, `command`), exiting 1 on `failed`. Two upgrades racing for one commit leave the install the slot ran as the rollback; the other reports `current`. |
 | `policy show [--json]`, `policy set --base <revision> …` | Read the integration branch's policy, or land a change to its settings fields without running the landing checks (see [Settings](#settings)). |
 | `landed <path>` | The landing recorded for the workspace at exactly that path, even after it was removed, as one JSON line (`workspaceName`, `workspacePath`, `artifactCommitId`, and `operationId`, `issueNumber`, `landedAt` when recorded), or `null`. Read-only. |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
@@ -385,7 +457,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `restore <archive-id> [--name <name>] [--path <path>]` | Recreate a workspace from an archive on its recorded commit and unpack the payload, refusing a missing or altered payload rather than restoring something incomplete. `--name` and `--path` put it where a resumed thread expects it; the answer is one JSON line naming what it made, and the pass records a `restored` outcome. |
 | `restore --latest --path <path> [--name <name>]` | Restore the newest archive of that checkout, which is what a harness resuming a thread can name: it knows where its workspace was, not which attempt archived it. |
 | `archives` | List archived workspaces with their time, name, commit and inventory size. |
-| `maintain [--json]` | The hourly pass: honour pending release requests, move the primary checkout onto the integration head, then evict idle checkouts past eviction's default 24 hours (as `evict` without `--idle-hours`). The move is the one `land` makes, but only for a checkout that holds nothing of its own: an empty working copy whose parents are integrated. Uncommitted edits, unlanded commits and conflicts leave it exactly where it is, so the pass never rebases a checkout someone is editing, and `--json` reports the outcome as `primaryCheckout` (`moved`, `current`, or `left` with a reason). It reads the integration head as of the last fetch, which every `start` makes. Every outcome is appended to `state/archive-outcomes.jsonl`, a request that cannot be read or honoured is kept and retried, and the pass never removes a workspace it has not archived. A repository the pass cannot read, such as one whose `jj` is missing from the invoking `PATH`, fails the pass with that reason rather than reporting nothing to archive or evict, and an eviction failure after a request was honoured still reports each request's outcome and exits 1. It also names every idle checkout `retire` would refuse, with the refusal reason — `cannot retire\t<name>\t<reason>` on stderr, or `evictions.unretirable` with `--json` — so a settled thread's refused retirement is visible in `maintain.log` instead of piling up unnoticed. |
+| `maintain [--json]` | The hourly pass: upgrade this machine's client (as `upgrade`; `--json` reports it as `upgrade`, and a failure never fails the pass), honour pending release requests, move the primary checkout onto the integration head, then evict idle checkouts past eviction's default 24 hours (as `evict` without `--idle-hours`). The move is the one `land` makes, but only for a checkout that holds nothing of its own: an empty working copy whose parents are integrated. Uncommitted edits, unlanded commits and conflicts leave it exactly where it is, so the pass never rebases a checkout someone is editing, and `--json` reports the outcome as `primaryCheckout` (`moved`, `current`, or `left` with a reason). It reads the integration head as of the last fetch, which every `start` makes. Every outcome is appended to `state/archive-outcomes.jsonl`, a request that cannot be read or honoured is kept and retried, and the pass never removes a workspace it has not archived. A repository the pass cannot read, such as one whose `jj` is missing from the invoking `PATH`, fails the pass with that reason rather than reporting nothing to archive or evict, and an eviction failure after a request was honoured still reports each request's outcome and exits 1. It also names every idle checkout `retire` would refuse, with the refusal reason — `cannot retire\t<name>\t<reason>` on stderr, or `evictions.unretirable` with `--json` — so a settled thread's refused retirement is visible in `maintain.log` instead of piling up unnoticed. |
 | `retire <path> --operation <id>` | The one release operation a harness calls: snapshot the working copy, archive it, re-check that the archive still describes the checkout — its commit and every file outside history by bytes, mode and link target, again after the teardown and immediately before the forget — then retire it. The intent is written and fsynced before anything is removed, so a crash is reconcilable, and the result is durable at `state/retirements/<id>.json`. A replay answers the recorded result and acts on nothing. A refusal means nothing was removed; `uncertain` means a removal may have half-finished and must be reconciled. Exit codes: 0 retired, 1 refused, 2 uncertain. |
 | `retire-result <operation-id> \| --path <path>` | Read one retirement record, or the newest record for a checkout — the form a resumed thread can use, since it cannot recompute the id. Exit codes match `retire`. |
 | `retirements` | List recorded release operations with their state and workspace. |

@@ -25,9 +25,9 @@ export async function startBackgroundEntry(cwd: string, entry: string, options: 
 }
 
 /** Spawn `command` detached in `cwd`, appending its output to the background-work log. */
-export async function spawnDetached(command: string[], cwd: string): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
+export async function spawnDetached(command: string[], cwd: string, options: { logPath?: string } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
   await mkdir(stateHome(), { recursive: true, mode: 0o700 });
-  const logPath = poolRefillLogPath();
+  const logPath = options.logPath ?? poolRefillLogPath();
   let oversized = false;
   try { oversized = statSync(logPath).size > BACKGROUND_LOG_LIMIT; } catch { /* no log yet */ }
   const log = openSync(logPath, oversized ? "w" : "a", 0o600);

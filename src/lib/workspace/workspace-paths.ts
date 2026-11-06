@@ -71,6 +71,32 @@ export const stateHome = (): string => settled(join(slipjayHome(), "state"));
 /** When `start` last refreshed each integration branch from its remote. */
 export const startFetchHome = (): string => join(stateHome(), "start-fetches");
 
+/** Built trees of landed commits, one directory per commit: `~/.slipjay/installs`. */
+export const installsHome = (): string => settled(join(slipjayHome(), "installs"));
+
+/** The install the `slipjay` command runs; `upgrade` swaps this symlink. */
+export const currentSlotPath = (): string => settled(join(slipjayHome(), "current"));
+
+/** The install the current slot replaced, which `upgrade --rollback` returns to. */
+export const currentSlotPreviousPath = (): string => join(slipjayHome(), "current.previous");
+
+/**
+ * The install the runner service runs, and the one it replaced. Not `~/.slipjay/runner`: that is the
+ * runner's own state home (its `config.json`, `stop-runner.sh` and corepack shims), so the slot
+ * holding its code sits beside it and never replaces it.
+ */
+export const runnerSlotPath = (): string => settled(join(slipjayHome(), "runner-install"));
+export const runnerSlotPreviousPath = (): string => join(slipjayHome(), "runner-install.previous");
+
+/** The `slipjay` command on `PATH`, which the first `upgrade` links to the current slot. */
+export const commandLinkPath = (): string => join(homedir(), ".bun", "bin", "slipjay");
+
+/** The detached client upgrades' append-only log. */
+export const upgradeLogPath = (): string => join(stateHome(), "upgrade.log");
+
+/** When `start` last triggered an automatic client upgrade. */
+export const upgradeTriggerStampPath = (): string => join(stateHome(), "upgrade-trigger.stamp");
+
 /** Legacy per-workspace owner records. */
 export const lockHome = (): string => join(stateHome(), "locks");
 

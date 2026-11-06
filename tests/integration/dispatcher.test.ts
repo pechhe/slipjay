@@ -35,7 +35,7 @@ test("checkout and installed dispatch preserve version, usage, invalid commands 
         ["retirements", ["extra"]], ["cleanup", ["--unknown"]], ["remove", []],
         ["repair", []], ["land", ["--unknown"]], ["promote", ["--unknown"]],
         ["deploy", []], ["reset", ["extra"]], ["deploys", ["--unknown"]],
-        ["config", ["--unknown"]], ["policy", []], ["cutover", ["--unknown"]],
+        ["config", ["--unknown"]], ["upgrade", ["--unknown"]], ["policy", []], ["cutover", ["--unknown"]],
         ["metrics", ["--unknown"]], ["record-preview", []], ["watch", []], ["cancel", []], ["runner", []],
       ] as const) {
         const invalid = run(binary, [command, ...args]);
@@ -64,7 +64,7 @@ test("importing every command family leaves stdin, runner startup, signals and o
       const exitCode = process.exitCode;
       Object.defineProperty(process, "stdin", { get() { throw new Error("handler import read stdin"); } });
       process.argv = [process.execPath, "fixture", "runner", "serve"];
-      for (const module of ${JSON.stringify(["workspace-commands", "retention-commands", "start-commands", "landing-commands", "release-commands", "policy-commands", "cutover-command", "observation-commands", "runner-command", "hook-command", "command-context"])}) {
+      for (const module of ${JSON.stringify(["workspace-commands", "retention-commands", "start-commands", "landing-commands", "release-commands", "policy-commands", "upgrade-command", "cutover-command", "observation-commands", "runner-command", "hook-command", "command-context"])}) {
         await import(${JSON.stringify(`${installed.packageUrl}/src/launcher/`)} + module + ".ts");
       }
       assert.deepEqual(signals.map(signal => process.listeners(signal)), before);

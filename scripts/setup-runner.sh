@@ -3,15 +3,22 @@
 #
 #   scripts/setup-runner.sh <owner/name>=<git url> [<owner/name>=<git url> ...]
 #
-# Needs `slipjay` (bun global install), `jj`, `bws` and `corepack` (bundled with Node 20/22; Node 25+
-# needs `npm i -g corepack`) on PATH, and the Bitwarden secret SLIPJAY_RUNNER_TOKEN. Re-running rewrites the config and unit and restarts.
+# Needs a runner install (`slipjay upgrade --runner` builds one), `jj`, `bws`, `bun` and `corepack`
+# (bundled with Node 20/22; Node 25+ needs `npm i -g corepack`) on PATH, and the Bitwarden secret
+# SLIPJAY_RUNNER_TOKEN. Re-running rewrites the config and unit and restarts.
 set -euo pipefail
 
 [ $# -ge 1 ] || { echo "usage: $0 <owner/name>=<git url> ..." >&2; exit 2; }
-for tool in slipjay jj bws bun corepack loginctl systemctl; do
+for tool in jj bws bun corepack loginctl systemctl; do
   command -v "$tool" >/dev/null || { echo "missing $tool on PATH" >&2; exit 1; }
 done
 
+# The unit runs the runner's own slot, which `slipjay upgrade --runner` fills: never the client's, so a
+# client upgrade cannot change the code the runner runs. `~/.slipjay/runner` stays the runner's state.
+slot="$HOME/.slipjay/runner-install"
+[ -x "$slot/src/launcher/workspace.ts" ] || {
+  echo "no runner install at $slot: run \`slipjay upgrade --runner\` from a checkout first" >&2; exit 1;
+}
 home="$HOME/.slipjay/runner"
 mkdir -p "$home" "$HOME/.config/systemd/user"
 chmod 700 "$home"
@@ -63,7 +70,7 @@ After=network-online.target
 [Service]
 Environment=PATH=$shims:$PATH
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-ExecStart=$(command -v bws) run -- $(command -v slipjay) runner serve
+ExecStart=$(command -v bws) run -- $slot/src/launcher/workspace.ts runner serve
 Restart=always
 RestartSec=5
 KillMode=control-group

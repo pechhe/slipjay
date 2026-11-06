@@ -2,6 +2,7 @@ import { recordClientFactsInBackground } from "../lib/runner/runner-client.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
 import { hostname } from "node:os";
 import { createWorkspace, setWorkspaceForgeProject, unusedWorkspaceStartRefusal, resolveStartBase, readySpares, startSpareRefill } from "../lib/slipjay.ts";
+import { startClientUpgradeThrottled } from "../lib/workspace/workspace-upgrade.ts";
 import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
 import type { Readable } from "node:stream";
@@ -109,6 +110,10 @@ export async function runStart(rest: string[]): Promise<void> {
     // Every new workspace, claimed or fresh, tops the pool up: a miss on an empty pool fills it for the next start.
     const refill = options.refill || result.created ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
     if (refill && !refill.started) console.error(`Spare refill not started: ${refill.reason}`);
+    // Keep this machine's client on what landed, at most once every ten minutes: the spawn is awaited,
+    // the upgrade it starts is detached, so a start never waits for a build.
+    const upgrade = await startClientUpgradeThrottled();
+    if (upgrade.started) console.error(`Started a client upgrade in the background (log: ~/.slipjay/state/upgrade.log)`);
     if (options.resultFd === undefined) console.log(result.workspacePath);
     else {
       writeSync(options.resultFd, `${JSON.stringify({

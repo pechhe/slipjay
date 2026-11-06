@@ -6,6 +6,7 @@ import { landingPreview, workspaceContext } from "../lib/slipjay.ts";
 import { retiredFieldsWarning } from "../lib/policy/execution-policy.ts";
 import { landingTimingLine } from "../lib/landing/landing-timing.ts";
 import { repairFailedLanding } from "../lib/landing/repair-workspace.ts";
+import { landingUpgradesThisMachine, startClientUpgrade } from "../lib/workspace/workspace-upgrade.ts";
 
 const LAND_USAGE = "Usage: slipjay land [--direct] [--skip-preflight] [--handoff <json-file> | [--session <build-session-id>] [--ticket <n>]...]";
 
@@ -70,6 +71,8 @@ export async function runLand(rest: string[]): Promise<void> {
   const retired = retiredFieldsWarning((await workspaceContext().catch(() => null))?.configuration);
   if (retired) console.error(retired);
   const timing: { startedAt: number; stages: [string, number][] } = { startedAt: Date.now(), stages: [] };
+  // Read before landing: it removes this workspace, and the answer decides whether the machine installs what landed.
+  const upgradesThisMachine = await landingUpgradesThisMachine(process.cwd());
   // The landing may remove this very directory, after which process.cwd() throws.
   const following = new AbortController();
   const stopFollowing = () => following.abort(new Error("Stopped following; rerun slipjay land to reattach"));
@@ -85,6 +88,8 @@ export async function runLand(rest: string[]): Promise<void> {
     console.log(JSON.stringify({ ok: runner.ok, verdict: runner.operation.status, log: runner.logUrl,
       ...(runner.operation.kind === "landing" && runner.operation.outcome ? { outcome: runner.operation.outcome } : {}) }));
     if (!runner.ok) process.exitCode = 1;
+    // What landed is what this machine runs: a detached client upgrade installs it, never delaying the landing's answer.
+    if (runner.ok && upgradesThisMachine) await startClientUpgrade();
   } finally {
     process.removeListener("SIGINT", stopFollowing);
   }

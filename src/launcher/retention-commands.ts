@@ -7,6 +7,9 @@ import { landingIO } from "../lib/landing/landing-steps.ts";
 import { primaryCheckoutDisposition } from "../lib/landing/landing-candidate.ts";
 import type { PrimaryCheckoutOutcome } from "../lib/landing/landing-candidate.ts";
 import { resolve } from "node:path";
+import { configuredUpgradeSource } from "../lib/policy/machine-config.ts";
+import { upgradeMachine } from "../lib/workspace/workspace-upgrade.ts";
+import type { UpgradeOutcome } from "../lib/workspace/workspace-upgrade.ts";
 
 /** What `prune --empty` (with `emptyIdleMs: 0`) or the automatic sweep would do now, changing nothing. */
 async function printRetentionPlan(options: SweepOptions, json: boolean): Promise<void> {
@@ -165,10 +168,18 @@ export async function runArchives(rest: string[]): Promise<void> {
 }
 
 export async function runMaintain(rest: string[]): Promise<void> {
-  // The hourly pass: honour release requests first, then shed idle dependency trees.
+  // The hourly pass: upgrade this machine's client first, honour release requests, then shed idle dependency trees.
   const json = rest.includes("--json");
   const args = rest.filter((arg) => arg !== "--json");
   if (args.length) throw new Error("Usage: slipjay maintain [--json]");
+  // The client upgrade leads the pass and never fails it: a machine with no upgrade source skips it
+  // silently, and a build or verification that fails is reported with its reason. It never waits for
+  // another upgrade's build: `busy` says so, and the archive requests and eviction follow at once.
+  let upgrade: UpgradeOutcome | null = null;
+  if (configuredUpgradeSource()) {
+    try { upgrade = await upgradeMachine({ waitForInstallLock: false }); }
+    catch (error) { upgrade = { slot: "client", from: null, to: null, action: "failed", reason: error instanceof Error ? error.message : String(error), command: null }; }
+  }
   // Honouring a request consumes it, so its outcome must be reported even when the
   // eviction that follows fails: otherwise the pass silently loses what it already did.
   const outcomes = await processArchiveRequests();
@@ -198,8 +209,14 @@ export async function runMaintain(rest: string[]): Promise<void> {
   } catch (error) {
     evictionError = error instanceof Error ? error.message : String(error);
   }
-  if (json) console.log(JSON.stringify({ requests: outcomes, evictions: eviction, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError }, ...evictionError === null ? {} : { evictionError } }, null, 2));
+  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, requests: outcomes, evictions: eviction, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError }, ...evictionError === null ? {} : { evictionError } }, null, 2));
   else {
+    if (upgrade) {
+      // `upgraded` names what it moved between, `current` the install the slot already had.
+      const detail = upgrade.reason ?? (upgrade.action === "upgraded" && upgrade.from && upgrade.to
+        ? `${upgrade.from.slice(0, 12)} → ${upgrade.to.slice(0, 12)}` : upgrade.to?.slice(0, 12) ?? "");
+      (upgrade.action === "failed" ? console.error : console.log)(`upgrade\t${upgrade.action}\t${detail}`);
+    }
     // A request that could not be read has no workspace path to name, so it names the request instead.
     for (const entry of outcomes) console.log(`${entry.outcome}\t${entry.workspacePath || entry.requestId}\t${entry.reason}`);
     if (primaryCheckout?.action === "moved") console.log(`moved primary checkout onto ${integrationBranch}`);
