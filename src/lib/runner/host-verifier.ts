@@ -2,7 +2,7 @@ import { readdir, readlink, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { runBoundedProcess } from "../infra/bounded-process.ts";
-import { worktreeTree } from "./boat-verifier.ts";
+import { worktreeTree } from "./remote-attempt.ts";
 import type { Executor, RemoteAttempt, RemoteMachine } from "./runner-types.ts";
 
 /** The git-dir entry holding this checkout's last refreshed tree index, outside `.git/index`, which jj rewrites. */

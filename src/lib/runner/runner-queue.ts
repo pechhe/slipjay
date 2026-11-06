@@ -43,6 +43,7 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
+import { machineVerification } from "./machine-verifier.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
@@ -174,6 +175,7 @@ export function createRunnerQueue(input: {
   recoveryRetryMs?: number;
   /** Runs the gate of each repository whose runner entry names a `verifier`; absent, such a repository cannot verify. */
   remoteVerification?: RemoteVerification;
+  machineVerifications?: Record<string, import("./runner-types.ts").MachineVerification>;
   /** First availability probe after a boat outage; doubles up to one minute. */
   boatProbeMs?: number;
   /** Override pre-verification stage deadlines (milliseconds), for embedded runners and tests. */
@@ -292,7 +294,21 @@ export function createRunnerQueue(input: {
   const prefixes = new Map<string, PrefixTurn[]>();
   const screens = new Map<string, PrefixTurn>();
   let screenPassOrder = 0;
-  /** Each repository's runner-host gate place (`hostPlaces`, SJ-189), by repository key: the operation whose gate holds it. */
+  /** Named places are shared by every repository that names the same machine. */
+  const machinePlaces = input.machineVerifications ?? Object.fromEntries(Object.entries(config.machines ?? {}).map(([name, entry]) => [name, machineVerification(name, entry, { scratch: join(home, "scratch") })]));
+  const machineGates = new Set<string>();
+  // Quarantine recovery is independent of admission: a boat hold must not prevent a machine reopening.
+  const machineRecovery = Object.keys(machinePlaces).length ? setInterval(() => {
+    if (closed || draining || heldStart) return;
+    for (const [name, place] of Object.entries(machinePlaces)) if (!machineGates.has(name) && !place.available())
+      void place.recover?.([]).then(() => { if (place.available()) wakeMain(); }).catch(() => undefined);
+  }, 5000) : undefined;
+  machineRecovery?.unref?.();
+  const machinePlaceFree = (repo: string) => {
+    const name = configuredRepository(config, repo)?.gateMachine;
+    return Boolean(name && !machineGates.has(name) && machinePlaces[name]?.available());
+  };
+  /** Each repository's runner-host gate place (`hostPlaces`, SJ-189): the operation whose gate holds it. */
   const hostGates = new Map<string, string>();
   const hostPlaceFree = (repo: string) => configuredRepository(config, repo)?.hostPlaces === 1 && !hostGates.has(repositoryKey(repo));
   /**
@@ -300,7 +316,7 @@ export function createRunnerQueue(input: {
    * repository's host place is free and none of its landings is already in flight to take it first, one more may start,
    * and its gate takes that place.
    */
-  const heldForBoat = (repo: string): boolean => boatHolds.has(repo) && !(hostPlaceFree(repo)
+  const heldForBoat = (repo: string): boolean => boatHolds.has(repo) && !((hostPlaceFree(repo) || machinePlaceFree(repo))
     && ![...admitted.values(), ...[...screens.values()].map((turn) => turn.operation), ...prefixes.get(repo)?.map((turn) => turn.operation) ?? []]
       .some((entry) => entry.kind === "landing" && repositoryKey(entry.repo) === repositoryKey(repo)));
   /** Landings whose source conflicts with the prefix predicted for them: they screen on the tip alone. */
@@ -1192,7 +1208,7 @@ export function createRunnerQueue(input: {
       finally { signal.removeEventListener("abort", aborted); }
     }
     // Gate and migration commands both go through the executor, so each run records where it ran.
-    async function run(request: BoundedProcessRequest, purpose?: RunPurpose, via: Pick<Executor, "host" | "run"> & { runtime?: RuntimeIdentity } = executor): Promise<BoundedProcessResult> {
+    async function run(request: BoundedProcessRequest, purpose?: RunPurpose, via: Pick<Executor, "host" | "run"> & { runtime?: RuntimeIdentity; reportRoot?: string } = executor): Promise<BoundedProcessResult> {
       if (controller.signal.aborted) throw authorityError();
       const runId = randomUUID();
       const started = Date.now();
@@ -1245,7 +1261,7 @@ export function createRunnerQueue(input: {
       if (controller.signal.aborted) throw authorityError();
       append(operation.id, finished);
       if (reports) {
-        append(operation.id, { type: "test_report", runId, ...await readTestReports(reports, await realpath(checkout).catch(() => checkout)) });
+        append(operation.id, { type: "test_report", runId, ...await readTestReports(reports, via.reportRoot ?? await realpath(checkout).catch(() => checkout)) });
         await rm(reports, { recursive: true, force: true });
       }
       return { ...result, runId };
@@ -1266,6 +1282,37 @@ export function createRunnerQueue(input: {
      */
     async function openGate(base: string, candidate: string, integrationBranch: string, context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, signal: AbortSignal): Promise<GateAttempt> {
       const key = repositoryKey(operation.repo);
+      const name = configuredRepository(config, operation.repo)?.gateMachine;
+      if (name) {
+        const place = machinePlaces[name];
+        let reason = machineGates.has(name) ? "machine place busy" : place?.reason() || "machine place unavailable";
+        const cause: "busy" | "infrastructure" = machineGates.has(name) ? "busy" : "infrastructure";
+        if (!machineGates.has(name) && place?.available()) {
+          machineGates.add(name);
+          const started = Date.now();
+          const screening = prefix?.screenSlot !== undefined && prefix.screen?.phase !== "authoritative";
+          const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
+          try {
+            const attempt = await place.open({ repo: operation.repo, slot, screening, checkout, base, candidate, integrationBranch, environment: await buildCheckEnvironment(), signal });
+            const placement = `machine:${name}` as const;
+            append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, placement, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: null });
+            progress(`[verify] gate runs on ${attempt.executor.host}`);
+            return { attempt, started, placement };
+          } catch (error) {
+            machineGates.delete(name);
+            signal.throwIfAborted();
+            reason = message(error).slice(0, 2000);
+            const remote = (error as RemoteOpenFailure)?.remote;
+            if (remote) append(operation.id, { type: "remote_verification", phase: "failed", ...remote, placement: `machine:${name}`, setupMs: Date.now() - started, infrastructure: true, reason });
+          }
+        } else if (!machineGates.has(name)) {
+          // Recover in the background. This gate uses boat while health is unproven.
+          void place?.recover?.([]).then(wakeMain).catch(() => undefined);
+        }
+        append(operation.id, { type: "gate_fallback", placement: `machine:${name}`, cause, reason });
+        if (boatHolds.has(operation.repo)) throw Object.assign(new Error(`Remote executor unavailable (boat): boat is held; ${reason}`), { boatUnavailable: true });
+        return openRemote(base, candidate, integrationBranch, signal);
+      }
       if (hostPlaceFree(operation.repo)) {
         hostGates.set(key, operation.id);
         try { return await openHost(candidate, context); }
@@ -1319,11 +1366,21 @@ export function createRunnerQueue(input: {
       try {
         const after = await attempt.finish();
         append(operation.id, { type: "remote_verification", phase: "finished", machine: attempt.machine, ...after, machineMs: Date.now() - started });
+        if (after.memory?.oomKills)
+          progress(`[verify] ${attempt.executor.host}'s memory limit killed ${after.memory.oomKills} process(es) in this gate (peak ${Math.round(after.memory.peakBytes / 1024 ** 3)} GB): a failing check may be the limit, not the candidate`);
         if (after.tree !== attempt.tree)
           throw new GateDrift(`The gate changed ${after.trackedChanges} file(s) of the candidate on ${attempt.executor.host}; its result is not evidence for the candidate`);
       } finally {
-        try { await attempt.close(); }
+        // A machine place whose cleanup cannot be confirmed quarantines itself (machine-verifier.ts); that is the place's
+        // problem, not the candidate's, so it neither fails a green gate nor hides a gate that changed the candidate.
+        try {
+          await attempt.close().catch((error: unknown) => {
+            if (!placement.startsWith("machine:")) throw error;
+            progress(`[verify] ${placement} quarantined after this gate: ${message(error).slice(0, 500)}`);
+          });
+        }
         finally {
+          if (placement.startsWith("machine:")) { machineGates.delete(placement.slice("machine:".length)); wakeMain(); }
           if (placement === "host" && hostGates.get(repositoryKey(operation.repo)) === operation.id) {
             hostGates.delete(repositoryKey(operation.repo));
             wakeMain();
@@ -2393,6 +2450,7 @@ export function createRunnerQueue(input: {
     && (operation.kind === "recovery" || operation.stage === "integrating" || operation.stage === "finalizing" || operation.stage === "publishing" || operation.stage === "deploying");
   /** Stop whatever would start work on its own: the interval schedulers that submit deploys, resets, audits and recoveries. */
   function stopScheduling(): void {
+    clearInterval(machineRecovery);
     scheduler.close(); resetScheduler.close(); auditScheduler.close();
     for (const hold of boatHolds.values()) { clearTimeout(hold.timer); hold.controller?.abort(); }
     for (const retry of auditDiscovery.values()) clearTimeout(retry);
@@ -2441,6 +2499,7 @@ export function createRunnerQueue(input: {
       // Commands an earlier process left running stop before recovery touches their checkouts.
       recovering = Promise.allSettled([...lanes.values(), ...attempts]).then(async () => {
         await executor.recover?.();
+        await Promise.all(Object.values(machinePlaces).map((place) => place.recover?.([])));
         // Every attempt cleans its machine first, so a recovery that fails here is reported, never a reason to stop.
         await remoteVerification?.recover?.(Object.entries(config.repos).flatMap(([repo, entry]) => entry.verifier ? [repo] : []))
           .catch((error: unknown) => console.error(`[runner] ${message(error)}`));

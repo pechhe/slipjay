@@ -4,7 +4,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:f
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../infra/bounded-process.ts";
-import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
+import { collectRemoteReports, frozenInstall, receiveCandidate, remoteFiles, remoteCommand, shellWord, sshFailed, worktreeTree, loopbackPort, SETUP_TIMEOUT_MS, CONTROL_OUTPUT } from "./remote-attempt.ts";
+export { remoteCommand, shellWord, worktreeTree, loopbackPort } from "./remote-attempt.ts";
 import { TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import type { MachineLease, RemoteAttempt, RemoteMachine, RemoteOpenFailure, RemoteVerification, RunnerConfig, RuntimeIdentity } from "./runner-types.ts";
 
@@ -20,8 +21,6 @@ import type { MachineLease, RemoteAttempt, RemoteMachine, RemoteOpenFailure, Rem
 const USER_HOME = "/home/user";
 /** The VM's PATH: its own bun and jj, never the runner host's toolchain paths. */
 const REMOTE_PATH = `${USER_HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin`;
-/** Runner-host variables that describe the host, not the command, so they never reach the VM. */
-const HOST_ONLY = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", SYSTEMD_SLICE_ENV]);
 /**
  * How long a gate slot's disk may take to restore before the slot is forked afresh. Measured 2 Nov 2026: a fresh fork of
  * the image was ready in six to eleven minutes, while resuming a slot whose disk had grown (some 450,000 files) was still
@@ -59,41 +58,6 @@ const RECOVERY_MS = 240_000;
 /** Remote paths an attempt's commands created (TMPDIR, test reports), removed by every clean. */
 const SCRATCH_LIST = "~/.slipjay-scratch";
 /**
- * The checkout's files as a tree, read through a throwaway index so neither Git's nor jj's state moves: what the gate
- * actually ran against. The index starts from the candidate's `tree`, so a tracked file that matches an ignore rule
- * stays in it, and `add -A` then records every change, deletion and untracked file that is not ignored.
- *
- * That index keeps the file stat information of every entry whose content matches the worktree, so `add -A` rehashes
- * only the files whose stat changed rather than every file in the tree (12 s against 0.2 s on the YardSmith checkout,
- * 3 Nov 2026), and Git rehashes any file whose stat it cannot trust, so the tree written is the same. `add -A` runs
- * before the merge for that reason: `read-tree -m` refuses to replace an entry the worktree no longer matches
- * ("Entry … not uptodate. Cannot merge"), which would send every file back through a rehash. Without a usable index it
- * starts from `tree` alone, as before.
- *
- * `cache` is where an earlier read left its refreshed index: copying it is what makes a later read of the same
- * checkout cheap. The checkout's own index cannot serve that purpose there: jj writes a colocated repository's index
- * from trees alone, with no file stat information at all (measured: every one of the YardSmith checkout's 13,269
- * entries zeroed), so it never saves a rehash. A read that finds no cache yet hashes every file once, then leaves one.
- */
-export const worktreeTree = (tree: string, cache?: string) => `index=$(mktemp); trap 'rm -f "$index"' EXIT
-${cache ? `{ cp ${shellWord(cache)} "$index"; } 2>/dev/null || true
-` : ""}[ -s "$index" ] || cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null || true
-if [ -s "$index" ]; then
-  GIT_INDEX_FILE="$index" git add -A . || exit 1
-  GIT_INDEX_FILE="$index" git read-tree -m ${shellWord(tree)} 2>/dev/null || { : > "$index"; GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)}; }
-else
-  GIT_INDEX_FILE="$index" git read-tree ${shellWord(tree)} || exit 1
-fi
-GIT_INDEX_FILE="$index" git add -A . && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1${cache ? `
-{ cp "$index" ${shellWord(cache)}.new && mv ${shellWord(cache)}.new ${shellWord(cache)}; } 2>/dev/null || true` : ""}
-echo "$tree"`;
-const SETUP_TIMEOUT_MS = 900_000;
-const CONTROL_OUTPUT = 1024 * 1024;
-
-/** Quotes `value` as one POSIX shell word. */
-export const shellWord = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`;
-
-/**
  * A pool VM's name: stable per repository and slot, so a later runner process finds the same one. Numeric slots
  * belong to the authoritative lane, `<number>-screen` to screening, and other named pools to build machines. A build
  * machine's pool name starts with a letter (`deployment-policy.ts`), so neither gate form can name one.
@@ -124,22 +88,6 @@ open=$(others | tr '\\n' ' ')
 const MACHINE_GIT_DIR = `${USER_HOME}/slipjay-machine.git`;
 
 /**
- * The remote script for `request`: in the checkout path, under a scope `close` can stop, with the command's own
- * environment and the VM's PATH and HOME. TMPDIR and the test-report directory exist before it starts.
- */
-export function remoteCommand(request: Pick<BoundedProcessRequest, "executable" | "args" | "cwd" | "env">, unit: string): string {
-  const env = Object.entries(request.env ?? {}).filter(([key, value]) => value !== undefined && !HOST_ONLY.has(key)) as [string, string][];
-  const directories = [request.env?.TMPDIR, request.env?.[TEST_REPORT_DIR_ENV]].filter((value): value is string => Boolean(value));
-  return [
-    ...directories.length ? [`printf '%s\\n' ${directories.map(shellWord).join(" ")} >> ${SCRATCH_LIST}`, `mkdir -p ${directories.map(shellWord).join(" ")}`] : [],
-    `cd ${shellWord(request.cwd)}`,
-    ["exec systemd-run --user --scope --quiet --collect", `--unit=${shellWord(unit)}`, "env -i",
-      ...[["HOME", USER_HOME], ["USER", "user"], ["PATH", REMOTE_PATH], ...env].map(([key, value]) => shellWord(`${key}=${value}`)),
-      shellWord(request.executable), ...request.args.map(shellWord)].join(" "),
-  ].join(" && ");
-}
-
-/**
  * Removes every container on the VM but the image's own: a stopped `keep-*` one holding a Docker image the gate uses, or
  * one labelled `slipjay.keep=true`, such as a database service the gate expects under a fixed name.
  */
@@ -151,20 +99,7 @@ export const REMOVE_CONTAINERS = `docker ps -a --format '{{.Names}} {{.Label "sl
  */
 export const START_KEPT_CONTAINERS = `docker ps -a --filter label=slipjay.keep=true --filter status=created --filter status=exited --format '{{.Names}}' | xargs -r docker start >/dev/null 2>&1 || true`;
 
-/** An SSH failure, as opposed to the remote command's own exit status: ssh exits 255 for its own errors. */
-const sshFailed = (result: BoundedProcessResult) => result.exitCode === 255 && /^(?:ssh|kex_exchange|Connection (?:closed|reset|timed out|refused)|client_loop)\b|\bssh: /m.test(result.stderr);
-
 type Vm = { id: string; name: string; state: string; host: string; port: number; size: string; hydrated: boolean; health: string; healthReason: string };
-
-/** A loopback port in `url`, which a remote command reaches through a reverse tunnel to the runner host. */
-export const loopbackPort = (url: string | undefined): number | undefined => {
-  if (!url) return undefined;
-  try {
-    const parsed = new URL(url);
-    if (!["127.0.0.1", "localhost", "[::1]"].includes(parsed.hostname)) return undefined;
-    return Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
-  } catch { return undefined; }
-};
 
 export type BoatVerifierOptions = NonNullable<RunnerConfig["boat"]> & {
   /** Runs the boat CLI and ssh; tests replace it. */
@@ -350,32 +285,12 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
     return typeof value?.seconds === "number" && typeof value.dollars === "number" ? { seconds: value.seconds, dollars: value.dollars } : null;
   };
 
-  async function local(executable: string, args: string[], cwd: string): Promise<string> {
-    const result = await run({ executable, args, cwd, timeoutMs: CONTROL_TIMEOUT_MS, maxOutputBytes: CONTROL_OUTPUT, env: process.env });
-    if (result.exitCode !== 0) throw new Error(`Remote executor unavailable (setup): ${executable} ${args[0]} failed: ${result.stderr.trim().slice(-1000)}`);
-    return result.stdout.trim();
-  }
+  const { local, bundleMissing } = remoteFiles(run);
 
   const scratchDirectory = async () => {
     await mkdir(options.scratch ?? tmpdir(), { recursive: true });
     return mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-boat-"));
   };
-  /**
-   * A Git bundle of `refs` from the repository at `cwd`, without what the VM already holds: the commits among `heads` (the
-   * VM's own refs) that this repository knows too. Empty when the VM lacks nothing, which git refuses to write as a bundle.
-   */
-  async function bundleMissing(cwd: string, refs: string[], heads: string[], bundle: string): Promise<Buffer> {
-    const known: string[] = [];
-    for (const head of new Set(heads)) {
-      const present = await run({ executable: "git", args: ["cat-file", "-e", `${head}^{commit}`], cwd, timeoutMs: 10_000, maxOutputBytes: 1024, env: process.env });
-      if (present.exitCode === 0) known.push(head);
-    }
-    const bundled = await run({ executable: "git", args: ["bundle", "create", bundle, ...refs, ...known.map((head) => `^${head}`)],
-      cwd, timeoutMs: SETUP_TIMEOUT_MS, maxOutputBytes: CONTROL_OUTPUT, env: process.env });
-    if (bundled.exitCode !== 0 && /empty bundle/i.test(bundled.stderr)) return Buffer.alloc(0);
-    if (bundled.exitCode !== 0) throw new Error(`Remote executor unavailable (setup): git bundle failed: ${bundled.stderr.trim().slice(-1000)}`);
-    return readFile(bundle);
-  }
 
   return {
     async probe(signal) {
@@ -461,24 +376,8 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
   current=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo)
   if [ "$current" != "$target" ]; then sudo mkdir -p "$(dirname "$target")"; sudo chown user "$(dirname "$target")"; rm -rf "$target"; mv "$current" "$target"; echo "$target" > ~/.slipjay-repo; fi
   cd "$target"
-  cat > /tmp/slipjay-candidate.bundle
-  # Forced: a slot's refs move to whatever it verifies next, which need not descend from a candidate that never landed.
-  if [ -s /tmp/slipjay-candidate.bundle ]; then git fetch /tmp/slipjay-candidate.bundle ${shellWord(`+${ref}/*:${ref}/*`)}; fi
-  rm -f /tmp/slipjay-candidate.bundle
-  # Bookmarks, so jj sees both commits whether this bundle carried them or an earlier one did.
-  git update-ref ${shellWord(`refs/heads/slipjay-boat-${slot}-candidate`)} ${shellWord(candidate)}
-  git update-ref ${shellWord(`refs/heads/slipjay-boat-${slot}-base`)} ${shellWord(base)}
-  [ -d .jj ] || jj git init --colocate >/dev/null 2>&1
-  jj git import --quiet >/dev/null 2>&1 || true
-  jj bookmark set ${shellWord(integrationBranch)} -r ${shellWord(base)} --allow-backwards --quiet
-  jj edit ${shellWord(candidate)} --quiet
-  git clean -ffdxq -e node_modules -e .jj
-  want=$(sed -nE 's/.*"packageManager": *"bun@([0-9.]+)".*/\\1/p' package.json | head -1)
-  # As on the runner host, a candidate never makes the VM download a runtime: the image provides it.
-  if [ -n "$want" ] && [ "$(bun --version 2>/dev/null)" != "$want" ]; then echo "the image has bun $(bun --version 2>/dev/null || echo none), the candidate needs bun $want: refresh the image" >&2; exit 1; fi
-  if [ -f bun.lock ] || [ -f bun.lockb ]; then bun install --frozen-lockfile >/tmp/slipjay-install.log 2>&1 || { tail -40 /tmp/slipjay-install.log >&2; exit 1; }; fi
-  bun=$(readlink -f "$(command -v bun)")
-  echo "runtime $bun $(bun --version) $(sha256sum "$bun" | cut -d' ' -f1)"
+  ${receiveCandidate({ bundle: "/tmp/slipjay-candidate.bundle", ref, candidate, base, integrationBranch, bookmarkPrefix: `slipjay-boat-${slot}` })}
+  ${frozenInstall("/tmp/slipjay-install.log")}
   # An assignment, so a failing git command stops the script under -e and its stderr reaches the error.
   observed=$(${worktreeTree(tree)})
   echo "tree $observed"`, { input: bundle, timeoutMs: SETUP_TIMEOUT_MS, signal });
@@ -524,16 +423,7 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
               // A cancelled or timed-out command's local ssh is gone; its remote scope is not.
               if (result.cancelled || result.timedOut) await control(vm, "stop the command", `systemctl --user stop ${shellWord(`${unit}.scope`)} 2>/dev/null || true`).catch(() => undefined);
               const reports = request.env?.[TEST_REPORT_DIR_ENV];
-              if (reports) {
-                const archive = await run({ executable: "ssh", args: [...sshArgs(vm), `tar -C ${shellWord(reports)} -cf - . 2>/dev/null | base64 -w0`], cwd: tmpdir(),
-                  timeoutMs: CONTROL_TIMEOUT_MS, maxOutputBytes: 64 * 1024 * 1024, env: process.env });
-                if (archive.exitCode === 0 && archive.stdout.trim()) {
-                  await mkdir(reports, { recursive: true });
-                  const tarball = join(scratch, `${unit}.tar`);
-                  await writeFile(tarball, Buffer.from(archive.stdout.trim(), "base64"));
-                  await local("tar", ["-xf", tarball, "-C", reports], scratch);
-                }
-              }
+              if (reports) await collectRemoteReports(run, sshArgs(vm), reports, reports, scratch, unit);
               return result;
             },
           };

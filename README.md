@@ -408,6 +408,9 @@ See [Optional depth-two verification](docs/runner.md#optional-depth-two-verifica
 ### Remote verification on boat
 
 See [Remote verification on boat](docs/runner.md#remote-verification-on-boat).
+A repository can replace its runner-host gate place with a named SSH machine using
+`gateMachine`, with boat as the fallback. See [Named SSH gate places](docs/runner.md#named-ssh-gate-places)
+for configuration, attempt ownership and recovery.
 
 ### The runner host's gate place
 

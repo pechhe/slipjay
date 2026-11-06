@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.53.0
+
+- **A named SSH machine can take the gate:** runner `machines` and repository `gateMachine` replace the runner-host
+  place with one machine place, screening included. Busy, unreachable or quarantined machines use boat, with
+  infrastructure and fallback evidence; they never use the runner host. Existing configuration keeps its behaviour.
+- **Shared-machine cleanup owns its resources:** remote attempts share boat's bundle, frozen install, tree and
+  report transport, while cleaning only their exact systemd slice, labelled Docker resources and bounded root.
+  On-machine holder records survive runner restarts; unconfirmed cleanup quarantines the place until recovery.
+  A place-owned checkout, `node_modules` and Bun cache stay warm between attempts; bundles transfer only missing commits.
+  Cleanup also removes labelled networks and containers' anonymous volumes while retaining those warm paths.
+  Build tunnels allocate their remote port dynamically. Metrics split setup and gate timings by machine and count fallbacks.
+
 ## v3.52.0
 
 - **A workspace can name the Forge project its chores file in:** `slipjay attach-project <owner/name>` (or `--clear`)

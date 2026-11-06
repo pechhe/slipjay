@@ -125,6 +125,17 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (config.deployWorkers !== undefined && !(Number.isSafeInteger(config.deployWorkers) && config.deployWorkers >= 1)) return `The runner config's "deployWorkers" must be a whole number of at least 1`;
   if (config.shortLandingP90Seconds !== undefined && !(typeof config.shortLandingP90Seconds === "number" && Number.isFinite(config.shortLandingP90Seconds) && config.shortLandingP90Seconds > 0))
     return `The runner config's "shortLandingP90Seconds" must be a number of seconds above 0`;
+  for (const [name, machine] of Object.entries(config.machines ?? {})) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name) || !machine || typeof machine.ssh !== "string" || !machine.ssh.trim() || machine.ssh.startsWith("-") || /[@\s]/.test(machine.ssh)
+      || typeof machine.root !== "string" || !/^\/[a-zA-Z0-9_./-]+$/.test(machine.root) || machine.root === "/" || machine.root.split("/").some((part) => part === "..")
+      || typeof machine.account !== "string" || !/^[a-z_][a-z0-9_-]*$/.test(machine.account)) return `The runner config's machine "${name}" needs an SSH host or alias (account is separate), an absolute dedicated root and an account`;
+  }
+  for (const repo of Object.values(config.repos)) {
+    if (repo.gateMachine === undefined) continue;
+    if (typeof repo.gateMachine !== "string" || !Object.hasOwn(config.machines ?? {}, repo.gateMachine)) return `A repository's "gateMachine" names an unknown machine`;
+    if (repo.hostPlaces === 1) return `A repository's "gateMachine" cannot be combined with "hostPlaces": 1`;
+    if (!repo.verifier) return `A repository's "gateMachine" needs a "verifier"`;
+  }
   const limits = Object.entries(config.limits ?? {});
   if (limits.some(([key, value]) => !(key in RUNNER_DEFAULT_LIMITS) || (key === "tasksMax" ? !(Number.isSafeInteger(value) && Number(value) >= 1) : typeof value !== "string" || !/^[0-9]+(?:\.[0-9]+)?[KMGT%]?$/.test(value))))
     return `The runner config's "limits" takes memoryHigh and memoryMax (such as "40G"), cpuQuota (such as "1400%") and tasksMax (a whole number)`;

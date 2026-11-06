@@ -173,9 +173,10 @@ export type OperationEvent =
    */
   /** `placement` is where the attempt's gate was placed when its commands were about to run; rows before SJ-189 lack it and were all `boat`. */
   | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; placement?: GatePlacement; slot: number; screening?: boolean; pool?: string; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
-  | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null }
+  | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null; memory?: AttemptMemory }
   /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
-  | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
+  | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; infrastructure?: boolean; placement?: GatePlacement; setupMs?: number; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
+  | { type: "gate_fallback"; placement: `machine:${string}`; reason: string; cause: "busy" | "infrastructure" }
   | { type: "verification_base"; base: string; candidate?: string;
       /** The candidate policy's time budgets, so metrics can judge each repository by its own. */
       budgets?: import("../policy/execution-policy.ts").TimeBudgets }
@@ -590,20 +591,21 @@ export interface Executor {
   recover?(): Promise<void>;
 }
 
-/** Where a remote-verifying repository's gate ran: the runner host's gate place, or a boat VM. */
-export type GatePlacement = "host" | "boat";
+/** Where a remote-verifying repository's gate ran, including the configured name of a fixed SSH machine. */
+export type GatePlacement = "host" | "boat" | `machine:${string}`;
 
 /** What the remote machine's provider has billed for it so far: running time, idle included, and its price. */
 export type RemoteUsage = { seconds: number; dollars: number };
 
 /** The remote machine an attempt's gate ran on, as the ledger records it. */
 export type RemoteMachine = { verifier: "boat"; id: string; name: string; size: string; image: string }
+  | { verifier: "machine"; id: string; name: string; size: "machine"; image: "fixed SSH machine" }
   /** A gate placed in the runner host's own gate place (`hostPlaces`): `name` is the runner host. */
   | { verifier: "host"; id: string; name: string; size: "host"; image: "runner checkout" };
 
 /**
  * Where a repository's gate runs when its runner entry names a `verifier`: a machine the attempt has to itself, whose
- * checkout sits at the runner checkout's own path, so commands, evidence and test reports read as they would locally.
+ * checkout holds the exact candidate. Boat mirrors the runner's path; fixed machines map it into their dedicated root.
  * The runner still prepares the candidate locally; only the gate's commands run remotely.
  */
 export interface RemoteVerification {
@@ -611,7 +613,9 @@ export interface RemoteVerification {
    * `screening` selects a separate pool, never an authoritative numeric slot. */
   /** `retrying`: a landing's attempt after one whose machine was not ready; it reuses the slot's VM and forks none. */
   /** `pool` names a held VM of its own (a batch check's, SJ-192) instead of a gate slot; it shares warm-ups' turns like a build machine. */
-  open(input: { repo: string; slot: number; pool?: string; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string; signal: AbortSignal }): Promise<RemoteAttempt>;
+  open(input: { repo: string; slot: number; pool?: string; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string;
+    /** Runner-provided services a fixed place must connect before any gate command starts. */
+    environment?: NodeJS.ProcessEnv; signal: AbortSignal }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */
   probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
@@ -643,14 +647,18 @@ export type RemoteOpenFailure = Error & { boatUnavailable?: boolean; machineUnav
 
 export interface RemoteAttempt {
   /** Runs the gate's commands; `runtime` is the Bun they run with there, for command evidence. */
-  readonly executor: Executor & { runtime?: RuntimeIdentity };
+  readonly executor: Executor & { runtime?: RuntimeIdentity;
+    /** The real checkout root for absolute paths in remote reports; absent when it mirrors the runner path. */
+    reportRoot?: string };
   readonly machine: RemoteMachine;
   /** The tree of the files the machine's checkout holds before the gate: the candidate's, or the attempt fails. */
   readonly tree: string;
   /** The machine's billing when it took the attempt. */
   readonly usage: RemoteUsage | null;
   /** The checkout's files after the gate: `tree` null, and a count, when they no longer match the candidate. */
-  finish(): Promise<{ tree: string | null; trackedChanges: number; usage: RemoteUsage | null }>;
+  /** `memory`: a fixed machine's whole-attempt memory peak and out-of-memory kills, so a kill inside its limit is not
+   * mistaken for the candidate's own failure. */
+  finish(): Promise<{ tree: string | null; trackedChanges: number; usage: RemoteUsage | null; memory?: AttemptMemory }>;
   /** Stop everything the attempt started on the machine. */
   close(): Promise<void>;
 }
@@ -673,6 +681,13 @@ export type KillOutcome =
 
 export type RunnerLimits = { memoryHigh?: string; memoryMax?: string; cpuQuota?: string; tasksMax?: number };
 
+export type AttemptMemory = { peakBytes: number; oomKills: number };
+export type GateMachineConfig = { ssh: string; root: string; account: string };
+export interface MachineVerification extends RemoteVerification {
+  available(): boolean;
+  reason(): string;
+}
+
 export type RunnerConfig = {
   /** Shown in every client progress line; defaults to the host name. */
   name?: string;
@@ -693,12 +708,15 @@ export type RunnerConfig = {
      * commands are about to run runs them here, in its runner checkout; any other opens the verifier as before. 0 or
      * absent: the verifier only. The place holds one landing or screening gate and does not count against `combinedLimits`.
      */
-    hostPlaces?: 0 | 1 }>;
+    hostPlaces?: 0 | 1;
+    /** One shared SSH place replaces the runner-host place; otherwise use verifier. */
+    gateMachine?: string }>;
   /**
    * boat.dev VMs for repositories whose `verifier` is `boat`: one per verification place, forked from `image` (a sandbox
    * kept stopped as the starting image) and reached over SSH with `sshKey`. `cli` is the boat CLI, which authenticates
    * with `BOAT_API_KEY` from the runner's environment.
    */
+  machines?: Record<string, GateMachineConfig>;
   boat?: { image: string; cli?: string; sshKey?: string; size?: "small" | "default" | "large" | "xlarge" };
   /**
    * jj settings the runner sets as repository config in every warm checkout before it

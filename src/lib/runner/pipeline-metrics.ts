@@ -41,6 +41,7 @@ export type OperationGroupMetrics = {
      * The same attempts split by where their gate was placed (SJ-189): setup is opening to the candidate held and
      * installed, gate is from then to the gate's end. Host attempts bill nothing, so `machineMs` and the dollars are boat's.
      */
+    fallbacks?: Record<string, number>;
     placements: Partial<Record<GatePlacement, { attempts: number; setup: MetricTiming | null; gate: MetricTiming | null }>>;
     /** The VM seconds boat billed the gate pool between each machine's first and last reading in the window; null when any reading is missing. */
     boatVmSeconds: number | null };
@@ -422,7 +423,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
   const causes = Object.fromEntries(["gate", "conflict", "infrastructure", "policy", "killed", "paused_out", "held", "superseded", "cancelled"].map((cause) => [cause, 0])) as Record<CauseClass, number>;
   const outcomes: Record<string, number> = {};
   type Group = { repo: string; kind: Operation["kind"]; operations: number; outcomes: Record<string, number>; stages: Map<RunnerStage, number[]>; commands: Map<string, number[]>; total: number[]; paused: number[]; active: number[]; remoteSetup: number[]; remoteMs: number; remoteDollars: number; billed: Map<string, number[]>; billedSeconds: Map<string, number[]>; unbilled: number;
-    placements: Map<GatePlacement, { setup: number[]; gate: number[] }> };
+    fallbacks: Record<string, number>; placements: Map<GatePlacement, { setup: number[]; gate: number[] }> };
   const groups = new Map<string, Group>();
   const windows = pauseWindows(events);
   const attemptsByChange = new Map<string, { repo: string; changeId: string; operations: OperationHistory[] }>();
@@ -434,7 +435,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
     const submitted = op.submitted!;
     const kind = operationKind(submitted);
     const groupKey = JSON.stringify([submitted.repo, kind]);
-    const group: Group = groups.get(groupKey) ?? { repo: submitted.repo, kind, operations: 0, outcomes: {}, stages: new Map(), commands: new Map(), total: [], paused: [], active: [], remoteSetup: [], remoteMs: 0, remoteDollars: 0, billed: new Map(), billedSeconds: new Map(), unbilled: 0, placements: new Map() };
+    const group: Group = groups.get(groupKey) ?? { repo: submitted.repo, kind, operations: 0, outcomes: {}, stages: new Map(), commands: new Map(), total: [], paused: [], active: [], remoteSetup: [], remoteMs: 0, remoteDollars: 0, billed: new Map(), billedSeconds: new Map(), unbilled: 0, fallbacks: {}, placements: new Map() };
     groups.set(groupKey, group);
     group.operations++;
     const terminal = rows.find((row) => isTerminal(row.event.type));
@@ -442,34 +443,39 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
     outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
     group.outcomes[outcome] = (group.outcomes[outcome] ?? 0) + 1;
     /** The attempt whose gate is running: where it was placed and how long its setup took. */
-    let gating: { placement: GatePlacement; setupMs: number } | undefined;
+    let gating: { placement: GatePlacement; setupMs: number; readyAt: number } | undefined;
     for (const row of rows) {
+      if (row.event.type === "gate_fallback") { const key = `${row.event.placement}: ${row.event.reason}`; group.fallbacks[key] = (group.fallbacks[key] ?? 0) + 1; }
       if (row.event.type === "classified") causes[row.event.cause]++;
-      if (row.event.type === "remote_verification" && row.event.phase === "ready" && validDuration(row.event.setupMs)) {
+      if (row.event.type === "remote_verification" && (row.event.phase === "ready" || row.event.phase === "failed") && typeof row.event.setupMs === "number" && validDuration(row.event.setupMs)) {
         group.remoteSetup.push(row.event.setupMs);
         const placement = row.event.placement ?? "boat";
         const split = group.placements.get(placement) ?? { setup: [], gate: [] };
         split.setup.push(row.event.setupMs);
         group.placements.set(placement, split);
-        gating = { placement, setupMs: row.event.setupMs };
+        if (row.event.phase === "ready") gating = { placement, setupMs: row.event.setupMs, readyAt: eventTime(row) };
       }
       if (row.event.type === "remote_verification" && row.event.phase === "finished" && gating && validDuration(row.event.machineMs) && row.event.machineMs >= gating.setupMs)
         group.placements.get(gating.placement)!.gate.push(row.event.machineMs - gating.setupMs);
       if (row.event.type === "remote_verification" && row.event.phase !== "ready") gating = undefined;
       // A host attempt bills nothing: its events carry no reading, and no reading is missing.
-      if (row.event.type === "remote_verification" && row.event.machine.verifier !== "host") {
+      if (row.event.type === "remote_verification" && row.event.machine.verifier === "boat") {
         for (const reading of row.event.phase === "failed" ? [row.event.usageBefore, row.event.usage] : [row.event.usage]) {
           if (reading) { push(group.billed, row.event.machine.id, reading.dollars); push(group.billedSeconds, row.event.machine.id, reading.seconds); }
           else group.unbilled += 1;
         }
       }
-      if (row.event.type === "remote_verification" && row.event.phase === "finished" && row.event.machine.verifier !== "host" && validDuration(row.event.machineMs)) {
+      if (row.event.type === "remote_verification" && row.event.phase === "finished" && row.event.machine.verifier === "boat" && validDuration(row.event.machineMs)) {
         group.remoteMs += row.event.machineMs;
         group.remoteDollars += row.event.machineMs / 3_600_000 * BOAT_VM_HOUR_DOLLARS * (BOAT_SIZE_RATE[row.event.machine.size] ?? 1);
       }
       if (row.event.type === "stage_detail" && row.event.migrateDurationMs === undefined && row.event.pushDurationMs === undefined && validDuration(row.event.durationMs))
         push(group.stages, row.event.stage, row.event.durationMs);
     }
+
+    // A lost executor may leave no finish reading. Its terminal verdict still bounds the gate's time.
+    if (gating && terminal && eventTime(terminal) >= gating.readyAt)
+      group.placements.get(gating.placement)!.gate.push(eventTime(terminal) - gating.readyAt);
 
     const firstStage = rows.find((row) => row.event.type === "stage" && row.event.stage !== "queued");
     const start = eventTime(submittedRow);
@@ -530,10 +536,11 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
       stages: Object.fromEntries([...group.stages].map(([stage, values]) => [stage, timing(values)!])),
       queue: { total: timing(group.total), activeWait: timing(group.active), paused: timing(group.paused) },
       commands: Object.fromEntries([...group.commands].map(([command, values]) => [command, timing(values)!])),
-      ...group.remoteSetup.length || group.billed.size || group.unbilled ? { remote: { attempts: group.remoteSetup.length, setup: timing(group.remoteSetup), machineMs: group.remoteMs,
+      ...group.remoteSetup.length || group.billed.size || group.unbilled || Object.keys(group.fallbacks).length ? { remote: { attempts: group.remoteSetup.length, setup: timing(group.remoteSetup), machineMs: group.remoteMs,
         // A reading boat could not give, or a machine read only once, leaves the window's spend unknown, never $0.
         dollars: billedSpan(group.billed, group.unbilled, 10_000),
         estimatedDollars: Math.round(group.remoteDollars * 10_000) / 10_000,
+        fallbacks: group.fallbacks,
         placements: Object.fromEntries([...group.placements].map(([placement, split]) => [placement, { attempts: split.setup.length, setup: timing(split.setup), gate: timing(split.gate) }])),
         boatVmSeconds: billedSpan(group.billedSeconds, group.unbilled, 1) } } : {},
     })).sort((a, b) => a.repo.localeCompare(b.repo) || a.kind.localeCompare(b.kind)),
@@ -571,8 +578,9 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     lines.push(`  Commands: ${Object.entries(group.commands).map(([name, value]) => `${name} ${formatTiming(value)}`).join("; ") || "no samples"}`);
     if (group.remote) {
       lines.push(`  Remote verifier: ${group.remote.attempts} attempts; setup ${formatTiming(group.remote.setup)}; attempt machine time ${seconds(group.remote.machineMs)} (about $${group.remote.estimatedDollars.toFixed(4)}); ${group.remote.dollars === null ? "billed spend unavailable (boat did not report every reading)" : `billed $${group.remote.dollars.toFixed(4)}, idle time included`}`);
+      for (const [reason, count] of Object.entries(group.remote.fallbacks ?? {})) lines.push(`  Gate fallback ${reason}: ${count}`);
       for (const [placement, split] of Object.entries(group.remote.placements))
-        lines.push(`  Gates on ${placement}: ${split.attempts} attempts; setup ${formatTiming(split.setup)}; gate ${formatTiming(split.gate)}`);
+        if (split) lines.push(`  Gates on ${placement}: ${split.attempts} attempts; setup ${formatTiming(split.setup)}; gate ${formatTiming(split.gate)}`);
       lines.push(`  Boat VM time billed: ${group.remote.boatVmSeconds === null ? "unavailable (boat did not report every reading)" : seconds(group.remote.boatVmSeconds * 1000)}`);
     }
   }

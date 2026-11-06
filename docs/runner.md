@@ -7,7 +7,7 @@ runs the repository's declared gate in its own warm checkout, then integrates an
 publishes. A change that contains a merge, such as an upstream update merged into
 the integration line, lands as a merge: only its first-parent line moves onto the
 tip, and the merged-in history is kept rather than copied, so the integration line
-must be the merge's first parent. The authoring machine runs none of the gate.
+must be the merge's first parent. Gate commands run in the configured runner, boat or named SSH place.
 
 Before a landing queues, the runner dry-runs its rebase, in a checkout of its own: onto
 the integration head, then onto each landing of the repository queued ahead of it, in
@@ -497,6 +497,81 @@ queue for boat as any held landing does. A retry of a VM that was not ready runs
 when it finds the place free, and otherwise waits on boat as before. `hostPlaces` is 0 or 1 and
 needs `verifier`; 0 or omitted is boat only, and the place does not count against
 `combinedLimits`.
+
+### Named SSH gate places
+
+With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlaces: 1` (SJ-199):
+
+```json
+{
+  "name": "peach-live",
+  "machines": {
+    "peach-box": { "ssh": "peach-box", "account": "ubuntu", "root": "/srv/slipjay-gate" }
+  },
+  "repos": {
+    "pechhe/yardsmith": { "url": "git@github.com:pechhe/yardsmith.git", "verifier": "boat", "gateMachine": "peach-box", "screeningLanes": 3 }
+  },
+  "boat": { "image": "bx_starting_image" }
+}
+```
+
+This is a fragment of runner config; keep the required `jj` identity and existing settings.
+Unknown machine names, a machine place without `verifier`, and a machine place combined
+with `hostPlaces: 1` are refused at startup. With `gateMachine` absent all existing placement
+behaviour is preserved. The choice stays at gate time: the free, healthy named place takes
+the gate, including while boat is held; a busy or quarantined place uses boat. It never
+falls back to the runner host. All repositories naming the same machine share one place,
+screening included. A machine screen returns its runner worker while retaining the machine
+place until its commands and cleanup finish, because its gate uses the remote machine's resources.
+
+The machine must provide Git, jj, the candidate's Bun, Docker, an SSH server supporting
+reverse forwards, and a working systemd user manager for `account`. The SSH target is a host or SSH alias, with the account named separately, and uses the
+runner account's normal SSH config and known hosts. Before enabling it, the machine's installer
+must create the dedicated root, enforce a finite filesystem/project quota covering that root,
+and write `quota-ready` inside it to attest that quota. Every attempt runs in
+`slipjay-attempt-<id>.slice`, a child of `slipjay-attempt.slice`, so the installer bounds all gates together
+with a drop-in on that parent (`MemoryHigh`, `MemoryMax`, `CPUQuota`) and writes the marker only after it. Record its size, account and resource
+limits in the machine inventory. SlipJay refuses setup without
+the marker; it does not install quotas or choose the machine's resource budget. The quota covers
+all of the root, including the place-owned `checkout` and `bun-cache` directories. Both persist
+across attempts: transfer excludes commits the checkout already holds, and frozen installation
+reuses the Bun cache and the checkout's `node_modules`, including test caches. An unusable checkout
+or a failed fetch can be reinitialised once during setup; failed repair falls back to boat before
+any gate command runs. Logs, reports and temporary files remain in each attempt's own directory.
+Docker data created by the gate must use its attempt label and the gate's bounded storage settings.
+
+The gate receives `SLIPJAY_GATE_MACHINE` (the configured name), `SLIPJAY_ATTEMPT_ID` (a unique id),
+`SLIPJAY_RESOURCE_PREFIX` (`sj_<id>`) and `SLIPJAY_DOCKER_LABEL` (`slipjay.attempt=<id>`).
+Apply that exact Docker label to every container, volume and network; derive database and resource
+names from the prefix. `TMPDIR` and the test report directory point inside the attempt's directory;
+`BUN_INSTALL_CACHE_DIR` points to the place's persistent `bun-cache`. The gate must choose its own
+database target, CPU/memory admission locks and resource budget; it must never inherit a Development target. Build's reverse-forward binds a
+port allocated atomically by sshd, and the gate receives the rewritten Build URL.
+
+An atomically created `holder` directory and atomically renamed `holder/id` record occupancy on
+the machine before setup starts. Every command, including install, runs in an attempt-owned
+systemd slice. Cleanup stops that exact slice, proves its cgroup empty, removes only containers,
+volumes and networks with the exact attempt label, proves those gone and removes the attempt
+directory. Containers are removed with `docker rm -f -v` so their anonymous volumes are removed too.
+Cleanup removes checkout debris with `git clean`, preserving `node_modules` and `.jj`. Recovery
+keeps the place-owned checkout and Bun cache.
+The Build tunnel's login command belongs to the slice too, so restart recovery ends its listeners.
+There is no VM-wide container removal, scope wildcard, Docker prune, checkout move or chown.
+
+Startup quarantines the place. Recovery reads its on-machine holder and performs the same cleanup;
+an SSH loss or unconfirmed cleanup keeps it quarantined. An unconfirmed cleanup after a gate only quarantines the place: it neither fails
+that gate nor replaces its own verdict, such as a gate that changed the candidate's files. Recovery runs at startup, before reuse,
+and every five seconds while quarantined, independently of boat admission. Gates use boat while
+recovery cannot prove it clean. An unreachable machine or setup failure before any gate command
+records infrastructure evidence and a fallback reason, then uses boat. A candidate failure stays
+a failed gate; after commands start an SSH loss fails the attempt without replaying it elsewhere.
+Cancellation stops the command's scope and then cleans the attempt.
+
+`remote_verification` placements are `machine:<configured name>`, `boat` or `host`, and command
+runs name their executor host. `gate_fallback` records its reason and whether it was busy or
+infrastructure. `slipjay metrics` splits setup and gate median/p90 by these placements, counts
+fallback reasons, and charges boat billing only to boat attempts.
+
 
 ### Independent screening lanes
 
