@@ -32,11 +32,16 @@ async function retainedPaths(run: RemoteRun, checkout: string, base: string): Pr
   if (!Array.isArray(declared)) return [];
   // Each pattern names a path at least two segments deep and every segment carries a literal character, so a typo such
   // as `*` or `apps` can never keep all untracked state; tracked files are cleaned and tree-checked regardless.
-  return declared.filter((pattern): pattern is string => {
+  const kept = declared.filter((pattern): pattern is string => {
     if (typeof pattern !== "string" || !/^[A-Za-z0-9_.*/-]+$/.test(pattern) || pattern.startsWith("/") || pattern.startsWith("-")) return false;
     const segments = pattern.split("/").filter(Boolean);
     return segments.length >= 2 && segments.every((segment) => segment !== ".." && segment !== "." && /[A-Za-z0-9_-]/.test(segment.replaceAll("*", "")));
   });
+  // A refused pattern only narrows what the place keeps, so it never makes a gate unsound, but its warm state is lost:
+  // say so rather than drop it silently.
+  const refused = declared.filter((pattern) => !kept.includes(pattern as string));
+  if (refused.length) console.error(`[runner] machine place ignores placeRetainedPaths ${refused.map((pattern) => JSON.stringify(pattern)).join(", ")} in ${base}'s slipjay.json: each must be at least two path segments deep, and every segment must name something`);
+  return kept;
 }
 
 /** A shared SSH machine. No provider lifecycle or VM-wide cleanup belongs here. */
@@ -124,7 +129,9 @@ fi`);
       const id = randomUUID().replaceAll("-", "");
       const path = `${root}/${id}`;
       const slice = `slipjay-attempt-${id}.slice`;
+      // Which of the machine's places this gate holds, so a repository can spread its CPU pinning across places (SJ-200).
       const attemptEnv = { TMPDIR: `${path}/scratch`, BUN_INSTALL_CACHE_DIR: `${machineRoot}/bun-cache`, SLIPJAY_GATE_MACHINE: name,
+        SLIPJAY_GATE_PLACE: String(place), SLIPJAY_GATE_PLACES: String(config.places ?? 1),
         SLIPJAY_ATTEMPT_ID: id, SLIPJAY_RESOURCE_PREFIX: `sj_${id}`, SLIPJAY_DOCKER_LABEL: `slipjay.attempt=${id}` };
       let scratch: string | undefined;
       let socket: string | undefined;

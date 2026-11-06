@@ -160,7 +160,9 @@ export type OperationEvent =
   | { type: "client_operation"; repo: string; workspace: string; machine: string }
   | { type: "identity"; ticket?: number; spec?: number; submitterKind: "person" | "agent" | "unknown"; submitterId: string; harness?: string; sessionId?: string; workspace: string; machine: string }
   | { type: "queue_snapshot"; position: number; depth: number; waitingFor: string | null; paused: boolean }
-  | { type: "stage_detail"; stage: RunnerStage; durationMs: number; conflict?: boolean; files?: string[]; installSource?: "cloned" | "fresh" | "existing"; base?: string; remoteMoved?: boolean; migrateDurationMs?: number; pushDurationMs?: number }
+  | { type: "stage_detail"; stage: RunnerStage; durationMs: number; conflict?: boolean; files?: string[]; installSource?: "cloned" | "fresh" | "existing"; base?: string; remoteMoved?: boolean; migrateDurationMs?: number; pushDurationMs?: number;
+    /** The jj, git and gh commands the stage ran on the runner: how many, their total time and the slowest five (SJ-200). */
+    commands?: { count: number; ms: number; slowest: Array<{ command: string; ms: number }> } }
   | { type: "change_shape"; files: number; insertions: number; deletions: number; packages: string[]; apps: string[]; migrationBearing: boolean; testFiles: string[]; fileSet: string; sizeBucket: "small" | "medium" | "large" }
   | ClassifiedFact
   | { type: "held"; repo: string; commitId: string; retries: number; durationMs: number; published: boolean }

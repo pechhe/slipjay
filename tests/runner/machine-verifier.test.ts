@@ -243,6 +243,7 @@ test("a machine's further places keep their own checkout and holder, and share i
   const attempt = await open(m); await attempt.executor.run(command); await attempt.close();
   assert.equal(attempt.executor.reportRoot, "/gate-root/place-2/checkout");
   assert.equal(attempt.machine.id, "peach-box/2");
+  assert.ok(s.scripts.filter((script) => script.includes("slipjay-command-")).every((script) => script.includes("SLIPJAY_GATE_PLACE=2") && script.includes("SLIPJAY_GATE_PLACES=")), "each gate knows its place");
   const commands = s.scripts.filter((script) => script.includes("slipjay-command-"));
   assert.ok(commands.every((script) => script.includes("BUN_INSTALL_CACHE_DIR=/gate-root/bun-cache")));
   assert.ok(s.scripts.some((script) => script.includes("/gate-root/quota-ready")));
@@ -295,7 +296,12 @@ test("the place keeps only the untracked paths the base's policy declares, and r
   // Too broad to be a declared generated or cache path: `*`, `apps`, `**/x`, `*/*`.
   s.policy(JSON.stringify({ placeRetainedPaths: ["apps/web/.svelte-kit", "apps/web/src/paraglide", "../escape", "/abs", "-x", "a;rm -rf", "*", "apps", "**/.svelte-kit", "*/*"] }));
   const before = s.scripts.length;
-  const a = await open(m);
+  const logged: string[] = [];
+  const consoleError = console.error;
+  console.error = (...parts: unknown[]) => { logged.push(parts.join(" ")); };
+  const a = await open(m).finally(() => { console.error = consoleError; });
+  // Refused patterns are named on the runner's log, never dropped silently.
+  assert.ok(logged.some((line) => line.includes("ignores placeRetainedPaths") && line.includes('"*"') && line.includes('"**/.svelte-kit"') && !line.includes("apps/web/.svelte-kit")));
   const cleans = s.scripts.slice(before).filter((script) => script.includes("clean -ffdxq") && /slipjay-(prepare|receive)-/.test(script));
   assert.equal(cleans.length, 2, "the setup and receive cleans, after the policy is read");
   for (const clean of cleans) {

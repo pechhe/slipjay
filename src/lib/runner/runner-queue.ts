@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { stat, mkdir, realpath, rm } from "node:fs/promises";
 import { availableParallelism, freemem, loadavg, tmpdir, totalmem } from "node:os";
 import { dirname, join } from "node:path";
-import { withWorkspaceCommandSignal } from "../infra/workspace-command.ts";
+import { type CommandTiming, withCommandTimings, withWorkspaceCommandSignal } from "../infra/workspace-command.ts";
 import { sanitizedProcessEnv } from "../infra/bounded-process.ts";
 import { candidateBun } from "./candidate-bun.ts";
 import { integrateLandingCandidate, prepareLandingCandidate, rollbackFailure, verifyPreparedCandidate, integratePreparedCandidate } from "../landing/landing-candidate.ts";
@@ -165,6 +165,9 @@ export function runnerLogOptions(config: RunnerConfig, executor: Pick<Executor, 
  * nor is stopped by one that arrives. It is queued only once its own candidate's staging deploy
  * is green, so newer landings never hold it; a newer green candidate supersedes it while queued.
  */
+/** The one file a narrowed landing slot keeps in its working copy (see narrowCheckout). */
+const SPARSE_LANDING_PATH = "slipjay.json";
+
 export function createRunnerQueue(input: {
   log: OperationLog; executor: Executor; home: string; config: RunnerConfig;
   environment?: () => NodeJS.ProcessEnv;
@@ -402,6 +405,14 @@ export function createRunnerQueue(input: {
    * gate keeps there: the runner's own limits bound concurrent runs together.
    */
   const scratchOf = (checkout: string) => join(tmpdir(), `slipjay-${createHash("sha256").update(checkout).digest("hex").slice(0, 12)}`);
+  /** Keeps only slipjay.json in a landing slot's working copy; a no-op when it already holds just that. */
+  async function narrowCheckout(checkout: string): Promise<void> {
+    if ((await jj(checkout, ["sparse", "list"])).trim() !== SPARSE_LANDING_PATH) await jj(checkout, ["sparse", "set", "--clear", "--add", SPARSE_LANDING_PATH]);
+  }
+  /** Restores every file to a slot narrowed for a remote-verifier landing, for work that needs them here. */
+  async function widenCheckout(checkout: string): Promise<void> {
+    if ((await jj(checkout, ["sparse", "list"])).trim() !== ".") await jj(checkout, ["sparse", "reset"]);
+  }
   /** The published integration of an earlier submission of this exact commit, if any. */
   async function publishedIntegration(checkout: string, operation: LandingOperation, branch: string, remote: string): Promise<{ base: string; commitId: string } | null> {
     for (const earlier of log.operationsForChange(operation.repo, operation.changeId)) {
@@ -1161,8 +1172,19 @@ export function createRunnerQueue(input: {
     let installSource: "fresh" | "existing" | undefined;
     let rebaseConflict = false;
     let conflictFiles: string[] = [];
+    // Every jj, git and gh command this operation runs on the runner, timed, so each stage names its slow steps (SJ-200).
+    const commandTimings: CommandTiming[] = [];
+    let stageTimingFrom = 0;
+    const stageCommands = () => {
+      const ran = commandTimings.slice(stageTimingFrom);
+      stageTimingFrom = commandTimings.length;
+      if (!ran.length) return {};
+      return { commands: { count: ran.length, ms: ran.reduce((total, entry) => total + entry.ms, 0),
+        slowest: [...ran].sort((left, right) => right.ms - left.ms).slice(0, 5) } };
+    };
     const stageDetail = (): OperationEvent => ({ type: "stage_detail", stage, durationMs: Date.now() - stageStarted,
-      ...(stage === "installing" ? { installSource } : {}), ...(stage === "rebasing" ? { conflict: rebaseConflict, files: conflictFiles } : {}) });
+      ...(stage === "installing" ? { installSource } : {}), ...(stage === "rebasing" ? { conflict: rebaseConflict, files: conflictFiles } : {}),
+      ...stageCommands() });
     const controller = new AbortController();
     const pendingCommands = new Set<Promise<unknown>>();
     let verificationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1507,6 +1529,11 @@ export function createRunnerQueue(input: {
       const retained = operation.kind === "landing" ? log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event : undefined;
       const retainedSource = retained?.type === "source_retained" ? retained : undefined;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" && !retainedSource ? ["--branch", operation.bookmark] : []]);
+      // A landing gated on a machine place, which receives the candidate as a bundle, needs the candidate's files here
+      // only to generate migrations, so its slot checkout holds just slipjay.json: each working-copy switch then takes
+      // about 0.15 s on peach-live instead of 4 s (SJ-200). Installing for a migration widens it first. A host place
+      // gates in this checkout, so it is never narrowed for one.
+      if (operation.kind === "landing" && prefix && configuredRepository(config, operation.repo)?.gateMachine) await narrowCheckout(checkout);
       if (retainedSource) await importSubmissionSource(home, operation.repo, operation.id, retainedSource, checkout);
       const sourceRevision = retainedSource ? operation.commitId : operation.kind === "landing" ? operation.bookmark : operation.commitId;
       if (prefix) {
@@ -1695,6 +1722,7 @@ export function createRunnerQueue(input: {
             onProgress?.("[deps] not installed on the runner: the gate's VM installs the candidate, and it generates no migration");
             return;
           }
+          await widenCheckout(cwd);
           setStage("installing");
           installSource = await stat(join(cwd, "node_modules")).then(() => "existing" as const, () => "fresh" as const);
           await landingIO.prepareCandidateDependencies(cwd, candidate, target, onProgress, runCommand);
@@ -1798,8 +1826,8 @@ export function createRunnerQueue(input: {
     try {
       // A pre-verification publishes nothing. Race all its awaits, including post-install
       // filesystem inspection, and fence late continuations with the same signal.
-      if (operation.kind === "verification") await withAuthority(withWorkspaceCommandSignal(controller.signal, execute, pendingCommands));
-      else await execute();
+      if (operation.kind === "verification") await withAuthority(withWorkspaceCommandSignal(controller.signal, () => withCommandTimings(commandTimings, execute), pendingCommands));
+      else await withCommandTimings(commandTimings, execute);
     } catch (error) {
       // A fresh attempt: once for a dependent whose predecessor's outcome invalidated it (it then
       // has no predecessor), and once for a head whose remote base moved. Its own failure, an

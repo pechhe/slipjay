@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import { machineVerification } from "../../src/lib/runner/machine-verifier.ts";
@@ -16,14 +18,22 @@ function places() {
   let setupFailure = "";
   let boatFailure = false;
   let closeFailure = false;
-  const attempt = (machine: boolean, input: Parameters<RemoteVerification["open"]>[0]): RemoteAttempt => ({
-    machine: machine ? { verifier: "machine", name: "peach-box", id: "peach-box", size: "machine", image: "fixed SSH machine" }
-      : { verifier: "boat", name: "slot", id: "boat", size: "large", image: "image" },
-    executor: { host: machine ? "machine:peach-box" : "boat:slot", run: runBoundedProcess },
-    tree: "tree", usage: null,
-    async finish() { const mutated = await readFile(join(input.checkout, "mutate"), "utf8").then((value) => value === "changed by machine gate", () => false); return { tree: mutated ? null : "tree", trackedChanges: mutated ? 1 : 0, usage: null }; },
-    async close() { if (machine) { occupied = false; if (closeFailure) throw new Error("Remote executor unavailable (machine peach-box): cleanup unconfirmed"); } },
-  });
+  // Like a real place, a remote attempt works in its own copy of exactly the candidate, never in the runner's checkout
+  // (which is narrowed for a machine-place repository, SJ-200).
+  const attempt = async (machine: boolean, input: Parameters<RemoteVerification["open"]>[0]): Promise<RemoteAttempt> => {
+    const copy = await mkdtemp(join(tmpdir(), "remote-place-"));
+    const gitDirectory = execFileSync("jj", ["--ignore-working-copy", "git", "root"], { cwd: input.checkout, encoding: "utf8" }).trim();
+    execFileSync("sh", ["-c", `git --git-dir "$1" archive "$2" | tar -x -C "$3"`, "sh", gitDirectory, input.candidate, copy]);
+    const inCopy = (cwd: string) => cwd.startsWith(input.checkout) ? copy + cwd.slice(input.checkout.length) : cwd;
+    return {
+      machine: machine ? { verifier: "machine", name: "peach-box", id: "peach-box", size: "machine", image: "fixed SSH machine" }
+        : { verifier: "boat", name: "slot", id: "boat", size: "large", image: "image" },
+      executor: { host: machine ? "machine:peach-box" : "boat:slot", run: (request) => runBoundedProcess({ ...request, cwd: inCopy(request.cwd) }) },
+      tree: "tree", usage: null,
+      async finish() { const mutated = await readFile(join(copy, "mutate"), "utf8").then((value) => value === "changed by machine gate", () => false); return { tree: mutated ? null : "tree", trackedChanges: mutated ? 1 : 0, usage: null }; },
+      async close() { await rm(copy, { recursive: true, force: true }); if (machine) { occupied = false; if (closeFailure) throw new Error("Remote executor unavailable (machine peach-box): cleanup unconfirmed"); } },
+    };
+  };
   const machine: MachineVerification = {
     available: () => !occupied && !quarantined,
     reason: () => quarantined ? "quarantined: earlier work alive" : "machine place busy",
@@ -231,4 +241,24 @@ test("a place that goes down while gates queue for it sends each to boat once, l
     assert.deepEqual([placements(f, b), placements(f, c)], [["boat"], ["boat"]]);
     for (const id of [b, c]) assert.equal(f.log.events({ operationId: id }).filter(({ event }) => event.type === "gate_fallback").length, 1);
   } finally { await rm(join(f.root, "hold"), { force: true }); await f.dispose(); }
+});
+
+test("a machine-place landing slot keeps only slipjay.json, and widens to every file to generate a migration", async () => {
+  const p = places();
+  const f = await fixture(true, false, undefined, false, { ...options(p), screeningLanes: 1 });
+  try {
+    const sparse = (id: string) => {
+      const started = f.log.events({ operationId: id }).flatMap(({ event }) => event.type === "attempt_started" ? [event.checkout] : []).at(-1)!;
+      return execFileSync("jj", ["--ignore-working-copy", "sparse", "list"], { cwd: started, encoding: "utf8" }).trim();
+    };
+    const plain = f.submit(await f.candidate("plain.txt"));
+    assert.equal((await f.land(plain))?.type, "landed");
+    assert.equal(sparse(plain), "slipjay.json", "a landing that generates nothing switches only slipjay.json");
+    const schema = f.submit(await f.candidate("schema/a.ts"));
+    assert.equal((await f.land(schema))?.type, "landed", "the migration still generates in the runner's checkout");
+    assert.equal(sparse(schema), ".", "generation widened the slot to every file");
+    const next = f.submit(await f.candidate("next.txt"));
+    assert.equal((await f.land(next))?.type, "landed");
+    assert.equal(sparse(next), "slipjay.json", "the next plain landing narrows it again");
+  } finally { await f.dispose(); }
 });

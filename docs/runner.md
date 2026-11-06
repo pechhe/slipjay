@@ -528,7 +528,12 @@ This is a fragment of runner config; keep the required `jj` identity and existin
 `places` (1 to 8, default 1) is how many gates the machine runs at once (SJ-200). Place 0 keeps the root itself, so an
 existing warm checkout survives; place N works in `<root>/place-N` with its own checkout, holder and control lock. The
 install cache and the `quota-ready` marker stay machine-wide. A gate takes the first free, healthy place, and with
-every place held it queues for the next one freed.
+every place held it queues for the next one freed. A landing slot of a machine-place repository keeps only
+`slipjay.json` in its working copy, since the place receives the candidate as a bundle; switching it takes about
+0.15 s on peach-live instead of 4 s. A landing that must install and generate migrations on the runner widens it to
+every file first, and the next plain landing narrows it again. Each `stage_detail` records how many jj, git and gh
+commands the stage ran, their total time and the slowest five. Its commands see `SLIPJAY_GATE_PLACE` (0-based) and
+`SLIPJAY_GATE_PLACES`, so a repository that pins its own CPUs can give each place a different share of the machine.
 Unknown machine names, a machine place without `verifier`, and a machine place combined
 with `hostPlaces: 1` are refused at startup. With `gateMachine` absent all existing placement
 behaviour is preserved. The choice stays at gate time: the free, healthy named place takes

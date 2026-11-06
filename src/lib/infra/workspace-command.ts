@@ -8,6 +8,20 @@ export function withWorkspaceCommandSignal<T>(signal: AbortSignal, work: () => P
   return commandSignal.run({ signal, pending }, work);
 }
 
+/** One jj, git or gh command an operation ran, and how long it took. */
+export type CommandTiming = { command: string; ms: number };
+const commandTimings = new AsyncLocalStorage<CommandTiming[]>();
+/**
+ * Records into `timings` how long each jj, git and gh command run inside `work` took (SJ-200), so the runner can
+ * name the slow steps of a stage from its own record instead of tracing the host.
+ */
+export function withCommandTimings<T>(timings: CommandTiming[], work: () => Promise<T>): Promise<T> {
+  return commandTimings.run(timings, work);
+}
+/** A short label for a command: the program and its first two non-flag arguments. */
+const commandLabel = (command: string, args: readonly string[]) =>
+  [command, ...args.filter((arg) => !arg.startsWith("-")).slice(0, 2)].join(" ");
+
 /** Credential keys jj, git and gh need to reach a remote (D5), plus where jj's own
  *  configuration lives, which decides the author it records; nothing else of the user env. */
 const PASSED_KEY = /^(SSH_AUTH_SOCK|GIT_SSH.*|GH_.*|GITHUB_TOKEN|JJ_CONFIG|XDG_CONFIG_HOME)$/;
@@ -56,6 +70,18 @@ export async function runWorkspaceCommand(
   command: string,
   args: readonly string[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean; tee?: boolean; input?: string } = {},
+): Promise<WorkspaceCommandResult> {
+  const timings = commandTimings.getStore();
+  if (!timings) return runScopedCommand(command, args, options);
+  const started = Date.now();
+  try { return await runScopedCommand(command, args, options); }
+  finally { timings.push({ command: commandLabel(command, args), ms: Date.now() - started }); }
+}
+
+async function runScopedCommand(
+  command: string,
+  args: readonly string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number; inherit?: boolean; tee?: boolean; input?: string },
 ): Promise<WorkspaceCommandResult> {
   const scope = commandSignal.getStore();
   const abortSignal = scope?.signal;
