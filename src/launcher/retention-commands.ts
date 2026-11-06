@@ -1,8 +1,11 @@
 import { readBuildThroughRunner, runnerLocation } from "../lib/runner/runner-client.ts";
 import type { SweepOptions } from "../lib/workspace/workspace-sweep.ts";
 import { callerPids, workspaceHolders } from "../lib/workspace/workspace-holders.ts";
-import { cleanupLandedWorkspace, planDisposableWorkspaces, pruneEmptyWorkspaces, evictIdleWorkspaces, EVICTION_IDLE_MS, archiveWorkspace, latestArchiveFor, listArchives, restoreArchive, releaseWorkspace, readReleaseResult, latestReleaseFor, listReleaseResults, processArchiveRequests, workspaceContext, describeRetention, removeWorkspace } from "../lib/slipjay.ts";
+import { cleanupLandedWorkspace, planDisposableWorkspaces, pruneEmptyWorkspaces, evictIdleWorkspaces, EVICTION_IDLE_MS, archiveWorkspace, latestArchiveFor, listArchives, restoreArchive, releaseWorkspace, readReleaseResult, latestReleaseFor, listReleaseResults, processArchiveRequests, workspaceContext, describeRetention, removeWorkspace, withWorkspaceTransaction } from "../lib/slipjay.ts";
 import type { EvictionOutcome } from "../lib/slipjay.ts";
+import { landingIO } from "../lib/landing/landing-steps.ts";
+import { primaryCheckoutDisposition } from "../lib/landing/landing-candidate.ts";
+import type { PrimaryCheckoutOutcome } from "../lib/landing/landing-candidate.ts";
 import { resolve } from "node:path";
 
 /** What `prune --empty` (with `emptyIdleMs: 0`) or the automatic sweep would do now, changing nothing. */
@@ -169,6 +172,25 @@ export async function runMaintain(rest: string[]): Promise<void> {
   // Honouring a request consumes it, so its outcome must be reported even when the
   // eviction that follows fails: otherwise the pass silently loses what it already did.
   const outcomes = await processArchiveRequests();
+  // A machine nobody lands from keeps its primary checkout on an older integrated parent
+  // unless someone moves it by hand. Move it the way `land` does, but only when it holds
+  // nothing of its own, so the hourly pass never rebases a checkout someone is editing.
+  let primaryCheckout: PrimaryCheckoutOutcome | null = null;
+  let primaryCheckoutError: string | null = null;
+  let integrationBranch: string | null = null;
+  try {
+    const context = await workspaceContext(process.cwd());
+    if (context) {
+      integrationBranch = context.integrationBranch;
+      primaryCheckout = await withWorkspaceTransaction(
+        `integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
+        () => primaryCheckoutDisposition(context, landingIO, { carryEdits: false }),
+        { waitMs: 60_000 },
+      );
+    }
+  } catch (error) {
+    primaryCheckoutError = error instanceof Error ? error.message : String(error);
+  }
   let eviction: EvictionOutcome | null = null;
   let evictionError: string | null = null;
   try {
@@ -176,10 +198,13 @@ export async function runMaintain(rest: string[]): Promise<void> {
   } catch (error) {
     evictionError = error instanceof Error ? error.message : String(error);
   }
-  if (json) console.log(JSON.stringify({ requests: outcomes, evictions: eviction, ...evictionError === null ? {} : { evictionError } }, null, 2));
+  if (json) console.log(JSON.stringify({ requests: outcomes, evictions: eviction, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError }, ...evictionError === null ? {} : { evictionError } }, null, 2));
   else {
     // A request that could not be read has no workspace path to name, so it names the request instead.
     for (const entry of outcomes) console.log(`${entry.outcome}\t${entry.workspacePath || entry.requestId}\t${entry.reason}`);
+    if (primaryCheckout?.action === "moved") console.log(`moved primary checkout onto ${integrationBranch}`);
+    else if (primaryCheckout?.warning) console.error(`left primary checkout\t${primaryCheckout.reason}\t${primaryCheckout.warning}`);
+    if (primaryCheckoutError !== null) console.error(`could not move primary checkout: ${primaryCheckoutError}`);
     if (eviction) {
       for (const result of eviction.results) console.log(`evicted\t${result.name}\t${result.removedPaths.join(", ")}`);
       for (const skipped of eviction.skipped) if (!/used within|pool spare|no activity recorded/.test(skipped.reason)) console.error(`kept\t${skipped.name}\t${skipped.reason}`);

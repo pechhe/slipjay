@@ -181,13 +181,20 @@ export async function integrateLandingCandidate(cwd: string, options: CandidateO
 }
 
 /**
- * What an Isolated landing does with the primary checkout. It moves `@` onto the new
- * integration when its parents are already integrated: an empty `@` becomes a new
- * empty change there, and uncommitted edits are rebased along with it. Edits that
- * would conflict there, a conflicted `@` and unintegrated ancestry stay exactly where
- * they are (the next Direct landing rebases them). None of these block integration or push.
+ * What a landing does with the primary checkout, or, with `carryEdits: false`, what
+ * the hourly maintenance pass does with it. It moves `@` onto the new integration
+ * when its parents are already integrated: an empty `@` becomes a new empty change
+ * there, and (when `carryEdits`) uncommitted edits are rebased along with it. Edits
+ * that would conflict there, a conflicted `@` and unintegrated ancestry stay exactly
+ * where they are (the next Direct landing rebases them). Maintenance never carries
+ * edits: a timer must not rebase a checkout someone is editing. None of these block
+ * integration or push.
  */
-async function primaryCheckoutDisposition(context: CandidateContext, io: LandingIO): Promise<PrimaryCheckoutOutcome> {
+export async function primaryCheckoutDisposition(
+  context: Pick<CandidateContext, "integration" | "integrationBranch">,
+  io: Pick<LandingIO, "revisionFacts" | "jj">,
+  { carryEdits = true }: { carryEdits?: boolean } = {},
+): Promise<PrimaryCheckoutOutcome> {
   const { revisionFacts, jj } = io;
   const root = context.integration.root;
   const facts = await revisionFacts(root, "@");
@@ -198,6 +205,7 @@ async function primaryCheckoutDisposition(context: CandidateContext, io: Landing
   const parent = await revisionFacts(root, "@-");
   const integration = await revisionFacts(root, context.integrationBranch);
   if (parent.commitId === integration.commitId) return { action: "current" };
+  if (!facts.empty && !carryEdits) return { action: "left", reason: "edits" };
   if (facts.empty) {
     await jj(root, ["new", context.integrationBranch]);
     return { action: "moved" };

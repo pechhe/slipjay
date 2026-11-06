@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,24 @@ const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta
 const HOUR = 60 * 60_000;
 /** The listing `workspaceContext` makes, which is what a repository it cannot read fails. */
 const LISTING_FAILURE = /^jj --color=never --ignore-working-copy workspace failed/m;
+
+/**
+ * A commit on the integration branch, made in another workspace as a landing on
+ * another machine leaves it: the checkout people run scripts from stays where it was.
+ */
+async function advanceIntegration(f: Awaited<ReturnType<typeof project>>, file: string): Promise<{ commit: string; parent: string }> {
+  const parent = jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
+  const workspace = await createWorkspace("ahead", f.repo);
+  await writeFile(join(workspace.workspacePath, file), `${file}\n`);
+  jj(workspace.workspacePath, ["commit", "-m", "Landed elsewhere"]);
+  const commit = jj(workspace.workspacePath, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
+  jj(workspace.workspacePath, ["bookmark", "set", "main", "-r", commit]);
+  return { commit, parent };
+}
+
+const maintain = (cwd: string, args: string[] = ["--json"]) => spawnSync("bun", [cli, "maintain", ...args], {
+  cwd, env: process.env, encoding: "utf8", timeout: 120_000,
+});
 
 /** A PATH whose `jj` fails, so the pass finds the repository but cannot read it. */
 async function brokenJjPath(): Promise<string> {
@@ -174,6 +192,79 @@ test("maintain reports honoured requests before a failing eviction", async () =>
     assert.match(plain.stdout, new RegExp(`^skipped\\t${gone.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\t`, "m"));
     assert.match(plain.stderr, /^maintain could not evict: jj --color=never --ignore-working-copy workspace failed/m);
     assert.doesNotMatch(plain.stdout, /Nothing to archive or evict/);
+  } finally {
+    await f.dispose();
+  }
+});
+
+/**
+ * On a machine nobody lands from, the primary checkout stayed on an old integrated
+ * parent for days: `start` fetched the integration branch but nothing moved the
+ * checkout people run the repository's scripts from. The pass must move it onto the
+ * head the way `land` does, so landed changes take effect there without a hand-moved
+ * `jj new`.
+ */
+test("maintain moves a clean primary checkout onto the integration head", async () => {
+  const f = await project();
+  try {
+    const { commit, parent } = await advanceIntegration(f, "ahead.txt");
+    assert.notEqual(parent, commit, "the integration branch advanced while the primary stayed behind");
+
+    const result = maintain(f.repo);
+    assert.equal(result.status, 0, result.stderr);
+    const reported = JSON.parse(result.stdout) as { primaryCheckout?: { action: string; reason?: string } };
+    assert.deepEqual(reported.primaryCheckout, { action: "moved" });
+    assert.equal(jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]), commit);
+    assert.equal(await readFile(join(f.repo, "ahead.txt"), "utf8"), "ahead.txt\n");
+
+    const plain = maintain(f.repo, []);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.doesNotMatch(plain.stdout, /primary checkout/, "a checkout already on the head is not reported as moved again");
+  } finally {
+    await f.dispose();
+  }
+});
+
+/**
+ * The pass is a timer, not a person: it must never carry or rebase a checkout that
+ * holds work of its own. Uncommitted edits and unlanded commits both stay where they
+ * are, exactly as `land` leaves a conflicted one.
+ */
+test("maintain leaves a primary checkout that holds its own work where it is", async () => {
+  const f = await project();
+  try {
+    await writeFile(join(f.repo, "local.txt"), "unlanded\n");
+    const change = jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
+    const { parent, commit } = await advanceIntegration(f, "ahead.txt");
+
+    const result = maintain(f.repo);
+    assert.equal(result.status, 0, result.stderr);
+    const reported = JSON.parse(result.stdout) as { primaryCheckout?: { action: string; reason?: string } };
+    assert.deepEqual(reported.primaryCheckout, { action: "left", reason: "edits" });
+    assert.equal(jj(f.repo, ["log", "-r", "@", "--no-graph", "-T", "change_id"]), change);
+    assert.equal(jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]), parent, "the primary stays on its old parent");
+    assert.equal(await readFile(join(f.repo, "local.txt"), "utf8"), "unlanded\n");
+    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), commit);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("maintain leaves an empty primary checkout with unlanded commits under it where it is", async () => {
+  const f = await project();
+  try {
+    await writeFile(join(f.repo, "mine.txt"), "mine\n");
+    jj(f.repo, ["commit", "-m", "unlanded"]);
+    jj(f.repo, ["new"]);
+    const own = jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
+    const { commit } = await advanceIntegration(f, "ahead.txt");
+
+    const result = maintain(f.repo);
+    assert.equal(result.status, 0, result.stderr);
+    const reported = JSON.parse(result.stdout) as { primaryCheckout?: { action: string; reason?: string } };
+    assert.deepEqual(reported.primaryCheckout, { action: "left", reason: "unintegrated-ancestry" });
+    assert.equal(jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]), own);
+    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), commit);
   } finally {
     await f.dispose();
   }
