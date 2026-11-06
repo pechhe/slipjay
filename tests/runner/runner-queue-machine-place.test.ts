@@ -45,30 +45,35 @@ const gate = (root: string) => `const fs=require('node:fs');while(fs.existsSync(
 const placements = (f: Awaited<ReturnType<typeof fixture>>, id?: string): GatePlacement[] => f.log.events(id ? { operationId: id } : {}).flatMap(({ event }) => event.type === "remote_verification" && event.phase === "ready" ? [event.placement!] : []);
 const options = (p: ReturnType<typeof places>) => ({ screeningLanes: 3, workers: 2, gateMachine: "peach-box", machineVerifications: { "peach-box": p.machine }, remoteVerification: p.boat });
 
-test("machine screens exclude one another, release the runner worker, and expose host and timing evidence", async () => {
+test("machine screens exclude one another, queue for the place rather than use boat, and release the runner worker while waiting", async () => {
   const p = places();
   const f = await fixture(false, false, undefined, false, { ...options(p), workers: 1, other: true, gates: (root) => [gate(root)] });
   try {
     await writeFile(join(f.root, "hold"), "");
     const a = f.submit(await f.candidate("a"));
-    const b = f.submit(await f.candidate("b"));
     f.queue.wake();
-    await until(() => placements(f).length === 2 || undefined);
-    assert.deepEqual(placements(f).sort(), ["boat", "machine:peach-box"]);
-    assert.equal(p.max(), 1);
-    assert.equal(p.opens(), 1);
+    await until(() => placements(f, a).length === 1 || undefined);
+    const b = f.submit(await f.candidate("b"));
+    const c = f.submit(await f.candidate("c"));
+    f.queue.wake();
+    const queued = (id: string) => f.log.events({ operationId: id }).some(({ event }) => event.type === "progress" && /busy; queued for one/.test(event.line));
+    await until(() => queued(b) && queued(c) || undefined);
     const other = f.submit(await f.candidate("unheld", f.otherAuthor, "fixture/other"));
     f.queue.wake();
     await until(() => f.result(other) || undefined);
-    assert.equal(f.result(other)?.type, "landed", "the remote screen returned its runner worker");
+    assert.equal(f.result(other)?.type, "landed", "queued screens hold no runner worker");
+    assert.deepEqual([placements(f, b), placements(f, c)], [[], []], "a queued gate opens nothing, boat included");
     await rm(join(f.root, "hold"));
-    await until(() => f.result(a) && f.result(b) || undefined);
-    assert.equal(f.result(a)?.type, "landed"); assert.equal(f.result(b)?.type, "landed");
+    await until(() => f.result(a) && f.result(b) && f.result(c) || undefined);
+    for (const id of [a, b, c]) assert.equal(f.result(id)?.type, "landed");
+    assert.deepEqual(placements(f).sort(), ["machine:peach-box", "machine:peach-box", "machine:peach-box"]);
+    assert.equal(p.max(), 1);
+    assert.ok(!f.log.events().some(({ event }) => event.type === "gate_fallback"), "busy is never a reason for boat");
+    for (const id of [b, c]) assert.ok(f.log.events({ operationId: id }).some(({ event }) => event.type === "gate_waited"));
     const hosts = f.log.events().flatMap(({ event }) => event.type === "run_started" && event.purpose === "gate" ? [event.host] : []);
-    assert.ok(hosts.includes("machine:peach-box")); assert.ok(hosts.includes("boat:slot"));
+    assert.ok(hosts.includes("machine:peach-box")); assert.ok(!hosts.includes("boat:slot"));
     const metrics = pipelineMetrics(f.log.events(), "1970-01-01").groups.find((group) => group.repo === "fixture/repo")!.remote!;
-    assert.equal(metrics.placements["machine:peach-box"]?.gate?.samples, 1);
-    assert.ok(Object.keys(metrics.fallbacks ?? {}).some((key) => key.includes("busy")));
+    assert.equal(metrics.placements["machine:peach-box"]?.gate?.samples, 3);
   } finally { await rm(join(f.root, "hold"), { force: true }); await f.dispose(); }
 });
 
@@ -111,6 +116,10 @@ test("quarantined places use boat until recovery proves clean, then take gates w
   try {
     const a = await f.land(f.submit(await f.candidate("a")));
     assert.equal(a?.type, "landed"); assert.deepEqual(placements(f), ["boat"]);
+    // Boat for a down place is never quiet: the landing warns, and the runner records the outage once.
+    assert.ok(f.log.events().some(({ event }) => event.type === "progress" && /^warning: peach-box's gate place is down \(quarantined: earlier work alive\); this gate runs on a boat VM instead$/.test(event.line)));
+    const outages = () => f.log.events().flatMap(({ event }) => event.type === "machine_place" ? [`${event.name} ${event.state}`] : []);
+    assert.deepEqual(outages(), ["peach-box down"]);
     // A failed attempt to open boat holds it. The next gate can still use a recovered machine.
     p.holdBoat();
     const b = f.submit(await f.candidate("b")); f.queue.wake();
@@ -119,6 +128,7 @@ test("quarantined places use boat until recovery proves clean, then take gates w
     await until(() => f.result(b) || undefined);
     assert.equal(f.result(b)?.type, "landed", JSON.stringify(f.result(b)));
     assert.deepEqual(placements(f, b), ["machine:peach-box"]);
+    assert.deepEqual(outages(), ["peach-box down", "peach-box up"]);
   } finally { await f.dispose(); }
 });
 
@@ -155,4 +165,70 @@ test("failed repair of the real machine verifier's corrupt checkout falls back t
     assert.deepEqual(placements(f), ["boat"]);
     assert.ok(f.log.events().some(({ event }) => event.type === "remote_verification" && event.phase === "failed" && event.infrastructure && /checkout reinitialisation failed/.test(event.reason)));
   } finally { await f.dispose(); }
+});
+
+test("a gate queued for the place stops when its landing is cancelled, opening nothing", async () => {
+  const p = places();
+  const f = await fixture(false, false, undefined, false, { ...options(p), gates: (root) => [gate(root)] });
+  try {
+    await writeFile(join(f.root, "hold"), "");
+    const a = f.submit(await f.candidate("a"));
+    f.queue.wake();
+    await until(() => placements(f, a).length === 1 || undefined);
+    const b = f.submit(await f.candidate("b"));
+    f.queue.wake();
+    await until(() => f.log.events({ operationId: b }).some(({ event }) => event.type === "progress" && /queued for one/.test(event.line)) || undefined);
+    f.log.append(b, { type: "cancelled", reason: "cancelled by the author" });
+    await until(() => f.result(b) || undefined);
+    assert.equal(f.result(b)?.type, "cancelled");
+    assert.deepEqual(placements(f, b), []);
+    await rm(join(f.root, "hold"));
+    await until(() => f.result(a) || undefined);
+    assert.equal(f.result(a)?.type, "landed");
+  } finally { await rm(join(f.root, "hold"), { force: true }); await f.dispose(); }
+});
+
+test("a machine with two places runs two gates side by side and queues a third for the first place freed", async () => {
+  const first = places(), second = places();
+  const f = await fixture(false, false, undefined, false, { ...options(first), machineVerifications: { "peach-box": [first.machine, second.machine] }, gates: (root) => [gate(root)] });
+  try {
+    await writeFile(join(f.root, "hold"), "");
+    const a = f.submit(await f.candidate("a"));
+    const b = f.submit(await f.candidate("b"));
+    const c = f.submit(await f.candidate("c"));
+    f.queue.wake();
+    await until(() => placements(f, a).length === 1 && placements(f, b).length === 1 || undefined);
+    assert.deepEqual([first.opens(), second.opens()], [1, 1], "each place took one gate, at the same time");
+    await until(() => f.log.events({ operationId: c }).some(({ event }) => event.type === "progress" && /every peach-box gate place is busy; queued for one/.test(event.line)) || undefined);
+    assert.deepEqual(placements(f, c), [], "the third gate opens nothing while both places are held");
+    await rm(join(f.root, "hold"));
+    await until(() => f.result(a) && f.result(b) && f.result(c) || undefined);
+    for (const id of [a, b, c]) assert.equal(f.result(id)?.type, "landed");
+    assert.equal(first.opens() + second.opens(), 3);
+    assert.ok(!f.log.events().some(({ event }) => event.type === "gate_fallback"), "busy places are queued for, never boat");
+    assert.ok(f.log.events({ operationId: c }).some(({ event }) => event.type === "gate_waited"));
+  } finally { await rm(join(f.root, "hold"), { force: true }); await f.dispose(); }
+});
+
+test("a place that goes down while gates queue for it sends each to boat once, loudly, never passing it between them", async () => {
+  const p = places();
+  const f = await fixture(false, false, undefined, false, { ...options(p), gates: (root) => [gate(root)] });
+  try {
+    await writeFile(join(f.root, "hold"), "");
+    const a = f.submit(await f.candidate("a"));
+    f.queue.wake();
+    await until(() => placements(f, a).length === 1 || undefined);
+    const b = f.submit(await f.candidate("b"));
+    const c = f.submit(await f.candidate("c"));
+    f.queue.wake();
+    const queued = (id: string) => f.log.events({ operationId: id }).some(({ event }) => event.type === "progress" && /queued for one/.test(event.line));
+    await until(() => queued(b) && queued(c) || undefined);
+    // The place goes down while a still holds it: its release hands a down place to b.
+    p.quarantine(true);
+    await rm(join(f.root, "hold"));
+    await until(() => f.result(a) && f.result(b) && f.result(c) || undefined);
+    for (const id of [a, b, c]) assert.equal(f.result(id)?.type, "landed");
+    assert.deepEqual([placements(f, b), placements(f, c)], [["boat"], ["boat"]]);
+    for (const id of [b, c]) assert.equal(f.log.events({ operationId: id }).filter(({ event }) => event.type === "gate_fallback").length, 1);
+  } finally { await rm(join(f.root, "hold"), { force: true }); await f.dispose(); }
 });

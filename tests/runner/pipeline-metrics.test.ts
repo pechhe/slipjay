@@ -554,3 +554,32 @@ test("a pass of the command on the same base before the failures contradicts tha
   const [flake] = pipelineMetrics(events, at(0)).flakes;
   assert.deepEqual([flake?.test, flake?.confirmed], ["landing > rename", false]);
 });
+
+test("reports submission to publication by selection, migration change and placement, counting failures", () => {
+  const report = (kind: "related" | "complete"): OperationEvent => ({ type: "test_report", runId: "r", status: "recorded", selection: kind, files: [] });
+  const ready = (placement: "boat" | "machine:peach-box"): OperationEvent => ({ type: "remote_verification", phase: "ready", placement, slot: 0, machine: { verifier: placement === "boat" ? "boat" : "machine", name: "m", id: "m", size: "large", image: "i" } } as OperationEvent);
+  const landing = (id: string, seq: number, publishMs: number, extra: OperationEvent[], end: OperationEvent = { type: "landed", base: "main", commitId: `commit-${id}`, branch: "main", remote: "origin" }, change = id): StoredEvent[] => [
+    row(seq * 10, id, NOW - 3_600_000, submitted("acme/app", change)),
+    ...extra.map((event, index) => row(seq * 10 + 1 + index, id, NOW - 3_600_000 + 1 + index, event)),
+    row(seq * 10 + 9, id, NOW - 3_600_000 + publishMs, end),
+  ];
+  const migration = { ...shape("db"), migrationBearing: true } as OperationEvent;
+  const events = [
+    ...landing("a", 1, 60_000, [shape("a"), report("related"), ready("machine:peach-box")]),
+    ...landing("b", 2, 80_000, [shape("b"), report("related"), ready("machine:peach-box")]),
+    ...landing("c", 3, 200_000, [migration, report("complete"), ready("boat")]),
+    ...landing("d", 4, 90_000, [shape("d"), report("related"), ready("machine:peach-box")], { type: "failed", reason: "gate failed" } as OperationEvent),
+    ...landing("e", 5, 30_000, [shape("e")]),
+    // d's change again: it waited for the place, then published as a relanding.
+    ...landing("d-again", 6, 100_000, [shape("d"), report("related"), { type: "gate_waited", placement: "machine:peach-box", waitedMs: 20_000 }, ready("machine:peach-box")], undefined, "d"),
+  ];
+  const stp = pipelineMetrics(events, at(0), { now: NOW }).repositories[0]!.submissionToPublication;
+  assert.deepEqual([stp.published?.samples, stp.published?.medianMs, stp.failed, stp.relanded], [5, 80_000, 1, 1]);
+  assert.deepEqual([stp.bySelection.related?.published?.samples, stp.bySelection.related?.failed], [3, 1]);
+  assert.equal(stp.bySelection.complete?.published?.medianMs, 200_000);
+  assert.equal(stp.bySelection.unrecorded?.published?.medianMs, 30_000);
+  assert.deepEqual([stp.byMigration.migrationBearing.published?.samples, stp.byMigration.other.published?.samples, stp.byMigration.other.failed], [1, 4, 1]);
+  const atOnce = stp.byPlacement["machine:peach-box at once"], waited = stp.byPlacement["machine:peach-box waited"];
+  assert.deepEqual([atOnce?.published?.samples, atOnce?.failed, waited?.published?.medianMs, waited?.relanded, stp.byPlacement.boat?.published?.samples, stp.byPlacement.runner?.published?.samples], [2, 1, 100_000, 1, 1, 1]);
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, at(0), { now: NOW })), /Submission to publication: 5 samples, median \S+, p90 \S+, 1 failed, 1 relanded/);
+});

@@ -19,6 +19,7 @@ function stand() {
   let drift = false;
   let lost = false;
   let clientKilled = false;
+  let basePolicy = "";
   let cancelled = false;
   let archive = "";
   let held = false;
@@ -29,6 +30,7 @@ function stand() {
     if (request.executable === "tar") return runBoundedProcess(request);
     if (request.executable === "git") {
       if (request.args[0] === "bundle") { bundles.push([...request.args]); return result("", 128, "Refusing to create empty bundle."); }
+      if (request.args[0] === "show") return basePolicy ? result(basePolicy) : result("", 128, "fatal: path does not exist");
       return result(request.args[0] === "rev-parse" ? tree : "");
     }
     if (request.args.includes("forward")) return tunnelFailure ? result("", 1, "forward refused") : result("48123");
@@ -63,8 +65,8 @@ function stand() {
     if (script.includes("git write-tree")) return result(`${drift ? "changed" : tree}\n${memoryAfter}`);
     return result();
   };
-  const make = () => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run });
-  return { scripts, bundles, make, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
+  const make = (place?: number) => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run, ...place === undefined ? {} : { place } });
+  return { scripts, bundles, make, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
 }
 const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv) => m.open({ environment, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 const command = { executable: "bun", args: ["run", "test"], cwd: "/runner/checkout", timeoutMs: 1000, maxOutputBytes: 1024 };
@@ -236,6 +238,18 @@ test("successive attempts transfer only missing commits and retain the place che
   assert.notEqual(ids[0], ids[1], "scratch, labels and scopes retain separate attempt identities");
 });
 
+test("a machine's further places keep their own checkout and holder, and share its install cache and quota marker", async () => {
+  const s = stand(), m = s.make(2); await m.recover!([]);
+  const attempt = await open(m); await attempt.executor.run(command); await attempt.close();
+  assert.equal(attempt.executor.reportRoot, "/gate-root/place-2/checkout");
+  assert.equal(attempt.machine.id, "peach-box/2");
+  const commands = s.scripts.filter((script) => script.includes("slipjay-command-"));
+  assert.ok(commands.every((script) => script.includes("BUN_INSTALL_CACHE_DIR=/gate-root/bun-cache")));
+  assert.ok(s.scripts.some((script) => script.includes("/gate-root/quota-ready")));
+  assert.ok(s.scripts.some((script) => script.includes("/gate-root/place-2/control.lock")));
+  assert.ok(!s.scripts.some((script) => script.includes("/gate-root/control.lock")), "place 2 never takes place 0's lock");
+});
+
 test("a corrupt warm checkout is reinitialised during setup and retried with a full bundle once", async () => {
   const s = stand(), m = s.make(); await m.recover!([]);
   const first = await open(m); await first.close();
@@ -273,4 +287,27 @@ test("an ssh client killed by a signal mid-command is a lost machine, not the ca
   await assert.rejects(a.executor.run(command), /executor lost: ssh to machine peach-box \(ssh ended by SIGTERM\)/);
   assert.equal(m.available(), false, "the place is quarantined until recovery");
   await a.close().catch(() => undefined);
+});
+
+test("the place keeps only the untracked paths the base's policy declares, and refuses malformed ones", async () => {
+  const s = stand(), m = s.make();
+  await m.recover!([]);
+  // Too broad to be a declared generated or cache path: `*`, `apps`, `**/x`, `*/*`.
+  s.policy(JSON.stringify({ placeRetainedPaths: ["apps/web/.svelte-kit", "apps/web/src/paraglide", "../escape", "/abs", "-x", "a;rm -rf", "*", "apps", "**/.svelte-kit", "*/*"] }));
+  const before = s.scripts.length;
+  const a = await open(m);
+  const cleans = s.scripts.slice(before).filter((script) => script.includes("clean -ffdxq") && /slipjay-(prepare|receive)-/.test(script));
+  assert.equal(cleans.length, 2, "the setup and receive cleans, after the policy is read");
+  for (const clean of cleans) {
+    const exclusions = clean.slice(clean.indexOf("clean -ffdxq")).split("\n")[0]!;
+    assert.ok(exclusions.includes("apps/web/.svelte-kit") && exclusions.includes("apps/web/src/paraglide"));
+    assert.doesNotMatch(exclusions, /escape|\/abs|-x\b|rm -rf|-e '\*'|-e 'apps'|\*\*|'\*\/\*'/);
+    assert.ok(exclusions.includes("node_modules") && exclusions.includes(".jj"));
+  }
+  await a.close();
+  s.policy("");
+  const b = await open(m);
+  const latest = s.scripts.findLast((script) => script.includes("jj edit"))!;
+  assert.doesNotMatch(latest, /svelte-kit/, "no policy at the base keeps nothing extra");
+  await b.close();
 });

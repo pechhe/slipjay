@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../infra/bounded-process.ts";
-import { collectRemoteReports, frozenInstall, loopbackPort, receiveCandidate, remoteCommand, remoteFiles, shellWord, sshFailed, worktreeTree, type RemoteRun } from "./remote-attempt.ts";
+import { cleanExclusions, collectRemoteReports, frozenInstall, loopbackPort, receiveCandidate, remoteCommand, remoteFiles, shellWord, sshFailed, worktreeTree, type RemoteRun } from "./remote-attempt.ts";
 import { TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import type { GateMachineConfig, MachineVerification, RemoteAttempt, RemoteMachine } from "./runner-types.ts";
 
@@ -19,18 +19,42 @@ const parseMemory = (reading: string): { peakBytes: number; limitKills: number }
   return Number.isFinite(peak) && Number.isFinite(kills) ? { peakBytes: peak!, limitKills: kills! } : undefined;
 };
 
+/**
+ * `placeRetainedPaths` from `slipjay.json` at `base` (the integration branch the candidate rebased onto): gitignore-style
+ * patterns of untracked state a fixed place keeps between gates, such as keyed generated output. Anything malformed,
+ * absolute or climbing out of the checkout is refused, so it only ever narrows the clean.
+ */
+async function retainedPaths(run: RemoteRun, checkout: string, base: string): Promise<string[]> {
+  const shown = await run({ executable: "git", args: ["show", `${base}:slipjay.json`], cwd: checkout, env: process.env, timeoutMs: 30_000, maxOutputBytes: 1024 * 1024 });
+  if (shown.exitCode !== 0) return [];
+  let declared: unknown;
+  try { declared = (JSON.parse(shown.stdout) as { placeRetainedPaths?: unknown }).placeRetainedPaths; } catch { return []; }
+  if (!Array.isArray(declared)) return [];
+  // Each pattern names a path at least two segments deep and every segment carries a literal character, so a typo such
+  // as `*` or `apps` can never keep all untracked state; tracked files are cleaned and tree-checked regardless.
+  return declared.filter((pattern): pattern is string => {
+    if (typeof pattern !== "string" || !/^[A-Za-z0-9_.*/-]+$/.test(pattern) || pattern.startsWith("/") || pattern.startsWith("-")) return false;
+    const segments = pattern.split("/").filter(Boolean);
+    return segments.length >= 2 && segments.every((segment) => segment !== ".." && segment !== "." && /[A-Za-z0-9_-]/.test(segment.replaceAll("*", "")));
+  });
+}
+
 /** A shared SSH machine. No provider lifecycle or VM-wide cleanup belongs here. */
-export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string } = {}): MachineVerification {
+export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string; place?: number } = {}): MachineVerification {
   const run = options.run ?? runBoundedProcess;
   const { local, bundleMissing } = remoteFiles(run);
   const ssh = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-l", config.account, config.ssh];
-  const root = config.root.replace(/\/$/, "");
+  // A machine with several places (SJ-200) keeps place 0 at its root, so its warm checkout survives, and place N in
+  // `place-N` under it. The bounded filesystem, its quota-ready marker and the install cache stay machine-wide.
+  const machineRoot = config.root.replace(/\/$/, "");
+  const place = options.place ?? 0;
+  const root = place ? `${machineRoot}/place-${place}` : machineRoot;
   const holder = `${root}/holder`;
   const repo = `${root}/checkout`;
   let busy = false;
   let quarantine = "runner restart: recovery has not confirmed the place clean";
   let recovering: Promise<void> | undefined;
-  const machine: RemoteMachine = { verifier: "machine", name, id: name, size: "machine", image: "fixed SSH machine" };
+  const machine: RemoteMachine = { verifier: "machine", name, id: place ? `${name}/${place}` : name, size: "machine", image: "fixed SSH machine" };
   const fail = (reason: string) => new Error(`Remote executor unavailable (machine ${name}): ${reason}`);
   async function control(script: string, signal?: AbortSignal, input?: Buffer, timeoutMs = 120_000): Promise<string> {
     const result = await run({ executable: "ssh", args: [...ssh, `bash -lc ${shellWord(`set -euo pipefail\nexport PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"\n${script}`)}`],
@@ -42,6 +66,8 @@ export function machineVerification(name: string, config: GateMachineConfig, opt
     if (result.exitCode !== 0) throw fail(result.stderr.trim().slice(-2000) || `control exited ${result.exitCode}`);
     return result.stdout.trim();
   }
+  /** The untracked paths the place last kept (`placeRetainedPaths`); after a restart, none until a gate reads them again. */
+  let retain: string[] = [];
   /** Exact holder ids, never container or scope name patterns. Stop descendants before deleting paths. */
   function clean(id: string): string {
     const slice = `slipjay-attempt-${id}.slice`;
@@ -64,7 +90,7 @@ if [ -n "$networks" ]; then docker network rm $networks >/dev/null; fi
 [ -z "$(docker volume ls -q --filter ${shellWord(`label=slipjay.attempt=${id}`)})" ]
 [ -z "$(docker network ls -q --filter ${shellWord(`label=slipjay.attempt=${id}`)})" ]
 if git -C ${shellWord(repo)} rev-parse --git-dir >/dev/null 2>&1; then
-  git -C ${shellWord(repo)} clean -ffdxq -e node_modules -e .jj
+  git -C ${shellWord(repo)} clean -ffdxq ${cleanExclusions(retain)}
 fi
 rm -rf -- ${shellWord(`${root}/${id}`)}
 rm -rf -- ${shellWord(holder)}`;
@@ -98,7 +124,7 @@ fi`);
       const id = randomUUID().replaceAll("-", "");
       const path = `${root}/${id}`;
       const slice = `slipjay-attempt-${id}.slice`;
-      const attemptEnv = { TMPDIR: `${path}/scratch`, BUN_INSTALL_CACHE_DIR: `${root}/bun-cache`, SLIPJAY_GATE_MACHINE: name,
+      const attemptEnv = { TMPDIR: `${path}/scratch`, BUN_INSTALL_CACHE_DIR: `${machineRoot}/bun-cache`, SLIPJAY_GATE_MACHINE: name,
         SLIPJAY_ATTEMPT_ID: id, SLIPJAY_RESOURCE_PREFIX: `sj_${id}`, SLIPJAY_DOCKER_LABEL: `slipjay.attempt=${id}` };
       let scratch: string | undefined;
       let socket: string | undefined;
@@ -129,16 +155,18 @@ echo "$HOME"`, signal);
         acquired = true;
         await control(`mkdir -p ${shellWord(`${path}/scratch`)}
 # Installer attests an enforced filesystem quota, bounding the dedicated root.
-[ -f ${shellWord(`${root}/quota-ready`)} ] || { echo 'gate root needs filesystem quota and quota-ready marker' >&2; exit 1; }`, signal);
+[ -f ${shellWord(`${machineRoot}/quota-ready`)} ] || { echo 'gate root needs filesystem quota and quota-ready marker' >&2; exit 1; }`, signal);
         await mkdir(options.scratch ?? tmpdir(), { recursive: true });
         scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-machine-"));
         const scoped = (script: string, unit: string) => remoteCommand({ executable: "bash", args: ["-c", `set -euo pipefail\n${script}`], cwd: path, env: attemptEnv }, unit, { home, account: config.account, slice });
         const resetCheckout = `rm -rf -- ${shellWord(repo)}\ngit init --quiet ${shellWord(repo)}`;
-        const heads = (await control(scoped(`mkdir -p ${shellWord(`${root}/bun-cache`)}
+        // Untracked state the place keeps between gates, from the base's policy so a candidate cannot widen it.
+        retain = await retainedPaths(run, checkout, base);
+        const heads = (await control(scoped(`mkdir -p ${shellWord(`${machineRoot}/bun-cache`)}
 if ! git -C ${shellWord(repo)} rev-parse --git-dir >/dev/null 2>&1 || ! git -C ${shellWord(repo)} for-each-ref --format='%(objectname)' >/dev/null 2>&1; then
   ${resetCheckout}
 fi
-git -C ${shellWord(repo)} clean -ffdxq -e node_modules -e .jj
+git -C ${shellWord(repo)} clean -ffdxq ${cleanExclusions(retain)}
 git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepare-${id}`), signal))
           .split("\n").filter((head) => /^[0-9a-f]{40}$/.test(head));
         const ref = `refs/slipjay/machine/${id}`;
@@ -148,7 +176,7 @@ git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepa
           try {
             const bundle = await bundleMissing(checkout, [`${ref}/candidate`, `${ref}/base`], known, join(scratch!, "candidate.bundle"));
             await control(scoped(`cd ${shellWord(repo)}
-${receiveCandidate({ bundle: `${path}/candidate.bundle`, ref, candidate, base, integrationBranch, bookmarkPrefix: "slipjay" })}
+${receiveCandidate({ bundle: `${path}/candidate.bundle`, ref, candidate, base, integrationBranch, bookmarkPrefix: "slipjay", retain })}
 git update-ref -d ${shellWord(`${ref}/candidate`)}
 git update-ref -d ${shellWord(`${ref}/base`)}`, `slipjay-receive-${id}`), signal, bundle, 900_000);
           } finally {

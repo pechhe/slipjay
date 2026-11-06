@@ -129,6 +129,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name) || !machine || typeof machine.ssh !== "string" || !machine.ssh.trim() || machine.ssh.startsWith("-") || /[@\s]/.test(machine.ssh)
       || typeof machine.root !== "string" || !/^\/[a-zA-Z0-9_./-]+$/.test(machine.root) || machine.root === "/" || machine.root.split("/").some((part) => part === "..")
       || typeof machine.account !== "string" || !/^[a-z_][a-z0-9_-]*$/.test(machine.account)) return `The runner config's machine "${name}" needs an SSH host or alias (account is separate), an absolute dedicated root and an account`;
+    if (machine.places !== undefined && !(Number.isSafeInteger(machine.places) && machine.places >= 1 && machine.places <= 8))
+      return `The runner config's machine "${name}" sets "places" to a whole number from 1 to 8`;
   }
   for (const repo of Object.values(config.repos)) {
     if (repo.gateMachine === undefined) continue;

@@ -1,7 +1,7 @@
 import { batchMetrics, formatBatchMetrics, type BatchMetrics } from "./batch-metrics.ts";
 import { START_STEPS, type StartStep } from "../workspace/start-steps.ts";
 import { isLandingSubmission, repositoryKey, RUNNER_CONTROL_ID } from "./runner-contract.ts";
-import type { CauseClass, GatePlacement, Operation, RunnerStage, StoredEvent } from "./runner-types.ts";
+import type { CauseClass, GatePlacement, Operation, OperationEvent, RunnerStage, StoredEvent } from "./runner-types.ts";
 import type { TimeBudgets } from "../policy/execution-policy.ts";
 import { auditSummariesFromEvents, type AuditSummary } from "../release/audit-ledger.ts";
 
@@ -58,6 +58,7 @@ export type TestFileGrowth = { kind: Operation["kind"]; file: string; suite: str
 export type BudgetStatus = { status: "undeclared" | "insufficient-samples" | "within" | "over"; over: string[] };
 
 /** One repository's landing health: verify time against its budgets, and its test files. */
+export type LandingTimes = { published: MetricTiming | null; failed: number; relanded: number };
 export type RepositoryMetrics = {
   repo: string;
   budgets: TimeBudgets | null;
@@ -71,6 +72,16 @@ export type RepositoryMetrics = {
    */
   gateCriticalPath: { timed: number; suites: Array<{ suite: string; landings: number; serialTail: MetricTiming | null }>; lockWait: MetricTiming | null };
   budget: BudgetStatus;
+  /**
+   * Landings submitted in the report window, from submission to publication (SJ-200), split by how the gate chose its
+   * tests, whether the change touched migration trigger paths, and where its last gate ran. `failed` counts those that
+   * ended failed or declined, so a fast median cannot hide a slow path that fails.
+   */
+  submissionToPublication: LandingTimes & {
+    bySelection: Record<string, LandingTimes>;
+    byMigration: { migrationBearing: LandingTimes; other: LandingTimes };
+    byPlacement: Record<string, LandingTimes>;
+  };
   /** Gate and audit commands by what their reports said; `missing` counts those that wrote none. */
   reports: { recorded: number; malformed: number; missing: number };
   slowestTestFiles: TestFileMetric[];
@@ -305,8 +316,20 @@ function budgetStatus(budgets: TimeBudgets | null, verify: MetricTiming | null, 
 }
 
 /** Each repository's verify time against its latest recorded budgets, and its test files from executed reports. */
+/** Where a landing's last gate ran, and for a machine place whether it waited for it or took it at once (SJ-200). */
+function gatePlacementKind(events: OperationHistory["events"], ready: OperationEvent | undefined): string {
+  if (ready?.type !== "remote_verification" || ready.phase !== "ready" || !ready.placement) return "runner";
+  if (!ready.placement.startsWith("machine:")) return ready.placement;
+  return `${ready.placement} ${events.some((row) => row.event.type === "gate_waited") ? "waited" : "at once"}`;
+}
+
 function repositoryMetrics(histories: Map<string, OperationHistory>, since: number, now: number, audits: Map<string, AuditSummary>): RepositoryMetrics[] {
   type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; timed: number; critical: Map<string, { landings: number; tails: number[] }>; lockWait: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
+  type Times = { published: number[]; failed: number; relanded: number };
+  const earlierChanges = new Set<string>();
+  const landingTimes = new Map<string, { all: Times; selection: Map<string, Times>; migration: { migrationBearing: Times; other: Times }; placement: Map<string, Times> }>();
+  const times = (): Times => ({ published: [], failed: 0, relanded: 0 });
+  const timesIn = (map: Map<string, Times>, key: string) => map.get(key) ?? map.set(key, times()).get(key)!;
   const repos = new Map<string, Repo>();
   const repoOf = (name: string): Repo => {
     let repo = repos.get(name);
@@ -345,6 +368,28 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
     }
     if (!(submittedAt >= since)) continue;
     const kind = operationKind(op.submitted);
+    const changeKey = isLandingSubmission(op.submitted) ? `${op.submitted.repo}\0${op.submitted.changeId}` : undefined;
+    if (kind === "landing" && submittedAt <= now) {
+      const outcome = op.events.find((row) => row.event.type === "landed" || row.event.type === "failed" || row.event.type === "declined");
+      if (outcome) {
+        const split = landingTimes.get(op.submitted.repo) ?? landingTimes.set(op.submitted.repo, { all: times(), selection: new Map(), migration: { migrationBearing: times(), other: times() }, placement: new Map() }).get(op.submitted.repo)!;
+        const report = op.events.find((row) => row.event.type === "test_report" && row.event.status === "recorded" && row.event.selection !== undefined)?.event;
+        const shape = op.events.find((row) => row.event.type === "change_shape")?.event;
+        const placement = op.events.findLast((row) => row.event.type === "remote_verification" && row.event.phase === "ready")?.event;
+        const into = [split.all,
+          timesIn(split.selection, report?.type === "test_report" && report.status === "recorded" ? report.selection ?? "unrecorded" : "unrecorded"),
+          shape?.type === "change_shape" && shape.migrationBearing ? split.migration.migrationBearing : split.migration.other,
+          timesIn(split.placement, gatePlacementKind(op.events, placement))];
+        // A relanded change is one whose earlier submission did not publish it.
+        const relanded = outcome.event.type === "landed" && changeKey !== undefined && earlierChanges.has(changeKey);
+        for (const entry of into) {
+          if (outcome.event.type === "landed") entry.published.push(eventTime(outcome) - submittedAt);
+          else entry.failed++;
+          if (relanded) entry.relanded++;
+        }
+      }
+    }
+    if (changeKey) earlierChanges.add(changeKey);
     for (const row of op.events) {
       if (row.event.type !== "test_report") continue;
       if (row.event.status === "malformed") { repo.malformed++; continue; }
@@ -400,6 +445,12 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
         suites: [...repo.critical].map(([suite, entry]) => ({ suite, landings: entry.landings, serialTail: timing(entry.tails) }))
           .sort((a, b) => b.landings - a.landings || a.suite.localeCompare(b.suite)) },
       budget: budgetStatus(repo.budgets, verify, overBudget.length),
+      submissionToPublication: (() => {
+        const split = landingTimes.get(name);
+        const out = (entry?: Times): LandingTimes => ({ published: timing(entry?.published ?? []), failed: entry?.failed ?? 0, relanded: entry?.relanded ?? 0 });
+        const record = (map?: Map<string, Times>) => Object.fromEntries([...map ?? []].sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, out(entry)]));
+        return { ...out(split?.all), bySelection: record(split?.selection), byMigration: { migrationBearing: out(split?.migration.migrationBearing), other: out(split?.migration.other) }, byPlacement: record(split?.placement) };
+      })(),
       reports: { recorded: repo.recorded, malformed: repo.malformed, missing: repo.missing },
       slowestTestFiles: [...files].sort((a, b) => b.medianMs - a.medianMs).slice(0, LISTED_FILES),
       growingTestFiles: growing,
@@ -587,6 +638,12 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
   for (const repo of metrics.repositories) {
     lines.push(`${repo.repo} budget: ${repo.budget.status}${repo.budget.over.length ? ` (${repo.budget.over.join(", ")})` : ""}; landing verify over 7 days ${formatTiming(repo.verify)}${repo.budgets ? `; budgets ${JSON.stringify(repo.budgets)}` : ""}`);
     lines.push(`  Verify by selection: related ${formatTiming(repo.verifyBySelection.related)}; complete ${formatTiming(repo.verifyBySelection.complete)}`);
+    const landing = (times: LandingTimes) => `${formatTiming(times.published)}, ${times.failed} failed, ${times.relanded} relanded`;
+    const stp = repo.submissionToPublication;
+    lines.push(`  Submission to publication: ${landing(stp)}`);
+    lines.push(`    by selection: ${Object.entries(stp.bySelection).map(([key, value]) => `${key} ${landing(value)}`).join("; ") || "none"}`);
+    lines.push(`    by migration change: migration-bearing ${landing(stp.byMigration.migrationBearing)}; other ${landing(stp.byMigration.other)}`);
+    lines.push(`    by placement: ${Object.entries(stp.byPlacement).map(([key, value]) => `${key} ${landing(value)}`).join("; ") || "none"}`);
     if (repo.gateCriticalPath.timed) {
       const { timed, suites, lockWait } = repo.gateCriticalPath;
       lines.push(`  Gate critical path over ${timed} timed gates: ${suites.map(({ suite, landings, serialTail }) => `${suite} ${landings}${serialTail ? ` (serial tail median ${seconds(serialTail.medianMs)})` : ""}`).join("; ") || "none named"}; lock wait ${formatTiming(lockWait)}`);

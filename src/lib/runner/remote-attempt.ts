@@ -100,9 +100,16 @@ export function remoteFiles(run: RemoteRun) {
   return { local, bundleMissing };
 }
 
+/**
+ * `git clean`'s exclusions: always `node_modules` and `.jj`, plus `retain`, the untracked paths a fixed place keeps
+ * between gates (`placeRetainedPaths`, read from the integration branch's policy, never the candidate's).
+ */
+export const cleanExclusions = (retain: readonly string[] = []) =>
+  ["node_modules", ".jj", ...retain].map((pattern) => `-e ${shellWord(pattern)}`).join(" ");
+
 /** Receive the bundle on stdin and expose precisely the candidate and base to colocated jj. Cwd is the checkout. */
-export function receiveCandidate(input: { bundle: string; ref: string; candidate: string; base: string; integrationBranch: string; bookmarkPrefix: string }): string {
-  const { bundle, ref, candidate, base, integrationBranch, bookmarkPrefix } = input;
+export function receiveCandidate(input: { bundle: string; ref: string; candidate: string; base: string; integrationBranch: string; bookmarkPrefix: string; retain?: readonly string[] }): string {
+  const { bundle, ref, candidate, base, integrationBranch, bookmarkPrefix, retain } = input;
   return `cat > ${shellWord(bundle)}
 if [ -s ${shellWord(bundle)} ]; then git fetch ${shellWord(bundle)} ${shellWord(`+${ref}/*:${ref}/*`)}; fi
 rm -f ${shellWord(bundle)}
@@ -112,7 +119,7 @@ git update-ref ${shellWord(`refs/heads/${bookmarkPrefix}-base`)} ${shellWord(bas
 jj git import --quiet >/dev/null 2>&1 || true
 jj bookmark set ${shellWord(integrationBranch)} -r ${shellWord(base)} --allow-backwards --quiet
 jj edit ${shellWord(candidate)} --quiet
-git clean -ffdxq -e node_modules -e .jj`;
+git clean -ffdxq ${cleanExclusions(retain)}`;
 }
 
 /** Candidate-controlled files never choose a runtime download or a mutable dependency resolution. */

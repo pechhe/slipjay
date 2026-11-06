@@ -515,7 +515,7 @@ With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlac
 {
   "name": "peach-live",
   "machines": {
-    "peach-box": { "ssh": "peach-box", "account": "ubuntu", "root": "/srv/slipjay-gate" }
+    "peach-box": { "ssh": "peach-box", "account": "ubuntu", "root": "/srv/slipjay-gate", "places": 3 }
   },
   "repos": {
     "pechhe/yardsmith": { "url": "git@github.com:pechhe/yardsmith.git", "verifier": "boat", "gateMachine": "peach-box", "screeningLanes": 3 }
@@ -525,6 +525,10 @@ With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlac
 ```
 
 This is a fragment of runner config; keep the required `jj` identity and existing settings.
+`places` (1 to 8, default 1) is how many gates the machine runs at once (SJ-200). Place 0 keeps the root itself, so an
+existing warm checkout survives; place N works in `<root>/place-N` with its own checkout, holder and control lock. The
+install cache and the `quota-ready` marker stay machine-wide. A gate takes the first free, healthy place, and with
+every place held it queues for the next one freed.
 Unknown machine names, a machine place without `verifier`, and a machine place combined
 with `hostPlaces: 1` are refused at startup. With `gateMachine` absent all existing placement
 behaviour is preserved. The choice stays at gate time: the free, healthy named place takes
@@ -546,7 +550,11 @@ all of the root, including the place-owned `checkout` and `bun-cache` directorie
 across attempts: transfer excludes commits the checkout already holds, and frozen installation
 reuses the Bun cache and the checkout's `node_modules`, including test caches. An unusable checkout
 or a failed fetch can be reinitialised once during setup; failed repair falls back to boat before
-any gate command runs. Logs, reports and temporary files remain in each attempt's own directory.
+any gate command runs. Logs, reports and temporary files remain in each attempt's own directory. Between gates the place cleans every untracked path in the checkout except `node_modules`, `.jj` and the
+repository's `placeRetainedPaths`: gitignore-style patterns read from `slipjay.json` at the integration branch the candidate
+rebased onto, never from the candidate. They exist for state a later gate verifies before reusing, such as keyed
+generated output whose stamp records its inputs and an output digest; anything absolute, climbing out of the checkout or
+malformed is ignored.
 Docker data created by the gate must use its attempt label and the gate's bounded storage settings.
 
 The gate receives `SLIPJAY_GATE_MACHINE` (the configured name), `SLIPJAY_ATTEMPT_ID` (a unique id),
@@ -580,6 +588,17 @@ Cancellation stops the command's scope and then cleans the attempt.
 runs name their executor host. `gate_fallback` records its reason and whether it was busy or
 infrastructure. `slipjay metrics` splits setup and gate median/p90 by these placements, counts
 fallback reasons, and charges boat billing only to boat attempts.
+
+A gate that finds every place of its machine held queues and never opens boat for that (SJ-200).
+Queued gates take the next freed place in arrival order, off the runner's workers while they
+screen, and a queued gate stops at once when its attempt is superseded or cancelled or its prefix
+is invalidated. `gate_waited` records how long a gate queued. Boat is only for a place that is
+down (unreachable, quarantined or failing setup), and that is never quiet: the landing prints a
+`warning:` line, the runner logs it, and a `machine_place` event on the runner's own record marks
+the outage once, with a matching `up` event when a gate next opens there or recovery proves it
+clean. `slipjay metrics` reports submission to publication for landings split by test selection,
+migration-trigger changes, and placement (`machine:<name> waited`, `machine:<name> at once`,
+`boat`), with failed and relanded landings counted.
 
 
 ### Independent screening lanes

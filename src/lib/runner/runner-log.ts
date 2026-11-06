@@ -43,7 +43,7 @@ export const LEDGER_FACT_MS = 365 * 24 * 60 * 60 * 1000;
  */
 const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEvent["type"]>([
   ...TERMINAL_EVENT_TYPES, "repository_policy", "landing_title", "submitted", "identity", "classified", "integrated", "publication_intent", "held",
-  "integration_held", "integration_recovered", "integration_released", "boat_circuit", "verification_passed", "verification_skipped",
+  "integration_held", "integration_recovered", "integration_released", "boat_circuit", "machine_place", "verification_passed", "verification_skipped",
   "attempt_prepared", "attempt_invalidated", "audit_head", "audit_cause", "repair_claimed", "repair_released",
   "provenance", "build_admitted", "build_receipt", "evidence_expired", "submission_request",
   "batch_started", "batch_run", "batch_outcome", "batch_routed", "batch_unrouted"]);

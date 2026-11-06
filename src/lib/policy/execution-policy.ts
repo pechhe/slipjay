@@ -35,6 +35,8 @@ export type ExecutionPolicy = {
   generatedPaths?: unknown;
   /** Paths of review, acceptance or recovery evidence that retiring a workspace preserves in the state home (see `preserveWorkspaceEvidence`). */
   evidencePaths?: unknown;
+  /** Untracked paths a fixed gate place keeps between gates (SJ-200); read only from the integration branch. */
+  placeRetainedPaths?: unknown;
   /** Repository-relative directories each workspace links to the same path in the primary checkout. */
   sharedPaths?: string[];
   /** How many prepared spare workspaces the pool keeps; 1 when undeclared. */

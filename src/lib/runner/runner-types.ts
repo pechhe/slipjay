@@ -176,6 +176,8 @@ export type OperationEvent =
   | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null; memory?: AttemptMemory }
   /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
   | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; infrastructure?: boolean; placement?: GatePlacement; setupMs?: number; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
+  /** The gate waited for its busy machine place and then took it (SJ-200). */
+  | { type: "gate_waited"; placement: `machine:${string}`; waitedMs: number }
   | { type: "gate_fallback"; placement: `machine:${string}`; reason: string; cause: "busy" | "infrastructure" }
   | { type: "verification_base"; base: string; candidate?: string;
       /** The candidate policy's time budgets, so metrics can judge each repository by its own. */
@@ -298,6 +300,8 @@ export type OperationEvent =
   | { type: "resumed"; by: string }
   /** Repository-local admission hold while the boat API is unreachable. */
   /** `hostPlace`: the repository has a runner-host gate place, which still takes a gate while boat is held. */
+  /** A machine gate place went down (a gate then used boat) or recovered (SJ-200). */
+  | { type: "machine_place"; name: string; state: "down" | "up"; reason: string }
   | { type: "boat_circuit"; repo: string; state: "open" | "closed"; reason: string; hostPlace?: true }
   | { type: "integration_held"; repo: string; commitId: string; reason: string; targetReached?: boolean; branch?: string; remote?: string }
   | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean }
@@ -682,7 +686,9 @@ export type KillOutcome =
 export type RunnerLimits = { memoryHigh?: string; memoryMax?: string; cpuQuota?: string; tasksMax?: number };
 
 export type AttemptMemory = { peakBytes: number; oomKills: number };
-export type GateMachineConfig = { ssh: string; root: string; account: string };
+export type GateMachineConfig = { ssh: string; root: string; account: string;
+  /** How many gates the machine runs at once, each in its own place (SJ-200); default 1. */
+  places?: number };
 export interface MachineVerification extends RemoteVerification {
   available(): boolean;
   reason(): string;
