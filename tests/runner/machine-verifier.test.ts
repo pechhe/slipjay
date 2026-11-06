@@ -18,6 +18,7 @@ function stand() {
   let setup = true;
   let drift = false;
   let lost = false;
+  let clientKilled = false;
   let cancelled = false;
   let archive = "";
   let held = false;
@@ -51,6 +52,7 @@ function stand() {
     if (script.includes("--frozen-lockfile")) return setup ? result(`runtime /home/ubuntu/.bun/bin/bun 1.4.4 ${"a".repeat(64)}\ntree ${tree}\n${memoryBefore}`) : result("", 1, "install failed");
     if (script.includes("slipjay-command-")) {
       if (lost) return result("", 255, "ssh: Connection reset");
+      if (clientKilled) return { ...result("", 143), signal: "SIGTERM" };
       if (held && request.abortSignal) {
         await new Promise<void>((resolve) => { if (request.abortSignal!.aborted) resolve(); else request.abortSignal!.addEventListener("abort", () => resolve(), { once: true }); });
         cancelled = true; return { ...result(), cancelled: true };
@@ -62,7 +64,7 @@ function stand() {
     return result();
   };
   const make = () => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run });
-  return { scripts, bundles, make, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
+  return { scripts, bundles, make, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
 }
 const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv) => m.open({ environment, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 const command = { executable: "bun", args: ["run", "test"], cwd: "/runner/checkout", timeoutMs: 1000, maxOutputBytes: 1024 };
@@ -261,4 +263,14 @@ test("a gate's memory peak and the kills its machine limit made during it reach 
   const b = await open(m);
   assert.equal((await b.finish()).memory, undefined);
   await b.close();
+});
+
+test("an ssh client killed by a signal mid-command is a lost machine, not the candidate's failing check", async () => {
+  const s = stand(), m = s.make();
+  await m.recover!([]);
+  const a = await open(m);
+  s.killClient();
+  await assert.rejects(a.executor.run(command), /executor lost: ssh to machine peach-box \(ssh ended by SIGTERM\)/);
+  assert.equal(m.available(), false, "the place is quarantined until recovery");
+  await a.close().catch(() => undefined);
 });

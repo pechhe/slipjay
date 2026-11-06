@@ -224,7 +224,10 @@ ${memoryReading}`, `slipjay-setup-${id}`), signal, undefined, 900_000);
                 request.abortSignal?.throwIfAborted();
                 const abortSignal = AbortSignal.any([stopping.signal, ...request.abortSignal ? [request.abortSignal] : []]);
                 const result = await run({ ...request, abortSignal, executable: "ssh", args: [...ssh, `bash -lc ${shellWord(remoteCommand({ ...request, cwd: join(repo, subdirectory), env }, unit, { home, account: config.account, slice }))}`], cwd: tmpdir(), env: process.env });
-                if (sshFailed(result)) { quarantine = "SSH lost after gate commands started"; throw new Error(`executor lost: ssh to machine ${name}`); }
+                // The local ssh client dying by a signal it did not ask for (killed, or the runner's host under pressure)
+                // loses the command as surely as a dropped connection: its exit says nothing about the candidate.
+                const clientKilled = result.signal !== null && !result.cancelled && !result.timedOut;
+                if (sshFailed(result) || clientKilled) { quarantine = "SSH lost after gate commands started"; throw new Error(`executor lost: ssh to machine ${name}${clientKilled ? ` (ssh ended by ${result.signal})` : ""}`); }
                 if (result.cancelled || result.timedOut) await control(`systemctl --user stop ${shellWord(`${unit}.scope`)}`);
                 if (reports) await collectRemoteReports(run, ssh, remoteReports, reports, scratch!, unit, (script) => scoped(script, `slipjay-reports-${id}-${randomUUID()}`), true);
                 return result;

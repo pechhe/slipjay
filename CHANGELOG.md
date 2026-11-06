@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.53.1
+
+- **A machine gate whose ssh client is killed is a lost machine:** an ssh command ended by a signal it did not ask
+  for (not a cancel or timeout) quarantines the place and reports `executor lost`, as a dropped connection does,
+  instead of blaming the candidate's check. Found by SJ-199's controlled run on peach-box.
+
 ## v3.53.0
 
 - **A named SSH machine can take the gate:** runner `machines` and repository `gateMachine` replace the runner-host
