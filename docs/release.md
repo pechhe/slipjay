@@ -243,6 +243,17 @@ deploy of the same commit did any of that, or the environment declares no `migra
 health check) or whose first verify refused, with no such earlier deploy, changed
 nothing, so it rolls back and restores earlier projects as usual.
 
+A migration's author can declare that the release before it works on the schema it leaves, until the new release
+takes traffic and again after a rollback, with `-- slipjay:previous-release-compatible` as the first line of the SQL
+(`PREVIOUS_RELEASE_COMPATIBLE`). `nonAdditiveSql` then takes the file as additive however it rewrites rows. The ordering
+is still per promotion: when every migration file in it is additive or declared, they migrate before any project deploys,
+so the candidate's app never starts against the old spelling, a failed promotion rolls back automatically, and the runner
+promotes it without the owner; one undeclared non-additive file sends all of them last. It is a claim the plan cannot check, so the
+declaring repository's review must. A rename the previous release cannot tolerate is not declarable: split it into a
+release that accepts both spellings, the rewrite, and a later removal of the old spelling. Without the line the file is
+classified and ordered as above, and the migration runs last, just before traffic moves, so the candidate must not
+write the new spelling at start-up.
+
 ## Confirming and publishing
 
 1. `slipjay promote` fetches and plans: the candidate (the integration branch on

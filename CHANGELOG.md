@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.54.0
+
+- **A migration can declare itself previous-release-compatible (YS-614):** a SQL migration whose first line is
+  `-- slipjay:previous-release-compatible` is taken as additive by the promotion plan, even when it rewrites rows. When
+  every migration file of a promotion is additive or declared, they migrate before any project deploys, so the
+  candidate's app never starts against the old spelling, and a failed promotion rolls back automatically; the runner
+  also no longer withholds its automatic promotion. One undeclared non-additive file still sends all of them last. The
+  author asserts that the previous release works on the migrated schema until activation and again after a rollback.
+
 ## v3.53.1
 
 - **A machine gate whose ssh client is killed is a lost machine:** an ssh command ended by a signal it did not ask

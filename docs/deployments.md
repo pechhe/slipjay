@@ -94,7 +94,8 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   promotion whose migration files are all additive they run before any project
   deploys, so the health checks run the new code on its own schema (the code production
   serves already fits an added schema); a failure there deploys nothing. Otherwise (a
-  non-additive migration, see [`nonAdditiveMigrations`](release.md#rollback-and-non-additive-migrations), or a rerun deploy that does
+  non-additive migration, see [`nonAdditiveMigrations`](release.md#rollback-and-non-additive-migrations) (a file declaring
+  itself `-- slipjay:previous-release-compatible` counts as additive), or a rerun deploy that does
   not know the promotion's files) they run after every project
   passed its check and before any activates, so earlier code runs on the new schema only
   briefly. `verify` exits 0 when the

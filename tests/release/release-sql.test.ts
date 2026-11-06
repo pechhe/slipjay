@@ -71,3 +71,12 @@ test("a plain index dropped and created again under its name is a replacement, n
     'CREATE INDEX IF NOT EXISTS "k" ON "t" ("a"); DROP INDEX "k";',
   ]) assert.equal(nonAdditiveSql(sql), true, sql);
 });
+
+test("a first-line previous-release-compatible declaration makes a row rewrite additive; the same SQL without it, or declared later, is not", () => {
+  const rewrite = 'UPDATE "t" SET "audience" = \'yardsmith\' WHERE "audience" = \'workbench\';';
+  assert.equal(nonAdditiveSql(rewrite), true);
+  assert.equal(nonAdditiveSql(`-- slipjay:previous-release-compatible\n${rewrite}`), false);
+  assert.equal(nonAdditiveSql(`\n  -- slipjay:previous-release-compatible  \n${rewrite}`), false);
+  assert.equal(nonAdditiveSql(`${rewrite}\n-- slipjay:previous-release-compatible`), true);
+  assert.equal(nonAdditiveSql(`-- slipjay:previous-release-compatible-ish\n${rewrite}`), true);
+});

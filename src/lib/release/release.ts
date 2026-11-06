@@ -304,7 +304,15 @@ export function nonAdditiveStatements(sql: string): string[] {
   };
   return statements.filter((statement, position) => risky(statement, position)).map(({ text }) => text.trim());
 }
-export const nonAdditiveSql = (sql: string): boolean => nonAdditiveStatements(sql).length > 0;
+/**
+ * The first-line declaration with which a migration's author asserts that the release before it works on the schema it
+ * leaves, until the new release takes traffic and again after a rollback. A file carrying it is taken as additive: it
+ * migrates before any project deploys, and a failed promotion rolls back as for any additive release. The line is a
+ * claim, not a proof; the declaring repository's review is what checks it.
+ */
+export const PREVIOUS_RELEASE_COMPATIBLE = "-- slipjay:previous-release-compatible";
+const declaresPreviousReleaseCompatible = (sql: string): boolean => sql.split("\n").find((line) => line.trim() !== "")?.trim() === PREVIOUS_RELEASE_COMPATIBLE;
+export const nonAdditiveSql = (sql: string): boolean => !declaresPreviousReleaseCompatible(sql) && nonAdditiveStatements(sql).length > 0;
 const CANDIDATE_TRAILER = "Release-Candidate: ";
 
 class ReleaseRefusal extends Error {

@@ -6,6 +6,7 @@ import path from "node:path";
 import { test, vi } from "vite-plus/test";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { runDeploy } from "../../src/lib/release/deploy.ts";
+import { nonAdditiveSql, PREVIOUS_RELEASE_COMPATIBLE } from "../../src/lib/release/release.ts";
 import type { DeploymentEnvironment } from "../../src/lib/policy/deployment-policy.ts";
 
 const exited = (exitCode: number, stdout: string) => ({ exitCode, signal: null, timedOut: false, cancelled: false, stdout, stderr: "" }) as unknown as BoundedProcessResult;
@@ -123,6 +124,14 @@ test("migrations go before the projects deploy only when the promotion's known f
     assert.equal(await order(["drizzle/0001.sql", "drizzle/meta/0001_snapshot.json", "drizzle/meta/_journal.json"]), early, "Drizzle metadata beside the SQL");
     assert.equal(await order([]), late, "a rerun whose plan saw no commits does not know its files");
     assert.equal(await order(undefined), late, "a record from before the files were carried");
+    // The runner passes `nonAdditive` when any file of the promotion is flagged (YS-614): a declared rewrite migrates first,
+    // an undeclared one last, and one undeclared file among declared ones sends them all last.
+    const rewrite = "UPDATE t SET a = 1 WHERE a = 0;";
+    const declared = `${PREVIOUS_RELEASE_COMPATIBLE}\n${rewrite}`;
+    const flagged = (...files: string[]) => files.some(nonAdditiveSql);
+    assert.equal(await order(["migrations/0001.sql"], flagged(rewrite)), late, "an undeclared row rewrite");
+    assert.equal(await order(["migrations/0001.sql"], flagged(declared)), early, "a declared row rewrite");
+    assert.equal(await order(["migrations/0001.sql", "migrations/0002.sql"], flagged(declared, rewrite)), late, "one undeclared file sends the declared one last too");
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }
