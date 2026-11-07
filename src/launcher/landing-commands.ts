@@ -7,8 +7,9 @@ import { retiredFieldsWarning } from "../lib/policy/execution-policy.ts";
 import { landingTimingLine } from "../lib/landing/landing-timing.ts";
 import { repairFailedLanding } from "../lib/landing/repair-workspace.ts";
 import { landingUpgradesThisMachine, startClientUpgrade } from "../lib/workspace/workspace-upgrade.ts";
+import { startLandingFollower } from "../lib/workspace/workspace-background.ts";
 
-const LAND_USAGE = "Usage: slipjay land [--direct] [--skip-preflight] [--handoff <json-file> | [--session <build-session-id>] [--ticket <n>]...]";
+const LAND_USAGE = "Usage: slipjay land [--direct] [--skip-preflight] [--no-wait] [--handoff <json-file> | [--session <build-session-id>] [--ticket <n>]...] | slipjay land --follow";
 
 export async function runPreview(): Promise<void> {
   const preview = await landingPreview();
@@ -64,7 +65,13 @@ export async function runLand(rest: string[]): Promise<void> {
     tickets.push(value);
     flags.splice(index, 2);
   }
-  if (flags.some((flag) => flag !== "--direct" && flag !== "--skip-preflight")) throw new Error(LAND_USAGE);
+  // --no-wait returns once the runner holds the landing; --follow (what that leaves running) follows it and never submits.
+  const noWait = flags.includes("--no-wait");
+  const followOnly = flags.includes("--follow");
+  if (flags.some((flag) => !["--direct", "--skip-preflight", "--no-wait", "--follow"].includes(flag))) throw new Error(LAND_USAGE);
+  if (followOnly && (noWait || handoff || session !== undefined || tickets.length || flags.includes("--direct"))) throw new Error(LAND_USAGE);
+  // Its follower runs `land --follow` in a workspace, and the primary checkout is none.
+  if (noWait && flags.includes("--direct")) throw new Error("--no-wait cannot land the primary checkout (--direct); land it without --no-wait");
   // --direct lands the primary checkout itself, for a session explicitly working Direct.
   const location = runnerLocation();
   if (!location) throw new Error("No runner location: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
@@ -72,19 +79,33 @@ export async function runLand(rest: string[]): Promise<void> {
   if (retired) console.error(retired);
   const timing: { startedAt: number; stages: [string, number][] } = { startedAt: Date.now(), stages: [] };
   // Read before landing: it removes this workspace, and the answer decides whether the machine installs what landed.
-  const upgradesThisMachine = await landingUpgradesThisMachine(process.cwd());
+  // A no-wait submission leaves this to its follower, which runs the same command.
+  const upgradesThisMachine = !noWait && await landingUpgradesThisMachine(process.cwd());
+  const root = process.cwd();
+  if (followOnly) console.error(`${new Date().toISOString()} following the landing of ${root}`);
   // The landing may remove this very directory, after which process.cwd() throws.
   const following = new AbortController();
   const stopFollowing = () => following.abort(new Error("Stopped following; rerun slipjay land to reattach"));
   process.once("SIGINT", stopFollowing);
   try {
     const runner = await landThroughRunner(process.cwd(), {
-      location, handoff, session, tickets, skipPreflight: flags.includes("--skip-preflight"), direct: flags.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
+      location, handoff, session, tickets, skipPreflight: followOnly || flags.includes("--skip-preflight"), direct: flags.includes("--direct"), onLine: (line) => console.error(line), signal: following.signal,
+      submitOnly: noWait, followOnly,
       onStage: (stage) => timing.stages.push([stage, Date.now()]),
     });
     // stderr, so stdout stays the JSON result.
     const finished = { ...timing, finishedAt: Date.now() };
     console.error(landingTimingLine(finished));
+    if (runner.submitted) {
+      const follower: Awaited<ReturnType<typeof startLandingFollower>> = await startLandingFollower(root)
+        .catch((error: unknown) => ({ started: false, reason: String(error) }));
+      console.error(follower.started
+        ? `Submitted as operation ${runner.operation.id}. It is followed in the background, which finishes the landing here once it publishes (log: ${follower.logPath}). Rerun slipjay land here to follow it yourself.`
+        : `Submitted as operation ${runner.operation.id}, but its background follower did not start (${follower.reason}): rerun slipjay land here once it has an outcome to finish it.`);
+      console.log(JSON.stringify({ ok: true, verdict: "submitted", operationId: runner.operation.id, follow: "slipjay land", log: runner.logUrl,
+        follower: follower.started ? { pid: follower.pid, log: follower.logPath } : null }));
+      return;
+    }
     console.log(JSON.stringify({ ok: runner.ok, verdict: runner.operation.status, log: runner.logUrl,
       ...(runner.operation.kind === "landing" && runner.operation.outcome ? { outcome: runner.operation.outcome } : {}) }));
     if (!runner.ok) process.exitCode = 1;

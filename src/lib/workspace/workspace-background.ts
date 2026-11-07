@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { workspaceContext } from "../infra/workspace-jj.ts";
-import { poolRefillLogPath, stateHome } from "./workspace-paths.ts";
+import { landingFollowLogPath, poolRefillLogPath, stateHome } from "./workspace-paths.ts";
 
 const BACKGROUND_LOG_LIMIT = 1024 * 1024;
 
@@ -22,6 +22,18 @@ export async function startBackgroundEntry(cwd: string, entry: string, options: 
   if (!root) return { started: false, reason: "not-jj" };
   const command = options.command ?? ["nice", "-n", "10", process.execPath, fileURLToPath(new URL(entry, import.meta.url))];
   return await spawnDetached([...command, ...options.args ?? [], root], root);
+}
+
+/**
+ * After `slipjay land --no-wait`, follow the submitted landing from the workspace at `root` in a
+ * detached `slipjay land --follow`, so what a followed landing does after its outcome (recording it,
+ * releasing the workspace, the machine upgrade) still happens with nobody attached. `command`
+ * replaces the spawned follower (tests). If it is lost, the workspace is kept and rerunning
+ * `slipjay land` there finishes the landing.
+ */
+export async function startLandingFollower(root: string, options: { command?: string[] } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
+  const command = options.command ?? [process.execPath, fileURLToPath(new URL("../../launcher/workspace.ts", import.meta.url)), "land", "--follow"];
+  return await spawnDetached(command, root, { logPath: landingFollowLogPath() });
 }
 
 /** Spawn `command` detached in `cwd`, appending its output to the background-work log. */

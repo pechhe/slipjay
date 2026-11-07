@@ -603,10 +603,14 @@ export async function resendReceipts(location: string, operationId: string, env:
  */
 type LandOptions = { direct?: boolean; skipPreflight?: boolean; handoff?: SubmissionHandoff; session?: string; tickets?: number[];
   location: string; env?: NodeJS.ProcessEnv; resubmitAfterOutcome?: boolean;
+  /** Return once the runner holds the landing, before it has an outcome; `submitted` is then true and nothing after publication has run. */
+  submitOnly?: boolean;
+  /** Follow this commit's submitted landing, or report its last outcome; never submit. */
+  followOnly?: boolean;
   onLine?(line: string): void; onStage?(stage: string): void; onOperation?(operationId: string): void; signal?: AbortSignal };
 /** A landing's detached housekeeping (`startLandedHousekeeping`): its process and log, or why it did not start. */
 type LandedHousekeeping = { started: boolean; pid?: number; logPath?: string; reason?: string };
-type LandResult = { ok: boolean; operation: Operation; logUrl: string; housekeeping?: LandedHousekeeping };
+type LandResult = { ok: boolean; operation: Operation; logUrl: string; housekeeping?: LandedHousekeeping; submitted?: boolean };
 
 /** A landing that failed before it submitted anything or followed an operation: the runner holds nothing of it. */
 export class LandingNotSubmitted extends Error {
@@ -684,8 +688,9 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
       older = running !== undefined;
       if (running) operation = running;
       // A caller that must never submit a commit twice reports this commit's last outcome instead.
-      if (!operation && options.resubmitAfterOutcome === false && priorAttempt?.result && priorAttempt.commitId === target.commitId) operation = priorAttempt;
+      if (!operation && (options.resubmitAfterOutcome === false || options.followOnly) && priorAttempt?.result && priorAttempt.commitId === target.commitId) operation = priorAttempt;
     }
+    if (!operation && options.followOnly) throw new LandingNotSubmitted(new Error(`No submitted landing of ${target.commitId.slice(0, 12)} to follow; nothing was submitted`));
     if (operation) progress.engaged = true;
     if (!operation) {
       const repair = await workspaceRepairProof(context, location, repo, target.changeId);
@@ -824,6 +829,10 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached }).catch((error: unknown) =>
       onLine(`warning: the runner did not record this follow-up (${error instanceof Error ? error.message : String(error)}); the landing is still followed here`));
     options.onOperation?.(operation.id);
+    // The runner holds a landing it has admitted (Build answers admission before the submission is acknowledged),
+    // so its outcome no longer needs this process. An older commit's operation is not this submission: follow it as before.
+    if (options.submitOnly && !older && !operation.result && !(operation.kind === "landing" && operation.admission === "pending"))
+      return { ok: true, operation, logUrl: runLogCommand(operation.id), submitted: true };
     operation = await follow(baseUrl, token, operation, name, onLine, env, options.signal, options.onStage);
     // What follows is this machine's own work (recording the landing, sweeping other workspaces), not the runner's.
     if (operation.result) options.onStage?.("housekeeping");

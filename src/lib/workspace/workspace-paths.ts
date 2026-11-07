@@ -120,3 +120,5 @@ export const postIntegrationHome = (): string => join(stateHome(), "post-integra
 
 /** The detached spare refill's append-only log. */
 export const poolRefillLogPath = (): string => join(stateHome(), "pool-refill.log");
+/** Where the detached follower of a `slipjay land --no-wait` submission writes its outcome. */
+export const landingFollowLogPath = (): string => join(stateHome(), "landing-follow.log");
