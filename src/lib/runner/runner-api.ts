@@ -486,7 +486,7 @@ export function createRunnerHandler(input: {
       if (batch) return json(batch satisfies VerificationResponse);
       if (!input.log.deployments(repo, "staging").some((entry) => entry.commitId === body.commitId && entry.result?.type === "deployed"))
         return json({ error: `Staging is not green on ${body.commitId.slice(0, 12)}` }, 400);
-      const existing = input.log.verifications(repo).find((entry) => entry.commitId === body.commitId && entry.status !== "superseded" && entry.status !== "cancelled");
+      const existing = input.log.verifications(repo, body.commitId).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
       if (existing)
         return json({ operation: existing, requested: false });
       const id = newOperationId();

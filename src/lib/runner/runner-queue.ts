@@ -10,7 +10,7 @@ import type { PreparedLandingCandidate } from "../landing/landing-candidate.ts";
 import { importSubmissionSource } from "../landing/submission-source.ts";
 import { duplicateLandingSource, retainLandingSource, retainLandingArtifact, importLandingArtifact, RETAINED_ARTIFACT_REVISIONS } from "../landing/landing-artifact.ts";
 import type { LandingArtifact } from "../landing/landing-artifact.ts";
-import { completeLanding, conflictedPaths, fetchIntegration, landingIO } from "../landing/landing-steps.ts";
+import { completeLanding, conflictedPaths, fetchIntegration, fetchIntegrationIfMoved, landingIO } from "../landing/landing-steps.ts";
 import { createDeployScheduler } from "../release/deploy-scheduler.ts";
 import { createResetScheduler } from "../release/reset-scheduler.ts";
 import { auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
@@ -88,7 +88,7 @@ const RECOVERY_RETRY_MAX_MS = 900_000;
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
   Object.entries(config.repos).find(([name]) => repositoryKey(name) === repositoryKey(repo))?.[1];
-import { ensureRepoConfig, integrationTrunkConfig, jj, run as workspaceRun, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
+import { ensureRepoConfig, integrationTrunkConfig, jj, jjGitExecutable, run as workspaceRun, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 
 /**
  * An integration the runner could not finalize or publish. It stays on the runner's
@@ -438,24 +438,41 @@ export function createRunnerQueue(input: {
     }
     return null;
   }
+  // Each checkout's repository config, set once per process: the runner is its only writer, and reading it back on every
+  // turn cost a jj process (SJ-200). A checkout cloned again starts unconfigured.
+  const configured = new Map<string, string>();
+  async function configureCheckout(checkout: string, settings: Readonly<Record<string, string>>): Promise<void> {
+    const key = JSON.stringify(settings);
+    if (configured.get(checkout) === key) return;
+    await ensureRepoConfig(checkout, settings);
+    configured.set(checkout, key);
+    gits.delete(checkout);
+  }
+  // The Git jj runs in each checkout, read once with its config: Git run beside jj must reach the remotes jj reaches.
+  const gits = new Map<string, Promise<string>>();
+  const gitOf = (checkout: string): Promise<string> => {
+    let git = gits.get(checkout);
+    if (!git) gits.set(checkout, git = jjGitExecutable(checkout));
+    return git;
+  };
   async function cleanup(operation: LandingOperation, checkout: string, remote: string): Promise<void> {
     // A replacement of a running screen owns the same remote bookmark now.
     if (log.operationsForChange(operation.repo, operation.changeId).some((entry) => entry.id !== operation.id
       && entry.bookmark === operation.bookmark && (entry.status === "queued" || entry.status === "running"))) return;
-    try {
-      // A candidate this checkout never fetched (cancelled while queued, or interrupted by a
-      // restart) has no local bookmark to delete until it is fetched. One this landing already
-      // fetched needs no second round trip to the remote: the bookmark to delete is known here.
-      if (!await revisionExists(checkout, `${operation.bookmark}@${remote}`))
-        await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", operation.bookmark]).catch(() => {});
-      await jj(checkout, ["bookmark", "track", `${operation.bookmark}@${remote}`]).catch(() => {});
-      await jj(checkout, ["bookmark", "delete", operation.bookmark]);
-      await jj(checkout, ["git", "push", "--remote", remote, "--bookmark", operation.bookmark]);
-    } catch (error) {
-      // Leave no half-deleted bookmark behind: a resubmission fetches the candidate afresh.
-      await jj(checkout, ["bookmark", "forget", "--include-remotes", operation.bookmark]).catch(() => {});
-      append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${message(error)}` });
-    }
+    // One round trip deletes the candidate from the remote, whether or not this checkout ever fetched it; one already
+    // gone is deleted. Through jj it was a fetch, a track, a delete and a push, about 5 s of a landing's tail (SJ-200).
+    // The lease is the submitted commit, as jj's push leased the position it fetched: an author who has since pushed a
+    // newer candidate to the bookmark keeps it.
+    // jj's own Git repository: a checkout need not be colocated, and Git run in it would find whatever repository encloses it.
+    const ref = `refs/heads/${operation.bookmark}`;
+    const gitDirectory = await jj(checkout, ["--ignore-working-copy", "git", "root"]).catch(() => undefined);
+    const deleted = gitDirectory
+      ? await workspaceRun(await gitOf(checkout), ["--git-dir", gitDirectory, "push", "--quiet", `--force-with-lease=${ref}:${operation.commitId}`, remote, "--delete", ref], { cwd: checkout })
+      : { code: 1, stdout: "", stderr: "the checkout's Git repository could not be found" };
+    if (deleted.code !== 0 && !/remote ref does not exist/i.test(deleted.stderr))
+      append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${(deleted.stderr || deleted.stdout).trim()}` });
+    // Leave no local copy behind either: a resubmission fetches the candidate afresh.
+    await jj(checkout, ["bookmark", "forget", "--include-remotes", operation.bookmark]).catch(() => {});
   }
   /** The release branch's policy: at the base a pre-verification ran against, never the candidate's; else at the branch's head. */
   async function releasePolicy(repo: string, commitId: string, ranAgainst?: string) {
@@ -512,7 +529,7 @@ export function createRunnerQueue(input: {
     // Without a staging deploy to follow, the landing itself is what gets pre-verified, unless the release branch
     // batches its checks (SJ-192): then the next scheduled promotion checks the batch, and is armed now.
     const batched = skipped && Boolean(applied?.batchVerification);
-    if (skipped && promotesFrom(configuration) && !batched && !log.verifications(repo).some((entry) => entry.commitId === commitId)) queueVerification(repo, commitId);
+    if (skipped && promotesFrom(configuration) && !batched && !log.verifications(repo, commitId).length) queueVerification(repo, commitId);
     if (batched && promotesFrom(configuration)) void promoteAutomatically(repo);
     resetScheduler.consider(repo, configuration?.reset ?? null);
     auditScheduler.consider(repo, configuration?.audit ?? null);
@@ -530,6 +547,7 @@ export function createRunnerQueue(input: {
       if (!await stat(checkout).then(() => true, () => false)) {
         await mkdir(dirname(checkout), { recursive: true });
         await jj(dirname(checkout), ["git", "clone", repository.url, checkout]);
+        configured.delete(checkout);
       }
       const context = await workspaceContext(checkout, undefined, { fetchMissingBookmarks: true });
       if (!context) throw new Error("Runner checkout is unavailable");
@@ -735,7 +753,7 @@ export function createRunnerQueue(input: {
    */
   async function reconcileVerification(repo: string): Promise<void> {
     const green = log.deployments(repo, "staging").find((entry) => entry.result?.type === "deployed");
-    if (!green || log.verifications(repo).some((entry) => entry.commitId === green.commitId)) return;
+    if (!green || log.verifications(repo, green.commitId).length) return;
     const configuration = await readExactExecutionPolicy(join(repoCheckout(repo), ".git"), green.commitId).then((exact) => exact.configuration, () => null);
     if (promotesFrom(configuration)) queueVerification(repo, green.commitId);
   }
@@ -761,7 +779,7 @@ export function createRunnerQueue(input: {
   async function requestBatchCheck(repo: string, commitId: string): Promise<VerificationResponse | null> {
     const base = await releasePolicy(repo, commitId);
     if (base?.process !== "development" || !base.batchVerification) return null;
-    const latest = log.verifications(repo).find((entry) => entry.commitId === commitId && entry.status !== "superseded" && entry.status !== "cancelled");
+    const latest = log.verifications(repo, commitId).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
     // An ended check stands only against the base it measured: a promotion since, or Production serving another commit, makes it stale.
     const current = async (check: VerificationOperation): Promise<boolean> => {
       if (log.releases(repo).some((release) => release.result?.type === "released" && release.submittedAt > check.submittedAt)) return false;
@@ -823,9 +841,10 @@ export function createRunnerQueue(input: {
    */
   function promotionCandidate(repo: string, except?: string): { commitId: string; verification: ReturnType<typeof log.verifications>[number] } | undefined {
     const verifications = log.verifications(repo);
+    // Read once: each projects every one of the repository's releases or deploys.
+    const tried = new Set([...log.releases(repo).filter((release) => release.id !== except), ...log.deployments(repo, "production")].map((entry) => entry.commitId));
     for (const entry of log.landings(repo).reverse()) {
-      if (log.releases(repo).some((release) => release.commitId === entry.commitId && release.id !== except)
-        || log.deployments(repo, "production").some((deploy) => deploy.commitId === entry.commitId)) return undefined;
+      if (tried.has(entry.commitId)) return undefined;
       const verification = verifications.find((other) => other.commitId === entry.commitId && other.result?.type === "verified");
       if (verification) return { commitId: entry.commitId, verification };
     }
@@ -876,7 +895,7 @@ export function createRunnerQueue(input: {
    */
   const standsFor = (repo: string, commitId: string): string | null => {
     const states: string[] = [];
-    const release = log.releases(repo).find((entry) => entry.commitId === commitId);
+    const release = log.releases(repo, commitId)[0];
     if (release) states.push(release.result?.type === "released" ? "is already released"
       : release.status === "queued" || release.status === "running" ? `has a release (${release.id}) still open`
       : `has a release that ended ${release.status}`);
@@ -927,8 +946,8 @@ export function createRunnerQueue(input: {
       if (releaseBase?.process === "development" && releaseBase.batchVerification && !missingPromotion(releaseBase)) return considerBatch(repo, newest.commitId, releaseBase);
     }
     // A newest landing whose verification failed is left behind, and says why.
-    const failed = log.verifications(repo).find((entry) => entry.commitId === newest.commitId && entry.status === "failed");
-    if (failed && !log.releases(repo).some((entry) => entry.commitId === failed.commitId) && (await releasePolicy(repo, failed.commitId))?.process === "development")
+    const failed = log.verifications(repo, newest.commitId).find((entry) => entry.status === "failed");
+    if (failed && !log.releases(repo, failed.commitId).length && (await releasePolicy(repo, failed.commitId))?.process === "development")
       note(failed.commitId, failed.id, "its pre-verification failed");
     if (!choice) return;
     const { commitId, verification } = choice;
@@ -1035,7 +1054,7 @@ export function createRunnerQueue(input: {
   async function considerBatch(repo: string, head: string, base: NonNullable<Awaited<ReturnType<typeof releasePolicy>>>): Promise<void> {
     if (standsFor(repo, head)) return;
     if (log.openOperations(repo).some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
-    const checks = log.verifications(repo).filter((entry) => entry.commitId === head);
+    const checks = log.verifications(repo, head);
     if (checks.some((entry) => entry.status === "queued" || entry.status === "running")) return;
     const failed = checks.filter((entry) => entry.status === "failed");
     const latest = checks.find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
@@ -1589,6 +1608,7 @@ export function createRunnerQueue(input: {
       })) {
         await mkdir(dirname(checkout), { recursive: true });
         await jj(dirname(checkout), ["git", "clone", repository.url, checkout]);
+        configured.delete(checkout);
       }
       // Recover a committed rename while resolving policy, before requiring its
       // local bookmark. Fetch and track only the new target; never delete the old one.
@@ -1598,7 +1618,7 @@ export function createRunnerQueue(input: {
       remote = context.configuration.remote ?? "origin";
       const branch = context.integrationBranch;
       // Mutable integration history is what the candidate cleanup below would abandon.
-      await ensureRepoConfig(checkout, { ...RUNNER_JJ_DEFAULTS, ...config.jj, ...integrationTrunkConfig(branch, remote) });
+      await configureCheckout(checkout, { ...RUNNER_JJ_DEFAULTS, ...config.jj, ...integrationTrunkConfig(branch, remote) });
       const retained = operation.kind === "landing" ? log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event : undefined;
       const retainedSource = retained?.type === "source_retained" ? retained : undefined;
       await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" && !retainedSource ? ["--branch", operation.bookmark] : []]);
@@ -1857,13 +1877,15 @@ export function createRunnerQueue(input: {
           if (!await stat(publisher).then(() => true, () => false)) {
             await mkdir(dirname(publisher), { recursive: true });
             await jj(dirname(publisher), ["git", "clone", repository!.url, publisher]);
+            configured.delete(publisher);
           }
-          await ensureRepoConfig(publisher, { ...RUNNER_JJ_DEFAULTS, ...config.jj });
-          await jj(publisher, ["git", "fetch", "--remote", remote!, "--branch", branch]);
+          await configureCheckout(publisher, { ...RUNNER_JJ_DEFAULTS, ...config.jj });
+          await fetchIntegrationIfMoved(publisher, remote!, branch, await gitOf(publisher));
           const canonical = await workspaceContext(publisher);
           if (!canonical) throw new Error("Canonical publisher is unavailable");
-          const local = (await revisionFacts(publisher, branch)).commitId;
-          let tip = (await revisionFacts(publisher, `${branch}@${remote}`)).commitId;
+          // Bookmark reads: neither depends on the checkout's files, so neither snapshots them.
+          const local = (await revisionFacts(publisher, branch, { ignoreWorkingCopy: true })).commitId;
+          let tip = (await revisionFacts(publisher, `${branch}@${remote}`, { ignoreWorkingCopy: true })).commitId;
           if (local !== tip && !await revisionExists(publisher, `${local} & ::${branch}@${remote}`)) {
             // Held external state remains canonical, even when this attempt verified elsewhere.
             await finishIntegration(canonical, local, publisher);
@@ -2023,14 +2045,17 @@ export function createRunnerQueue(input: {
         if (!retryPrefix && verdict?.type !== "yielded" && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
         // This checkout belongs to the runner: leave failed candidates in history,
         // and start the next turn from the integration (including any held commit).
-        if (integrationBranch) {
+        const returnToIntegration = async () => {
+          if (!integrationBranch) return;
           try { await jj(checkout, ["new", integrationBranch]); }
           catch (error) {
             const reason = `Runner checkout could not return to ${integrationBranch}: ${message(error)}`;
             progress(reason);
             if (verdict?.type === "failed") verdict = { ...verdict, reason: `${verdict.reason}\n${reason}` };
           }
-        }
+        };
+        // A published landing's verdict does not wait for it: nothing reads this checkout before the operation ends.
+        if (verdict?.type !== "landed") await returnToIntegration();
         if (verdict?.type === "landed") {
           const publishedCommit = verdict.commitId;
           const integrated = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "integrated" && event.commitId === publishedCommit);
@@ -2040,6 +2065,7 @@ export function createRunnerQueue(input: {
         if (verdict?.type === "failed" && operation.kind === "landing")
           await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
         if (verdict && (!prefix?.screen || !log.operation(operation.id)?.result)) append(operation.id, verdict);
+        if (verdict?.type === "landed") await returnToIntegration();
         // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
         if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo, operation.kind === "verification" ? operation.id : undefined);
         if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
@@ -2187,7 +2213,7 @@ export function createRunnerQueue(input: {
           append(operation.id, { type: "failed", stage, reason: `Not promoted automatically: superseded by ${newest?.slice(0, 12) ?? "a newer candidate"}` });
           return;
         }
-        const base = log.verifications(operation.repo).find((entry) => entry.commitId === operation.commitId && entry.result?.type === "verified")?.result;
+        const base = log.verifications(operation.repo, operation.commitId).find((entry) => entry.result?.type === "verified")?.result;
         const baseConfiguration = base?.type === "verified"
           ? await readExactExecutionPolicy(join(checkout, ".git"), base.base).then((exact) => exact.configuration, () => null) : null;
         if (!baseConfiguration) {

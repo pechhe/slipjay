@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { admissionLane, admits, awaitingReplacement, recoveryKey, RECEIPT_KEY_EVENT_TYPES, RECEIPT_SETTLEMENT_EVENT_TYPES, repositoryKey, RUNNER_CONTROL_ID, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { AuditOperation, DeployOperation, HeldIntegrationState, LandingOperation, Operation, OperationEvent, OperationLog, OperationLogProjections, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, VerificationOperation, WatchOperation } from "./runner-types.ts";
+import type { AuditOperation, DeployOperation, HeldIntegrationState, LandingOperation, Operation, OperationEvent, OperationLog, OperationLogProjections, PublishedLanding, ReleaseOperation, ResetOperation, RunRecord, StoredEvent, VerificationOperation, WatchOperation, WatchRepository } from "./runner-types.ts";
 
 export function newOperationId(): string {
   return `op_${Date.now().toString(36).padStart(10, "0")}_${randomBytes(12).toString("hex")}`;
@@ -72,6 +72,10 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     type TEXT NOT NULL,
     data TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type); CREATE INDEX IF NOT EXISTS events_at ON events(at);
+    -- One event of one operation, such as the submission a landed event belongs to: keyed by operation alone, each lookup
+    -- reads every event of the operation, test reports included, which made a repository's landings 0.3 s (SJ-200). Type
+    -- first also answers a scan of one type's operations from the index alone.
+    CREATE INDEX IF NOT EXISTS events_type_operation ON events(type, operation_id);
     CREATE UNIQUE INDEX IF NOT EXISTS events_submission_request ON events(json_extract(data, '$.repo'), json_extract(data, '$.requestId')) WHERE type = 'submission_request';
     -- Keyed by the fact each read looks up, not by repository: a repository-first key also matches the landings join's
     -- repository predicate, and SQLite then prefers it to the exact operation id, which is far slower.
@@ -112,19 +116,47 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     AND (? IS NULL OR json_extract(data, '$.environment') = ?) ORDER BY seq DESC`);
   const kindIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
     AND json_extract(data, '$.kind') = ? AND json_extract(data, '$.repo') = ? ORDER BY seq DESC`);
+  const kindCommitIds = db.prepare(`SELECT operation_id FROM events WHERE type = 'submitted'
+    AND json_extract(data, '$.kind') = ? AND json_extract(data, '$.repo') = ? AND json_extract(data, '$.commitId') = ? ORDER BY seq DESC`);
   const landed = db.prepare(`SELECT landed.at, landed.data FROM events landed
     JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
     WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq DESC LIMIT 1`);
   const landings = db.prepare(`SELECT landed.operation_id, landed.at, landed.data, json_extract(submitted.data, '$.changeId') AS change_id FROM events landed
     JOIN events submitted ON submitted.operation_id = landed.operation_id AND submitted.type = 'submitted'
     WHERE landed.type = 'landed' AND json_extract(submitted.data, '$.repo') = ? ORDER BY landed.seq`);
-  const gateCandidates = (type: "verification_passed" | "verification_skipped") =>
-    new Set((db.prepare("SELECT json_extract(data, '$.candidate') AS candidate FROM events WHERE type = ?").all(type) as { candidate: string }[]).map((row) => row.candidate));
+  const typeTip = db.prepare("SELECT MAX(seq) AS seq FROM events WHERE type = ?");
+  /**
+   * `read`, recomputed only when an event of one of `types` was appended since: a read across every operation that only
+   * those events change. Each check is one index lookup per type; a forgetting pass drops every cached value.
+   */
+  const cached: Array<{ clear(): void }> = [];
+  function readOnChange<T>(types: readonly string[], read: () => T): () => T {
+    let value: { key: string; value: T } | undefined;
+    cached.push({ clear: () => { value = undefined; } });
+    return () => {
+      const key = types.map((type) => (typeTip.get(type) as { seq: number | null }).seq ?? 0).join(",");
+      if (value?.key !== key) value = { key, value: read() };
+      return value.value;
+    };
+  }
+  const gateCandidateRows = db.prepare("SELECT json_extract(data, '$.candidate') AS candidate FROM events WHERE type = ?");
+  const gateCandidateSet = (type: "verification_passed" | "verification_skipped") => new Set((gateCandidateRows.all(type) as { candidate: string }[]).map((row) => row.candidate));
+  // Read once per change of either, not once per repository on every snapshot (SJ-200).
+  const gateCandidates = readOnChange(["verification_passed", "verification_skipped"], () => ({ passed: gateCandidateSet("verification_passed"), skipped: gateCandidateSet("verification_skipped") }));
+  // A repository's landings change only when one lands or a gate verdict is recorded; the watch reads them per repository
+  // after every stage event (SJ-200).
+  const landingReads = new Map<string, () => PublishedLanding[]>();
+  const publishedLandings = (repo: string): PublishedLanding[] => {
+    let read = landingReads.get(repo);
+    if (!read) landingReads.set(repo, read = readOnChange(["landed", "verification_passed", "verification_skipped"], () => readPublishedLandings(repo)));
+    // A copy: a caller may reorder what it is given.
+    return [...read()];
+  };
   /** The commits a repository's landings published, each with whether the landing checks passed on it, or were skipped for a settings landing. */
-  function publishedLandings(repo: string): PublishedLanding[] {
+  function readPublishedLandings(repo: string): PublishedLanding[] {
     const rows = landings.all(repo) as { operation_id: string; at: string; data: string; change_id: string }[];
     if (!rows.length) return [];
-    const passed = gateCandidates("verification_passed"), skipped = gateCandidates("verification_skipped");
+    const { passed, skipped } = gateCandidates();
     return rows.flatMap((row) => {
       const event = JSON.parse(row.data) as OperationEvent;
       if (event.type !== "landed") return [];
@@ -266,9 +298,12 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
   function placed<T extends Operation>(projected: T, open: Operation[]): T {
     return (open.find((entry) => entry.id === projected.id) as T | undefined) ?? projected;
   }
-  function ofKind<K extends "release" | "verification" | "reset" | "audit">(repo: string, kind: K): Extract<ReleaseOperation | VerificationOperation | ResetOperation | AuditOperation, { kind: K }>[] {
+  // Projecting every one of a repository's operations of a kind parses each one's whole history; a read about one commit
+  // projects only that commit's (SJ-200: a repository's 584 pre-verifications took 0.2 s per snapshot).
+  function ofKind<K extends "release" | "verification" | "reset" | "audit">(repo: string, kind: K, commitId?: string): Extract<ReleaseOperation | VerificationOperation | ResetOperation | AuditOperation, { kind: K }>[] {
     const open = queue();
-    return projectIds((kindIds.all(kind, repo) as { operation_id: string }[]).map((row) => row.operation_id))
+    const ids = commitId === undefined ? kindIds.all(kind, repo) : kindCommitIds.all(kind, repo, commitId);
+    return projectIds((ids as { operation_id: string }[]).map((row) => row.operation_id))
       .filter((entry): entry is Extract<ReleaseOperation | VerificationOperation | ResetOperation | AuditOperation, { kind: K }> => entry.kind === kind)
       .map((entry) => placed(entry, open));
   }
@@ -354,7 +389,14 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       }
       return stored;
   }
-  function unsettledReceipts(): Set<string> {
+  // What a receipt's owed state is read from: submissions, admissions, receipts and their key and settlement events.
+  const RECEIPT_STATE_TYPES = [...new Set(["submitted", "build_admitted", "build_receipt", "declined", "landed", "integrated",
+    ...RECEIPT_KEY_EVENT_TYPES, ...RECEIPT_SETTLEMENT_EVENT_TYPES])];
+  // Recomputed only when one of those is appended: a snapshot after a stage event, or a receipt pass after a progress line,
+  // reuses the last answer instead of scanning every receipt and key event again (about 0.2 s, SJ-200).
+  const unsettledReceipts = readOnChange(RECEIPT_STATE_TYPES, readUnsettledReceipts);
+  const buildOpen = readOnChange(RECEIPT_STATE_TYPES, readBuildOpen);
+  function readUnsettledReceipts(): Set<string> {
     const types = (list: readonly string[]) => list.map((type) => `'${type}'`).join(",");
     // Only a Build-bound attempt owes a receipt, and a receipt is identified by the attempt and the sequence it answers:
     // one of the attempt's own keys, or a settlement of the commit it integrated or held. These reads take columns only,
@@ -384,7 +426,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
    * parked one. Every other Build-bound landing is settled for good, so readers of what is owed need not parse its
    * history; on 3 Nov 2026 parsing all of them was 70% of each 1.2 s queue snapshot. Column reads only.
    */
-  function buildOpen(): Set<string> {
+  function readBuildOpen(): Set<string> {
     const latest = new Map<string, { operation: string; state: string }>();
     for (const row of db.prepare("SELECT operation_id, json_extract(data, '$.sequence') AS sequence, json_extract(data, '$.state') AS state FROM events WHERE type = 'build_receipt' ORDER BY seq").all() as
       { operation_id: string; sequence: number; state: string }[]) latest.set(`${row.operation_id}\n${row.sequence}`, { operation: row.operation_id, state: row.state });
@@ -393,7 +435,11 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     // As owedReceipts: an admitted landing owes its attempt's receipts, a chore only its one publication, and a landing
     // Build never admitted owes none beyond its admission.
     const admitted = new Set((db.prepare("SELECT DISTINCT operation_id FROM events WHERE type = 'build_admitted'").all() as { operation_id: string }[]).map((row) => row.operation_id));
-    const chores = new Set((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.chore') IS NOT NULL").all() as { operation_id: string }[]).map((row) => row.operation_id));
+    // A chore owes its one publication only once it published, or integrated a commit a later recovery may confirm
+    // published; a chore that failed before that owes nothing, and counting it kept every such chore open for good
+    // (SJ-200: about 300 of them, parsed in full on every snapshot and receipt pass).
+    const chores = new Set((db.prepare(`SELECT s.operation_id FROM events s WHERE s.type = 'submitted' AND json_extract(s.data, '$.chore') IS NOT NULL
+      AND EXISTS (SELECT 1 FROM events e WHERE e.operation_id = s.operation_id AND e.type IN ('landed', 'integrated'))`).all() as { operation_id: string }[]).map((row) => row.operation_id));
     const open = new Set([...unsettledReceipts()].filter((id) => admitted.has(id) || chores.has(id) && !delivered.has(id)));
     for (const row of db.prepare(`SELECT s.operation_id FROM events s WHERE s.type = 'submitted' AND json_extract(s.data, '$.admission') IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM events e WHERE e.operation_id = s.operation_id AND (e.type = 'build_admitted'
@@ -401,6 +447,22 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         OR e.type = 'build_receipt' AND json_extract(e.data, '$.sequence') = s.seq))`).all() as { operation_id: string }[]) open.add(row.operation_id);
     for (const operation of parked) open.add(operation);
     return open;
+  }
+
+  /** What the watch and Build's export report per repository: release state, from the facts that can change it. */
+  function reportedRepositories(now: Date): WatchRepository[] {
+    if (!projections.repositories) return [];
+    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+    const reporting = (db.prepare(`SELECT seq, operation_id, at, data FROM events WHERE
+      seq IN (SELECT MAX(seq) FROM events WHERE type = 'repository_policy' GROUP BY json_extract(data, '$.repo'))
+      OR (type = 'failed' AND at >= ? AND json_extract(data, '$.stage') = 'screening')
+      OR seq = (WITH tip AS (SELECT MAX(seq) AS seq FROM events WHERE type IN ('submitted', 'stage', 'landed', 'deployed', 'released', 'verified', 'audited',
+        'failed', 'cancelled', 'superseded', 'yielded', 'audit_head', 'audit_cause', 'paused', 'resumed'))
+        -- Only a refusal newer than that can be the newest; reading every progress line for one was 0.06-0.2 s (SJ-200).
+        SELECT MAX(newest) FROM (SELECT seq AS newest FROM tip UNION ALL SELECT e.seq FROM events e, tip
+          WHERE e.type = 'progress' AND e.seq > tip.seq AND json_extract(e.data, '$.line') LIKE 'Not promoting %')) ORDER BY seq`).all(midnight.toISOString()) as EventRow[])
+      .map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
+    return projections.repositories(log, reporting, now);
   }
 
   const log: OperationLog = {
@@ -494,9 +556,11 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         if (row.commitId && referenced(RUNNER_CONTROL_ID, [row.commitId], [...doomed])) continue;
         events += remove("seq = ?", row.seq);
       }
-      if (events) projection = undefined;
+      if (events) { projection = undefined; for (const entry of cached) entry.clear(); }
       return { events, operations };
     },
+    // Build's export sends only this, after every few events: it never needs the queue, its timing or the receipts (SJ-200).
+    releaseState: (now = new Date()) => ({ observedAt: now.toISOString(), repositories: reportedRepositories(now) }),
     snapshot(runner, now = new Date()) {
       db.exec("BEGIN");
       try {
@@ -504,16 +568,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         const all = (snapshotRows.all() as EventRow[]).map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent }));
         const open = queue().map((op) => projections.watch ? projections.watch(op, all, now) : unwatched(op));
         const repos = (db.prepare("SELECT DISTINCT json_extract(data, '$.repo') AS repo FROM events WHERE type = 'submitted'").all() as { repo: string }[]).map((row) => row.repo);
-        const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
-        const reporting = projections.repositories ? (db.prepare(`SELECT seq, operation_id, at, data FROM events WHERE
-          seq IN (SELECT MAX(seq) FROM events WHERE type = 'repository_policy' GROUP BY json_extract(data, '$.repo'))
-          OR (type = 'failed' AND at >= ? AND json_extract(data, '$.stage') = 'screening')
-          OR seq = (SELECT MAX(seq) FROM events WHERE type IN ('submitted', 'stage', 'landed', 'deployed', 'released', 'verified', 'audited',
-            'failed', 'cancelled', 'superseded', 'yielded', 'audit_head', 'audit_cause', 'paused', 'resumed')
-            OR (type = 'progress' AND json_extract(data, '$.line') LIKE 'Not promoting %')) ORDER BY seq`).all(midnight.toISOString()) as EventRow[])
-          .map((row): StoredEvent => ({ seq: row.seq, operationId: row.operation_id, at: row.at, event: JSON.parse(row.data) as OperationEvent })) : [];
         return { version: 1, runner, seq, observedAt: now.toISOString(),
-          repositories: projections.repositories?.(log, reporting, now) ?? [],
+          repositories: reportedRepositories(now),
           lanes: { serial: open.filter((op) => op.kind !== "deploy"), deploy: open.filter((op) => op.kind === "deploy") },
           paused: paused(), held: held(),
           recentReleases: projectIds((db.prepare("SELECT operation_id FROM events WHERE type = 'submitted' AND json_extract(data, '$.kind') = 'release' ORDER BY seq DESC LIMIT 10").all() as { operation_id: string }[]).map((row) => row.operation_id)).filter((op): op is ReleaseOperation => op.kind === "release").sort((a, b) => b.lastSeq - a.lastSeq).slice(0, 10).map(withoutRuns),
@@ -544,8 +600,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         .filter((entry): entry is DeployOperation => entry.kind === "deploy")
         .map((entry) => placed(entry, open));
     },
-    releases: (repo) => ofKind(repo, "release"),
-    verifications: (repo) => ofKind(repo, "verification"),
+    releases: (repo, commitId) => ofKind(repo, "release", commitId),
+    verifications: (repo, commitId) => ofKind(repo, "verification", commitId),
     resets: (repo) => ofKind(repo, "reset"),
     audits: (repo) => ofKind(repo, "audit"),
     landings: publishedLandings,

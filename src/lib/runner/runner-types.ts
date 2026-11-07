@@ -437,6 +437,8 @@ export interface OperationLog {
   append(operationId: string, event: OperationEvent): StoredEvent;
   subscribe(listener: (event: StoredEvent) => void): () => void;
   snapshot(runner: string, now?: Date): QueueSnapshot;
+  /** The snapshot's per-repository release state alone, as Build's export sends it. */
+  releaseState(now?: Date): Pick<QueueSnapshot, "observedAt" | "repositories">;
   latestSeq(): number;
   /** Events after `afterSeq` (exclusive), optionally for one operation, in seq order. */
   events(options?: { operationId?: string; afterSeq?: number; limit?: number }): StoredEvent[];
@@ -453,10 +455,10 @@ export interface OperationLog {
   openOperations(repo?: string): Operation[];
   /** A repository's deploys, newest first, optionally of one environment. */
   deployments(repo: string, environment?: string): DeployOperation[];
-  /** A repository's release operations, newest first. */
-  releases(repo: string): ReleaseOperation[];
-  /** A repository's pre-verifications, newest first. */
-  verifications(repo: string): VerificationOperation[];
+  /** A repository's release operations, newest first; only those of `commitId` when one is named. */
+  releases(repo: string, commitId?: string): ReleaseOperation[];
+  /** A repository's pre-verifications, newest first; only those of `commitId` when one is named. */
+  verifications(repo: string, commitId?: string): VerificationOperation[];
   /** A repository's reset operations, newest first. */
   resets(repo: string): ResetOperation[];
   /** A repository's audits, newest first. */

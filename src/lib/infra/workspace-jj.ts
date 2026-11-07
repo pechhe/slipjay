@@ -142,6 +142,14 @@ export async function jj(cwd: string, args: string[], options: Record<string, un
 export const integrationTrunkConfig = (branch: string, remote: string): Readonly<Record<string, string>> => ({ 'revset-aliases."trunk()"': `${branch}@${remote}` });
 
 /**
+ * The Git jj runs for `cwd` (`git.executable-path`), so a Git command run beside jj reaches the remotes jj reaches: a
+ * configured wrapper may rewrite them.
+ */
+export async function jjGitExecutable(cwd: string): Promise<string> {
+  return (await jj(cwd, ["--ignore-working-copy", "config", "get", "git.executable-path"]).catch(() => "")) || "git";
+}
+
+/**
  * Set `settings` in a checkout's repository-level jj config, writing only the ones it does
  * not already hold as those strings: one read instead of a write per setting on every use.
  */

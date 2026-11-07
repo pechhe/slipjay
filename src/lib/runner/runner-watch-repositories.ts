@@ -47,8 +47,8 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     const imagesPending = policy.images && (!candidateImages || candidateImages.status === "queued" || candidateImages.status === "running");
     const summary = auditSummary({ audits: log.audits(repo), landings }, now);
     const refusal = (policy.promotionAudit ?? Boolean(policy.audit)) ? promotionRefusal(summary) : null;
-    const verification = candidate ? log.verifications(repo).find((entry) => entry.commitId === candidate.commitId) : undefined;
-    const release = candidate ? log.releases(repo).find((entry) => entry.commitId === candidate.commitId) : undefined;
+    const verification = candidate ? log.verifications(repo, candidate.commitId)[0] : undefined;
+    const release = candidate ? log.releases(repo, candidate.commitId)[0] : undefined;
     const candidateAttempt = deploys.find((entry) => entry.commitId === candidate?.commitId);
     const staging = stagingDeploys.find((entry) => entry.commitId === candidate?.commitId);
     const pendingDeploy = log.openOperations(repo).some((entry) => entry.kind === "release" || entry.kind === "deploy");

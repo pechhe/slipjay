@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, jj, fixture } from "./fixtures/runner-queue-fixture.ts";
 
@@ -85,5 +85,34 @@ test("unknown repositories and stale submitted commits fail without publishing",
       assert.match(result.reason, id === unknown ? /not configured/ : /does not resolve to submitted commit/);
     }
     assert.equal(f.main(), before);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("an author's newer candidate pushed to the bookmark after submitting stays on origin when the submitted one ends (SJ-200)", async () => {
+  const f = await fixture();
+  try {
+    const request = await f.candidate("first.txt");
+    const id = f.submit(request);
+    // The author moves the same change on and pushes it again, before the runner reaches the submitted commit.
+    await writeFile(join(f.author, "first.txt"), "newer\n");
+    const newer = await f.push();
+    assert.equal(newer.bookmark, request.bookmark);
+    assert.notEqual(newer.commitId, request.commitId);
+    assert.equal((await f.land(id))?.type, "failed");
+    // The deletion is leased to the submitted commit, as jj's push leased the position it fetched.
+    assert.equal(execFileSync("git", ["--git-dir", f.origin, "rev-parse", `refs/heads/${request.bookmark}`], { encoding: "utf8" }).trim(), newer.commitId);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a runner checkout cloned again is configured again, and a landing leaves it on the integration branch (SJ-200)", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.land(f.submit(await f.candidate("one.txt"))))?.type, "landed");
+    const checkout = join(f.home, "repos", "fixture/repo");
+    await rm(checkout, { recursive: true, force: true });
+    const second = await f.land(f.submit(await f.candidate("two.txt")));
+    assert.equal(second?.type, "landed", JSON.stringify(second));
+    assert.match(jj(checkout, ["config", "list", "--repo", "revset-aliases"]), /trunk\(\)/);
+    assert.equal(jj(checkout, ["log", "--no-graph", "-r", "@-", "-T", "commit_id"]), f.main());
   } finally { await f.dispose(); }
 }, 120_000);

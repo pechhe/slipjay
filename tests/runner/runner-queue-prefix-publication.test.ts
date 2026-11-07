@@ -74,3 +74,25 @@ test("depth-two publication refuses an author rewrite after preparation", async 
     assert.equal(f.log.events({ operationId: a }).filter((row) => row.event.type === "attempt_prepared").length, 1);
   } finally { await rm(join(f.root, "hold-a"), { force: true }); await f.dispose(); }
 }, 120_000);
+
+test("the canonical publisher, reading the remote tip before fetching, still publishes on a tip pushed outside the runner (SJ-200)", async () => {
+  const f = await fixture(false, false, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
+  try {
+    const canonical = join(f.home, "repos", "fixture/repo");
+    // A fetch that moved what the canonical checkout tracks of the integration branch; the fixture submits candidates by
+    // bookmark, which the publisher fetches too.
+    const fetches = () => jj(canonical, ["op", "log", "--no-graph", "-T", 'id ++ " " ++ description ++ "\\n"']).split("\n")
+      .filter((line) => line.includes(" fetch from git remote(s)"))
+      .filter((line) => /main@origin/.test(jj(canonical, ["op", "show", line.split(" ")[0]!, "--no-graph"]))).length;
+    assert.equal((await f.land(f.submit(await f.candidate("a.txt"))))?.type, "landed");
+    assert.equal((await f.land(f.submit(await f.candidate("b.txt"))))?.type, "landed");
+    // Its own pushes keep what it tracks current.
+    assert.equal(fetches(), 0);
+    await f.seedMain({ "elsewhere.txt": "pushed outside the runner\n" });
+    const c = await f.land(f.submit(await f.candidate("c.txt")));
+    assert.equal(c?.type, "landed", JSON.stringify(c));
+    assert.equal(fetches(), 1);
+    assert.equal(f.remoteFile("elsewhere.txt"), "pushed outside the runner");
+    assert.equal(f.remoteFile("c.txt"), "c.txt");
+  } finally { await f.dispose(); }
+}, 120_000);

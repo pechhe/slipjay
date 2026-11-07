@@ -104,7 +104,10 @@ test("past the fact horizon even an operation's lasting facts go, unless somethi
     // Inside the horizon its facts stay, even though the window has passed.
     log.forgetHistory(new Date(Date.now() + LEDGER_FACT_MS - 10 * DAY));
     assert.equal(log.lastLanded("owner/repo")?.commitId, "owed-commit");
+    // A read kept since then (SJ-200) is not served again once its facts are forgotten, though no newer landing arrived.
+    assert.deepEqual(log.landings("owner/repo").map((entry) => entry.commitId), ["old-commit", "owed-commit"]);
     assert.equal(log.forgetHistory(horizon, new Set([owed])).operations, 1);
+    assert.deepEqual(log.landings("owner/repo").map((entry) => entry.commitId), ["owed-commit"]);
     assert.deepEqual(log.events({ operationId: old }), [], "a year on, the operation and its facts are gone");
     assert.equal(log.operation(old), null);
     assert.ok(log.events({ operationId: owed }).length > 0, "what a caller still owes stays whole");

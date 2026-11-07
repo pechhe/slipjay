@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { candidateBookmark, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { LandingOperation, OperationEvent } from "../../src/lib/runner/runner-types.ts";
+import type { LandingOperation, OperationEvent, WatchRepository } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import type { OperationLogOptions } from "../../src/lib/runner/runner-log.ts";
 import { classifyEvent } from "../../src/lib/runner/failure-classification.ts";
@@ -522,5 +522,93 @@ test("only an entirely proven pre-command hold is releasable; retries retain rea
     assert.equal(log.held()[0]?.targetReached, false, "settlement starts a new lifecycle");
     hold(true); hold(false);
     assert.equal(log.held()[0]?.targetReached, true, "a reached attempt cannot be erased");
+  } finally { log.close(); }
+});
+
+test("a chore that failed before integrating owes Build nothing, while one that published owes its receipt until delivered (SJ-200)", () => {
+  const log = openLog(":memory:");
+  try {
+    const chore = (id: string, changeId: string) => log.append(id, { type: "submitted", repo: "owner/repo", changeId, commitId: changeId[0]!.repeat(40),
+      bookmark: candidateBookmark(changeId), submittedBy: "author", chore: { title: "Tidy", helperRevisions: [] } });
+    chore("failed", "f".repeat(32));
+    log.append("failed", { type: "run_started", runId: "gate", command: "bun test", host: "runner" });
+    log.append("failed", { type: "failed", stage: "verifying", reason: "a test failed" });
+    chore("published", "p".repeat(32));
+    const landed = log.append("published", { type: "landed", base: "b".repeat(40), commitId: "c".repeat(40), branch: "main", remote: "origin" });
+    chore("held", "h".repeat(32));
+    log.append("held", { type: "integrated", base: "b".repeat(40), commitId: "d".repeat(40) });
+    log.append("held", { type: "failed", stage: "publishing", reason: "push failed" });
+    const bound = () => log.buildBound().map(({ operation }) => operation.id).sort();
+    // A recovery may yet confirm the held integration published, so that chore stays open too.
+    assert.deepEqual(bound(), ["held", "published"]);
+    log.append("published", { type: "build_receipt", sequence: landed.seq, state: "delivered" });
+    assert.deepEqual(bound(), ["held"]);
+  } finally { log.close(); }
+});
+
+test("a read about one commit's pre-verifications or releases returns only that commit's, newest first (SJ-200)", () => {
+  const log = openLog(":memory:");
+  try {
+    const verify = (id: string, repo: string, commitId: string) => log.append(id, { type: "submitted", kind: "verification", repo, commitId, submittedBy: "runner" });
+    const release = (id: string, repo: string, commitId: string) => log.append(id, { type: "submitted", kind: "release", repo, commitId, migrationsReady: false, submittedBy: "owner" });
+    verify("v-a1", "owner/repo", "a"); verify("v-b", "owner/repo", "b"); verify("v-a2", "owner/repo", "a"); verify("v-other", "owner/other", "a");
+    release("r-a", "owner/repo", "a"); release("r-b", "owner/repo", "b");
+    assert.deepEqual(log.verifications("owner/repo", "a").map((entry) => entry.id), ["v-a2", "v-a1"]);
+    assert.deepEqual(log.verifications("owner/repo").map((entry) => entry.id), ["v-a2", "v-b", "v-a1"]);
+    assert.deepEqual(log.releases("owner/repo", "b").map((entry) => entry.id), ["r-b"]);
+    assert.deepEqual(log.verifications("owner/repo", "missing"), []);
+  } finally { log.close(); }
+});
+
+test("a repository's published landings follow each new landing and gate verdict, whatever a caller does to its copy (SJ-200)", () => {
+  const log = openLog(":memory:");
+  try {
+    const land = (id: string, commitId: string) => {
+      log.append(id, submission("owner/repo", id.padEnd(32, "k"), `${id}-source`));
+      log.append(id, { type: "landed", base: "base", commitId, branch: "main", remote: "origin" });
+    };
+    land("one", "c1");
+    assert.deepEqual(log.landings("owner/repo").map((entry) => [entry.commitId, entry.gate]), [["c1", "none"]]);
+    log.append("one", { type: "verification_passed", base: "base", candidate: "c1" });
+    land("two", "c2");
+    log.append("two", { type: "verification_skipped", base: "c1", candidate: "c2", fields: ["settings"], reason: "settings only" });
+    const read = log.landings("owner/repo");
+    assert.deepEqual(read.map((entry) => [entry.commitId, entry.gate]), [["c1", "green"], ["c2", "skipped"]]);
+    read.reverse();
+    assert.deepEqual(log.landings("owner/repo").map((entry) => entry.commitId), ["c1", "c2"]);
+    assert.deepEqual(log.landings("owner/other"), []);
+  } finally { log.close(); }
+});
+
+test("the watch's repository reporting is keyed by the newest stage-type event, or a newer promotion refusal (SJ-200)", () => {
+  let reported: number[] = [];
+  const log = openOperationLog(":memory:", {}, { repositories: (_log, events) => { reported = events.map((row) => row.seq); return []; } });
+  try {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", kind: "verification", repo: "owner/repo", commitId: "a", submittedBy: "runner" });
+    const refusedEarly = log.append(id, { type: "progress", line: "Not promoting a automatically: its pre-verification failed" });
+    const stage = log.append(id, { type: "stage", stage: "verifying" });
+    log.snapshot("runner");
+    assert.deepEqual(reported, [stage.seq], "an older refusal is not the newest");
+    assert.ok(refusedEarly.seq < stage.seq);
+    const refused = log.append(id, { type: "progress", line: "Not promoting a automatically: a release is already open" });
+    log.append(id, { type: "progress", line: "[verify] something else" });
+    log.snapshot("runner");
+    assert.deepEqual(reported, [refused.seq]);
+  } finally { log.close(); }
+});
+
+test("the release state Build's export reads names the repositories a snapshot reports, without the rest of it (SJ-200)", () => {
+  const log = openOperationLog(":memory:", {}, { repositories: (_log, events) =>
+    [{ repo: "owner/repo", screeningLanes: events.length } as unknown as WatchRepository] });
+  try {
+    const id = newOperationId();
+    log.append(id, { type: "submitted", kind: "verification", repo: "owner/repo", commitId: "a", submittedBy: "runner" });
+    log.append(id, { type: "stage", stage: "verifying" });
+    const now = new Date("2026-11-07T12:00:00.000Z");
+    const snapshot = log.snapshot("runner", now);
+    const state = log.releaseState(now);
+    assert.deepEqual(state, { observedAt: snapshot.observedAt, repositories: snapshot.repositories });
+    assert.equal(state.repositories[0]?.repo, "owner/repo");
   } finally { log.close(); }
 });

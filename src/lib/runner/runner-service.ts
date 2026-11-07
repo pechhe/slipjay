@@ -102,7 +102,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   // client. Release state comes from the same ledger-only snapshot as watch; it shares nothing with the receipt drain.
   const relay = config.build && buildToken
     ? createPipelineRelay({ origin: config.build.origin, token: buildToken, readPage: localPipelineReader({ baseUrl: server.url, token }),
-      readReleaseState: () => { const { observedAt, repositories } = log.snapshot(config.name ?? hostname()); return { observedAt, repositories }; },
+      readReleaseState: () => log.releaseState(),
       subscribe: log.subscribe }) : undefined;
   relay?.start();
   // Retained evidence is bounded: expire it at start and every six hours. One pass at a time. The ledger follows it,

@@ -172,7 +172,8 @@ and held state through the existing recovery path.
   progress line; a check's early failure line is printed regardless.
 - **Transport.** The client publishes the change as the bookmark
   `slipjay/changes/<changeId>` and submits it by jj change ID. The runner fetches it
-  on its turn and deletes it when the operation closes. Until the operation has a result
+  on its turn and deletes it when the operation closes, leased to the submitted commit, so a
+  newer commit the author pushed to the same bookmark meanwhile stays. Until the operation has a result
   (a failed or unknown submission included), the client keeps a local bookmark of that name,
   without a remote ref, on the candidate: another workspace that imported the runner's copy
   would otherwise abandon the candidate, and rebase what is stacked on it, when the runner
@@ -305,6 +306,10 @@ and held state through the existing recovery path.
     only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
     With both, the runner also pushes its metrics export to HQ (see [Pipeline metrics relay](landing-evidence.md#pipeline-metrics-relay)).
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
+    The runner is one event loop, so a large ledger must never stall the landing in progress (SJ-200): reads
+    across operations (gate verdicts, published landings, receipts, open builds) are indexed by event type and
+    kept until an event of a type they read is appended or retention forgets events; the queue snapshot is
+    projected again for each new ledger revision, and the release state Build's export reads is only the repositories.
     It keeps everything for its history window and only lasting facts past it (see [Retention](landing-evidence.md#retention)), and its
     write-ahead log is checkpointed every five minutes and after each retention pass, so it never sits at a
     high-water mark. An append waits up to five seconds for a competing writer's lock instead of failing the
