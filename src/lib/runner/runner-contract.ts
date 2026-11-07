@@ -131,7 +131,12 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
       || typeof machine.account !== "string" || !/^[a-z_][a-z0-9_-]*$/.test(machine.account)) return `The runner config's machine "${name}" needs an SSH host or alias (account is separate), an absolute dedicated root and an account`;
     if (machine.places !== undefined && !(Number.isSafeInteger(machine.places) && machine.places >= 1 && machine.places <= 8))
       return `The runner config's machine "${name}" sets "places" to a whole number from 1 to 8`;
+    if (machine.checkPlace !== undefined && (typeof machine.checkPlace !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(machine.checkPlace)))
+      return `The runner config's machine "${name}" sets "checkPlace" to the name of the boat pool its release-check place serves`;
   }
+  const served = Object.entries(config.machines ?? {}).flatMap(([name, machine]) => machine?.checkPlace ? [[machine.checkPlace, name] as const] : []);
+  const twice = served.find(([pool], index) => served.findIndex(([other]) => other === pool) !== index);
+  if (twice) return `The runner config's machines name the release-check pool "${twice[0]}" more than once`;
   for (const repo of Object.values(config.repos)) {
     if (repo.gateMachine === undefined) continue;
     if (typeof repo.gateMachine !== "string" || !Object.hasOwn(config.machines ?? {}, repo.gateMachine)) return `A repository's "gateMachine" names an unknown machine`;

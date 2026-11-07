@@ -45,7 +45,7 @@ export type ExecutionPolicy = {
   process?: ProcessLevel;
   /** When `process: "development"` promotes by itself (see `promotion-schedule.ts`); every pre-verified landing when undeclared. */
   promotionSchedule?: PromotionSchedule;
-  /** Batch checks at promotion instead of a pre-verification per landing (see `batch-verification.ts`); undefined when undeclared. */
+  /** Batch checks, at promotion and with `everyMinutes` continuously in the background, instead of a pre-verification per landing (see `batch-verification.ts`); undefined when undeclared. */
   batchVerification?: BatchVerification;
   postIntegration?: unknown;
   /** The target the runner resets on a schedule and on demand; undefined when undeclared. */

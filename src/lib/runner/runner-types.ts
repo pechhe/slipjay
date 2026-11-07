@@ -237,7 +237,11 @@ export type OperationEvent =
    * Production served when it began (the release branch when nothing was served), on `machine`, the pool of the VM
    * held for it (`host` when the runner has no remote verifier). `landings` are the batch's landings in landing order.
    */
-  | { type: "batch_started"; base: string; head: string; machine: string; scheduled: boolean; landings: { commitId: string; operationId: string }[] }
+  /**
+   * `landings` are the diagnosis candidates: every landing from `base` to `head`, or only those after `after`, the newest
+   * of them a complete check already passed (SJ-202). `background` marks a check the interval started.
+   */
+  | { type: "batch_started"; base: string; head: string; machine: string; scheduled: boolean; background?: boolean; after?: string; landings: { commitId: string; operationId: string }[] }
   /** One run of the batch's release checks at `commit`: the complete check, the rerun of what failed, or a diagnosis step. */
   | { type: "batch_run"; phase: "complete" | "rerun" | "diagnosis"; commit: string; status: "passed" | "failed" | "infrastructure";
       keys?: string[]; failingTests?: string[]; reason?: string; setupMs?: number; durationMs: number }
@@ -245,9 +249,10 @@ export type OperationEvent =
    * How the batch check ended. `green` promotes as before; `flaky` failed once and passed its rerun, so it routes
    * nothing and the head needs another complete check; `infrastructure` is a machine, setup or tooling failure, never
    * routed; `red` names each culprit landing and the suites that started failing there, and may offer
-   * `shorterCandidate`, which still needs its own complete check.
+   * `shorterCandidate`, which still needs its own complete check; `stopped` was stopped for a release the owner pushed
+   * (SJ-202): no verdict, never routed, and the head is checked again later.
    */
-  | { type: "batch_outcome"; outcome: "green" | "flaky" | "infrastructure" | "red"; base: string; head: string; machine: string; reason?: string;
+  | { type: "batch_outcome"; outcome: "green" | "flaky" | "infrastructure" | "red" | "stopped"; base: string; head: string; machine: string; reason?: string;
       keys?: string[]; diagnosis?: "complete" | "incomplete"; shorterCandidate?: string | null;
       culprits?: { commitId: string; operationId: string; workspace: string | null; keys: string[]; failingTests: string[]; command: string | null; output: string }[];
       /** Failures first seen past a landing diagnosis could not run at: one of the landings after `after` (null: the base) caused each; none is routed. */
@@ -687,10 +692,18 @@ export type KillOutcome =
 
 export type RunnerLimits = { memoryHigh?: string; memoryMax?: string; cpuQuota?: string; tasksMax?: number };
 
-export type AttemptMemory = { peakBytes: number; oomKills: number };
+/** What an attempt's slice used on its machine place: its memory peak, the limit's kills, and its CPU time (SJ-202). */
+export type AttemptMemory = { peakBytes: number; oomKills: number; cpuMs?: number };
 export type GateMachineConfig = { ssh: string; root: string; account: string;
   /** How many gates the machine runs at once, each in its own place (SJ-200); default 1. */
-  places?: number };
+  places?: number;
+  /**
+   * One further place, `check` under the root, that gates never use (SJ-202), serving the boat pool this names: the
+   * release checks (background, scheduled or for a confirm) and the nightly audit of a repository whose
+   * `batchVerification.machine` is that pool run there, in `release-check` slices the machine's installer gives idle CPU
+   * priority, and on the pool's boat VMs only while the place is down.
+   */
+  checkPlace?: string };
 export interface MachineVerification extends RemoteVerification {
   available(): boolean;
   reason(): string;

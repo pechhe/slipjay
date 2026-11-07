@@ -9,16 +9,28 @@ import { MACHINE_POOL } from "./deployment-policy.ts";
  * landing; each culprit is recorded on its own Forge work. Undeclared, the repository behaves as before. Like every
  * promotion setting it is read from the release branch's policy, never from the candidate's.
  */
-export type BatchVerification = { machine: string };
+export type BatchVerification = {
+  /** A boat pool, or a runner machine with a release-check place (`checkPlace`, SJ-202), which the check then uses. */
+  machine: string;
+  /**
+   * Background checks (SJ-202): at most once every this many minutes, the runner checks the newest landing in the
+   * background when something has landed since the last check and no landing gate is queued or waiting for a place, so
+   * a promotion finds an already-checked tip and a red check names its culprit soon after it lands. Absent, checks run
+   * only when a promotion falls due, as before.
+   */
+  everyMinutes?: number;
+};
 
 /** Validates a declared opt-in; undefined when undeclared. */
 export function batchVerification(declared: unknown, fail: (message: string) => never): BatchVerification | undefined {
   if (declared === undefined) return undefined;
   if (declared === null || typeof declared !== "object" || Array.isArray(declared)) fail("batchVerification must be an object");
-  const { machine, ...rest } = declared as Record<string, unknown>;
+  const { machine, everyMinutes, ...rest } = declared as Record<string, unknown>;
   if (Object.keys(rest).length) fail(`batchVerification declares unknown fields: ${Object.keys(rest).join(", ")}`);
   if (typeof machine !== "string" || !MACHINE_POOL.test(machine)) fail("batchVerification.machine must be a machine pool name (a-z, 0-9, -)");
-  return { machine };
+  if (everyMinutes !== undefined && !(Number.isInteger(everyMinutes) && (everyMinutes as number) >= 1 && (everyMinutes as number) <= 1440))
+    fail("batchVerification.everyMinutes must be a whole number of minutes from 1 to 1440");
+  return { machine, ...everyMinutes === undefined ? {} : { everyMinutes: everyMinutes as number } };
 }
 
 /**

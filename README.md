@@ -28,7 +28,7 @@ the full contracts, including configuration, refusal conditions and recovery.
   [rollback and migrations](docs/release.md#rollback-and-non-additive-migrations), and
   [confirmation](docs/release.md#confirming-and-publishing). Development mode also uses
   [automatic promotion](docs/release.md#automatic-promotion) and, when configured,
-  [batch checks](docs/release.md#batch-checks-at-promotion).
+  [batch checks](docs/release.md#batch-checks).
 - **Configure a runner or verifier:** [Runner](docs/runner.md), starting with [setup](docs/runner.md#setup)
   and the [candidate Bun runtime](docs/runner.md#candidate-bun-runtime).
 - **Deploy, reset or audit:** [Deploys](docs/deployments.md#deploys),

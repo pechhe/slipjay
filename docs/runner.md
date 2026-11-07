@@ -542,6 +542,18 @@ falls back to the runner host. All repositories naming the same machine share on
 screening included. A machine screen returns its runner worker while retaining the machine
 place until its commands and cleanup finish, because its gate uses the remote machine's resources.
 
+**Release-check place (`checkPlace`, SJ-202).** `"checkPlace": "release-check"` on a machine gives it one further
+place, `check` under the root, that gates never use, serving the boat pool it names. A repository whose release policy
+names that pool as `batchVerification.machine` runs its batch checks (scheduled, background and confirmed) and its
+nightly audit there, one at a time, instead of on the pool's boat VMs or the runner host. One machine serves a pool. Its attempts run in `release-check-<id>.slice` beside the
+gate slices, and see `SLIPJAY_RELEASE_CHECK=1` instead of a gate place; the installer gives `release-check.slice`
+`CPUWeight=idle` and a `MemoryMax`, so gates and anything else on the machine win every contended core. Database
+containers a check starts belong to Docker's own slice and run outside that bound. With the place down, the check
+says so (`warning: … release-check place is down`), records the machine as down, and runs on a VM of the pool it
+serves (the audit, and any check without a remote verifier, on the runner host); it never falls back quietly. The place
+starts quarantined after a restart and is recovered at startup, every 5 s while idle, and once more before a check
+counts it down. Each attempt records the CPU time its slice used.
+
 The machine must provide Git, jj, the candidate's Bun, Docker, an SSH server supporting
 reverse forwards, and a working systemd user manager for `account`. The SSH target is a host or SSH alias, with the account named separately, and uses the
 runner account's normal SSH config and known hosts. Before enabling it, the machine's installer

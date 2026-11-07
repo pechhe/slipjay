@@ -157,10 +157,11 @@ idle; a warmed machine whose promotion never comes stops 30 minutes after its sl
 runner keeps the field without reading it and promotes every verified landing, so restart the runner
 on the new build before relying on it.
 
-## Batch checks at promotion
+## Batch checks
 
-**Batch checks at promotion (`batchVerification`, SJ-192).** A development-mode repository may move its broad tests
-from every landing to once per promotion: `"batchVerification": { "machine": "release-check" }` beside
+**Batch checks (`batchVerification`, SJ-192).** A development-mode repository may move its broad tests
+from every landing to a batch check, run when a promotion falls due and, with `everyMinutes`, continuously in the
+background (below): `"batchVerification": { "machine": "release-check" }` beside
 `promotionSchedule`. Like every promotion setting it is read from the release branch's policy, never the candidate's.
 A landing then queues no pre-verification of its own; its landing gate can stay narrow. When a scheduled promotion
 falls due and something new has landed, the runner freezes the integration head and queues its **batch check**: a
@@ -172,7 +173,24 @@ resumes that VM, with production's build machine, 25 minutes before the slot, so
 new since the last promotion no machine is warmed. A green check promotes and deploys as before; nothing deploys
 without a complete green batch check of the exact commit. `slipjay promote --confirm` of a candidate without one asks
 the runner for its batch check at once, whatever the schedule, follows it to its end and confirms only if it passed;
-an open or passed check of that commit is reused, and a red one refuses. The nightly audit is unchanged.
+an open or passed check of that commit is reused, and a red one refuses.
+
+**Continuous checks (`batchVerification.everyMinutes`, SJ-202).** With `everyMinutes` (1 to 1440), the runner also
+checks the newest landing in the background, so a promotion usually finds its tip already checked and a breakage is
+named soon after it lands. A background check is an ordinary batch check from the commit Production serves to the
+newest landing, and starts only when that landing has no check of its own (so a red head waits for something new),
+no other check is open, no release or production deploy is open, `everyMinutes` have passed since the last check
+started, and no landing is queued or waiting for a gate place; otherwise the runner looks again later. A scheduled or
+confirmed promotion then promotes the newest landing with a passed check, and checks the head first only when none is
+newer than Production. A confirm of another commit stops a running background check: it ends `stopped` (cancelled,
+never a failure, never infrastructure, never routed) and its head is checked again later. Diagnosis of a red check
+considers only the landings after the newest one whose complete check passed (`after` on `batch_started`), and a
+culprit an earlier check already routed for the same suites is recorded `batch_unrouted` (`already routed by batch
+check …`) instead of being sent to Forge again. When a runner machine's release-check place serves the pool `machine` names
+([runner](runner.md#named-ssh-gate-places)), checks and the nightly audit run there at idle CPU priority, and on the
+pool's boat VMs only while it is down (the audit, which never used boat, runs on the runner host then, and says so);
+otherwise the audit runs on the runner host as before. A flaky or infrastructure background check is checked again on
+the interval, at most three complete checks of one head.
 A check that changed the source it ran on (a boat VM's tree differs once the check ends, or the host checkout differs
 from the commit) is not evidence for it: the batch fails, routes nothing and is checked again like infrastructure.
 
@@ -206,12 +224,13 @@ A failed batch is handled in this order:
   disposes the finding through Forge's usual route (`fix` makes a repair Ticket and reopens the Spec), and the fix lands
   through the ordinary landing gate. A revert is an ordinary landing too; the runner never reverts.
 
-The ledger records `batch_started` (base, head, machine, landings), each `batch_run` (complete, rerun, diagnosis, with
+The ledger records `batch_started` (base, head, machine, the landings diagnosis considers, `after` and `background`), each `batch_run` (complete, rerun, diagnosis, with
 its setup time), `batch_outcome`, and `batch_routed` / `batch_unrouted`. `slipjay metrics` reports per repository the
 landing gate's time (verifying, or screening where a landing published without it, plus remote setup), the batch
 checks run and how each ended, the culprits with their Forge items, red batches no green one has followed, the median
-time from a red batch to the next green one, scheduled checks' setup, and how many red batches had a culprit that
-passed its own landing gate. It needs a runner on SlipJay 3.51.0 or later; an older runner ignores the field and
+time from a red batch to the next green one, scheduled checks' setup, how many red batches had a culprit that
+passed its own landing gate, background checks, stops, checks a day, the CPU time checks used on a machine place, and
+the time from a landing published 08:00 to 20:00 London to the end of the first green or red check that covers it. It needs a runner on SlipJay 3.51.0 or later; an older runner ignores the field and
 pre-verifies every landing.
 
 ## Rollback and non-additive migrations

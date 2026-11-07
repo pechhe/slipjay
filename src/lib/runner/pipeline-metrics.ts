@@ -600,7 +600,7 @@ export function pipelineMetrics(events: readonly StoredEvent[], since: string, o
     attempts,
     held,
     workspaceStarts: workspaceStarts(events, threshold).filter((entry) => !only || repositoryKey(entry.repo) === only),
-    batches: batchMetrics(events, threshold, timing, only),
+    batches: batchMetrics(events, threshold, timing, only, now),
   };
 }
 

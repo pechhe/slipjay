@@ -13,10 +13,10 @@ import type { GateMachineConfig, MachineVerification, RemoteAttempt, RemoteMachi
  * limit makes anywhere beneath it. One gate holds the place at a time, so the count's change across the attempt is its own.
  */
 const memoryReading = `cg=$(cut -d: -f3 /proc/self/cgroup); slice="/sys/fs/cgroup$(dirname "$cg")"; parent=$(dirname "$slice")
-echo "memory $(cat "$slice/memory.peak" 2>/dev/null || echo -) $(awk '$1 == "oom_kill" {print $2}' "$parent/memory.events" 2>/dev/null || echo -)"`;
-const parseMemory = (reading: string): { peakBytes: number; limitKills: number } | undefined => {
-  const [peak, kills] = reading.split(" ").map(Number);
-  return Number.isFinite(peak) && Number.isFinite(kills) ? { peakBytes: peak!, limitKills: kills! } : undefined;
+echo "memory $(cat "$slice/memory.peak" 2>/dev/null || echo -) $(awk '$1 == "oom_kill" {print $2}' "$parent/memory.events" 2>/dev/null || echo -) $(awk '$1 == "usage_usec" {print $2}' "$slice/cpu.stat" 2>/dev/null || echo -)"`;
+const parseMemory = (reading: string): { peakBytes: number; limitKills: number; cpuUsec?: number } | undefined => {
+  const [peak, kills, cpu] = reading.split(" ").map(Number);
+  return Number.isFinite(peak) && Number.isFinite(kills) ? { peakBytes: peak!, limitKills: kills!, ...Number.isFinite(cpu) ? { cpuUsec: cpu! } : {} } : undefined;
 };
 
 /**
@@ -45,21 +45,25 @@ async function retainedPaths(run: RemoteRun, checkout: string, base: string): Pr
 }
 
 /** A shared SSH machine. No provider lifecycle or VM-wide cleanup belongs here. */
-export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string; place?: number } = {}): MachineVerification {
+export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string; place?: number; check?: boolean } = {}): MachineVerification {
   const run = options.run ?? runBoundedProcess;
   const { local, bundleMissing } = remoteFiles(run);
   const ssh = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-l", config.account, config.ssh];
   // A machine with several places (SJ-200) keeps place 0 at its root, so its warm checkout survives, and place N in
   // `place-N` under it. The bounded filesystem, its quota-ready marker and the install cache stay machine-wide.
   const machineRoot = config.root.replace(/\/$/, "");
+  // The release-check place (SJ-202) lives in `check`, apart from the gate places, and its slices are `release-check-*`,
+  // which the machine gives idle CPU priority, rather than the gates' `slipjay-attempt-*`.
+  const check = options.check === true;
   const place = options.place ?? 0;
-  const root = place ? `${machineRoot}/place-${place}` : machineRoot;
+  const root = check ? `${machineRoot}/check` : place ? `${machineRoot}/place-${place}` : machineRoot;
+  const sliceOf = (id: string) => `${check ? "release-check" : "slipjay-attempt"}-${id}.slice`;
   const holder = `${root}/holder`;
   const repo = `${root}/checkout`;
   let busy = false;
   let quarantine = "runner restart: recovery has not confirmed the place clean";
   let recovering: Promise<void> | undefined;
-  const machine: RemoteMachine = { verifier: "machine", name, id: place ? `${name}/${place}` : name, size: "machine", image: "fixed SSH machine" };
+  const machine: RemoteMachine = { verifier: "machine", name, id: check ? `${name}/check` : place ? `${name}/${place}` : name, size: "machine", image: "fixed SSH machine" };
   const fail = (reason: string) => new Error(`Remote executor unavailable (machine ${name}): ${reason}`);
   async function control(script: string, signal?: AbortSignal, input?: Buffer, timeoutMs = 120_000): Promise<string> {
     const result = await run({ executable: "ssh", args: [...ssh, `bash -lc ${shellWord(`set -euo pipefail\nexport PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin"\n${script}`)}`],
@@ -75,7 +79,7 @@ export function machineVerification(name: string, config: GateMachineConfig, opt
   let retain: string[] = [];
   /** Exact holder ids, never container or scope name patterns. Stop descendants before deleting paths. */
   function clean(id: string): string {
-    const slice = `slipjay-attempt-${id}.slice`;
+    const slice = sliceOf(id);
     return `state=$(systemctl --user show ${shellWord(slice)} --property=LoadState --value 2>/dev/null || true)
 if [ "$state" != not-found ]; then
   [ "$state" = loaded ]
@@ -128,10 +132,11 @@ fi`);
       busy = true;
       const id = randomUUID().replaceAll("-", "");
       const path = `${root}/${id}`;
-      const slice = `slipjay-attempt-${id}.slice`;
+      const slice = sliceOf(id);
       // Which of the machine's places this gate holds, so a repository can spread its CPU pinning across places (SJ-200).
       const attemptEnv = { TMPDIR: `${path}/scratch`, BUN_INSTALL_CACHE_DIR: `${machineRoot}/bun-cache`, SLIPJAY_GATE_MACHINE: name,
-        SLIPJAY_GATE_PLACE: String(place), SLIPJAY_GATE_PLACES: String(config.places ?? 1),
+        // A release check is pinned to no gate place's CPUs; it says it is a check instead (SJ-202).
+        ...check ? { SLIPJAY_RELEASE_CHECK: "1" } : { SLIPJAY_GATE_PLACE: String(place), SLIPJAY_GATE_PLACES: String(config.places ?? 1) },
         SLIPJAY_ATTEMPT_ID: id, SLIPJAY_RESOURCE_PREFIX: `sj_${id}`, SLIPJAY_DOCKER_LABEL: `slipjay.attempt=${id}` };
       let scratch: string | undefined;
       let socket: string | undefined;
@@ -276,7 +281,10 @@ ${memoryReading}`, `slipjay-setup-${id}`), signal, undefined, 900_000);
             const lines = (await control(scoped(`cd ${shellWord(repo)}\n${worktreeTree(tree, `${root}/tree-index`)}\n${memoryReading}`, `slipjay-finish-${id}`))).split("\n");
             const after = lines[0] ?? "";
             const now = parseMemory(lines.findLast((entry) => entry.startsWith("memory "))?.slice("memory ".length) ?? "");
-            const memory = now && killsBefore !== undefined ? { peakBytes: now.peakBytes, oomKills: Math.max(0, now.limitKills - killsBefore) } : undefined;
+            // The attempt's slice is its own (named by the attempt) and outlives each scope, so its counter is the whole
+            // attempt's CPU time, its preparation and install included.
+            const cpuMs = now?.cpuUsec !== undefined ? Math.round(now.cpuUsec / 1000) : undefined;
+            const memory = now && killsBefore !== undefined ? { peakBytes: now.peakBytes, oomKills: Math.max(0, now.limitKills - killsBefore), ...cpuMs === undefined ? {} : { cpuMs } } : undefined;
             return { tree: after === tree ? tree : null, trackedChanges: after === tree ? 0 : 1, usage: null, ...memory ? { memory } : {} };
           },
           close,

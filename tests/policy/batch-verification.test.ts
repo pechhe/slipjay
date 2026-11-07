@@ -11,3 +11,9 @@ test("batch verification is opt-in per repository, names its machine pool, and n
   assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "batch", every: 5 } })), /unknown fields: every/);
   assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, requiredLandingVerification: [], batchVerification: { machine: "batch" } })), /without a releaseBranch/);
 });
+
+test("background checks are an interval in whole minutes beside the batch machine (SJ-202)", () => {
+  assert.deepEqual(parseExecutionPolicy(policy({ batchVerification: { machine: "peach-box", everyMinutes: 20 } })).batchVerification, { machine: "peach-box", everyMinutes: 20 });
+  for (const everyMinutes of [0, 1.5, 1441, "20"])
+    assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "peach-box", everyMinutes } })), /everyMinutes must be a whole number of minutes from 1 to 1440/);
+});

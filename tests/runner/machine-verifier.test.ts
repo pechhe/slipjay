@@ -274,6 +274,11 @@ test("a gate's memory peak and the kills its machine limit made during it reach 
   const a = await open(m);
   assert.deepEqual((await a.finish()).memory, { peakBytes: 41 * 1024 ** 3, oomKills: 2 }, "kills before the attempt are not its own");
   await a.close();
+  // The attempt's own slice counts its whole CPU time, setup included (SJ-202).
+  s.memory("1024 5 1000000", `${2 * 1024 ** 3} 5 91000000`);
+  const c = await open(m);
+  assert.deepEqual((await c.finish()).memory, { peakBytes: 2 * 1024 ** 3, oomKills: 0, cpuMs: 91_000 });
+  await c.close();
   s.memory("- -", "- -");
   const b = await open(m);
   assert.equal((await b.finish()).memory, undefined);

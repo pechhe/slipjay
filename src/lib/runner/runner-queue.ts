@@ -180,6 +180,8 @@ export function createRunnerQueue(input: {
   /** Runs the gate of each repository whose runner entry names a `verifier`; absent, such a repository cannot verify. */
   remoteVerification?: RemoteVerification;
   machineVerifications?: Record<string, import("./runner-types.ts").MachineVerification | readonly import("./runner-types.ts").MachineVerification[]>;
+  /** The release-check places by the boat pool each serves (SJ-202), for embedded runners and tests; absent, built from `checkPlace`. */
+  machineCheckVerifications?: Record<string, import("./runner-types.ts").MachineVerification>;
   /** First availability probe after a boat outage; doubles up to one minute. */
   boatProbeMs?: number;
   /** Override pre-verification stage deadlines (milliseconds), for embedded runners and tests. */
@@ -304,6 +306,15 @@ export function createRunnerQueue(input: {
     : Object.fromEntries(Object.entries(config.machines ?? {}).map(([name, entry]) =>
       [name, Array.from({ length: entry.places ?? 1 }, (_, place) => machineVerification(name, entry, { scratch: join(home, "scratch"), place }))]));
   const machineGates = machinePlaceHolds();
+  /**
+   * The release-check places (SJ-202), by the boat pool each serves, with the machine it is on: gates never use one, and
+   * one release check or audit holds it at a time.
+   */
+  const machineChecks: Record<string, { machine: string; place: MachineVerification }> = input.machineCheckVerifications
+    ? Object.fromEntries(Object.entries(input.machineCheckVerifications).map(([pool, place]) => [pool, { machine: pool, place }]))
+    : Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.checkPlace
+      ? [[entry.checkPlace, { machine: name, place: machineVerification(name, entry, { scratch: join(home, "scratch"), check: true }) }]] : []));
+  const machineCheckHolds = machinePlaceHolds();
   /** A down place is recorded on the runner's own record once per outage, and logged, so boat use is never silent. */
   const machinePlaceDown = (name: string, reason: string) => {
     const last = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "machine_place" && row.event.name === name)?.event;
@@ -316,12 +327,16 @@ export function createRunnerQueue(input: {
     if (last?.type === "machine_place" && last.state === "down") append(RUNNER_CONTROL_ID, { type: "machine_place", name, state: "up", reason: "recovered" });
   };
   // Quarantine recovery is independent of admission: a boat hold must not prevent a machine reopening.
-  const machineRecovery = Object.keys(machinePlaces).length ? setInterval(() => {
+  const machineRecovery = Object.keys(machinePlaces).length || Object.keys(machineChecks).length ? setInterval(() => {
     if (closed || draining || heldStart) return;
     for (const [name, places] of Object.entries(machinePlaces)) places.forEach((place, index) => {
       if (!machineGates.holds(name, index) && !place.available())
         void place.recover?.([]).then(() => { if (place.available()) { machinePlaceUp(name); wakeMain(); } }).catch(() => undefined);
     });
+    // A release-check place starts quarantined like a gate place, and reopens the same way (SJ-202).
+    for (const [pool, { machine, place }] of Object.entries(machineChecks))
+      if (!machineCheckHolds.anyHeld(pool) && !place.available())
+        void place.recover?.([]).then(() => { if (place.available()) { machinePlaceUp(machine); wakeMain(); } }).catch(() => undefined);
   }, 5000) : undefined;
   machineRecovery?.unref?.();
   const machinePlaceFree = (repo: string) => {
@@ -454,14 +469,16 @@ export function createRunnerQueue(input: {
     if (!policy?.releaseBranch) {
       // A candidate removing the release branch must still use the release policy of the integration
       // parent it extended. Only a repository already without a release branch uses its own policy.
-      const parents = (await jj(directory, ["log", "-r", `${commitId}-`, "--no-graph", "-T", 'commit_id ++ "\\n"']).catch(() => "")).trim().split("\n").filter(Boolean);
+      // A read: it never snapshots the landing checkout, which a turn may be working in.
+      const parents = (await jj(directory, ["--ignore-working-copy", "log", "-r", `${commitId}-`, "--no-graph", "-T", 'commit_id ++ "\\n"']).catch(() => "")).trim().split("\n").filter(Boolean);
       if (parents.length !== 1) return null;
       const previous = await readExactExecutionPolicy(join(directory, ".git"), parents[0]!).then((exact) => exact.configuration, () => null);
       if (!previous) return null;
       if (!previous.releaseBranch) return candidate;
       policy = previous;
     }
-    const releaseBase = await jj(checkout, ["log", "-r", `${policy.releaseBranch}@${policy.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "");
+    // A read as well: background checks ask for the policy beside landings and recovery working in this checkout.
+    const releaseBase = await jj(checkout, ["--ignore-working-copy", "log", "-r", `${policy.releaseBranch}@${policy.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "");
     return releaseBase ? readExactExecutionPolicy(join(checkout, ".git"), releaseBase).then((exact) => exact.configuration, () => null) : null;
   }
   function reportPolicy(repo: string, configuration: Awaited<ReturnType<typeof releasePolicy>>, applied: Awaited<ReturnType<typeof releasePolicy>>): void {
@@ -727,7 +744,7 @@ export function createRunnerQueue(input: {
    * of it is already queued or running. A running one finishes. One that passed is verified
    * again: the release branch may have moved since, which a confirm would not reuse it across.
    */
-  function queueVerification(repo: string, commitId: string, by: "staging" | "batch" | "confirm" = "staging"): string {
+  function queueVerification(repo: string, commitId: string, by: "staging" | "batch" | "background" | "confirm" = "staging"): string {
     const existing = log.verifications(repo);
     const open = existing.find((entry) => entry.commitId === commitId && (entry.status === "queued" || entry.status === "running"));
     if (open) return open.id;
@@ -754,8 +771,16 @@ export function createRunnerQueue(input: {
     if (latest && (latest.status === "queued" || latest.status === "running")) return { operation: latest, requested: false };
     if (latest && (latest.status === "verified" || batchOutcomeOf(latest.id)?.outcome === "red") && await current(latest)) return { operation: latest, requested: false };
     const id = queueVerification(repo, commitId, "confirm");
+    // The owner's release goes first (SJ-202): a background check of another commit stops, freeing the check place.
+    for (const entry of running.values())
+      if (entry.operation.kind === "verification" && entry.operation.repo === repo && entry.operation.id !== id && entry.operation.submittedBy.endsWith(":background")) {
+        stopping.set(entry.operation.id, `stopped for the release of ${commitId.slice(0, 12)} the owner pushed (${id}); checked again later`);
+        entry.controller.abort();
+      }
     return { operation: log.operation(id) as VerificationOperation, requested: true };
   }
+  /** Background checks stopped for a release the owner pushed, and why: they end `stopped`, never as the owner's kill. */
+  const stopping = new Map<string, string>();
   const automaticPromotions = new Map<string, Promise<void>>();
   /** Per repository, the timer that asks again when its `promotionSchedule` next lets a promotion start. */
   const scheduledPromotions = new Map<string, ReturnType<typeof setTimeout>>();
@@ -819,8 +844,15 @@ export function createRunnerQueue(input: {
     const next = (automaticPromotions.get(repo) ?? Promise.resolve()).then(() => considerAutomaticPromotion(repo, after))
       .catch((error: unknown) => { console.error(`[runner] automatic promotion of ${repo} could not be considered: ${message(error)}`); });
     automaticPromotions.set(repo, next);
+    // The background check is considered after, on its own chain: nothing that asks for a promotion waits for it.
+    void next.then(() => {
+      const background = (backgroundConsiderations.get(repo) ?? Promise.resolve()).then(() => considerBackgroundCheck(repo))
+        .catch((error: unknown) => { console.error(`[runner] a background check of ${repo} could not be considered: ${message(error)}`); });
+      backgroundConsiderations.set(repo, background);
+    });
     return next;
   }
+  const backgroundConsiderations = new Map<string, Promise<void>>();
   /** Why a passed pre-verification cannot promote its commit, or null when it may: its migrations, which no one approved. */
   const migrationsWithheld = (verified: { nonAdditiveMigrations?: string[] }): string | null =>
     verified.nonAdditiveMigrations === undefined ? "its migrations were not assessed"
@@ -947,6 +979,47 @@ export function createRunnerQueue(input: {
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
     console.error(`[runner] ${repo}: promoting ${commitId.slice(0, 12)} automatically (process: "development")`);
     wakeMain();
+  }
+  /** The next look at each repository's background check (SJ-202). */
+  const backgroundChecks = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * `batchVerification.everyMinutes` (SJ-202): check the newest landing in the background, so a promotion finds an
+   * already-checked tip and a red check names its culprit soon after it lands. A check starts when the newest landing
+   * has none of its own (so a red head waits for a new landing), no other check is open, no release or production
+   * deploy is open, the interval has passed since the last check started, and no landing gate is queued or waiting for
+   * a place; otherwise the runner looks again later. Asked whenever promotion is, and by its own timer.
+   */
+  async function considerBackgroundCheck(repo: string): Promise<void> {
+    const newest = log.lastLanded(repo);
+    if (!newest) return;
+    const base = await releasePolicy(repo, newest.commitId);
+    const every = base?.process === "development" && !missingPromotion(base) ? base.batchVerification?.everyMinutes : undefined;
+    if (!every) return;
+    const later = (ms: number) => {
+      clearTimeout(backgroundChecks.get(repo));
+      const timer = setTimeout(() => { backgroundChecks.delete(repo); void promoteAutomatically(repo); }, Math.max(1_000, ms));
+      timer.unref?.();
+      backgroundChecks.set(repo, timer);
+    };
+    if (standsFor(repo, newest.commitId)) return;
+    const checks = log.verifications(repo).filter((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+    const own = checks.filter((entry) => entry.commitId === newest.commitId);
+    // A head with a check waits for a new landing, unless that check ended flaky or by infrastructure: it is checked
+    // again on the interval, within the same bound as a scheduled batch.
+    if (own.length) {
+      const outcome = own[0]!.status === "failed" ? batchOutcomeOf(own[0]!.id)?.outcome : undefined;
+      if ((outcome !== "flaky" && outcome !== "infrastructure") || own.filter((entry) => entry.status === "failed").length >= BATCH_ATTEMPTS) return;
+    }
+    if (checks.some((entry) => entry.status === "queued" || entry.status === "running")) return;
+    if (log.openOperations(repo).some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return later(60_000);
+    const last = checks[0];
+    const due = last ? Date.parse(last.submittedAt) + every * 60_000 : now();
+    if (due > now()) return later(due - now());
+    // Landing gates go first: a check waits while one is queued for the lane or for a place on its machine.
+    const gateMachine = configuredRepository(config, repo)?.gateMachine;
+    if (log.openOperations(repo).some((entry) => entry.kind === "landing" && entry.status === "queued") || (gateMachine && machineGates.queued(gateMachine))) return later(60_000);
+    console.error(`[runner] ${repo}: background-checking ${newest.commitId.slice(0, 12)}`);
+    queueVerification(repo, newest.commitId, "background");
   }
   /** How a batch check ended, from its own record; undefined while it has none (it never ran, or predates SJ-192). */
   const batchOutcomeOf = (operationId: string) => log.events({ operationId }).map((row) => row.event)
@@ -1856,6 +1929,13 @@ export function createRunnerQueue(input: {
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
       else if (verificationTimeout) verdict = { type: "failed", stage, reason: verificationTimeout };
+      else if (controller.signal.aborted && stopping.has(operation.id)) {
+        const reason = stopping.get(operation.id)!;
+        stopping.delete(operation.id);
+        const started = log.events({ operationId: operation.id }).map((row) => row.event).find((event) => event.type === "batch_started");
+        if (started?.type === "batch_started") append(operation.id, { type: "batch_outcome", outcome: "stopped", base: started.base, head: started.head, machine: started.machine, reason });
+        verdict = { type: "cancelled", reason };
+      }
       else if (controller.signal.aborted) verdict = { type: "cancelled", reason: OWNER_KILL_REASON };
       else if (leftPrediction) {
         progress(`[screen] ${unpredicted.has(operation.id) ? `conflicts with ${ahead!.operation.id} ahead; screening again on the integration tip alone`
@@ -2039,13 +2119,34 @@ export function createRunnerQueue(input: {
       if (!auditPolicy) return { type: "cancelled", reason: `${head.slice(0, 12)} declares no audit` };
       progress(`Auditing ${head.slice(0, 12)}`);
       await jj(checkout, ["new", head]);
-      setStage("verifying");
-      const commands = auditPolicy.commands.map((check) => [check.executable, ...check.args].join(" "));
-      const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, run, abortSignal: controller.signal });
-      // A kill stops its commands, which then read as failures.
-      if (controller.signal.aborted) throw new OwnerKill();
-      if (verification.gaps.length) return { type: "failed", stage, reason: `The audit did not run in full, so it is not green: ${verification.gaps.map((gap) => `${gap.command} (${gap.reason || gap.capability})`).join("; ")}` };
-      return { type: "audited", commit: head, commands, passed: verification.passed, skipped: [], reused: [] };
+      // The audit runs on the release-check place its head's batch machine names (SJ-202), so the runner's host does
+      // not share it; with none, or with that place down (said and recorded), it runs here as before.
+      const pool = configuration?.batchVerification?.machine;
+      const held = pool ? await takeCheckPlace(pool, "audit runs on the runner host") : null;
+      let gate: GateAttempt | undefined;
+      try {
+        if (held) {
+          const started = Date.now();
+          gate = { attempt: await held.place.open({ repo: operation.repo, slot: 0, screening: false, checkout, base: head, candidate: head, integrationBranch: branch, environment: await buildCheckEnvironment(), signal: controller.signal }),
+            started, placement: `machine:${held.machine}` };
+          append(operation.id, { type: "remote_verification", phase: "ready", machine: gate.attempt.machine, placement: gate.placement, slot: 0, candidate: head, tree: gate.attempt.tree, setupMs: Date.now() - started, usage: null });
+          setStage("installing");
+          const via = gate.attempt.executor;
+          await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand: (request) => run(request, "dependencies", via), env: (environment?.() ?? process.env) });
+        }
+        setStage("verifying");
+        const via = gate?.attempt.executor;
+        const commands = auditPolicy.commands.map((check) => [check.executable, ...check.args].join(" "));
+        const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, abortSignal: controller.signal,
+          run: (request) => run(request, "gate", via) });
+        // A kill stops its commands, which then read as failures.
+        if (controller.signal.aborted) throw new OwnerKill();
+        if (verification.gaps.length) return { type: "failed", stage, reason: `The audit did not run in full, so it is not green: ${verification.gaps.map((gap) => `${gap.command} (${gap.reason || gap.capability})`).join("; ")}` };
+        return { type: "audited", commit: head, commands, passed: verification.passed, skipped: [], reused: [] };
+      } finally {
+        try { if (gate) await closeRemote(gate); }
+        finally { if (held) { machineCheckHolds.release(pool!, 0); wakeMain(); } }
+      }
     }
     /**
      * Run the reset the integration tip declares, in its exact source: the integration
@@ -2167,119 +2268,166 @@ export function createRunnerQueue(input: {
       if (!plan.commits.length) return { type: "failed", stage, reason: `${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}` };
       const head = plan.candidate;
       const between = new Set((await jj(checkout, ["log", "--no-graph", "-r", `::${head} ~ ::${base}`, "-T", 'commit_id ++ "\\n"'])).split("\n").filter(Boolean));
-      const landings: BatchLanding[] = log.landings(operation.repo).filter((entry) => between.has(entry.commitId)).map((entry) => ({ commitId: entry.commitId, operationId: entry.operationId }));
-      const placed = remoteVerification ? machine : "host";
-      append(operation.id, { type: "batch_started", base, head, machine: placed, scheduled: operation.submittedBy.endsWith(":batch"), landings });
-      progress(`[batch] checking ${landings.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`);
-      let open: { commit: string; gate?: GateAttempt } | undefined;
-      const releaseMachine = async () => {
-        const held = open?.gate;
-        open = undefined;
-        if (held) await closeRemote(held);
-      };
-      const runAt = async (commit: string, scope: BatchScope | null): Promise<BatchRun> => {
-        let setupMs: number | undefined;
-        try {
-          if (open?.commit !== commit) {
-            await releaseMachine();
-            const started = Date.now();
-            await jj(checkout, ["new", commit]);
-            open = { commit };
-            if (remoteVerification) open.gate = { attempt: await remoteVerification.open({ repo: operation.repo, slot: 0, pool: machine, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, signal: controller.signal })
-              .catch((error: RemoteOpenFailure) => {
-                if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
-                throw error;
-              }), started, placement: "boat" };
-            if (open.gate) append(operation.id, { type: "remote_verification", phase: "ready", machine: open.gate.attempt.machine, placement: "boat", slot: 0, pool: machine, candidate: commit, tree: open.gate.attempt.tree, setupMs: Date.now() - started, usage: open.gate.attempt.usage });
-            setStage("installing");
-            const via = open.gate?.attempt.executor;
-            await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand: (request) => run(request, "dependencies", via), env: releaseEnvironment(base, commit)() });
-            setupMs = Date.now() - started;
-          }
-        } catch (error) {
-          if (controller.signal.aborted) throw authorityError();
-          // The previous commit's checks changed its source: none of this batch's results is evidence.
-          if (error instanceof GateDrift) throw error;
-          await releaseMachine().catch(() => undefined);
-          return { status: "infrastructure", reason: `setup at ${commit.slice(0, 12)} failed: ${message(error).slice(0, 1000)}` };
-        }
-        setStage("verifying");
-        const via = open!.gate?.attempt.executor;
-        const indexes = scope ? scope.checks : plan.checks.map((_, index) => index);
-        const runIds: string[] = [];
-        let failure: RequiredVerificationError | undefined;
-        try {
-          await runRequiredVerification({ root: checkout, checks: indexes.map((index) => plan.checks[index]), environment: releaseEnvironment(base, commit, scope?.suites),
-            onProgress: progress, abortSignal: controller.signal,
-            run: async (request) => { const result = await run(request, "gate", via); if (result.runId) runIds.push(result.runId); return result; } })
-            .then((evidence) => { if (evidence.gaps.length) throw new Error(`release checks did not run in full: ${evidence.gaps.map((gap) => gap.command).join("; ")}`); });
-        } catch (error) {
-          if (controller.signal.aborted) throw authorityError();
-          if (!(error instanceof RequiredVerificationError) || error.evidence.outcome === "spawn_failure")
-            return { status: "infrastructure", reason: `release checks at ${commit.slice(0, 12)} could not run: ${message(error).slice(0, 1000)}`, ...setupMs === undefined ? {} : { setupMs } };
-          failure = error;
-        }
-        // On the host, the checkout must still hold the commit's tree (a boat machine is compared when it is released).
-        if (!open!.gate) {
-          const drift = await jj(checkout, ["diff", "--from", commit, "--to", "@", "--summary"]);
-          if (drift) {
-            await jj(checkout, ["restore", "--from", commit, "--into", "@"]);
-            throw new GateDrift(`The release checks changed the source of ${commit.slice(0, 12)}; their results are not evidence for it:\n${drift}`);
-          }
-        }
-        const ran = new Set(runIds);
-        const events = log.events({ operationId: operation.id }).map((row) => row.event);
-        const suites: Record<string, SuiteState> = {};
-        for (const event of events) if (event.type === "test_report" && ran.has(event.runId) && event.status === "recorded")
-          for (const entry of event.outcomes ?? []) if (suites[entry.suite] !== "failed") suites[entry.suite] = entry.outcome;
-        if (!failure) return { status: "passed", suites, ...setupMs === undefined ? {} : { setupMs } };
-        const failingTests = events.flatMap((event) => event.type === "run_finished" && ran.has(event.runId) ? event.failingTests ?? [] : []);
-        return { status: "failed", failedChecks: failure.evidence.failures.map((entry) => indexes[entry.checkIndex]!), command: failure.evidence.command,
-          suites, failingTests: boundedTests(failingTests), output: boundedOutput(failure.message), ...setupMs === undefined ? {} : { setupMs } };
-      };
-      let outcome: Awaited<ReturnType<typeof runBatchCheck>>;
-      const notEvidence = (error: unknown): OperationEvent => {
-        append(operation.id, { type: "batch_outcome", outcome: "infrastructure", base, head, machine: placed, reason: message(error).slice(0, 2000) });
-        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} is not evidence for it: ${message(error)}` };
-      };
+      const batch: BatchLanding[] = log.landings(operation.repo).filter((entry) => between.has(entry.commitId)).map((entry) => ({ commitId: entry.commitId, operationId: entry.operationId }));
+      // A landing in the batch whose own complete check passed proves every suite there (SJ-202): only the landings after
+      // the newest such one can have started a failure, so diagnosis starts after it.
+      const greenChecked = new Set(log.verifications(operation.repo).filter((entry) => entry.result?.type === "verified" && batchOutcomeOf(entry.id)?.outcome === "green").map((entry) => entry.commitId));
+      const after = batch.findLast((entry) => entry.commitId !== head && greenChecked.has(entry.commitId));
+      const landings = after ? batch.slice(batch.indexOf(after) + 1) : batch;
+      // A machine's release-check place when `machine` names one (SJ-202), otherwise the boat pool `machine`, or the host.
+      const held = await takeCheckPlace(machine, remoteVerification ? `check runs on a ${machine} boat VM` : "check runs on the runner host");
+      const checkPlace = held?.place;
+      const placed = held ? `machine:${held.machine}` : remoteVerification ? machine : "host";
       try {
-        outcome = await runBatchCheck({ head, landings, run: (commit, scope) => runAt(commit, scope),
-          onRun: ({ phase, commit, run: result, durationMs }) => append(operation.id, { type: "batch_run", phase, commit, status: result.status, durationMs,
-            ...result.setupMs === undefined ? {} : { setupMs: result.setupMs },
-            ...result.status === "failed" ? { keys: boundedKeys(Object.entries(result.suites).filter(([, state]) => state === "failed").map(([suite]) => suite)), failingTests: result.failingTests } : {},
-            ...result.status === "infrastructure" ? { reason: result.reason } : {} }) });
-      } catch (error) {
-        await releaseMachine().catch((closing: unknown) => progress(`[batch] the batch machine could not be released: ${message(closing)}`));
-        if (error instanceof GateDrift) return notEvidence(error);
-        throw error;
+        append(operation.id, { type: "batch_started", base, head, machine: placed, scheduled: operation.submittedBy.endsWith(":batch"),
+          ...operation.submittedBy.endsWith(":background") ? { background: true } : {}, ...after ? { after: after.commitId } : {}, landings });
+        progress(`[batch] checking ${batch.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`
+          + (after ? `; ${after.commitId.slice(0, 12)} already passed, so diagnosis considers the ${landings.length} after it` : ""));
+        let open: { commit: string; gate?: GateAttempt } | undefined;
+        const releaseMachine = async () => {
+          const held = open?.gate;
+          open = undefined;
+          if (held) await closeRemote(held);
+        };
+        const runAt = async (commit: string, scope: BatchScope | null): Promise<BatchRun> => {
+          let setupMs: number | undefined;
+          try {
+            if (open?.commit !== commit) {
+              await releaseMachine();
+              const started = Date.now();
+              await jj(checkout, ["new", commit]);
+              open = { commit };
+              if (checkPlace) {
+                open.gate = { attempt: await checkPlace.open({ repo: operation.repo, slot: 0, screening: false, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, environment: await buildCheckEnvironment(), signal: controller.signal }), started, placement: placed as GatePlacement };
+                append(operation.id, { type: "remote_verification", phase: "ready", machine: open.gate.attempt.machine, placement: placed as GatePlacement, slot: 0, candidate: commit, tree: open.gate.attempt.tree, setupMs: Date.now() - started, usage: null });
+              } else if (remoteVerification) open.gate = { attempt: await remoteVerification.open({ repo: operation.repo, slot: 0, pool: machine, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, signal: controller.signal })
+                .catch((error: RemoteOpenFailure) => {
+                  if (error?.remote) append(operation.id, { type: "remote_verification", phase: "failed", ...error.remote, reason: error.message.slice(0, 2000) });
+                  throw error;
+                }), started, placement: "boat" };
+              if (open.gate && !checkPlace) append(operation.id, { type: "remote_verification", phase: "ready", machine: open.gate.attempt.machine, placement: "boat", slot: 0, pool: machine, candidate: commit, tree: open.gate.attempt.tree, setupMs: Date.now() - started, usage: open.gate.attempt.usage });
+              setStage("installing");
+              const via = open.gate?.attempt.executor;
+              await prepareWorkspaceDependencies(checkout, { quiet: true, runCommand: (request) => run(request, "dependencies", via), env: releaseEnvironment(base, commit)() });
+              setupMs = Date.now() - started;
+            }
+          } catch (error) {
+            if (controller.signal.aborted) throw authorityError();
+            // The previous commit's checks changed its source: none of this batch's results is evidence.
+            if (error instanceof GateDrift) throw error;
+            await releaseMachine().catch(() => undefined);
+            return { status: "infrastructure", reason: `setup at ${commit.slice(0, 12)} failed: ${message(error).slice(0, 1000)}` };
+          }
+          setStage("verifying");
+          const via = open!.gate?.attempt.executor;
+          const indexes = scope ? scope.checks : plan.checks.map((_, index) => index);
+          const runIds: string[] = [];
+          let failure: RequiredVerificationError | undefined;
+          try {
+            await runRequiredVerification({ root: checkout, checks: indexes.map((index) => plan.checks[index]), environment: releaseEnvironment(base, commit, scope?.suites),
+              onProgress: progress, abortSignal: controller.signal,
+              run: async (request) => { const result = await run(request, "gate", via); if (result.runId) runIds.push(result.runId); return result; } })
+              .then((evidence) => { if (evidence.gaps.length) throw new Error(`release checks did not run in full: ${evidence.gaps.map((gap) => gap.command).join("; ")}`); });
+          } catch (error) {
+            if (controller.signal.aborted) throw authorityError();
+            if (!(error instanceof RequiredVerificationError) || error.evidence.outcome === "spawn_failure")
+              return { status: "infrastructure", reason: `release checks at ${commit.slice(0, 12)} could not run: ${message(error).slice(0, 1000)}`, ...setupMs === undefined ? {} : { setupMs } };
+            failure = error;
+          }
+          // On the host, the checkout must still hold the commit's tree (a boat machine is compared when it is released).
+          if (!open!.gate) {
+            const drift = await jj(checkout, ["diff", "--from", commit, "--to", "@", "--summary"]);
+            if (drift) {
+              await jj(checkout, ["restore", "--from", commit, "--into", "@"]);
+              throw new GateDrift(`The release checks changed the source of ${commit.slice(0, 12)}; their results are not evidence for it:\n${drift}`);
+            }
+          }
+          const ran = new Set(runIds);
+          const events = log.events({ operationId: operation.id }).map((row) => row.event);
+          const suites: Record<string, SuiteState> = {};
+          for (const event of events) if (event.type === "test_report" && ran.has(event.runId) && event.status === "recorded")
+            for (const entry of event.outcomes ?? []) if (suites[entry.suite] !== "failed") suites[entry.suite] = entry.outcome;
+          if (!failure) return { status: "passed", suites, ...setupMs === undefined ? {} : { setupMs } };
+          const failingTests = events.flatMap((event) => event.type === "run_finished" && ran.has(event.runId) ? event.failingTests ?? [] : []);
+          return { status: "failed", failedChecks: failure.evidence.failures.map((entry) => indexes[entry.checkIndex]!), command: failure.evidence.command,
+            suites, failingTests: boundedTests(failingTests), output: boundedOutput(failure.message), ...setupMs === undefined ? {} : { setupMs } };
+        };
+        let outcome: Awaited<ReturnType<typeof runBatchCheck>>;
+        const notEvidence = (error: unknown): OperationEvent => {
+          append(operation.id, { type: "batch_outcome", outcome: "infrastructure", base, head, machine: placed, reason: message(error).slice(0, 2000) });
+          return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} is not evidence for it: ${message(error)}` };
+        };
+        try {
+          outcome = await runBatchCheck({ head, landings, run: (commit, scope) => runAt(commit, scope),
+            onRun: ({ phase, commit, run: result, durationMs }) => append(operation.id, { type: "batch_run", phase, commit, status: result.status, durationMs,
+              ...result.setupMs === undefined ? {} : { setupMs: result.setupMs },
+              ...result.status === "failed" ? { keys: boundedKeys(Object.entries(result.suites).filter(([, state]) => state === "failed").map(([suite]) => suite)), failingTests: result.failingTests } : {},
+              ...result.status === "infrastructure" ? { reason: result.reason } : {} }) });
+        } catch (error) {
+          await releaseMachine().catch((closing: unknown) => progress(`[batch] the batch machine could not be released: ${message(closing)}`));
+          if (error instanceof GateDrift) return notEvidence(error);
+          throw error;
+        }
+        // Releasing the last machine compares its tree: a check that changed the source, or a machine whose tree cannot be read, proves nothing.
+        try { await releaseMachine(); } catch (error) { return notEvidence(error); }
+        const recorded = { base, head, machine: placed };
+        if (outcome.outcome === "green") {
+          append(operation.id, { type: "batch_outcome", outcome: "green", ...recorded });
+          return { type: "verified", base: plan.base, candidate: head, checks: plan.checks, nonAdditiveMigrations: plan.nonAdditiveMigrations };
+        }
+        if (outcome.outcome === "infrastructure") {
+          append(operation.id, { type: "batch_outcome", outcome: "infrastructure", ...recorded, reason: outcome.reason });
+          return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} did not run (infrastructure, not a regression): ${outcome.reason}` };
+        }
+        if (outcome.outcome === "flaky") {
+          append(operation.id, { type: "batch_outcome", outcome: "flaky", ...recorded, keys: boundedKeys(outcome.keys) });
+          return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed and passed on its rerun; nothing is routed, and the head needs a complete green check before it deploys` };
+        }
+        const culprits = outcome.culprits.map((culprit) => ({ ...culprit, keys: boundedKeys(culprit.keys), workspace: log.operation(culprit.operationId)?.submittedBy ?? null }));
+        append(operation.id, { type: "batch_outcome", outcome: "red", ...recorded, keys: boundedKeys(outcome.keys), diagnosis: outcome.diagnosis,
+          shorterCandidate: outcome.shorterCandidate, culprits, ...outcome.unattributed.length ? { unattributed: outcome.unattributed.map((entry) => ({ ...entry, keys: boundedKeys(entry.keys) })) } : {},
+          ...outcome.reason ? { reason: outcome.reason } : {} });
+        // The part of the batch before the first culprit ships only after its own complete check passes.
+        if (outcome.shorterCandidate) queueVerification(operation.repo, outcome.shorterCandidate, "batch");
+        trackRoute(operation.id);
+        const named = culprits.map((culprit) => `${culprit.commitId.slice(0, 12)} (${culprit.operationId}: ${culprit.keys.join(", ")})`).join("; ");
+        const unnamed = outcome.unattributed.map((entry) => `${entry.keys.join(", ")} started failing between ${entry.after?.slice(0, 12) ?? base.slice(0, 12)} and ${entry.firstFailing.slice(0, 12)}, where diagnosis could not run`).join("; ");
+        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} failed: ${outcome.keys.join(", ")}; ${culprits.length ? `culprits ${named}` : "no culprit found"}`
+          + (unnamed ? `; unattributed: ${unnamed}` : "")
+          + (outcome.shorterCandidate ? `; ${outcome.shorterCandidate.slice(0, 12)}, before the first culprit, is checked next` : "") };
+      } finally {
+        if (checkPlace) { machineCheckHolds.release(machine, 0); wakeMain(); }
       }
-      // Releasing the last machine compares its tree: a check that changed the source, or a machine whose tree cannot be read, proves nothing.
-      try { await releaseMachine(); } catch (error) { return notEvidence(error); }
-      const recorded = { base, head, machine: placed };
-      if (outcome.outcome === "green") {
-        append(operation.id, { type: "batch_outcome", outcome: "green", ...recorded });
-        return { type: "verified", base: plan.base, candidate: head, checks: plan.checks, nonAdditiveMigrations: plan.nonAdditiveMigrations };
+    }
+    /**
+     * The release-check place serving boat pool `name` (SJ-202), held for this check until it ends; null when no place
+     * serves it, or when it is down, which is said and recorded: the check then uses the pool or the host, never quietly.
+     */
+    async function takeCheckPlace(name: string, fallback: string): Promise<{ machine: string; place: MachineVerification } | null> {
+      const served = machineChecks[name];
+      if (!served) return null;
+      const { place } = served;
+      // A quarantined place (as every place is after a restart) is recovered once before it counts as down.
+      for (let recovered = false; ; recovered = true) {
+        for (;;) {
+          if (!machineCheckHolds.queued(name) && machineCheckHolds.take(name, 1, () => place.available()) !== null) return served;
+          if (!machineCheckHolds.anyHeld(name)) break;
+          progress(`[batch] ${served.machine}'s release-check place is busy; queued for it`);
+          const waited = await machineCheckHolds.wait(name, controller.signal);
+          if (controller.signal.aborted && waited.place !== null) machineCheckHolds.release(name, waited.place);
+          controller.signal.throwIfAborted();
+          if (waited.place === null) continue;
+          if (place.available()) return served;
+          machineCheckHolds.free(name, waited.place);
+        }
+        if (recovered || !place.recover) break;
+        await place.recover([]).catch(() => undefined);
+        if (place.available()) machinePlaceUp(served.machine);
       }
-      if (outcome.outcome === "infrastructure") {
-        append(operation.id, { type: "batch_outcome", outcome: "infrastructure", ...recorded, reason: outcome.reason });
-        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} did not run (infrastructure, not a regression): ${outcome.reason}` };
-      }
-      if (outcome.outcome === "flaky") {
-        append(operation.id, { type: "batch_outcome", outcome: "flaky", ...recorded, keys: boundedKeys(outcome.keys) });
-        return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed and passed on its rerun; nothing is routed, and the head needs a complete green check before it deploys` };
-      }
-      const culprits = outcome.culprits.map((culprit) => ({ ...culprit, keys: boundedKeys(culprit.keys), workspace: log.operation(culprit.operationId)?.submittedBy ?? null }));
-      append(operation.id, { type: "batch_outcome", outcome: "red", ...recorded, keys: boundedKeys(outcome.keys), diagnosis: outcome.diagnosis,
-        shorterCandidate: outcome.shorterCandidate, culprits, ...outcome.unattributed.length ? { unattributed: outcome.unattributed.map((entry) => ({ ...entry, keys: boundedKeys(entry.keys) })) } : {},
-        ...outcome.reason ? { reason: outcome.reason } : {} });
-      // The part of the batch before the first culprit ships only after its own complete check passes.
-      if (outcome.shorterCandidate) queueVerification(operation.repo, outcome.shorterCandidate, "batch");
-      trackRoute(operation.id);
-      const named = culprits.map((culprit) => `${culprit.commitId.slice(0, 12)} (${culprit.operationId}: ${culprit.keys.join(", ")})`).join("; ");
-      const unnamed = outcome.unattributed.map((entry) => `${entry.keys.join(", ")} started failing between ${entry.after?.slice(0, 12) ?? base.slice(0, 12)} and ${entry.firstFailing.slice(0, 12)}, where diagnosis could not run`).join("; ");
-      return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} failed: ${outcome.keys.join(", ")}; ${culprits.length ? `culprits ${named}` : "no culprit found"}`
-        + (unnamed ? `; unattributed: ${unnamed}` : "")
-        + (outcome.shorterCandidate ? `; ${outcome.shorterCandidate.slice(0, 12)}, before the first culprit, is checked next` : "") };
+      const reason = place.reason() || "release-check place unavailable";
+      progress(`warning: ${served.machine}'s release-check place is down (${reason}); this ${fallback} instead`);
+      machinePlaceDown(served.machine, reason);
+      return null;
     }
   }
   /** The base a release check is measured from: the commit Production serves, or the release branch while nothing is served. */
@@ -2311,6 +2459,23 @@ export function createRunnerQueue(input: {
     const ended = events.findLast((row) => row.event.type === "batch_outcome");
     if (!operation || outcome?.type !== "batch_outcome" || outcome.outcome !== "red" || !started || !ended) return;
     const answered = new Set(events.flatMap((row) => row.event.type === "batch_routed" || row.event.type === "batch_unrouted" ? [row.event.commitId] : []));
+    // A culprit's suites an earlier check already routed are not routed again (SJ-202): a later red check of a newer
+    // tip names the culprit again until it is repaired, and only a suite it newly breaks is sent.
+    const routedBefore = (commitId: string): { keys: Set<string>; by: string[] } => {
+      const keys = new Set<string>();
+      const by: string[] = [];
+      for (const other of log.verifications(operation.repo)) {
+        if (other.id === operationId) continue;
+        const rows = log.events({ operationId: other.id }).map((row) => row.event);
+        if (!rows.some((event) => event.type === "batch_routed" && event.commitId === commitId)) continue;
+        const earlier = rows.findLast((event) => event.type === "batch_outcome");
+        const named = earlier?.type === "batch_outcome" ? earlier.culprits?.find((entry) => entry.commitId === commitId) : undefined;
+        if (!named) continue;
+        for (const key of named.keys) keys.add(key);
+        by.push(other.id);
+      }
+      return { keys, by };
+    };
     let retry = false;
     for (const culprit of outcome.culprits ?? []) {
       const key = `${operationId}\0${culprit.commitId}`;
@@ -2318,9 +2483,12 @@ export function createRunnerQueue(input: {
       routing.add(key);
       try {
         const reference = { commitId: culprit.commitId, operationId: culprit.operationId };
+        const earlier = routedBefore(culprit.commitId);
+        const fresh = culprit.keys.filter((key) => !earlier.keys.has(key));
+        if (!fresh.length) { append(operationId, { type: "batch_unrouted", ...reference, reason: `already routed by batch check ${earlier.by.join(", ")} for ${culprit.keys.join(", ")}` }); continue; }
         if (!input.recordBatchCheck) { append(operationId, { type: "batch_unrouted", ...reference, reason: "this runner has no Forge route" }); continue; }
         const answer = await input.recordBatchCheck({ repository: operation.repo, batchId: operationId, occurredAt: ended.at, startedAt: started.at, endedAt: ended.at,
-          base: outcome.base, head: outcome.head, culprit: reference, failingTests: culprit.failingTests, failedSuites: culprit.keys, command: culprit.command, output: culprit.output });
+          base: outcome.base, head: outcome.head, culprit: reference, failingTests: culprit.failingTests, failedSuites: fresh, command: culprit.command, output: culprit.output });
         if (answer.kind === "accepted") {
           const value = (answer.value ?? {}) as { runId?: unknown; specId?: unknown; number?: unknown; noteId?: unknown };
           append(operationId, { type: "batch_routed", ...reference, specId: String(value.specId ?? ""), number: typeof value.number === "number" ? value.number : null,
@@ -2531,6 +2699,7 @@ export function createRunnerQueue(input: {
     for (const retry of auditDiscovery.values()) clearTimeout(retry);
     auditDiscovery.clear();
     for (const timer of scheduledPromotions.values()) clearTimeout(timer);
+    for (const timer of backgroundChecks.values()) clearTimeout(timer);
     scheduledPromotions.clear();
     for (const timer of builderWarmups.values()) clearTimeout(timer);
     builderWarmups.clear();
@@ -2574,7 +2743,7 @@ export function createRunnerQueue(input: {
       // Commands an earlier process left running stop before recovery touches their checkouts.
       recovering = Promise.allSettled([...lanes.values(), ...attempts]).then(async () => {
         await executor.recover?.();
-        await Promise.all(Object.values(machinePlaces).flat().map((place) => place.recover?.([])));
+        await Promise.all([...Object.values(machinePlaces).flat(), ...Object.values(machineChecks).map((entry) => entry.place)].map((place) => place.recover?.([])));
         // Every attempt cleans its machine first, so a recovery that fails here is reported, never a reason to stop.
         await remoteVerification?.recover?.(Object.entries(config.repos).flatMap(([repo, entry]) => entry.verifier ? [repo] : []))
           .catch((error: unknown) => console.error(`[runner] ${message(error)}`));
@@ -2609,7 +2778,7 @@ export function createRunnerQueue(input: {
     async idle() {
       for (;;) {
         if (recovering) await recovering;
-        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...routes]);
+        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...backgroundConsiderations.values(), ...routes]);
         const lane = deploying;
         await lane;
         await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));
