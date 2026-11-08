@@ -600,4 +600,31 @@ test("reports submission to publication by selection, migration change and place
   const atOnce = stp.byPlacement["machine:peach-box at once"], waited = stp.byPlacement["machine:peach-box waited"];
   assert.deepEqual([atOnce?.published?.samples, atOnce?.failed, waited?.published?.medianMs, waited?.relanded, stp.byPlacement.boat?.published?.samples, stp.byPlacement.runner?.published?.samples], [2, 1, 100_000, 1, 1, 1]);
   assert.match(formatPipelineMetrics(pipelineMetrics(events, at(0), { now: NOW })), /Submission to publication: 5 samples, median \S+, p90 \S+, 1 failed, 1 relanded/);
+  // The typical cohort is a and b, d's failure and d-again: not the complete migration landing c, nor e with no selection.
+  const typical = stp.typical;
+  assert.deepEqual([typical.published?.samples, typical.published?.medianMs, typical.failed, typical.relanded], [3, 80_000, 1, 1]);
+  assert.deepEqual(Object.values(typical.publishedPerDay), [3]);
+  assert.deepEqual(Object.keys(typical.byPlacement).sort(), ["machine:peach-box at once", "machine:peach-box waited"]);
+  assert.deepEqual([typical.byPlacement["machine:peach-box at once"]?.published?.samples, typical.byPlacement["machine:peach-box at once"]?.failed, typical.byPlacement["machine:peach-box waited"]?.relanded], [2, 1, 1]);
+  assert.match(formatPipelineMetrics(pipelineMetrics(events, at(0), { now: NOW })), /typical \(related selection, no migration change\): 3 samples, median \S+, p90 \S+, 1 failed, 1 relanded/);
+});
+
+test("a related landing that changes a migration trigger stays out of the typical cohort, and each UTC day counts its own", () => {
+  const report: OperationEvent = { type: "test_report", runId: "r", status: "recorded", selection: "related", files: [] };
+  const landed = (id: string): OperationEvent => ({ type: "landed", base: "main", commitId: `commit-${id}`, branch: "main", remote: "origin" });
+  const DAY = 24 * 3_600_000;
+  const landing = (id: string, seq: number, submittedAt: number, extra: OperationEvent[]): StoredEvent[] => [
+    row(seq * 10, id, submittedAt, submitted("acme/app", id)),
+    ...extra.map((event, index) => row(seq * 10 + 1 + index, id, submittedAt + 1 + index, event)),
+    row(seq * 10 + 9, id, submittedAt + 60_000, landed(id)),
+  ];
+  const events = [
+    ...landing("yesterday", 1, NOW - DAY - 3_600_000, [shape("a"), report]),
+    ...landing("today", 2, NOW - 3_600_000, [shape("b"), report]),
+    ...landing("schema", 3, NOW - 3_600_000, [{ ...shape("db"), migrationBearing: true } as OperationEvent, report]),
+  ];
+  const typical = pipelineMetrics(events, at(0), { now: NOW }).repositories[0]!.submissionToPublication.typical;
+  const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+  assert.equal(typical.published?.samples, 2);
+  assert.deepEqual(typical.publishedPerDay, { [day(NOW - DAY - 3_600_000 + 60_000)]: 1, [day(NOW - 3_600_000 + 60_000)]: 1 });
 });

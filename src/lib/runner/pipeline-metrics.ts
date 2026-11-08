@@ -81,6 +81,8 @@ export type RepositoryMetrics = {
     bySelection: Record<string, LandingTimes>;
     byMigration: { migrationBearing: LandingTimes; other: LandingTimes };
     byPlacement: Record<string, LandingTimes>;
+    /** The typical landing: related selection and no migration trigger change, with its published count per UTC day. */
+    typical: LandingTimes & { publishedPerDay: Record<string, number>; byPlacement: Record<string, LandingTimes> };
   };
   /** Gate and audit commands by what their reports said; `missing` counts those that wrote none. */
   reports: { recorded: number; malformed: number; missing: number };
@@ -327,7 +329,7 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
   type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; timed: number; critical: Map<string, { landings: number; tails: number[] }>; lockWait: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
   type Times = { published: number[]; failed: number; relanded: number };
   const earlierChanges = new Set<string>();
-  const landingTimes = new Map<string, { all: Times; selection: Map<string, Times>; migration: { migrationBearing: Times; other: Times }; placement: Map<string, Times> }>();
+  const landingTimes = new Map<string, { all: Times; selection: Map<string, Times>; migration: { migrationBearing: Times; other: Times }; placement: Map<string, Times>; typical: { all: Times; perDay: Map<string, number>; placement: Map<string, Times> } }>();
   const times = (): Times => ({ published: [], failed: 0, relanded: 0 });
   const timesIn = (map: Map<string, Times>, key: string) => map.get(key) ?? map.set(key, times()).get(key)!;
   const repos = new Map<string, Repo>();
@@ -372,14 +374,23 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
     if (kind === "landing" && submittedAt <= now) {
       const outcome = op.events.find((row) => row.event.type === "landed" || row.event.type === "failed" || row.event.type === "declined");
       if (outcome) {
-        const split = landingTimes.get(op.submitted.repo) ?? landingTimes.set(op.submitted.repo, { all: times(), selection: new Map(), migration: { migrationBearing: times(), other: times() }, placement: new Map() }).get(op.submitted.repo)!;
+        const split = landingTimes.get(op.submitted.repo) ?? landingTimes.set(op.submitted.repo, { all: times(), selection: new Map(), migration: { migrationBearing: times(), other: times() }, placement: new Map(), typical: { all: times(), perDay: new Map(), placement: new Map() } }).get(op.submitted.repo)!;
         const report = op.events.find((row) => row.event.type === "test_report" && row.event.status === "recorded" && row.event.selection !== undefined)?.event;
         const shape = op.events.find((row) => row.event.type === "change_shape")?.event;
         const placement = op.events.findLast((row) => row.event.type === "remote_verification" && row.event.phase === "ready")?.event;
+        const selection = report?.type === "test_report" && report.status === "recorded" ? report.selection ?? "unrecorded" : "unrecorded";
+        const migrationBearing = shape?.type === "change_shape" && shape.migrationBearing === true;
+        const placementKind = gatePlacementKind(op.events, placement);
+        const typical = selection === "related" && !migrationBearing;
         const into = [split.all,
-          timesIn(split.selection, report?.type === "test_report" && report.status === "recorded" ? report.selection ?? "unrecorded" : "unrecorded"),
-          shape?.type === "change_shape" && shape.migrationBearing ? split.migration.migrationBearing : split.migration.other,
-          timesIn(split.placement, gatePlacementKind(op.events, placement))];
+          timesIn(split.selection, selection),
+          migrationBearing ? split.migration.migrationBearing : split.migration.other,
+          timesIn(split.placement, placementKind),
+          ...(typical ? [split.typical.all, timesIn(split.typical.placement, placementKind)] : [])];
+        if (typical && outcome.event.type === "landed") {
+          const day = new Date(eventTime(outcome)).toISOString().slice(0, 10);
+          split.typical.perDay.set(day, (split.typical.perDay.get(day) ?? 0) + 1);
+        }
         // A relanded change is one whose earlier submission did not publish it.
         const relanded = outcome.event.type === "landed" && changeKey !== undefined && earlierChanges.has(changeKey);
         for (const entry of into) {
@@ -449,7 +460,8 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
         const split = landingTimes.get(name);
         const out = (entry?: Times): LandingTimes => ({ published: timing(entry?.published ?? []), failed: entry?.failed ?? 0, relanded: entry?.relanded ?? 0 });
         const record = (map?: Map<string, Times>) => Object.fromEntries([...map ?? []].sort(([a], [b]) => a.localeCompare(b)).map(([key, entry]) => [key, out(entry)]));
-        return { ...out(split?.all), bySelection: record(split?.selection), byMigration: { migrationBearing: out(split?.migration.migrationBearing), other: out(split?.migration.other) }, byPlacement: record(split?.placement) };
+        return { ...out(split?.all), bySelection: record(split?.selection), byMigration: { migrationBearing: out(split?.migration.migrationBearing), other: out(split?.migration.other) }, byPlacement: record(split?.placement),
+          typical: { ...out(split?.typical.all), publishedPerDay: Object.fromEntries([...split?.typical.perDay ?? []].sort(([a], [b]) => a.localeCompare(b))), byPlacement: record(split?.typical.placement) } };
       })(),
       reports: { recorded: repo.recorded, malformed: repo.malformed, missing: repo.missing },
       slowestTestFiles: [...files].sort((a, b) => b.medianMs - a.medianMs).slice(0, LISTED_FILES),
@@ -644,6 +656,9 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     lines.push(`    by selection: ${Object.entries(stp.bySelection).map(([key, value]) => `${key} ${landing(value)}`).join("; ") || "none"}`);
     lines.push(`    by migration change: migration-bearing ${landing(stp.byMigration.migrationBearing)}; other ${landing(stp.byMigration.other)}`);
     lines.push(`    by placement: ${Object.entries(stp.byPlacement).map(([key, value]) => `${key} ${landing(value)}`).join("; ") || "none"}`);
+    lines.push(`    typical (related selection, no migration change): ${landing(stp.typical)}`);
+    lines.push(`      published per UTC day: ${Object.entries(stp.typical.publishedPerDay).map(([day, count]) => `${day} ${count}`).join("; ") || "none"}`);
+    lines.push(`      by placement: ${Object.entries(stp.typical.byPlacement).map(([key, value]) => `${key} ${landing(value)}`).join("; ") || "none"}`);
     if (repo.gateCriticalPath.timed) {
       const { timed, suites, lockWait } = repo.gateCriticalPath;
       lines.push(`  Gate critical path over ${timed} timed gates: ${suites.map(({ suite, landings, serialTail }) => `${suite} ${landings}${serialTail ? ` (serial tail median ${seconds(serialTail.medianMs)})` : ""}`).join("; ") || "none named"}; lock wait ${formatTiming(lockWait)}`);
