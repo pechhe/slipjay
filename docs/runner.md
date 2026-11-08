@@ -301,7 +301,9 @@ and held state through the existing recovery path.
   - `config.json`: the name, the listen port, the repositories, keyed `owner/name` with their git URL,
     and `jj`: settings set as repository config in every warm checkout. It must name `user.name` and
     `user.email`, the identity the runner commits as (use an email GitHub links to the owner);
-    the runner also sets `snapshot.max-new-file-size` to 64MiB unless `jj` overrides it, so none of these depend on the host's jj config.
+    the runner also sets `snapshot.max-new-file-size` to 64MiB, and `snapshot.auto-update-stale` to true because its
+    checkout is shared: another operation on the repository can move past its working copy, and JJ must update it rather
+    than refuse the next read. None of these depend on the host's jj config.
     An optional `build.origin` names the HQ that Forge admission and receipts go to; it takes effect
     only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
     With both, the runner also pushes its metrics export to HQ (see [Pipeline metrics relay](landing-evidence.md#pipeline-metrics-relay)).

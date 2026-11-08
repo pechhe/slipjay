@@ -114,8 +114,13 @@ export const SYSTEMD_SLICE_ENV = "SLIPJAY_SYSTEMD_SLICE";
 /** The slice's limits unless the config sets `limits`: systemd resource-control values. */
 export const RUNNER_DEFAULT_LIMITS: Readonly<Required<RunnerLimits>> = { memoryHigh: "40G", memoryMax: "48G", cpuQuota: "1400%", tasksMax: 4096 };
 
-/** jj settings the runner sets unless its config overrides them: YardSmith checks in files over jj's 1MiB default. */
-export const RUNNER_JJ_DEFAULTS: Readonly<Record<string, string>> = { "snapshot.max-new-file-size": "64MiB" };
+/**
+ * jj settings the runner sets unless its config overrides them: YardSmith checks in files over jj's 1MiB default, and
+ * the runner's checkout is shared, so another operation on its repository can move past its working copy. JJ then
+ * refuses the next command that snapshots it unless it is told to update: a stale working copy must never fail a read,
+ * and no one is there to run `jj workspace update-stale` for the runner.
+ */
+export const RUNNER_JJ_DEFAULTS: Readonly<Record<string, string>> = { "snapshot.max-new-file-size": "64MiB", "snapshot.auto-update-stale": "true" };
 
 /** Why the runner refuses to start with `config`; null when it can. */
 export const runnerConfigProblem = (config: RunnerConfig): string | null => {
