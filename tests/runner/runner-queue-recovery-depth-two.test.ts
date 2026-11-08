@@ -183,7 +183,13 @@ test("recovery finds a retained submission's integration under its duplicate's c
     await f.queue.recover();
     const events = f.log.events({ operationId: id }).map((row) => row.event);
     assert.ok(events.some((event) => event.type === "integrated" && event.commitId === duplicate), "the unrecorded integration is recognised, not dropped");
-    assert.ok(f.log.snapshot(f.executor.host).held.some((entry) => entry.commitId === duplicate));
+    // Recovery also queues the held integration for publication, and that queued operation may publish it and release
+    // the hold before this assertion runs; the recorded hold is the evidence that the unrecorded integration was retained.
+    assert.ok(events.some((event) => event.type === "integration_held" && event.commitId === duplicate), "the unrecorded integration is held for recovery");
+    // The queued recovery turn finishes the job: the retained duplicate reaches origin and its hold clears.
+    await f.queue.idle();
+    assert.equal(f.main(), duplicate, "the held integration was published under the duplicate's change ID");
+    assert.deepEqual(f.log.snapshot(f.executor.host).held, []);
   } finally { await f.dispose(); }
 }, 120_000);
 
