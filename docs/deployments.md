@@ -173,7 +173,10 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
 ```
 
 `commands` take the shape of `requiredLandingVerification` entries and must list at least one;
-`timeOfDay` (24-hour `HH:MM`) and `timeZone` (an IANA name) default to 02:00 Europe/London.
+`timeOfDay` (24-hour `HH:MM`) and `timeZone` (an IANA name) default to 02:00 Europe/London. A command may also
+declare `inconclusiveExitCodes`: exit codes that mean that command could not judge the suite (below). They may not
+include 0, 1 or anything from 126 up; any other value refuses the policy. A command with no declaration behaves as
+before, and an older runner ignores the field, safely leaving those exits as failures.
 
 - **When.** Once for every scheduled time on the zone's clock, which follows daylight saving, not
   an interval after the last run. The latest time that has passed is covered once an audit for it
@@ -199,6 +202,19 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
   ends `audited` with its commit and commands. A failing command ends it `failed`, as for a landing.
   A runner restart mid-audit records it `cancelled` (interrupted) and the schedule runs it again;
   neither is a verdict.
+- **Inconclusive.** An audit is inconclusive only when every failure in it is a non-zero exit from a command that
+  declares that exit code in `inconclusiveExitCodes` — so a `verify:release` that exits 2 as `UNVERIFIABLE` on a dirty
+  checkout, while exiting 1 for a real failure, makes the audit inconclusive, but a failing test, a red suite, a
+  timeout, a failed install, another exit code, or an undeclared command failing alongside a declared one is an
+  ordinary failure. Output text never decides; the result is fixed on the audit's `failed` terminal event when it
+  ends, from the policy that ran, and old audits stay failures. An inconclusive audit is never green: it does not move
+  the last green audit, does not clear or hide an open failure, is not one of its suspects, and does not stop the
+  repository being reported overdue. It covers its scheduled slot like a failing audit, so the next one runs at the
+  next scheduled time. Cancelled, interrupted and killed audits keep their treatment: they neither count towards nor
+  break a run of inconclusive audits. One inconclusive audit after a green one leaves automatic promotion and
+  `slipjay promote` free to proceed, and the ledger, `slipjay metrics`, `slipjay audit` and the watch snapshot show
+  it as inconclusive with the last green audit unchanged. Two inconclusive audits in a row refuse promotion, naming
+  both and stating what last judged the repository.
 - **Suspects, then escapes.** A failing audit records its suspects: the landings published, by the
   integration-branch ancestry the ledger recorded (each landing's base and published commit),
   between the last green audit's commit and the failing one, or all of them when none was green
@@ -211,6 +227,12 @@ Landings and releases keep their checks. Declare it in `slipjay.json`:
   `flake`, `infrastructure` or `unresolved`), `slipjay promote` refuses at planning, which for an
   audited repository always reads the runner, and the runner fails a confirmed release, asking
   again just before it publishes in case an audit failed while the release verified. A cause lasts until a green audit closes the failure.
+  Two inconclusive audits in a row refuse promotion the same way. `slipjay audit cause` accepts any of its cause
+  kinds for that refusal too: the cause covers the inconclusive audits up to when it was recorded and the count then
+  restarts, so one command cannot switch the bound off, and a green audit also clears it. With an open failure as
+  well, the failure is answered first and the two are lifted separately. A lifted refusal takes effect at the next
+  promotion trigger, including the promotion schedule; nothing new wakes promotion when an audit ends or a cause is
+  recorded.
 - **Overdue.** `slipjay audit` flags a repository overdue when its last green audit finished more
   than 26 hours ago (when it has never been green: since its first audit).
 

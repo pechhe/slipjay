@@ -90,6 +90,25 @@ test("audit refusal precedes verification; a recorded cause removes the hold", (
   } finally { log.close(); }
 });
 
+test("a single inconclusive audit shows as inconclusive in the watch snapshot and does not hold promotion", () => {
+  const log = fixture();
+  try {
+    policy(log, true); publish(log);
+    log.append("audit", { type: "submitted", kind: "audit", repo: "a/repo", commitId: "candidate", slot: new Date().toISOString(), submittedBy: "runner" });
+    log.append("audit", { type: "audit_head", commit: "candidate" });
+    log.append("audit", { type: "failed", stage: "verifying", reason: "UNVERIFIABLE", inconclusive: true });
+    const release = log.snapshot("runner").repositories[0]!.release!;
+    assert.equal(release.audit?.latest?.status, "inconclusive");
+    assert.notEqual(release.waitingOn.kind, "audit");
+    log.append("audit-2", { type: "submitted", kind: "audit", repo: "a/repo", commitId: "candidate", slot: new Date().toISOString(), submittedBy: "runner" });
+    log.append("audit-2", { type: "audit_head", commit: "candidate" });
+    log.append("audit-2", { type: "failed", stage: "verifying", reason: "UNVERIFIABLE", inconclusive: true });
+    const held = log.snapshot("runner").repositories[0]!.release!;
+    assert.equal(held.waitingOn.kind, "audit");
+    assert.ok(held.waitingOn.detail!.includes("audit") && held.waitingOn.detail!.includes("audit-2"));
+  } finally { log.close(); }
+});
+
 test("watch names chores and uses one-based lanes only during screening", () => {
   const log = fixture();
   try {

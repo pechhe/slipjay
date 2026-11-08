@@ -65,6 +65,16 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 const policy = (overrides: Record<string, unknown>) => JSON.stringify({ version: 1, ...overrides });
 const check = (executable: string, extra: Record<string, unknown> = {}) => ({ executable, args: ["run", "test"], ...extra });
 
+test("only an audit's own command may declare inconclusiveExitCodes", () => {
+  const command = { executable: "bun", args: ["run", "check"], inconclusiveExitCodes: [2] };
+  const policy = (extra: Record<string, unknown>) => JSON.stringify({ version: 1, integrationBranch: "main", remote: "origin", ...extra });
+  assert.throws(() => parseExecutionPolicy(policy({ requiredLandingVerification: [command] })), /only an audit\.commands command may/);
+  const { inconclusiveExitCodes: _dropped, ...plain } = command;
+  assert.throws(() => parseExecutionPolicy(policy({ requiredLandingVerification: [{ ...plain, capability: { id: "x", probe: command, onUnavailable: "continue", unavailableExitCodes: [3], unavailableStderrIncludes: ["x"] } }] })), /only an audit\.commands command may/);
+  const parsed = parseExecutionPolicy(policy({ requiredLandingVerification: [plain], audit: { commands: [command] } }));
+  assert.deepEqual(parsed.audit?.commands[0]?.inconclusiveExitCodes, [2]);
+});
+
 test("postIntegration readByGate defaults true and accepts only booleans", () => {
   assert.equal(postIntegrationPolicy(yardsmithPolicy.postIntegration)?.readByGate, true);
   for (const readByGate of [false, true]) {

@@ -141,6 +141,9 @@ function gateChecks(value: unknown, name = "requiredLandingVerification"): Verif
     const check = normalizeVerificationDeclaration(entry, field);
     gateCommand(check, field);
     if (check.capability) gateCommand(check.capability.probe, `${field}.capability.probe`);
+    // Only an audit can be inconclusive; anywhere else the declaration would be silently ignored.
+    if ((check.inconclusiveExitCodes && name !== "audit.commands") || check.capability?.probe.inconclusiveExitCodes)
+      fail(`${field} declares inconclusiveExitCodes, which only an audit.commands command may`);
     return check;
   });
 }

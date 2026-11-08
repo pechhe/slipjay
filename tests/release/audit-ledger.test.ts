@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { AUDIT_OVERDUE_AFTER_MS, auditSummariesFromEvents, auditSummary, auditToExplain, promotionRefusal, resolveCulprits } from "../../src/lib/release/audit-ledger.ts";
+import { AUDIT_OVERDUE_AFTER_MS, auditInconclusive, auditSummariesFromEvents, auditSummary, auditToExplain, promotionRefusal, resolveCulprits } from "../../src/lib/release/audit-ledger.ts";
 import { AUDIT_INTERRUPTED_REASON } from "../../src/lib/runner/runner-contract.ts";
 import type { AuditCause } from "../../src/lib/runner/runner-types.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
@@ -28,13 +28,14 @@ function ledger() {
       previous = commit;
       return id;
     },
-    audit(outcome: "green" | "failed" | "cancelled" | "interrupted" | "running", head: string | null = previous, extra: { skipped?: string[]; reused?: string[]; passed?: string[] } = {}) {
+    audit(outcome: "green" | "failed" | "inconclusive" | "cancelled" | "interrupted" | "running", head: string | null = previous, extra: { skipped?: string[]; reused?: string[]; passed?: string[] } = {}) {
       const id = `audit-${String((audits += 1)).padStart(3, "0")}`;
       log.append(id, { type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date().toISOString(), submittedBy: "test" });
       log.append(id, { type: "stage", stage: "verifying" });
       if (head) log.append(id, { type: "audit_head", commit: head });
       if (outcome === "green") log.append(id, { type: "audited", commit: head!, commands: ["install", "test"], passed: extra.passed ?? ["install", "test"], skipped: extra.skipped ?? [], reused: extra.reused ?? [] });
       else if (outcome === "failed") log.append(id, { type: "failed", stage: "verifying", reason: "Required verification failed", command: "bun run test" });
+      else if (outcome === "inconclusive") log.append(id, { type: "failed", stage: "verifying", reason: "Required verification failed", command: "bun run test", inconclusive: true });
       else if (outcome !== "running") log.append(id, { type: "cancelled", reason: outcome === "interrupted" ? AUDIT_INTERRUPTED_REASON : "cancelled by the author" });
       return id;
     },
@@ -391,5 +392,182 @@ test("a commit a recovery published stays in the audit ancestry, in the log's pr
     const now = new Date();
     assert.deepEqual(l.summary(now).openFailure?.suspects, [sha("r2")]);
     assert.deepEqual(auditSummariesFromEvents(l.log.events(), now).get(REPO), l.summary(now));
+  } finally { l.log.close(); }
+});
+
+// --- SJ-213: inconclusive audits ---
+
+test("an audit is inconclusive only when every failure is a declared could-not-judge exit", () => {
+  const commands = [
+    { executable: "bun", args: ["install"], inconclusiveExitCodes: [2] },
+    { executable: "bun", args: ["run", "verify:release", "--full"] },
+  ];
+  const failure = (checkIndex: number, outcome: string, exitCode: number | null) => ({ checkIndex, outcome, exitCode });
+  assert.equal(auditInconclusive([failure(0, "nonzero_exit", 2)], commands), true, "the declared exit alone");
+  assert.equal(auditInconclusive([failure(0, "nonzero_exit", 2), failure(0, "nonzero_exit", 2)], commands), true, "every failure declared");
+  for (const [name, failures] of [
+    ["a failing test (exit 1)", [failure(0, "nonzero_exit", 1)]],
+    ["another exit code", [failure(0, "nonzero_exit", 3)]],
+    ["a timeout", [failure(0, "timeout", null)]],
+    ["a signal", [failure(0, "signal", null)]],
+    ["a spawn failure", [failure(0, "spawn_failure", null)]],
+    ["a failed install that exits with the declared code from an undeclared command", [failure(1, "nonzero_exit", 2)]],
+    ["a declared exit alongside another command's failure", [failure(0, "nonzero_exit", 2), failure(1, "nonzero_exit", 1)]],
+    ["no failures at all", []],
+  ] as const) assert.equal(auditInconclusive(failures, commands), false, name);
+  assert.equal(auditInconclusive([failure(0, "nonzero_exit", 2)], [{ executable: "bun", args: ["install"] }]), false, "a command with no declaration sees no change: exit 2 is a failure");
+});
+
+test("a single inconclusive audit after a green one leaves promotion free and the last green unchanged", async () => {
+  const l = ledger();
+  try {
+    l.landing("s1");
+    l.audit("green", sha("s1"));
+    await sleep();
+    const inconclusive = l.audit("inconclusive", sha("s1"));
+    const summary = l.summary();
+    assert.equal(promotionRefusal(summary), null);
+    assert.equal(summary.latest?.status, "inconclusive");
+    assert.equal(summary.latest?.operationId, inconclusive);
+    assert.equal(summary.lastGreen?.commit, sha("s1"), "inconclusive is never green");
+    assert.equal(summary.openFailure, null);
+    assert.deepEqual(summary.inconclusive?.audits, [inconclusive]);
+    assert.equal(summary.inconclusive?.cause, null);
+    // It does not stop the repository being reported overdue.
+    const greenFinished = Date.parse(summary.lastGreen!.finishedAt);
+    assert.equal(l.summary(new Date(greenFinished + AUDIT_OVERDUE_AFTER_MS + 1)).overdue, true);
+    const now = new Date();
+    assert.deepEqual(auditSummariesFromEvents(l.log.events(), now).get(REPO), l.summary(now), "the metrics export reads it the same way");
+  } finally { l.log.close(); }
+});
+
+test("an inconclusive audit after an open failure leaves that failure refusing and does not clear it", async () => {
+  const l = ledger();
+  try {
+    l.landing("t1");
+    l.audit("green", sha("t1"));
+    await sleep();
+    const failed = l.audit("failed", sha("t1"));
+    await sleep();
+    l.audit("inconclusive", sha("t1"));
+    const summary = l.summary();
+    assert.deepEqual(summary.openFailure?.audits, [failed], "inconclusive stays out of the failure's suspects and cause");
+    assert.equal(summary.latest?.status, "inconclusive");
+    assert.match(promotionRefusal(summary) ?? "", /The latest audit failed at .* and no cause is recorded/);
+  } finally { l.log.close(); }
+});
+
+test("a cause recorded late on an audit of an earlier run does not lift a newer run's refusal", async () => {
+  const l = ledger();
+  try {
+    l.landing("u1");
+    l.audit("green", sha("u1"));
+    await sleep();
+    const earlier = l.audit("inconclusive", sha("u1"));
+    await sleep();
+    l.audit("green", sha("u1"));
+    await sleep();
+    const first = l.audit("inconclusive", sha("u1"));
+    await sleep();
+    const second = l.audit("inconclusive", sha("u1"));
+    await sleep();
+    l.cause(earlier, { kind: "infrastructure" });
+    const summary = l.summary();
+    const refusal = promotionRefusal(summary) ?? "";
+    assert.ok(refusal.includes(first) && refusal.includes(second), refusal);
+    assert.equal(summary.inconclusive?.cause, null);
+  } finally { l.log.close(); }
+});
+
+test("two inconclusive audits in a row refuse promotion naming both, a cause lifts and restarts the count, and a green clears it", async () => {
+  const l = ledger();
+  try {
+    l.landing("u1");
+    l.audit("green", sha("u1"));
+    await sleep();
+    const first = l.audit("inconclusive", sha("u1"));
+    await sleep();
+    l.audit("cancelled");
+    await sleep();
+    l.audit("interrupted");
+    await sleep();
+    const second = l.audit("inconclusive", sha("u1"));
+    let summary = l.summary();
+    const refusal = promotionRefusal(summary) ?? "";
+    assert.ok(refusal.includes(first) && refusal.includes(second), refusal);
+    assert.match(refusal, new RegExp(`last audit to judge the repository was green at ${sha("u1").slice(0, 12)}`));
+    // The default cause target is the newest inconclusive audit, and any kind lifts it.
+    const target = auditToExplain(l.log.audits(REPO), summary);
+    assert.ok(target.ok && target.audit.id === second);
+    l.cause(second, { kind: "infrastructure" });
+    assert.equal(promotionRefusal(l.summary()), null, "the cause covers the inconclusive audits up to when it was recorded");
+    await sleep();
+    l.audit("inconclusive", sha("u1"));
+    assert.equal(promotionRefusal(l.summary()), null, "a further single inconclusive audit does not refuse");
+    await sleep();
+    const fourth = l.audit("inconclusive", sha("u1"));
+    summary = l.summary();
+    assert.ok((promotionRefusal(summary) ?? "").includes(fourth), "a following one does");
+    l.cause(fourth, { kind: "flake" });
+    assert.equal(promotionRefusal(l.summary()), null);
+    await sleep();
+    l.audit("failed", sha("u1"));
+    assert.match(promotionRefusal(l.summary()) ?? "", /The latest audit failed at .* and no cause is recorded/, "a real failure after the lift still refuses");
+    await sleep();
+    l.audit("green", sha("u1"));
+    summary = l.summary();
+    assert.equal(promotionRefusal(summary), null, "a green audit clears the state");
+    assert.equal(summary.inconclusive, null);
+    assert.equal(summary.openFailure, null);
+  } finally { l.log.close(); }
+});
+
+test("with an open failure and two inconclusive audits the failure is answered first and they are lifted separately", async () => {
+  const l = ledger();
+  try {
+    l.landing("v1");
+    const failed = l.audit("failed", sha("v1"));
+    await sleep();
+    l.audit("inconclusive", sha("v1"));
+    await sleep();
+    const second = l.audit("inconclusive", sha("v1"));
+    let summary = l.summary();
+    assert.match(promotionRefusal(summary) ?? "", /The latest audit failed at/);
+    const target = auditToExplain(l.log.audits(REPO), summary);
+    assert.ok(target.ok && target.audit.id === failed, "the open failure is answered first");
+    l.cause(failed, { kind: "unresolved" });
+    summary = l.summary();
+    const refusal = promotionRefusal(summary) ?? "";
+    assert.ok(refusal.includes(second) && /last audit to judge the repository failed/.test(refusal), refusal);
+    l.cause(second, { kind: "culprits", landings: [sha("v1")] });
+    assert.equal(promotionRefusal(l.summary()), null);
+  } finally { l.log.close(); }
+});
+
+test("two inconclusive audits with no judging audit yet state that no audit has judged the repository", async () => {
+  const l = ledger();
+  try {
+    l.landing("w1");
+    l.audit("inconclusive", sha("w1"));
+    await sleep();
+    l.audit("inconclusive", sha("w1"));
+    const refusal = promotionRefusal(l.summary()) ?? "";
+    assert.match(refusal, /No audit has judged the repository yet/);
+    assert.equal(l.summary().lastGreen, null);
+  } finally { l.log.close(); }
+});
+
+test("a named inconclusive audit can be explained, and one that did not fail cannot", async () => {
+  const l = ledger();
+  try {
+    l.landing("x1");
+    const green = l.audit("green", sha("x1"));
+    await sleep();
+    const inconclusive = l.audit("inconclusive", sha("x1"));
+    const audits = l.log.audits(REPO);
+    assert.ok(auditToExplain(audits, l.summary(), inconclusive).ok);
+    assert.equal(auditToExplain(audits, l.summary(), green).ok, false);
+    // A single inconclusive audit alone refuses nothing and needs no default cause.
+    assert.deepEqual(auditToExplain(audits, l.summary()), { ok: false, reason: "The latest audit did not fail, so there is no open failure to explain; name an earlier failing audit with --audit" });
   } finally { l.log.close(); }
 });

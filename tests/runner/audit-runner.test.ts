@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,10 +18,13 @@ const test = serialTest.concurrent;
 const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8", stdio: "pipe" }).trim();
 const REPO = "fixture/repo";
 
-// The audit's second command records where it ran, holds while `hold-audit` exists, and fails when the head carries `break.txt`.
+// The audit's second command records where it ran, holds while `hold-audit` exists, fails when the head carries
+// `break.txt`, and exits 2 as UNVERIFIABLE when it carries `dirty.txt` (declared inconclusive in the audit policy).
 const auditCheck = (root: string) => `const fs=require("node:fs"),path=require("node:path"),at=(name)=>path.join(${JSON.stringify(root)},name);
 fs.appendFileSync(at("audit-ran.log"), process.cwd()+"\\n");
 while (fs.existsSync(at("hold-audit"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+if (fs.existsSync("exits-2-when-killed.txt")) { process.on("SIGTERM", () => process.exit(2)); fs.writeFileSync(at("audit-holding"), ""); setInterval(() => {}, 50); }
+if (fs.existsSync("dirty.txt")) { process.stderr.write("UNVERIFIABLE: checkout is dirty\\n"); process.exit(2); }
 if (fs.existsSync("break.txt")) { process.stderr.write("FAIL tests/fixture.test.ts > fixture > the suite is broken\\n"); process.exit(3); }`;
 
 /**
@@ -43,7 +47,7 @@ while (fs.existsSync("slow.txt") && fs.existsSync(${JSON.stringify(join(root, "h
     // Release verification holds while `hold-release` exists.
     releaseBranch: "release", requiredReleaseVerification: [{ executable: "node", args: ["-e", `const fs=require("node:fs");
 while (fs.existsSync(${JSON.stringify(join(root, "hold-release"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`] }],
-    ...audit ? { audit: { commands: [{ executable: "node", args: ["-e", "console.log('install')"] }, { executable: "node", args: ["-e", auditCheck(root)] }] } } : {},
+    ...audit ? { audit: { commands: [{ executable: "node", args: ["-e", "console.log('install')"] }, { executable: "node", args: ["-e", auditCheck(root)], inconclusiveExitCodes: [2] }] } } : {},
   }));
   jj(seed, ["describe", "-m", "Seed policy"]);
   jj(seed, ["git", "remote", "add", "origin", origin]);
@@ -143,6 +147,77 @@ test("an audit that fails records the head, the suspects and the failing command
     assert.notEqual(lastGreen?.commit, f.main());
     assert.deepEqual(openFailure?.suspects, [f.main()]);
     assert.equal(openFailure?.cause, null);
+  } finally { await f.dispose(); }
+}, 240_000);
+
+test("an audit whose only failure is a declared could-not-judge exit is inconclusive: promotion proceeds, the last green stands, and a second one refuses", async () => {
+  const f = await fixture();
+  try {
+    await f.queue.recover();
+    await f.settle((audits) => audits.some((operation) => operation.status === "audited"));
+    const greenAt = f.main();
+    const landing = f.submit(await f.candidate("dirty.txt"));
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(landing)?.status, "landed");
+    assert.equal(f.audits().length, 1, "the slot is covered, so the landing audits nothing");
+    const night = async () => {
+      const id = newOperationId();
+      f.log.append(id, { type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date(Date.now() + 86_400_000).toISOString(), submittedBy: "test" });
+      f.queue.wake();
+      await f.queue.idle();
+      return f.log.operation(id) as AuditOperation;
+    };
+    const first = await night();
+    assert.equal(first.status, "failed");
+    assert.ok(first.result?.type === "failed" && first.result.inconclusive === true, JSON.stringify(first.result));
+    assert.equal(first.head, f.main());
+    let summary = f.summary();
+    assert.equal(summary.latest?.status, "inconclusive");
+    assert.equal(summary.lastGreen?.commit, greenAt, "an inconclusive audit never moves the last green audit");
+    assert.equal(summary.openFailure, null);
+    assert.deepEqual(summary.inconclusive?.audits, [first.id]);
+    assert.equal(promotionRefusal(summary), null);
+    // The slot is covered: asking recovery again submits nothing early.
+    await f.queue.recover();
+    await f.queue.idle();
+    assert.equal(f.audits().filter((audit) => audit.id !== first.id && audit.status !== "cancelled").length, 1);
+    // Promotion proceeds: a confirmed release publishes.
+    const allowed = newOperationId();
+    f.log.append(allowed, { type: "submitted", kind: "release", repo: REPO, commitId: f.main(), migrationsReady: false, submittedBy: "test" });
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(allowed)?.result?.type, "released", JSON.stringify(f.log.operation(allowed)?.result));
+    // A second inconclusive audit in a row refuses, naming both.
+    const second = await night();
+    assert.ok(second.result?.type === "failed" && second.result.inconclusive === true);
+    const refusal = promotionRefusal(f.summary()) ?? "";
+    assert.ok(refusal.includes(first.id) && refusal.includes(second.id), refusal);
+    assert.match(refusal, new RegExp(`last audit to judge the repository was green at ${greenAt.slice(0, 12)}`));
+    // A recorded cause lifts it.
+    f.log.append(second.id, { type: "audit_cause", cause: { kind: "infrastructure" }, by: "henry" });
+    assert.equal(promotionRefusal(f.summary()), null);
+  } finally { await f.dispose(); }
+}, 240_000);
+
+test("a killed audit is not inconclusive", async () => {
+  const f = await fixture();
+  try {
+    await f.queue.recover();
+    await f.settle((audits) => audits.some((operation) => operation.status === "audited"));
+    const landing = f.submit(await f.candidate("exits-2-when-killed.txt"));
+    f.queue.wake();
+    await f.queue.idle();
+    assert.equal(f.log.operation(landing)?.status, "landed");
+    const id = newOperationId();
+    f.log.append(id, { type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date(Date.now() + 86_400_000).toISOString(), submittedBy: "test" });
+    f.queue.wake();
+    for (const deadline = Date.now() + 60_000; !existsSync(join(f.root, "audit-holding")) && Date.now() < deadline;) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(f.queue.kill(id).status, "killed");
+    await f.queue.idle();
+    const killed = f.log.operation(id) as AuditOperation;
+    assert.ok(!(killed.result?.type === "failed" && killed.result.inconclusive), JSON.stringify(killed.result));
+    assert.equal(f.summary().inconclusive, null);
   } finally { await f.dispose(); }
 }, 240_000);
 

@@ -1,6 +1,8 @@
 export type VerificationCommand = { executable: string; args: string[]; cwd?: string; baseline?: unknown; concurrent?: boolean;
   /** A failed check ends verification once its stage settles; later checks do not start (for installs and generation steps). */
-  stopOnFailure?: boolean };
+  stopOnFailure?: boolean;
+  /** Exit codes that say this command could not judge (an audit only): never 0, 1 or anything from 126 up. */
+  inconclusiveExitCodes?: number[] };
 
 export type CapabilityDeclaration = {
   id: string;
@@ -39,10 +41,14 @@ const command = (value: unknown, field: string): VerificationCommand => {
     throw new Error(`Malformed ${field} command`);
   }
   if (value.stopOnFailure != null && typeof value.stopOnFailure !== "boolean") throw new Error(`Malformed ${field} command`);
+  if (value.inconclusiveExitCodes != null && (!Array.isArray(value.inconclusiveExitCodes) || !value.inconclusiveExitCodes.length
+    || value.inconclusiveExitCodes.some((code) => !Number.isInteger(code) || (code as number) < 2 || (code as number) >= 126)))
+    throw new Error(`Malformed ${field} command`);
   return { executable: value.executable, args: [...(value.args as string[])], ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {}),
     ...(value.baseline && typeof value.baseline === "object" ? { baseline: value.baseline } : {}),
     ...(value.concurrent === true ? { concurrent: true } : {}),
-    ...(value.stopOnFailure === true ? { stopOnFailure: true } : {}) };
+    ...(value.stopOnFailure === true ? { stopOnFailure: true } : {}),
+    ...(value.inconclusiveExitCodes != null ? { inconclusiveExitCodes: [...new Set(value.inconclusiveExitCodes as number[])] } : {}) };
 };
 
 /**

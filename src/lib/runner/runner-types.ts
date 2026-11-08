@@ -300,7 +300,9 @@ export type OperationEvent =
    * `command` and `output` describe the first failing command (bounded as the local gate bounds it).
    * `failures` lists every failed verification check in declaration order (SJ-51).
    */
-  | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; failures?: VerificationFailureRef[]; deployment?: DeployRecord }
+  | { type: "failed"; stage: RunnerStage; reason: string; command?: string; output?: string; failures?: VerificationFailureRef[]; deployment?: DeployRecord;
+    /** An audit (`kind: "audit"` only) whose every failure was a declared could-not-judge exit: no verdict, fixed when it ends. Older events lack it and stay failures. */
+    inconclusive?: true }
   /** A queued operation replaced by a newer submission of the same change. */
   | { type: "superseded"; by: string }
   | { type: "cancelled"; reason: string; by?: string }
@@ -818,7 +820,7 @@ export type WatchRelease = {
   };
   /** Image builds are deploys to the environment literally named `images`. */
   images: { commitId: string; status: "built" | "building" | "failed" | "none"; at: string | null; reason: string | null } | null;
-  audit: { latest: { status: "green" | "failed"; commitId: string | null; finishedAt: string } | null; nextRunAt: string | null } | null;
+  audit: { latest: { status: "green" | "failed" | "inconclusive"; commitId: string | null; finishedAt: string } | null; nextRunAt: string | null } | null;
   waitingOn: { kind: "up_to_date" | "paused" | "images" | "audit" | "verification" | "deploy" | "approval" | "failed"; detail: string | null };
 };
 

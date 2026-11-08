@@ -650,8 +650,8 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
     }
     lines.push(`  Test reports: ${repo.reports.recorded} recorded, ${repo.reports.malformed} malformed, ${repo.reports.missing} missing`);
     if (repo.audit) {
-      const { lastGreen, overdue, openFailure, escapes } = repo.audit;
-      lines.push(`  Audit: last green ${lastGreen ? `${lastGreen.commit.slice(0, 12)} at ${lastGreen.finishedAt}` : "never"}${overdue ? " (overdue)" : ""}; ${openFailure ? `failing since ${openFailure.since}, ${openFailure.suspects.length} suspects, cause ${openFailure.cause ? openFailure.cause.kind : "not recorded"}` : "no open failure"}; ${escapes} escapes`);
+      const { lastGreen, overdue, openFailure, inconclusive, escapes } = repo.audit;
+      lines.push(`  Audit: last green ${lastGreen ? `${lastGreen.commit.slice(0, 12)} at ${lastGreen.finishedAt}` : "never"}${overdue ? " (overdue)" : ""}; ${openFailure ? `failing since ${openFailure.since}, ${openFailure.suspects.length} suspects, cause ${openFailure.cause ? openFailure.cause.kind : "not recorded"}` : "no open failure"}${inconclusive?.audits.length ? `; inconclusive ${inconclusive.audits.join(", ")}` : ""}; ${escapes} escapes`);
     }
     if (repo.slowestTestFiles.length) lines.push(`  Slowest test files: ${repo.slowestTestFiles.map((file) => `${file.kind} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
     if (repo.growingTestFiles.length) lines.push(`  Growing test files: ${repo.growingTestFiles.map((file) => `${file.kind} ${file.file} ${seconds(file.earlierMedianMs)} → ${seconds(file.laterMedianMs)}`).join("; ")}`);

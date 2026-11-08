@@ -117,7 +117,7 @@ export async function runAudit(args: string[]): Promise<number> {
     const { operations, summary } = await readAudits(process.cwd(), { location });
     console.log(JSON.stringify({ summary, audits: operations.slice(0, 10).map((operation) => ({ id: operation.id, status: operation.status, slot: operation.slot,
       ...operation.head ? { head: operation.head } : {}, ...operation.finishedAt ? { finishedAt: operation.finishedAt } : {},
-      ...operation.result?.type === "failed" ? { reason: operation.result.reason } : {}, ...operation.cause ? { cause: operation.cause.cause } : {} })) }, null, 2));
+      ...operation.result?.type === "failed" ? { reason: operation.result.reason, ...operation.result.inconclusive ? { inconclusive: true } : {} } : {}, ...operation.cause ? { cause: operation.cause.cause } : {} })) }, null, 2));
     return 0;
   }
   if (args[0] !== "cause") throw new Error(usage);

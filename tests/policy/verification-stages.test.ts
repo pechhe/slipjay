@@ -75,6 +75,14 @@ test("a thrown error still propagates after its stage settles", async () => {
     async (check) => { if (check.name === "a") throw new Error("boom"); return "b"; }), /boom/);
 });
 
+test("inconclusiveExitCodes is kept when declared, absent by default, and refused when malformed or 0, 1 or 126 up", () => {
+  const base = { executable: "bun", args: ["run", "verify:release", "--full"] };
+  assert.deepEqual(normalizeVerificationDeclaration({ ...base, inconclusiveExitCodes: [2, 3] }).inconclusiveExitCodes, [2, 3]);
+  assert.equal("inconclusiveExitCodes" in normalizeVerificationDeclaration(base), false);
+  for (const bad of [[], [0], [1], [126], [127], [2, 0], ["2"], [2.5], [-1], "2", 2, {}])
+    assert.throws(() => normalizeVerificationDeclaration({ ...base, inconclusiveExitCodes: bad }), /Malformed/, JSON.stringify(bad));
+});
+
 test("stopOnFailure is kept when true, absent by default, and refused when not a boolean", () => {
   const base = { executable: "bun", args: ["install"] };
   assert.equal(normalizeVerificationDeclaration({ ...base, stopOnFailure: true }).stopOnFailure, true);

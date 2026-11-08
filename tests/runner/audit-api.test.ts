@@ -29,12 +29,12 @@ async function fixture() {
       previous = sha(name);
       return id;
     },
-    audit(outcome: "green" | "failed", head = previous) {
+    audit(outcome: "green" | "failed" | "inconclusive", head = previous) {
       const id = `op_${String(audits += 1).padStart(10, "0")}_${"a".repeat(24)}`;
       log.append(id, { type: "submitted", kind: "audit", repo: "owner/repo", commitId: "", slot: new Date().toISOString(), submittedBy: "test" });
       log.append(id, { type: "audit_head", commit: head });
       log.append(id, outcome === "green" ? { type: "audited", commit: head, commands: ["t"], passed: ["t"], skipped: [], reused: [] }
-        : { type: "failed", stage: "verifying", reason: "Required verification failed" });
+        : { type: "failed", stage: "verifying", reason: "Required verification failed", ...(outcome === "inconclusive" ? { inconclusive: true as const } : {}) });
       return id;
     },
     async close() { await server.close(); log.close(); },
@@ -96,6 +96,30 @@ test("a recorded cause lifts the promotion refusal, and escapes count the culpri
     assert.equal(promotionRefusal(recorded.summary!), null);
     assert.equal(recorded.summary?.escapes, 1, "c3's gate was green; c2 was never gated");
     assert.deepEqual((await read(await f.request("/audits?repo=owner/repo"))).summary, recorded.summary);
+  } finally { await f.close(); }
+});
+
+test("two inconclusive audits refuse promotion through the cause route, and a recorded cause lifts it and restarts the count", async () => {
+  const f = await fixture();
+  try {
+    f.landing("e1");
+    f.audit("green");
+    const first = f.audit("inconclusive");
+    assert.equal(promotionRefusal((await read(await f.request("/audits?repo=owner/repo"))).summary!), null, "one inconclusive audit refuses nothing");
+    const second = f.audit("inconclusive");
+    const before = (await read(await f.request("/audits?repo=owner/repo"))).summary!;
+    const refusal = promotionRefusal(before) ?? "";
+    assert.ok(refusal.includes(first) && refusal.includes(second), refusal);
+    assert.equal(before.inconclusive?.cause, null);
+    const response = await f.cause({ kind: "flake" });
+    assert.equal(response.status, 200);
+    const recorded = await read(response);
+    assert.equal(recorded.operation?.id, second, "the default target is the newest inconclusive audit");
+    assert.deepEqual(recorded.operation?.cause?.cause, { kind: "flake" });
+    assert.equal(promotionRefusal(recorded.summary!), null);
+    assert.deepEqual(recorded.summary?.inconclusive?.audits, []);
+    f.audit("inconclusive");
+    assert.equal(promotionRefusal((await read(await f.request("/audits?repo=owner/repo"))).summary!), null, "the count restarted");
   } finally { await f.close(); }
 });
 

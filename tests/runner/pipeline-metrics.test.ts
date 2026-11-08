@@ -447,6 +447,24 @@ test("each repository's metrics carry its audit status", () => {
   assert.match(formatPipelineMetrics(metrics), /Audit: last green aaaaaaaaaaaa at .*; no open failure; 0 escapes/);
 });
 
+test("slipjay metrics shows a single inconclusive audit as inconclusive with the last green unchanged", () => {
+  const head = "a".repeat(40);
+  const events: StoredEvent[] = [
+    row(1, "audit-1", NOW - 3_600_000, { type: "submitted", kind: "audit", repo: "acme/app", commitId: head, slot: at(NOW - 3_600_000), submittedBy: "runner:schedule" }),
+    row(2, "audit-1", NOW - 3_500_000, { type: "audit_head", commit: head }),
+    row(3, "audit-1", NOW - 3_000_000, { type: "audited", commit: head, commands: ["bun run test"], passed: ["bun run test"], skipped: [], reused: [] }),
+    row(4, "audit-2", NOW - 2_000_000, { type: "submitted", kind: "audit", repo: "acme/app", commitId: head, slot: at(NOW - 2_000_000), submittedBy: "runner:schedule" }),
+    row(5, "audit-2", NOW - 1_900_000, { type: "audit_head", commit: head }),
+    row(6, "audit-2", NOW - 1_000_000, { type: "failed", stage: "verifying", reason: "UNVERIFIABLE", inconclusive: true }),
+  ];
+  const metrics = pipelineMetrics(events, at(0), { now: NOW });
+  const audit = metrics.repositories[0]?.audit;
+  assert.equal(audit?.latest?.status, "inconclusive");
+  assert.equal(audit?.lastGreen?.commit, head);
+  assert.deepEqual(audit?.inconclusive?.audits, ["audit-2"]);
+  assert.match(formatPipelineMetrics(metrics), /Audit: last green aaaaaaaaaaaa at .*; no open failure; inconclusive audit-2; 0 escapes/);
+});
+
 test("attributes each failing test to the command that failed it, not to the first failed command", () => {
   const failing = (id: string, seq: number, ms: number): StoredEvent[] => [
     row(seq, id, ms, submitted("acme/app", "per-check")),

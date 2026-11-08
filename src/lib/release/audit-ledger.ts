@@ -1,3 +1,4 @@
+import type { VerificationDeclaration } from "../policy/verification-policy.ts";
 import { repositoryKey, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
 import type { AuditCause, AuditOperation, PublishedLanding, StoredEvent } from "../runner/runner-types.ts";
 
@@ -31,12 +32,18 @@ export type AuditFailure = {
 export type AuditSummary = {
   /** The newest audit that ran in full and passed. */
   lastGreen: { commit: string; finishedAt: string; operationId: string } | null;
-  /** The newest audit that reached a verdict. A cancelled, interrupted or running one is no verdict. */
-  latest: { status: "green" | "failed"; commit: string | null; finishedAt: string; operationId: string } | null;
+  /** The newest audit that reached a verdict. A cancelled, interrupted or running one is no verdict; an inconclusive one reached none. */
+  latest: { status: "green" | "failed" | "inconclusive"; commit: string | null; finishedAt: string; operationId: string } | null;
   /** Audits are declared (some ran or are queued) and none has been green for `AUDIT_OVERDUE_AFTER_MS`. */
   overdue: boolean;
   /** The failure the latest audit belongs to, while it is failing. */
   openFailure: AuditFailure | null;
+  /**
+   * The inconclusive audits since the last audit that judged the repository (green or failing), oldest first:
+   * `audits` are the ones no recorded cause covers yet, and `cause` the newest cause recorded on an inconclusive audit.
+   * Two uncovered ones refuse promotion; a single one does not. Null when there is no such run.
+   */
+  inconclusive: { audits: string[]; cause: (AuditCause & { by: string; at: string }) | null } | null;
   /** Landings an audit failure blamed whose gate had passed, counted once each across every failure. */
   escapes: number;
 };
@@ -44,7 +51,19 @@ export type AuditSummary = {
 /** What the ledger reads of an audit: an `AuditOperation` supplies it, and so do the stored events (`auditSummariesFromEvents`). */
 export type AuditRecord = Pick<AuditOperation, "id" | "submittedAt" | "finishedAt" | "result" | "head" | "cause">;
 
-type Verdicted = { operation: AuditRecord; green: boolean; finishedAt: string; commit: string | null };
+type Verdicted = { operation: AuditRecord; verdict: "green" | "failed" | "inconclusive"; finishedAt: string; commit: string | null };
+
+/**
+ * Whether a failed audit could not judge the suite: every one of its failures is a non-zero exit from a command that
+ * declares that exit code as inconclusive, decided from the failures and the policy that ran, never from output text.
+ * A timeout, signal, kill, spawn failure or undeclared exit is a failure. Fixed on the audit's terminal event when it
+ * ends, so a later policy cannot change what a recorded audit meant.
+ */
+export function auditInconclusive(failures: readonly { checkIndex: number; outcome: string; exitCode: number | null }[],
+  commands: readonly VerificationDeclaration[]): boolean {
+  return failures.length > 0 && failures.every((failure) => failure.outcome === "nonzero_exit" && failure.exitCode !== null
+    && commands[failure.checkIndex]?.inconclusiveExitCodes?.includes(failure.exitCode) === true);
+}
 
 /**
  * An audit counts as green only when it ran every declared command to a pass: none skipped, none reused.
@@ -55,12 +74,12 @@ function ranInFull(result: Extract<NonNullable<AuditRecord["result"]>, { type: "
     && result.skipped.length === 0 && result.reused.length === 0;
 }
 
-/** An audit's verdict, or null while it has none (queued, running, cancelled, interrupted). */
+/** An audit's verdict, or null while it has none (queued, running, cancelled, interrupted). An inconclusive audit judged nothing. */
 function verdictOf(operation: AuditRecord): Verdicted | null {
   const { result, finishedAt } = operation;
   if (!finishedAt) return null;
-  if (result?.type === "audited") return { operation, green: ranInFull(result), finishedAt, commit: result.commit };
-  if (result?.type === "failed") return { operation, green: false, finishedAt, commit: operation.head ?? null };
+  if (result?.type === "audited") return { operation, verdict: ranInFull(result) ? "green" : "failed", finishedAt, commit: result.commit };
+  if (result?.type === "failed") return { operation, verdict: result.inconclusive === true ? "inconclusive" : "failed", finishedAt, commit: operation.head ?? null };
   return null;
 }
 
@@ -107,11 +126,21 @@ export function auditSummary({ audits, landings }: { audits: readonly AuditRecor
   const failures: { failure: AuditFailure; open: boolean }[] = [];
   let green: Verdicted | null = null;
   let cluster: Verdicted[] = [];
+  // Inconclusive audits judge nothing: they neither join nor close a failure, and only a judging verdict (green or
+  // failing) breaks a run of them. Cancelled, interrupted and killed audits are not verdicts and do neither.
+  let inconclusiveRun: Verdicted[] = [];
   const close = () => { if (cluster.length) failures.push({ failure: failureOf(cluster, green, published), open: false }); cluster = []; };
   for (const verdict of verdicts) {
-    if (verdict.green) { close(); green = verdict; } else cluster.push(verdict);
+    if (verdict.verdict === "green") { close(); green = verdict; inconclusiveRun = []; }
+    else if (verdict.verdict === "failed") { cluster.push(verdict); inconclusiveRun = []; }
+    else inconclusiveRun.push(verdict);
   }
   if (cluster.length) { failures.push({ failure: failureOf(cluster, green, published), open: true }); cluster = []; }
+  // A cause recorded on an audit of this run covers the run's audits up to when it was recorded, and no later ones; a
+  // cause from an earlier run explained that run, as a failure's cause explains only that failure.
+  const inconclusiveCauses = inconclusiveRun.flatMap(({ operation }) => operation.cause ? [operation.cause] : []);
+  const uncovered = inconclusiveRun.filter((verdict) => !inconclusiveCauses.some((cause) => Date.parse(cause.at) >= Date.parse(verdict.finishedAt)));
+  const recordedInconclusive = inconclusiveCauses.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
   const culprits = new Set(failures.flatMap(({ failure }) => failure.cause?.kind === "culprits" ? failure.cause.landings : [])
     .filter((commit) => published.get(commit)?.gate === "green"));
   const latest = verdicts.at(-1);
@@ -120,9 +149,11 @@ export function auditSummary({ audits, landings }: { audits: readonly AuditRecor
   const open = failures.find((entry) => entry.open);
   return {
     lastGreen: green ? { commit: green.commit!, finishedAt: green.finishedAt, operationId: green.operation.id } : null,
-    latest: latest ? { status: latest.green ? "green" : "failed", commit: latest.commit, finishedAt: latest.finishedAt, operationId: latest.operation.id } : null,
+    latest: latest ? { status: latest.verdict, commit: latest.commit, finishedAt: latest.finishedAt, operationId: latest.operation.id } : null,
     overdue: since !== null && now.getTime() - since > AUDIT_OVERDUE_AFTER_MS,
     openFailure: open?.failure ?? null,
+    inconclusive: inconclusiveRun.length ? { audits: uncovered.map(({ operation }) => operation.id),
+      cause: recordedInconclusive ? { ...recordedInconclusive.cause, by: recordedInconclusive.by, at: recordedInconclusive.at } : null } : null,
     escapes: culprits.size,
   };
 }
@@ -130,24 +161,36 @@ export function auditSummary({ audits, landings }: { audits: readonly AuditRecor
 /** Why a promotion is refused on account of the audits, or null when it is not. */
 export function promotionRefusal(summary: AuditSummary): string | null {
   const failure = summary.openFailure;
-  if (!failure || failure.cause) return null;
-  const suspects = failure.suspects.length ? ` Suspects: ${failure.suspects.slice(-5).map((commit) => commit.slice(0, 12)).join(", ")}${failure.suspects.length > 5 ? ` and ${failure.suspects.length - 5} earlier` : ""}.` : "";
-  return `The latest audit failed${failure.commit ? ` at ${failure.commit.slice(0, 12)}` : ""} and no cause is recorded.${suspects} `
+  if (failure && !failure.cause) {
+    const suspects = failure.suspects.length ? ` Suspects: ${failure.suspects.slice(-5).map((commit) => commit.slice(0, 12)).join(", ")}${failure.suspects.length > 5 ? ` and ${failure.suspects.length - 5} earlier` : ""}.` : "";
+    return `The latest audit failed${failure.commit ? ` at ${failure.commit.slice(0, 12)}` : ""} and no cause is recorded.${suspects} `
+      + `Record one with slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> before promoting.`;
+  }
+  const run = summary.inconclusive?.audits ?? [];
+  if (run.length < 2) return null;
+  // What last judged the repository, stated as it stands: an open failure here already has its cause recorded, and a
+  // green one is the newest judging verdict when there is no open failure.
+  const judged = failure ? `The last audit to judge the repository failed${failure.commit ? ` at ${failure.commit.slice(0, 12)}` : ""} and its cause is recorded`
+    : summary.lastGreen ? `The last audit to judge the repository was green at ${summary.lastGreen.commit.slice(0, 12)}`
+    : "No audit has judged the repository yet";
+  return `The latest ${run.length === 2 ? "two" : run.length} audits were inconclusive (${run.join(", ")}) and no cause is recorded for them. ${judged}; inconclusive audits do not judge it. `
     + `Record one with slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> before promoting.`;
 }
 
 /**
- * The failing audit a cause attaches to: `requested`, which must have failed, or the newest audit of the open
- * failure. A cause covers its whole failure, so which of its audits carries it is immaterial.
+ * The failing audit a cause attaches to: `requested`, which must have failed (an inconclusive audit counts, as it
+ * recorded a failure it could not judge), or the newest audit of the open failure — answered first when there is one —
+ * or the newest uncovered inconclusive audit of a refusing run. A cause covers its whole failure, or the inconclusive
+ * audits up to when it was recorded, so which of its audits carries it is immaterial.
  */
 export function auditToExplain<Audit extends AuditRecord>(audits: readonly Audit[], summary: AuditSummary, requested?: string): { ok: true; audit: Audit } | { ok: false; reason: string } {
   if (requested !== undefined) {
     const audit = audits.find((operation) => operation.id === requested);
     if (!audit) return { ok: false, reason: `${requested} is not an audit of this repository` };
-    return audit.result?.type === "failed" || (audit.result?.type === "audited" && verdictOf(audit)?.green === false)
+    return audit.result?.type === "failed" || (audit.result?.type === "audited" && verdictOf(audit)?.verdict === "failed")
       ? { ok: true, audit } : { ok: false, reason: `${requested} did not fail, so it has no cause to record` };
   }
-  const id = summary.openFailure?.audits.at(-1);
+  const id = summary.openFailure?.audits.at(-1) ?? ((summary.inconclusive?.audits.length ?? 0) >= 2 ? summary.inconclusive!.audits.at(-1) : undefined);
   const audit = audits.find((operation) => operation.id === id);
   return audit ? { ok: true, audit }
     : { ok: false, reason: "The latest audit did not fail, so there is no open failure to explain; name an earlier failing audit with --audit" };

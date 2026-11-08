@@ -13,7 +13,7 @@ import type { LandingArtifact } from "../landing/landing-artifact.ts";
 import { completeLanding, conflictedPaths, fetchIntegration, fetchIntegrationIfMoved, landingIO } from "../landing/landing-steps.ts";
 import { createDeployScheduler } from "../release/deploy-scheduler.ts";
 import { createResetScheduler } from "../release/reset-scheduler.ts";
-import { auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
+import { auditInconclusive, auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
 import { createAuditScheduler } from "../release/audit-scheduler.ts";
 import { runReset } from "../release/reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "../release/deploy.ts";
@@ -2096,7 +2096,7 @@ export function createRunnerQueue(input: {
           await schedule(operation.repo, verdict.commitId, readLandedPolicy).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
         // A reset, whatever its verdict, starts the next interval.
         if (operation.kind === "reset") await scheduleLatest(operation.repo, progress);
-        // An audit with a verdict waits for the next scheduled time; one without is due again now. What its head declared decides.
+        // An audit with a verdict waits for the next scheduled time (an inconclusive audit ends `failed`, so it waits too); one without is due again now. What its head declared decides.
         if (operation.kind === "audit") {
           if (auditPolicy === undefined) auditScheduler.reconsider(operation.repo);
           else auditScheduler.consider(operation.repo, auditPolicy);
@@ -2187,8 +2187,18 @@ export function createRunnerQueue(input: {
         const via = gate?.attempt.executor;
         await waitForHostBudget(gate?.placement, "background", controller.signal);
         const commands = auditPolicy.commands.map((check) => [check.executable, ...check.args].join(" "));
-        const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, abortSignal: controller.signal,
-          run: (request) => run(request, "gate", via) });
+        let verification;
+        try {
+          verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, abortSignal: controller.signal,
+            run: (request) => run(request, "gate", via) });
+        } catch (error) {
+          // Every failure a declared could-not-judge exit: the audit could not judge the suite, recorded as such on
+          // its terminal event now, from the policy that ran. Anything else is an ordinary failure, as before, and a
+          // kill stays a kill whatever its stopping commands exit with.
+          if (!controller.signal.aborted && error instanceof RequiredVerificationError && auditInconclusive(error.evidence.failures, auditPolicy.commands))
+            return { type: "failed", stage, reason: error.message, inconclusive: true, ...failedVerification(error.evidence) };
+          throw error;
+        }
         // A kill stops its commands, which then read as failures.
         if (controller.signal.aborted) throw new OwnerKill();
         if (verification.gaps.length) return { type: "failed", stage, reason: `The audit did not run in full, so it is not green: ${verification.gaps.map((gap) => `${gap.command} (${gap.reason || gap.capability})`).join("; ")}` };
