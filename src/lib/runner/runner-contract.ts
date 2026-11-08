@@ -37,7 +37,7 @@ export const candidateBookmark = (changeId: string): string => `slipjay/changes/
  * too. Deploys run in their own lane and are never killed: each project's command
  * ends at its declared deadline.
  */
-export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "screening", "verifying", "waiting-for-predecessor", "resetting"];
+export const KILLABLE_STAGES: readonly RunnerStage[] = ["fetching", "rebasing", "installing", "screening", "verifying", "waiting-for-budget", "waiting-for-predecessor", "resetting"];
 
 /** The reason a killed operation carries; it is never reported as a pass. */
 export const OWNER_KILL_REASON = "killed by the owner, not run to completion";

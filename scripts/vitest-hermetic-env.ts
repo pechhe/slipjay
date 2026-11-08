@@ -35,6 +35,8 @@ if (process.platform === "linux" && existsSync(SHM) && executable(SHM)) {
 
 const home = realpathSync(mkdtempSync(join(tmpdir(), "peach-test-home-")));
 process.env.HOME = home;
+// A runner a test starts must not wait on the real host's load, which is this suite's own.
+process.env.SLIPJAY_HOST_BUDGET = "off";
 // JJ otherwise spawns `tput cols` and `tput lines` on every raw fixture call.
 // Match jjEnvironment's noninteractive fallback without changing an explicit width.
 process.env.COLUMNS ||= "80";

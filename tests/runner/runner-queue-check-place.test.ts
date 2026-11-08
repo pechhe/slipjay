@@ -53,6 +53,31 @@ test("a batch check whose machine names a release-check place runs there, apart 
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("a release check waits for the CPU budget of its machine", async () => {
+  const state = { up: true, opened: 0, closed: 0 };
+  const asked: (string | null)[] = [];
+  let reads = 0;
+  const hostShell = (machine: string | null) => async (script: string) => {
+    if (script.includes("flock")) return "claimed\n";
+    asked.push(machine);
+    return `${machine === "peach-box" && !reads++ ? "99 99" : "1 1"} 1.00 1/100 200\n32\n`;
+  };
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
+    { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "peach-box" }, batchRemote: boat([]), hostShell,
+      machineCheckVerifications: { "peach-box": checkPlace(state) }, releaseGates: () => ['console.log("release checks pass")'] });
+  try {
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    const check = f.log.verifications(REPO)[0]!;
+    await until(() => f.log.operation(check.id)?.result ?? undefined);
+    assert.ok(asked.includes("peach-box"));
+    assert.ok(events(f, check.id, "host_budget_waited").some((event) => event.placement === "machine:peach-box"));
+    assert.ok(events(f, check.id, "progress").some((event) => /This verification is waiting for peach-box's CPU budget: load 99\.0 is over 24\.0/.test(event.line)));
+    const stages = events(f, check.id, "stage").map((event) => event.stage);
+    assert.equal(stages[stages.indexOf("waiting-for-budget") + 1], "verifying", "verifying restarts after the wait, so its deadline does not include it");
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("with the release-check place down, a batch check says so and runs on the boat pool instead", async () => {
   const state = { up: false, opened: 0, closed: 0 };
   const used: string[] = [];

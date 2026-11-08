@@ -46,6 +46,7 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bound
 import { machineVerification } from "./machine-verifier.ts";
 import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
+import { awaitHostBudget, type HostBudgetClass, type HostShell } from "./host-budget.ts";
 import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, MachineVerification, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
@@ -179,6 +180,10 @@ export function createRunnerQueue(input: {
   recoveryRetryMs?: number;
   /** Runs the gate of each repository whose runner entry names a `verifier`; absent, such a repository cannot verify. */
   remoteVerification?: RemoteVerification;
+  /** Reaches a host a gate, audit or release check is about to run on (null: this one), to keep its CPU budget (SJ-212); absent, no job waits for it. */
+  hostShell?: (machine: string | null) => HostShell;
+  /** How often a job waiting for its host's CPU budget reads it again, for embedded runners and tests. */
+  hostBudgetPollMs?: number;
   machineVerifications?: Record<string, import("./runner-types.ts").MachineVerification | readonly import("./runner-types.ts").MachineVerification[]>;
   /** The release-check places by the boat pool each serves (SJ-202), for embedded runners and tests; absent, built from `checkPlace`. */
   machineCheckVerifications?: Record<string, import("./runner-types.ts").MachineVerification>;
@@ -1407,6 +1412,23 @@ export function createRunnerQueue(input: {
       .filter(({ event }) => event.type === "yielded" && event.to === AWAITING_REMOTE_EXECUTOR).length;
     type GateAttempt = { attempt: RemoteAttempt; started: number; placement: GatePlacement; place?: number };
     /**
+     * Waits for the CPU budget of the host a job's commands are about to run on (SJ-212), in a stage of its own while it
+     * is over budget, so the wait counts against neither its commands' timeouts, a stage's deadline nor the verify times
+     * its budgets judge. A boat VM is its own host.
+     */
+    async function waitForHostBudget(placement: GatePlacement | undefined, jobClass: HostBudgetClass, signal: AbortSignal): Promise<void> {
+      if (!input.hostShell || placement === "boat") return;
+      const machine = placement?.startsWith("machine:") ? placement.slice("machine:".length) : null;
+      let waiting = false;
+      const { waited, waitedMs } = await awaitHostBudget({ shell: input.hostShell(machine), job: `This ${operation.kind}`, host: machine ?? config.name ?? "the runner host", jobClass, signal,
+        onWait: (line) => {
+          if (!waiting) { waiting = true; setStage("waiting-for-budget"); }
+          progress(`[verify] ${line}`);
+        }, ...input.hostBudgetPollMs === undefined ? {} : { pollMs: input.hostBudgetPollMs } });
+      if (waited) append(operation.id, { type: "host_budget_waited", placement: placement ?? "host", waitedMs });
+      if (waiting) setStage("verifying");
+    }
+    /**
      * Where this attempt's gate runs, chosen as its commands are about to run (SJ-189): the repository's runner-host gate
      * place when it has one and it is free, otherwise the remote verifier. While boat is held, a gate that finds the host
      * place busy returns to the queue as any boat-held landing does, never opening boat.
@@ -1779,6 +1801,7 @@ export function createRunnerQueue(input: {
             }
             const verification = await (async () => {
               try {
+                await waitForHostBudget(remote?.placement, "gate", abortSignal);
                 return await runRequiredVerification({
                   root: checkout, checks: candidateContext.configuration.requiredLandingVerification,
                   environment, onProgress: progress, run: remote ? (request: BoundedProcessRequest, purpose?: RunPurpose) => run(request, purpose, remote.attempt.executor) : run, abortSignal,
@@ -2162,6 +2185,7 @@ export function createRunnerQueue(input: {
         }
         setStage("verifying");
         const via = gate?.attempt.executor;
+        await waitForHostBudget(gate?.placement, "background", controller.signal);
         const commands = auditPolicy.commands.map((check) => [check.executable, ...check.args].join(" "));
         const verification = await runRequiredVerification({ root: checkout, checks: auditPolicy.commands, environment, onProgress: progress, abortSignal: controller.signal,
           run: (request) => run(request, "gate", via) });
@@ -2310,6 +2334,7 @@ export function createRunnerQueue(input: {
         progress(`[batch] checking ${batch.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`
           + (after ? `; ${after.commitId.slice(0, 12)} already passed, so diagnosis considers the ${landings.length} after it` : ""));
         let open: { commit: string; gate?: GateAttempt } | undefined;
+        let budgetTaken = false;
         const releaseMachine = async () => {
           const held = open?.gate;
           open = undefined;
@@ -2349,6 +2374,8 @@ export function createRunnerQueue(input: {
           const indexes = scope ? scope.checks : plan.checks.map((_, index) => index);
           const runIds: string[] = [];
           let failure: RequiredVerificationError | undefined;
+          // Once per check: a later run bisecting its failure waits for nothing but this check's own load to fade.
+          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, "background", controller.signal); }
           try {
             await runRequiredVerification({ root: checkout, checks: indexes.map((index) => plan.checks[index]), environment: releaseEnvironment(base, commit, scope?.suites),
               onProgress: progress, abortSignal: controller.signal,

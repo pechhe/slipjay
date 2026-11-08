@@ -16,7 +16,7 @@ import type { TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
  * Stages of one operation, in order; `queued` until the queue reaches it. `paused` is
  * never recorded: a queued operation shows it while the owner has paused the runner or boat admission is held.
  */
-export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "screening" | "verifying" | "waiting-for-predecessor" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
+export type RunnerStage = "queued" | "paused" | "fetching" | "rebasing" | "installing" | "screening" | "verifying" | "waiting-for-budget" | "waiting-for-predecessor" | "integrating" | "finalizing" | "publishing" | "deploying" | "resetting";
 
 /** Terminal and live states of an operation, derived from its events. */
 export type OperationStatus = "queued" | "running" | "landed" | "released" | "verified" | "deployed" | "reset" | "audited" | "failed" | "declined" | "superseded" | "cancelled";
@@ -180,6 +180,8 @@ export type OperationEvent =
   | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; infrastructure?: boolean; placement?: GatePlacement; setupMs?: number; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
   /** The gate waited for its busy machine place and then took it (SJ-200). */
   | { type: "gate_waited"; placement: `machine:${string}`; waitedMs: number }
+  /** A job waited for its host's CPU budget before its commands started (SJ-212). */
+  | { type: "host_budget_waited"; placement: GatePlacement; waitedMs: number }
   | { type: "gate_fallback"; placement: `machine:${string}`; reason: string; cause: "busy" | "infrastructure" }
   | { type: "verification_base"; base: string; candidate?: string;
       /** The candidate policy's time budgets, so metrics can judge each repository by its own. */

@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.55.0
+
+- **Heavy jobs wait for their host's CPU budget (SJ-212):** a landing gate, nightly audit or release check about to run on
+  the runner host or a machine place now waits while that host's load is over budget, before its commands' timeouts
+  start, and says what it is waiting for. Gates may start up to the host's CPU count and wait at most 2 minutes; audits and release
+  checks start up to three quarters of it and wait at most 30 minutes, so the nightly audits no longer pile onto one
+  host together. A job at its limit runs anyway and says so. `slipjay host-budget wait` gives any other heavy job the
+  same door, with no queue or service behind it.
+
 ## v3.54.0
 
 - **A migration can declare itself previous-release-compatible (YS-614):** a SQL migration whose first line is

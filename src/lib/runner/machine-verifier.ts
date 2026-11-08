@@ -44,11 +44,15 @@ async function retainedPaths(run: RemoteRun, checkout: string, base: string): Pr
   return kept;
 }
 
+export function machineSshArgs(config: Pick<GateMachineConfig, "account" | "ssh">): string[] {
+  return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-l", config.account, config.ssh];
+}
+
 /** A shared SSH machine. No provider lifecycle or VM-wide cleanup belongs here. */
 export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string; place?: number; check?: boolean } = {}): MachineVerification {
   const run = options.run ?? runBoundedProcess;
   const { local, bundleMissing } = remoteFiles(run);
-  const ssh = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-l", config.account, config.ssh];
+  const ssh = machineSshArgs(config);
   // A machine with several places (SJ-200) keeps place 0 at its root, so its warm checkout survives, and place N in
   // `place-N` under it. The bounded filesystem, its quota-ready marker and the install cache stay machine-wide.
   const machineRoot = config.root.replace(/\/$/, "");

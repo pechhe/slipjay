@@ -75,6 +75,25 @@ the runner's `limits` bound concurrent runs together.
   (such as a memory-capped check) must pass `--slice="$SLIPJAY_SYSTEMD_SLICE"`, or that
   scope leaves the runner's limits and outlives a kill of the run.
 
+### The host's CPU budget
+
+A gate, audit or release check that is about to run its commands on the runner host or a machine place first waits while
+that host is over its CPU budget (SJ-212). A boat VM is its own host, so a gate there does not wait. While it waits the
+operation is in the `waiting-for-budget` stage, so the wait counts against neither its commands' timeouts, a stage's deadline
+nor the verify times its budgets judge. It reports a `[verify]` progress line naming the load and the limit, and the ledger
+records `host_budget_waited`. A release check takes the budget once, not for each run bisecting a failure.
+
+The budget reads the kernel's load figures and takes the larger of the one- and five-minute loads. A landing gate may
+start up to the host's CPU count and waits at most 2 minutes. Audits and release checks ("background" work) start up to
+three quarters of it, wait a further minute after any job started on the host, so jobs started together do not all read
+the same quiet host, and wait at most 30 minutes. A job at its limit runs anyway and says so: the budget never fails a
+job. A host whose figures cannot be read admits the job. A runner started with `SLIPJAY_HOST_BUDGET=off` takes no budget at all.
+
+There is no queue and no service. The only state is the modification time of `~/.slipjay/host-budget-admitted` on that
+host and the lock around it. A gate claims no settling time of its own: its start only delays background work. Other heavy jobs take the same door with `slipjay host-budget wait --job <name> [--gate] [--max-wait-seconds <n>]`,
+which exits 0 when the job may start and prints what it waits for to stderr. YardSmith's `ys-preview` uses it, as should
+anything an agent starts for a load test or long measurement.
+
 ### Optional depth-two verification
 
 A runner repository entry can set `verificationDepth: 2` (default `1`) only when

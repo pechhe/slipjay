@@ -87,6 +87,31 @@ test("machine screens exclude one another, queue for the place rather than use b
   } finally { await rm(join(f.root, "hold"), { force: true }); await f.dispose(); }
 });
 
+test("a machine gate over budget waits for that machine's CPU budget, and a gate on boat reads no host", async () => {
+  const p = places();
+  const asked: (string | null)[] = [];
+  let reads = 0;
+  const hostShell = (machine: string | null) => async (script: string) => {
+    if (script.includes("flock")) return "claimed\n";
+    asked.push(machine);
+    return `${reads++ ? "1 1" : "99 99"} 1.00 1/100 200\n32\n`;
+  };
+  const f = await fixture(false, false, undefined, false, { ...options(p), hostShell, gates: (root) => [gate(root)] });
+  try {
+    const a = f.submit(await f.candidate("a"));
+    assert.equal((await f.land(a))?.type, "landed");
+    assert.deepEqual([...new Set(asked)], ["peach-box"]);
+    const events = f.log.events({ operationId: a }).map(({ event }) => event);
+    assert.ok(events.some((event) => event.type === "host_budget_waited" && event.placement === "machine:peach-box"));
+    assert.ok(events.some((event) => event.type === "progress" && /waiting for peach-box's CPU budget: load 99\.0 is over 32\.0/.test(event.line)));
+    asked.length = 0;
+    p.fail("SSH unreachable");
+    assert.equal((await f.land(f.submit(await f.candidate("b"))))?.type, "landed");
+    assert.deepEqual(placements(f), ["machine:peach-box", "boat"]);
+    assert.deepEqual(asked, [], "a boat VM is its own host");
+  } finally { await f.dispose(); }
+});
+
 test("machine setup infrastructure falls back to boat, and a machine gate changing candidate files fails", async () => {
   const p = places();
   const f = await fixture(false, false, undefined, false, { ...options(p), gates: (root) => [gate(root)] });
