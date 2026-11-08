@@ -13,7 +13,9 @@ export default defineConfig({
     pool: "forks",
     // The runner's systemd slice bounds CPU and memory. Keep that budget busy
     // while subprocess-heavy fixtures wait, with an isolated fork per file.
-    maxWorkers: "100%",
+    // Half the CPUs: at "100%" one complete suite held peach-live's five-minute load at 35 on 14 CPUs, with CPU pressure
+    // up to 75%, because each worker's fixtures start their own jj, git and runner processes (SJ-212).
+    maxWorkers: "50%",
     testTimeout: 120_000,
     hookTimeout: 120_000,
     setupFiles: [hermeticEnvironment],
