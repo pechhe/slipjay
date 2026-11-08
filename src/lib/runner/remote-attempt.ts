@@ -108,8 +108,12 @@ export const cleanExclusions = (retain: readonly string[] = []) =>
   ["node_modules", ".jj", ...retain].map((pattern) => `-e ${shellWord(pattern)}`).join(" ");
 
 /** Receive the bundle on stdin and expose precisely the candidate and base to colocated jj. Cwd is the checkout. */
-export function receiveCandidate(input: { bundle: string; ref: string; candidate: string; base: string; integrationBranch: string; bookmarkPrefix: string; retain?: readonly string[] }): string {
+export function receiveCandidate(input: { bundle: string; ref: string; candidate: string; base: string; integrationBranch: string; bookmarkPrefix: string; retain?: readonly string[]; workingCopy?: "candidate" | "child" }): string {
   const { bundle, ref, candidate, base, integrationBranch, bookmarkPrefix, retain } = input;
+  // A gate's selection reads the candidate as the working copy (`jj edit`), so git's HEAD is its parent. A release
+  // check or audit verifies an exact commit and refuses a checkout git reports as changed, so it works in an empty
+  // child (`jj new`): HEAD is the commit, the index its tree, and `git status` is clean.
+  const checkout = input.workingCopy === "child" ? `jj new ${shellWord(candidate)} --quiet` : `jj edit ${shellWord(candidate)} --quiet`;
   return `cat > ${shellWord(bundle)}
 if [ -s ${shellWord(bundle)} ]; then git fetch ${shellWord(bundle)} ${shellWord(`+${ref}/*:${ref}/*`)}; fi
 rm -f ${shellWord(bundle)}
@@ -118,7 +122,7 @@ git update-ref ${shellWord(`refs/heads/${bookmarkPrefix}-base`)} ${shellWord(bas
 [ -d .jj ] || jj git init --colocate >/dev/null 2>&1
 jj git import --quiet >/dev/null 2>&1 || true
 jj bookmark set ${shellWord(integrationBranch)} -r ${shellWord(base)} --allow-backwards --quiet
-jj edit ${shellWord(candidate)} --quiet
+${checkout}
 git clean -ffdxq ${cleanExclusions(retain)}`;
 }
 

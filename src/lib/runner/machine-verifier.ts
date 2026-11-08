@@ -188,7 +188,7 @@ git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepa
           try {
             const bundle = await bundleMissing(checkout, [`${ref}/candidate`, `${ref}/base`], known, join(scratch!, "candidate.bundle"));
             await control(scoped(`cd ${shellWord(repo)}
-${receiveCandidate({ bundle: `${path}/candidate.bundle`, ref, candidate, base, integrationBranch, bookmarkPrefix: "slipjay", retain })}
+${receiveCandidate({ bundle: `${path}/candidate.bundle`, ref, candidate, base, integrationBranch, bookmarkPrefix: "slipjay", retain, workingCopy: check ? "child" : "candidate" })}
 git update-ref -d ${shellWord(`${ref}/candidate`)}
 git update-ref -d ${shellWord(`${ref}/base`)}`, `slipjay-receive-${id}`), signal, bundle, 900_000);
           } finally {

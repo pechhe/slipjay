@@ -65,11 +65,27 @@ function stand() {
     if (script.includes("git write-tree")) return result(`${drift ? "changed" : tree}\n${memoryAfter}`);
     return result();
   };
-  const make = (place?: number) => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run, ...place === undefined ? {} : { place } });
+  const make = (place?: number, check = false) => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run, ...place === undefined ? {} : { place }, ...check ? { check } : {} });
   return { scripts, bundles, make, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
 }
 const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv) => m.open({ environment, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 const command = { executable: "bun", args: ["run", "test"], cwd: "/runner/checkout", timeoutMs: 1000, maxOutputBytes: 1024 };
+
+test("a gate works in the candidate itself, while a release check or audit works in an empty child of the commit it verifies", async () => {
+  // git status in a colocated checkout compares against @'s parent: a check needs that parent to be the verified commit.
+  const s = stand();
+  const receive = () => s.scripts.findLast((script) => script.includes("slipjay-receive-"))!;
+  const gate = s.make(1);
+  await gate.recover!([]);
+  await (await open(gate)).close();
+  assert.match(receive(), new RegExp(`jj edit '[\\\\']*${"c".repeat(40)}`));
+  assert.doesNotMatch(receive(), /jj new /);
+  const check = s.make(undefined, true);
+  await check.recover!([]);
+  await (await open(check)).close();
+  assert.match(receive(), new RegExp(`jj new '[\\\\']*${"c".repeat(40)}`));
+  assert.doesNotMatch(receive(), /jj edit /);
+});
 
 test("fixed SSH attempt transfers the candidate, isolates command paths and labels, detects drift and cleans only its owner", async () => {
   const s = stand(), m = s.make();
