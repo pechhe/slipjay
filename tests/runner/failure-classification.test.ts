@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { classifyFailure, classifyVerificationFailures, FAILURE_COMMAND_PATTERNS, FAILURE_RULE_VERSION, parseFailureOutput } from "../../src/lib/runner/failure-classification.ts";
+import { classifyEvent, classifyFailure, classifyVerificationFailures, FAILURE_COMMAND_PATTERNS, FAILURE_RULE_VERSION, failureCategory, failureCategoryOf, parseFailureOutput } from "../../src/lib/runner/failure-classification.ts";
 import { OWNER_KILL_REASON } from "../../src/lib/runner/runner-contract.ts";
 import { verificationDiagnosticCollector } from "../../src/lib/infra/verification-failure.ts";
-import type { OperationEvent, VerificationFailureRef } from "../../src/lib/runner/runner-types.ts";
+import type { ClassifiedFact, OperationEvent, StoredEvent, VerificationFailureRef } from "../../src/lib/runner/runner-types.ts";
 
 test("parses Vitest, Bun and node TAP failures as concrete test execution", () => {
   const vitest = parseFailureOutput([
@@ -73,7 +73,7 @@ test("classifies terminal precedence, rebase conflicts, verification infrastruct
   assert.equal(classifyFailure({ ...failed("verifying", "install failed"), command: "bun install" }, { paused: false, held: false }).cause, "infrastructure");
 
   assert.deepEqual(FAILURE_COMMAND_PATTERNS.map(({ kind }) => kind), ["fetch", "install", "test", "lint", "typecheck"]);
-  assert.equal(FAILURE_RULE_VERSION, 2);
+  assert.equal(FAILURE_RULE_VERSION, 3);
 });
 
 test("combines per-check causes: gate if any check is a gate failure, infrastructure only if all are", () => {
@@ -130,7 +130,7 @@ test("a gate's failure summary pairs each failing test with its first error and 
     { failure: failures[0]!, run: { runId: "r-tests", command: failures[0]!.command, host: "runner", startedAt: "now", firstErrors: [{ test: "apps/workbench/src/plan.spec.ts > plan > rejects an empty route", error: "AssertionError: expected 1 to be 2" }] } },
     { failure: failures[1]!, run: { runId: "r-check", command: failures[1]!.command, host: "runner", startedAt: "now", failureCauses: ["lint: 3 errors"] } },
   ]);
-  assert.equal(fact.ruleVersion, 2);
+  assert.equal(fact.ruleVersion, 3);
   assert.equal(fact.checks?.[0]?.firstErrors?.length, 1, "the run's and the output's pairing of one test count once");
   assert.deepEqual(fact.checks?.[1]?.failureCauses, ["lint: 3 errors"]);
   assert.deepEqual(fact.failureCauses, ["core typecheck: src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'.", "lint: 3 errors"]);
@@ -177,4 +177,74 @@ test("the selected diagnostics never file bun's recap under the last file, howev
   assert.match(selected, /1 tests failed:/);
   assert.doesNotMatch(selected, /test\/plan\.test\.ts:\n\(fail\)/);
   assert.deepEqual(parseFailureOutput(selected).failingTests, ["test/seed.test.ts > seeded"]);
+});
+
+const factOf = (extra: Partial<ClassifiedFact> = {}): ClassifiedFact => ({ type: "classified", ruleVersion: 3, cause: "gate", failingTests: [], diagnostics: [], ...extra });
+const gateReason = (kind: string, tail = "") => `Required verification failed (nonzero_exit): bun run test (check 1)\nChecks:\n1. bun run test: failed\nCheck 1 (bun run test):\nFailure: ${kind}\n${tail}`;
+
+test("a failure is a regression when its check names a test, an error or a diagnostic, and unresolved when it names none (SJ-215)", () => {
+  const named = failureCategory({ reason: gateReason("error", "Failing tests (1):\n  a.test.ts > breaks\nFirst error:\n  AssertionError: expected 1 to be 2"), fact: factOf({ failingTests: ["a.test.ts > breaks"] }) });
+  assert.deepEqual(named, { kind: "regression", evidence: "AssertionError: expected 1 to be 2" });
+  const testTimeout = failureCategory({ reason: gateReason("error", "Failing tests (1):\n  a.test.ts > slow\nOutput tail (last 1 of 1 lines):\n  ^ this test timed out after 50ms."), fact: factOf({ failingTests: ["a.test.ts > slow"] }) });
+  assert.notEqual(testTimeout.kind, "infrastructure", "a test's own timeout wording in captured output is not a runner breakage");
+  const laterCheck = `${gateReason("error", "Output tail (last 1 of 1 lines):\n  noise")}\nCheck 2 (bun run lint):\nFailure: error\nexecutor lost`;
+  assert.equal(failureCategory({ reason: laterCheck, fact: factOf() }).kind, "infrastructure", "a later check's own runner wording still counts after an earlier check's captured output");
+  assert.equal(failureCategory({ reason: gateReason("diagnostics"), fact: factOf({ diagnostics: ["src/a.ts(1,1): error TS2345: bad"] }) }).kind, "regression");
+  assert.equal(failureCategory({ reason: gateReason("error"), fact: factOf({ failureCauses: ["architecture: scoped-static exited 1"] }) }).kind, "regression");
+  assert.equal(failureCategory({ reason: gateReason("error"), fact: factOf() }).kind, "unresolved");
+});
+
+test("tests that timed out are the host's only when it was loaded past two runs per CPU, else unresolved", () => {
+  const timeout = { reason: gateReason("timeout and assertion"), fact: factOf({ failingTests: ["a.test.ts > one", "a.test.ts > two"] }) };
+  assert.equal(failureCategory({ ...timeout, load: { load1: 43, cpus: 14 } }).kind, "infrastructure");
+  assert.equal(failureCategory({ ...timeout, load: { load1: 20, cpus: 14 } }).kind, "unresolved");
+  assert.equal(failureCategory(timeout).kind, "unresolved");
+});
+
+test("the runner, a remote or a credential breaking is infrastructure by what the event says, not by the stage it failed in", () => {
+  const infrastructure = (reason: string) => failureCategory({ reason, fact: factOf({ cause: "infrastructure" }) }).kind;
+  assert.equal(infrastructure("runner restarted during verifying; land again"), "infrastructure");
+  assert.equal(infrastructure("executor lost: ssh to machine peach-box (ssh ended by SIGKILL)"), "infrastructure");
+  assert.equal(infrastructure("Remote executor unavailable (boat): boat resume: no answer from boat within 30s"), "infrastructure");
+  assert.equal(infrastructure("jj --color=never git fetch failed: git@github.com: Permission denied (publickey)."), "infrastructure");
+  // A failed event in an infrastructure stage that names no breakage decides nothing.
+  assert.equal(infrastructure("b5cb02eb8006 is already on master"), "unresolved");
+  assert.equal(infrastructure("Invalid reset identity, deadline or interval"), "unresolved");
+});
+
+test("a conflict or an invalidated prefix is a moved base, and a batch check's own flake finding is a flake", () => {
+  assert.equal(failureCategory({ reason: "Rebase produced conflicts; resolve them in this workspace and retry:\nabc A change", fact: factOf({ cause: "conflict" }) }).kind, "moved_base");
+  assert.equal(failureCategory({ reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source", fact: factOf({ cause: "infrastructure" }) }).kind, "moved_base");
+  assert.deepEqual(failureCategory({ reason: "Batch check of 44f99cfcf49c was flaky: forge-build-database failed and passed on its rerun", fact: factOf() }),
+    { kind: "flake", evidence: "Batch check of 44f99cfcf49c was flaky: forge-build-database failed and passed on its rerun" });
+});
+
+test("classifying an event records its category on failures only, from the operation's own host load", () => {
+  const stage = { type: "stage", stage: "verifying", health: { load1: 43, cpus: 14, freeMemoryBytes: 1, totalMemoryBytes: 2, running: 1 } } as const;
+  const history: StoredEvent[] = [{ seq: 1, operationId: "op", at: "2026-11-09T00:00:00.000Z", event: stage }];
+  const failed: OperationEvent = { type: "failed", stage: "verifying", reason: gateReason("timeout", "Failing tests (1):\n  a.test.ts > slow"), command: "bun run test", output: " FAIL a.test.ts > slow\nTest timed out in 5000ms." };
+  const fact = classifyEvent({ event: failed, operation: null, history, paused: false, held: false });
+  assert.equal(fact.ruleVersion, 3);
+  assert.equal(fact.category?.kind, "infrastructure");
+  assert.equal(classifyEvent({ event: { type: "superseded", by: "newer" }, operation: null, history, paused: false, held: false }).category, undefined);
+  assert.equal(failureCategoryOf([...history, { seq: 2, operationId: "op", at: "2026-11-09T00:01:00.000Z", event: failed }, { seq: 3, operationId: "op", at: "2026-11-09T00:01:00.000Z", event: fact }])?.kind, "infrastructure");
+  assert.equal(failureCategoryOf(history), undefined);
+});
+
+test("a failure recorded before rule 3 is a regression only on an error that is its own: a thrown error, a type error or a failed static check", () => {
+  const old = (extra: Partial<ClassifiedFact>) => factOf({ ruleVersion: 2, ...extra });
+  // The summary's first error was then the first anywhere in the output: a logged line is no evidence.
+  assert.equal(failureCategory({ reason: gateReason("error", "Failing tests (1):\n  a.test.ts > b\nFirst error:\n  error: {"), fact: old({ failingTests: ["a.test.ts > b"] }) }).kind, "unresolved");
+  assert.equal(failureCategory({ reason: gateReason("error", "Failing tests (1):\n  a.test.ts > b\nFirst error:\n  AssertionError: expected 1 to be 2"), fact: old({ failingTests: ["a.test.ts > b"] }) }).kind, "regression");
+  const script = gateReason("error", 'Output tail (last 2 of 2 lines):\nerror: script "check:weave-names" exited with code 1\nerror: script "check:landing" exited with code 1');
+  assert.deepEqual(failureCategory({ reason: script, fact: old({}) }), { kind: "regression", evidence: "check:weave-names exited 1" });
+  // A test runner's own script exiting says nothing about why.
+  assert.equal(failureCategory({ reason: gateReason("error", 'error: script "test:landing:affected" exited with code 1'), fact: old({}) }).kind, "unresolved");
+  // From rule 3 the summary prints the failing test's own error, so a plain line is evidence.
+  assert.equal(failureCategory({ reason: gateReason("error", "Failing tests (1):\n  a.test.ts > b\nFirst error:\n  error: expect(received).toBe(expected)"), fact: factOf({ failingTests: ["a.test.ts > b"] }) }).kind, "regression");
+});
+
+test("a stale receipt and a moved parent during verification are a moved base", () => {
+  assert.equal(failureCategory({ reason: "stale receipt: reviewed aaa onto bbb, candidate merges aaa onto ccc", fact: factOf() }).kind, "moved_base");
+  assert.equal(failureCategory({ reason: gateReason("diagnostics", "Error: Candidate or integration parent moved during verification"), fact: factOf() }).kind, "moved_base");
 });

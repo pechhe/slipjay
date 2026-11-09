@@ -1,0 +1,46 @@
+stdout | src/orchestration-v2/Adapters/AcpAdapterV2.test.ts > AcpAdapterV2 > delivers labeled video frames through acp-test
+[02:14:58.377] WARN (#959): Skipping unreadable video frame
+
+stdout | src/storageCleanup.test.ts > preserves late tracked edits when submodules were never initialized
+[02:14:59.125] WARN (#1872): storage cleanup failed for worktree {
+  threadId: 'thread-1',
+  error: {
+    _tag: 'GitCommandError',
+    operation: 'StorageCleanup.cleanupGit',
+    command: 'git worktree remove',
+    cwd: '/tmp/slipjay-b27aa991a9dd/cleanup-repo-p2Bc8e',
+    detail: "fatal: '/tmp/slipjay-b27aa991a9dd/storage-cleanup-VFAH2v/worktrees/feature' contains modified or untracked files, use --force to delete it"
+  }
+}
+
+ ✓  unit  src/features/triage/triageTarget.test.ts (2 tests) 4ms
+ ✓  unit  src/features/home/swipe-row-activation.test.ts (3 tests) 6ms
+ ✓  unit  src/features/pull-requests/pullRequestFileJump.test.ts (1 test) 6ms
+ ✓  unit  src/features/projects/AddProjectScreen.logic.test.ts (1 test) 3ms
+ ❯  unit  src/reactCompilerCoverage.test.ts (1060 tests | 1 failed) 95838ms
+   ❯ React Compiler coverage (1060)
+     ✓ Metro's transformer applies the compiler 4341ms
+     ✓ compiles src/App.tsx 162ms
+     × compiles src/Stack.tsx 24ms
+     ✓ compiles src/components/BrandMark.tsx 46ms
+     ✓ compiles src/components/CompactBrandTitle.tsx 121ms
+
+      at sendQueuedMessage ([CHECKOUT]/apps/mobile/src/state/threadOutboxDelivery.ts:779:9)
+      at [CHECKOUT]/apps/mobile/src/state/threadOutboxDelivery.ts:1390:17
+      at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+}
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL   unit  src/reactCompilerCoverage.test.ts > React Compiler coverage > compiles src/Stack.tsx
+SyntaxError: [CHECKOUT]/apps/mobile/src/Stack.tsx: Unexpected keyword 'import'. (114:0)
+
+  112 | } from "./features/settings/SettingsScheduledTasksRouteScreen";
+  113 | import {
+> 114 | import {
+      | ^
+  115 |   SettingsChampionDetailRouteScreen,
+  116 |   SettingsChampionsRouteScreen,
+  117 | } from "./features/settings/SettingsChampionsRouteScreen";
+ ❯ constructor ../../node_modules/.pnpm/@babel+parser@7.29.8/node_modules/@babel/parser/src/parse-error.ts:96:45

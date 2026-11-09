@@ -1,6 +1,7 @@
 import type { VerificationDeclaration } from "../policy/verification-policy.ts";
 import { repositoryKey, TERMINAL_EVENT_TYPES } from "../runner/runner-contract.ts";
-import type { AuditCause, AuditOperation, PublishedLanding, StoredEvent } from "../runner/runner-types.ts";
+import { failureCategory, namedError } from "../runner/failure-classification.ts";
+import type { AuditCause, AuditOperation, FailureCategory, PublishedLanding, StoredEvent } from "../runner/runner-types.ts";
 
 /**
  * What the ledger says about a repository's nightly audits: which commit was last audited green, whether the
@@ -12,9 +13,22 @@ import type { AuditCause, AuditOperation, PublishedLanding, StoredEvent } from "
 /** A repository whose last green audit finished more than this long ago is overdue: a night's slack beyond 24 hours. */
 export const AUDIT_OVERDUE_AFTER_MS = 26 * 3_600_000;
 
+/** One failing audit, as its own night: what it said failed and why, never merged with another night's (SJ-215). */
+export type AuditNight = {
+  audit: string; finishedAt: string; commit: string | null;
+  /** The category the runner recorded, or the one its rule gives the failure's recorded facts when it recorded none. */
+  category: FailureCategory;
+  /** False when the category was derived now from a failure recorded before rule 3: the classifier's reading, not a recorded fact. */
+  recorded: boolean;
+  /** The tests this night's run failed, and the error the first one printed. */
+  failingTests: string[]; firstError?: string;
+};
+
 export type AuditFailure = {
   /** The failing audits of this failure, oldest first: repeated failures of one defect are one failure. */
   audits: string[];
+  /** Each of them as its own night: the failures of different nights may have different causes. */
+  nights: AuditNight[];
   /** When the first of them finished. */
   since: string;
   /** The newest commit any of them audited, if one resolved a head. */
@@ -49,7 +63,7 @@ export type AuditSummary = {
 };
 
 /** What the ledger reads of an audit: an `AuditOperation` supplies it, and so do the stored events (`auditSummariesFromEvents`). */
-export type AuditRecord = Pick<AuditOperation, "id" | "submittedAt" | "finishedAt" | "result" | "head" | "cause">;
+export type AuditRecord = Pick<AuditOperation, "id" | "submittedAt" | "finishedAt" | "result" | "head" | "cause" | "classification" | "verifyLoad">;
 
 type Verdicted = { operation: AuditRecord; verdict: "green" | "failed" | "inconclusive"; finishedAt: string; commit: string | null };
 
@@ -97,6 +111,17 @@ function ancestry(head: string | null, landings: ReadonlyMap<string, PublishedLa
   return chain;
 }
 
+/** A failing audit's night: its recorded category, else the category its recorded failure gives under the current rule. */
+export function auditNight(operation: AuditRecord, finishedAt: string, commit: string | null): AuditNight {
+  const fact = operation.classification;
+  const reason = operation.result?.type === "failed" ? operation.result.reason : "";
+  const category: FailureCategory = fact?.category ?? (fact
+    ? failureCategory({ reason, fact, ...operation.verifyLoad ? { load: operation.verifyLoad } : {} })
+    : { kind: "unresolved", evidence: "the audit recorded no classification" });
+  const firstError = fact?.firstErrors?.[0]?.error ?? namedError(reason);
+  return { audit: operation.id, finishedAt, commit, category, recorded: Boolean(fact?.category), failingTests: fact?.failingTests ?? [], ...firstError ? { firstError } : {} };
+}
+
 function failureOf(cluster: Verdicted[], green: Verdicted | null, landings: ReadonlyMap<string, PublishedLanding>): AuditFailure {
   const audited = green ? new Set(ancestry(green.commit, landings).map((landing) => landing.commitId)) : new Set<string>();
   const suspects = new Set<string>();
@@ -106,7 +131,8 @@ function failureOf(cluster: Verdicted[], green: Verdicted | null, landings: Read
   const recorded = cluster.flatMap(({ operation }) => operation.cause ? [operation.cause] : [])
     .sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
   return {
-    audits: cluster.map(({ operation }) => operation.id), since: cluster[0]!.finishedAt,
+    audits: cluster.map(({ operation }) => operation.id), nights: cluster.map(({ operation, finishedAt, commit }) => auditNight(operation, finishedAt, commit)),
+    since: cluster[0]!.finishedAt,
     commit: cluster.findLast(({ commit }) => commit)?.commit ?? null, suspects: [...suspects],
     cause: recorded ? { ...recorded.cause, by: recorded.by, at: recorded.at } : null,
   };
@@ -232,6 +258,8 @@ export function auditSummariesFromEvents(events: readonly StoredEvent[], now: Da
     }
     const audit = audits.get(operationId)?.record;
     if (audit && event.type === "audit_head") audit.head = event.commit;
+    else if (audit && event.type === "classified") audit.classification = event;
+    else if (audit && event.type === "stage" && event.health && (event.stage === "verifying" || event.stage === "screening")) audit.verifyLoad = { load1: event.health.load1, cpus: event.health.cpus };
     else if (audit && event.type === "audit_cause") audit.cause = { cause: event.cause, by: event.by, at, ...event.note ? { note: event.note } : {} };
     else if (audit && terminal.includes(event.type)) { audit.result = event as NonNullable<AuditRecord["result"]>; audit.finishedAt = at; }
     else if (event.type === "landed") published.push({ operationId, at, event });

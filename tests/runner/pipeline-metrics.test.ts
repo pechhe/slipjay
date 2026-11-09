@@ -638,3 +638,29 @@ test("a related landing that changes a migration trigger stays out of the typica
   assert.equal(typical.published?.samples, 2);
   assert.deepEqual(typical.publishedPerDay, { [day(NOW - DAY - 3_600_000 + 60_000)]: 1, [day(NOW - 3_600_000 + 60_000)]: 1 });
 });
+
+test("reports each repository's failed landings and audits by category, with the machine time each category lost (SJ-215)", () => {
+  const failing = (id: string, seq: number, repo: string, category: "regression" | "infrastructure" | "moved_base" | undefined, runMs: number, kind?: "audit"): StoredEvent[] => [
+    row(seq, id, seq, kind ? { type: "submitted", kind, repo, commitId: "c", slot: "2026-11-09T02:00:00.000Z", submittedBy: "schedule" } : submitted(repo, id)),
+    ...run(`${id}-run`, "bun run test", runMs, 1).map((event, index) => row(seq + 1 + index, id, seq + 1 + index, event)),
+    row(seq + 3, id, seq + 3, { type: "classified", ruleVersion: 3, cause: "gate", failingTests: [], diagnostics: [], ...category ? { category: { kind: category, evidence: "e" } } : {} }),
+    row(seq + 4, id, seq + 4, { type: "failed", stage: "verifying", reason: "Required verification failed (nonzero_exit): bun run test (check 1)\nFailure: error\nFirst error:\n  Error: broke" }),
+  ];
+  const landed = [row(90, "ok", 90, submitted("acme/app", "ok")), row(91, "ok", 91, { type: "landed", base: "b", commitId: "c", branch: "main", remote: "origin" })];
+  const metrics = pipelineMetrics([
+    ...failing("a", 100, "acme/app", "regression", 4_000), ...failing("b", 110, "acme/app", "regression", 1_000), ...failing("c", 120, "acme/app", "infrastructure", 7_000),
+    ...failing("d", 130, "acme/app", "moved_base", 0, "audit"), ...failing("old", 140, "acme/app", undefined, 500), ...failing("other", 150, "acme/other", "regression", 2_000), ...landed,
+    // A failure that recorded no classification at all.
+    row(160, "bare", 160, submitted("acme/app", "bare")), row(161, "bare", 161, { type: "failed", stage: "verifying", reason: "gone" }),
+  ], at(0), { now: 1_000_000 });
+  const app = metrics.repositories.find((entry) => entry.repo === "acme/app")!.failures;
+  // `old` recorded a classification without a category (rule 2): the rule gives its recorded failure the category it would have.
+  assert.equal(app.total.count, 6);
+  assert.equal(app.derived, 1);
+  assert.equal(app.total.machineMs, 12_500);
+  assert.deepEqual(Object.fromEntries(Object.entries(app.byCategory).map(([name, loss]) => [name, [loss.count, loss.machineMs]])),
+    { regression: [3, 5_500], flake: [0, 0], infrastructure: [1, 7_000], moved_base: [1, 0], unresolved: [0, 0], unclassified: [1, 0] });
+  assert.deepEqual(app.byCategory.regression.operations, ["a", "b", "old"]);
+  assert.equal(metrics.repositories.find((entry) => entry.repo === "acme/other")!.failures.total.count, 1);
+  assert.match(formatPipelineMetrics(metrics), /Failed landings and audits: 6 \(regression 3, 5\.5s of machine time; infrastructure 1, 7\.0s of machine time; moved_base 1, 0\.0s of machine time; unclassified 1, 0\.0s of machine time; 12\.5s in all; 1 read from failures recorded before rule 3, and unresolved where the evidence does not decide\)/);
+});

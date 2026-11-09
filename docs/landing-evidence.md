@@ -568,7 +568,7 @@ has `automaticRetry: false`. A read never claims a repair lease or releases the
 author workspace. Owner cancellation and supersession remain terminal history.
 
 Cause rules in `src/lib/runner/failure-classification.ts` carry their version on every
-`classified` event (rule 2 adds `firstErrors` and `failureCauses`): `gate` for a failed verification, `conflict` for a rebase
+`classified` event (rule 2 adds `firstErrors` and `failureCauses`, rule 3 a `category`): `gate` for a failed verification, `conflict` for a rebase
 conflict, `infrastructure` for fetch/install/executor problems or a timeout before
 test execution, `policy` for declined paths, `killed` for the owner's kill,
 `paused_out` for cancellation during a pause, `held` for incomplete finalization
@@ -579,6 +579,28 @@ A flake candidate needs the same named test and command to fail in different
 changes in the selected window. It is confirmed when a later successful run of
 the same command in the same repository uses an unchanged source tree from a
 failed run. Candidate and confirmation are reported separately.
+
+**Failure category (rule 3).** A `failed` event's `classified` fact also carries `category: { kind, evidence }`:
+the one answer to "why did this fail" a reader of delivery health needs, separate from `cause`, which says where the
+runner saw it fail. Declined, cancelled and superseded operations did not fail and carry none. The first rule that
+matches decides, and the evidence is the line that matched; anything the evidence does not decide is `unresolved`, never a guess.
+
+| `kind` | When |
+| --- | --- |
+| `flake` | The failed event says a batch check was flaky (it failed and passed on its rerun). |
+| `moved_base` | A rebase conflict; a predecessor or prefix invalidated; a refused move of the integration bookmark; or a gate failure of a commit that passed earlier at another base (`interaction`). |
+| `infrastructure` | The event names a runner, remote or credential breakage (a restart, a fetch or push failure, an unavailable executor, a missing toolchain, a full disk, a deploy timeout); or a gate failure whose tests timed out while the host's load average was at least twice its CPU count when the check began. |
+| `regression` | A gate check failed and names an error, a `Failure cause:` or a diagnostic of its own. A failing test alone, with no error attributable to it, is `unresolved`. |
+| `unresolved` | Everything else: a check that names nothing, tests that timed out on an idle host, a failed stage whose event names no breakage. |
+
+A failure recorded before rule 3 has no `category`; `failureCategoryOf` gives it the one the rule would, from its
+recorded failed event, classification and stage health, so reports read old and new failures alike; they say so (`categoryRecorded: false` in `slipjay audit status`, a derived count in `slipjay metrics`), because that reading is the classifier's, not a recorded fact. It is weakest on flakes, which need a later passing run that does not exist when a failure is recorded: `flake` appears only when the failed event says so, and a failure that later passed on the same input stays what its evidence said at the time. A failing audit's
+category and failing tests are shown per night by `slipjay audit status`, and `slipjay metrics` counts failed landings
+and audits per repository by category with the machine time their commands ran (`Failed landings and audits`).
+
+A failure's summary names the error of the failing test itself: the error block printed after its `FAIL <test>` line
+(Vitest, node:test) or before its `(fail) <test>` line (Bun), not the first error anywhere in the output. When the
+output attributes no block to the test, the first error in the output is shown as before.
 
 **Naming a failure.** A gate command names what failed, for the classification and for `slipjay land`'s
 structured failure (`outcome.classification`, per check in `checks`), by ending its

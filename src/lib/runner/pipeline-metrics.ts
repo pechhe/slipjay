@@ -1,7 +1,8 @@
 import { batchMetrics, formatBatchMetrics, type BatchMetrics } from "./batch-metrics.ts";
 import { START_STEPS, type StartStep } from "../workspace/start-steps.ts";
 import { isLandingSubmission, repositoryKey, RUNNER_CONTROL_ID } from "./runner-contract.ts";
-import type { CauseClass, GatePlacement, Operation, OperationEvent, RunnerStage, StoredEvent } from "./runner-types.ts";
+import { failureCategoryOf } from "./failure-classification.ts";
+import type { CauseClass, FailureCategoryKind, GatePlacement, Operation, OperationEvent, RunnerStage, StoredEvent } from "./runner-types.ts";
 import type { TimeBudgets } from "../policy/execution-policy.ts";
 import { auditSummariesFromEvents, type AuditSummary } from "../release/audit-ledger.ts";
 
@@ -57,6 +58,12 @@ export type TestFileGrowth = { kind: Operation["kind"]; file: string; suite: str
 /** A budget is judged only on enough samples; `over` names each budget the window broke. */
 export type BudgetStatus = { status: "undeclared" | "insufficient-samples" | "within" | "over"; over: string[] };
 
+/** The failed landings and audits of one category: how many, and the machine time their commands ran for. */
+export type FailureLoss = { count: number; machineMs: number; operations: string[] };
+/** Failed landings and audits submitted in the report window, by why they failed (`FailureCategory`); `unclassified` recorded no classification. */
+export type FailureLosses = { total: FailureLoss; /** How many of them recorded no category (rule 2 or earlier) and were read under the current rule: the classifier's reading, not a recorded fact. */ derived: number; byCategory: Record<FailureCategoryKind | "unclassified", FailureLoss> };
+const FAILURE_CATEGORIES = ["regression", "flake", "infrastructure", "moved_base", "unresolved", "unclassified"] as const;
+
 /** One repository's landing health: verify time against its budgets, and its test files. */
 export type LandingTimes = { published: MetricTiming | null; failed: number; relanded: number };
 export type RepositoryMetrics = {
@@ -93,6 +100,8 @@ export type RepositoryMetrics = {
   testFilesOverBudget: TestFileMetric[];
   /** Its nightly audits (see `audit-ledger.ts`); null when it has none. */
   audit: AuditSummary | null;
+  /** Its failed landings and audits in the window, by category, with the machine time each category cost (SJ-215). */
+  failures: FailureLosses;
 };
 
 export type PipelineMetrics = {
@@ -329,7 +338,7 @@ function gatePlacementKind(events: OperationHistory["events"], ready: OperationE
 }
 
 function repositoryMetrics(histories: Map<string, OperationHistory>, since: number, now: number, audits: Map<string, AuditSummary>): RepositoryMetrics[] {
-  type Repo = { budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; timed: number; critical: Map<string, { landings: number; tails: number[] }>; lockWait: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
+  type Repo = { failures: FailureLosses; budgets: TimeBudgets | null; budgetSeq: number; verify: number[]; verifyRelated: number[]; verifyComplete: number[]; timed: number; critical: Map<string, { landings: number; tails: number[] }>; lockWait: number[]; recorded: number; malformed: number; missing: number; files: Map<string, { kind: Operation["kind"]; file: string; suite: string; samples: number[] }>; cost: Map<string, { file: string; suite: string; samples: number[] }> };
   type Times = { published: number[]; failed: number; relanded: number };
   const earlierChanges = new Set<string>();
   const landingTimes = new Map<string, { all: Times; selection: Map<string, Times>; migration: { migrationBearing: Times; other: Times }; placement: Map<string, Times>; typical: { all: Times; perDay: Map<string, number>; placement: Map<string, Times> } }>();
@@ -338,7 +347,7 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
   const repos = new Map<string, Repo>();
   const repoOf = (name: string): Repo => {
     let repo = repos.get(name);
-    if (!repo) { repo = { budgets: null, budgetSeq: -1, verify: [], verifyRelated: [], verifyComplete: [], timed: 0, critical: new Map(), lockWait: [], recorded: 0, malformed: 0, missing: 0, files: new Map(), cost: new Map() }; repos.set(name, repo); }
+    if (!repo) { repo = { failures: { total: { count: 0, machineMs: 0, operations: [] }, derived: 0, byCategory: Object.fromEntries(FAILURE_CATEGORIES.map((name) => [name, { count: 0, machineMs: 0, operations: [] as string[] }])) as unknown as FailureLosses["byCategory"] }, budgets: null, budgetSeq: -1, verify: [], verifyRelated: [], verifyComplete: [], timed: 0, critical: new Map(), lockWait: [], recorded: 0, malformed: 0, missing: 0, files: new Map(), cost: new Map() }; repos.set(name, repo); }
     return repo;
   };
   for (const op of [...histories.values()].sort((a, b) => (a.submittedEvent?.seq ?? 0) - (b.submittedEvent?.seq ?? 0))) {
@@ -404,6 +413,15 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
       }
     }
     if (changeKey) earlierChanges.add(changeKey);
+    if ((kind === "landing" || kind === "audit") && submittedAt <= now && op.events.some((row) => row.event.type === "failed")) {
+      const category = failureCategoryOf(op.events)?.kind ?? "unclassified";
+      // Machine time is the wall-clock of the commands the operation ran: each run's recorded duration.
+      const machineMs = op.events.reduce((sum, row) => sum + (row.event.type === "run_finished" && validDuration(row.event.durationMs) ? row.event.durationMs : 0), 0);
+      const losses = repo.failures;
+      const fact = op.events.findLast((row) => row.event.type === "classified")?.event;
+      if (fact?.type === "classified" && !fact.category) losses.derived++;
+      for (const loss of [losses.total, losses.byCategory[category]]) { loss.count++; loss.machineMs += machineMs; loss.operations.push(op.id); }
+    }
     for (const row of op.events) {
       if (row.event.type !== "test_report") continue;
       if (row.event.status === "malformed") { repo.malformed++; continue; }
@@ -472,6 +490,7 @@ function repositoryMetrics(histories: Map<string, OperationHistory>, since: numb
       costCandidates,
       testFilesOverBudget: overBudget,
       audit: [...audits].find(([repo]) => repositoryKey(repo) === repositoryKey(name))?.[1] ?? null,
+      failures: repo.failures,
     };
   }).sort((a, b) => a.repo.localeCompare(b.repo));
 }
@@ -671,6 +690,8 @@ export function formatPipelineMetrics(metrics: PipelineMetrics): string {
       const { lastGreen, overdue, openFailure, inconclusive, escapes } = repo.audit;
       lines.push(`  Audit: last green ${lastGreen ? `${lastGreen.commit.slice(0, 12)} at ${lastGreen.finishedAt}` : "never"}${overdue ? " (overdue)" : ""}; ${openFailure ? `failing since ${openFailure.since}, ${openFailure.suspects.length} suspects, cause ${openFailure.cause ? openFailure.cause.kind : "not recorded"}` : "no open failure"}${inconclusive?.audits.length ? `; inconclusive ${inconclusive.audits.join(", ")}` : ""}; ${escapes} escapes`);
     }
+    const lost = repo.failures;
+    lines.push(`  Failed landings and audits: ${lost.total.count}${lost.total.count ? ` (${FAILURE_CATEGORIES.filter((name) => lost.byCategory[name].count).map((name) => `${name} ${lost.byCategory[name].count}, ${seconds(lost.byCategory[name].machineMs)} of machine time`).join("; ")}; ${seconds(lost.total.machineMs)} in all; ${lost.derived} read from failures recorded before rule 3, and unresolved where the evidence does not decide)` : ""}`);
     if (repo.slowestTestFiles.length) lines.push(`  Slowest test files: ${repo.slowestTestFiles.map((file) => `${file.kind} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);
     if (repo.growingTestFiles.length) lines.push(`  Growing test files: ${repo.growingTestFiles.map((file) => `${file.kind} ${file.file} ${seconds(file.earlierMedianMs)} → ${seconds(file.laterMedianMs)}`).join("; ")}`);
     if (repo.testFilesOverBudget.length) lines.push(`  Test files over budget: ${repo.testFilesOverBudget.map((file) => `${file.suite} ${file.file} ${seconds(file.medianMs)}`).join("; ")}`);

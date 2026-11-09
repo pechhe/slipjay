@@ -107,7 +107,16 @@ export type NamedFailure = { firstErrors?: FirstError[]; failureCauses?: string[
 /** One failed check's own classification (SJ-51): `failingTests` are the tests that command failed. */
 export type ClassifiedCheck = { checkIndex: number; command: string; cause: CauseClass; runId?: string; failingTests: string[]; diagnostics: string[] } & NamedFailure;
 
-export type ClassifiedFact = NamedFailure & { type: "classified"; ruleVersion: number; cause: CauseClass; command?: string; failingTests: string[]; diagnostics: string[]; checks?: ClassifiedCheck[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
+/**
+ * Why a failed landing or audit failed, for someone reading delivery health (rule 3). `regression`: the checked code
+ * itself fails, named by a test, an error or a diagnostic. `flake`: a failure the ledger shows another run of the same
+ * input passing. `infrastructure`: the runner, a host or a remote broke, not the code. `moved_base`: the integration
+ * branch moved under the candidate. `unresolved`: the evidence does not decide it. `evidence` says why, in one line.
+ */
+export type FailureCategoryKind = "regression" | "flake" | "infrastructure" | "moved_base" | "unresolved";
+export type FailureCategory = { kind: FailureCategoryKind; evidence: string };
+
+export type ClassifiedFact = NamedFailure & { type: "classified"; ruleVersion: number; cause: CauseClass; category?: FailureCategory; command?: string; failingTests: string[]; diagnostics: string[]; checks?: ClassifiedCheck[]; interaction?: { earlierOperation: string; fromBase: string; toBase: string } };
 
 /**
  * Why a failing audit failed, as the person who looked recorded it. `culprits` names the
@@ -423,7 +432,9 @@ export type RecoveryOperation = OperationFields & { kind: "recovery" };
  * repository's lane like a landing (see `audit-scheduler.ts`). `slot` is the scheduled instant it covers; `head` the
  * commit it resolved and audited (absent until it resolves one); `cause` the newest cause recorded on it.
  */
-export type AuditOperation = OperationFields & { kind: "audit"; slot: string; head?: string; cause?: { cause: AuditCause; by: string; at: string; note?: string } };
+export type AuditOperation = OperationFields & { kind: "audit"; slot: string; head?: string; cause?: { cause: AuditCause; by: string; at: string; note?: string };
+  /** What the runner classified its failure as, and the host load when its checks began (for a classification recorded before rule 3 named its category). */
+  classification?: ClassifiedFact; verifyLoad?: { load1: number; cpus: number } };
 
 /** An operation as clients see it: a pure projection of its stored events plus queue order. */
 export type Operation = LandingOperation | ReleaseOperation | VerificationOperation | DeployOperation | ResetOperation | RecoveryOperation | AuditOperation;

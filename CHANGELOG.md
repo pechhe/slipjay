@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.56.0
+
+- **A failed landing or audit says whether it was a regression, a flake, infrastructure or a moved base (SJ-215):** the
+  `classified` event (rule 3) carries a `category` with its evidence, and says `unresolved` when the evidence does not
+  decide it. `slipjay audit status` gives each failing night its own failing tests and category, so several nights with
+  different causes no longer read as one failure, and `slipjay metrics` counts failed landings and audits per
+  repository by category with the machine time they cost. A failure's summary names the error the failing test itself
+  printed, not the first error anywhere in the output.
+
 ## v3.55.1
 
 - **A landing that waited for its host's CPU budget reports its whole verify time (SJ-212):** the wait splits the gate's

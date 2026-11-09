@@ -112,6 +112,34 @@ export function firstError(lines: string[]): string[] {
   return block;
 }
 
+const startsError = (line: string): boolean => (ERROR_START.test(line.trim()) && !SCRIPT_EXIT.test(line.trim())) || /^\s+error: \|-?$/.test(line);
+
+/**
+ * The error a failing test printed itself, rather than the first error anywhere in the output (a passing test's logged
+ * error, a warning, a worker's stderr). A `FAIL <test>` or `not ok <n> - <name>` line is followed by its error; Bun's
+ * `(fail) <name>` line follows it. Empty when the output attributes no error block to the test.
+ */
+export function testError(lines: string[], test: string): string[] {
+  const name = test.includes(" > ") ? test.slice(test.lastIndexOf(" > ") + 3) : test;
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const trimmed = lines[index]!.trim();
+    const forward = /^FAIL\s+(.+)$/.exec(trimmed)?.[1]?.trim() === test || /^not ok \d+ - (.+)$/.exec(trimmed)?.[1] === name;
+    if (forward) {
+      let end = index + 1;
+      while (end < lines.length && !/^(?:FAIL\b|⎯|not ok |ok \d+ - )/.test(lines[end]!.trim())) end++;
+      const block = lines.slice(index + 1, end);
+      if (block.some(startsError)) return firstError(block);
+    } else if (/^\(fail\) /.test(trimmed) && (trimmed.slice(7).replace(/ \[[\d.]+m?s\]$/, "") === name)) {
+      let start = index;
+      while (start > 0 && !/^\((?:pass|fail)\) /.test(lines[start - 1]!.trim())) start--;
+      const block = lines.slice(start, index);
+      const at = block.findIndex(startsError);
+      if (at >= 0) return firstError(block.slice(at));
+    }
+  }
+  return [];
+}
+
 /** First compiler/linter diagnostics, with a preceding position line when the message has none. */
 export function diagnostics(lines: string[], limit = MAX_DIAGNOSTICS): string[] {
   const found: string[] = [];
@@ -157,9 +185,12 @@ export function summarizeVerificationFailure(result: VerificationFailureResult):
     sections.push([`Failing tests (${tests.length}):`, ...tests.slice(0, MAX_TESTS).map((test) => `  ${clip(test)}`),
       ...(tests.length > MAX_TESTS ? [`  … ${tests.length - MAX_TESTS} more`] : [])].join("\n"));
   }
-  const error = kind === "diagnostics" ? [] : firstError(lines);
+  // The first failing test's own error when the output attributes one, else the first error anywhere (README, **Naming a failure**).
+  // With tests named and no block of theirs in the output, the first error anywhere would be some other test's or a log line: none is shown.
+  const own = tests.length ? testError(lines, tests[0]!) : [];
+  const error = kind === "diagnostics" || (tests.length && !own.length) ? [] : own.length ? own : firstError(lines);
   if (error.length) sections.push(["First error:", ...error.map((line) => `  ${clip(line)}`)].join("\n"));
-  else {
+  else if (!tests.length) {
     const found = diagnostics(lines);
     if (found.length) sections.push(["First diagnostics:", ...found.map((line) => `  ${clip(line)}`)].join("\n"));
   }

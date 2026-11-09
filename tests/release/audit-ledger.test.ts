@@ -578,3 +578,34 @@ test("a named inconclusive audit can be explained, and one that did not fail can
     assert.deepEqual(auditToExplain(audits, l.summary()), { ok: false, reason: "The latest audit did not fail, so there is no open failure to explain; name an earlier failing audit with --audit" });
   } finally { l.log.close(); }
 });
+
+test("each failing night is its own: its failing tests and category, recorded or derived by the rule, never merged into one failure (SJ-215)", () => {
+  const l = ledger();
+  try {
+    l.landing("a1");
+    const night = (reason: string, facts: Partial<Extract<import("../../src/lib/runner/runner-types.ts").OperationEvent, { type: "classified" }>>, load?: number) => {
+      const id = `audit-night-${l.log.audits(REPO).length + 1}`;
+      l.log.append(id, { type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date().toISOString(), submittedBy: "test" });
+      if (load !== undefined) l.log.append(id, { type: "stage", stage: "verifying", health: { load1: load, cpus: 14, freeMemoryBytes: 1, totalMemoryBytes: 2, running: 1 } });
+      l.log.append(id, { type: "audit_head", commit: sha("a1") });
+      l.log.append(id, { type: "classified", ruleVersion: 2, cause: "gate", failingTests: [], diagnostics: [], ...facts });
+      l.log.append(id, { type: "failed", stage: "verifying", reason });
+      return id;
+    };
+    const first = night("Required verification failed (nonzero_exit): bun run test\nFailure: error\nFirst error:\n  AssertionError: boom", { failingTests: ["usage.test.ts > bills"] });
+    const second = night("Required verification failed (nonzero_exit): bun run test\nFailure: timeout", { failingTests: ["a.test.ts > one", "a.test.ts > two"] }, 43);
+    const third = night("Required verification failed (nonzero_exit): bun run test\nFailure: timeout", { failingTests: ["b.test.ts > slow"] }, 1.2);
+    const fourth = night("Required verification failed (nonzero_exit): bun run test\nFailure: error", { ruleVersion: 3, category: { kind: "moved_base", evidence: "rebase conflict" }, failingTests: ["c.test.ts > c"] });
+    const failure = l.summary().openFailure!;
+    assert.deepEqual(failure.audits, [first, second, third, fourth]);
+    assert.deepEqual(failure.nights.map((entry) => [entry.audit, entry.category.kind, entry.failingTests]), [
+      [first, "regression", ["usage.test.ts > bills"]],
+      [second, "infrastructure", ["a.test.ts > one", "a.test.ts > two"]],
+      [third, "unresolved", ["b.test.ts > slow"]],
+      [fourth, "moved_base", ["c.test.ts > c"]],
+    ]);
+    assert.deepEqual(failure.nights.map((entry) => entry.recorded), [false, false, false, true]);
+    assert.equal(failure.nights[0]!.firstError, "AssertionError: boom");
+    assert.match(failure.nights[1]!.category.evidence, /load 43\.0 on 14 CPUs/);
+  } finally { l.log.close(); }
+});

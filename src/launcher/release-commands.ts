@@ -1,3 +1,4 @@
+import { auditNight } from "../lib/release/audit-ledger.ts";
 import { readAudits, recordAuditCause, deployThroughRunner, readDeploys, readPromotionState, requestVerificationThroughRunner, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner/runner-client.ts";
 import type { AutomaticPromotion, Operation } from "../lib/runner/runner-types.ts";
 import { open } from "node:fs/promises";
@@ -115,9 +116,15 @@ export async function runAudit(args: string[]): Promise<number> {
   if (!location) throw new Error("slipjay audit runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
   if (!args.length || (args.length === 1 && args[0] === "status")) {
     const { operations, summary } = await readAudits(process.cwd(), { location });
-    console.log(JSON.stringify({ summary, audits: operations.slice(0, 10).map((operation) => ({ id: operation.id, status: operation.status, slot: operation.slot,
-      ...operation.head ? { head: operation.head } : {}, ...operation.finishedAt ? { finishedAt: operation.finishedAt } : {},
-      ...operation.result?.type === "failed" ? { reason: operation.result.reason, ...operation.result.inconclusive ? { inconclusive: true } : {} } : {}, ...operation.cause ? { cause: operation.cause.cause } : {} })) }, null, 2));
+    // Each failing audit says its own failing tests and category: several nights' failures are never read as one.
+    const failing = new Set(summary.openFailure?.audits ?? []);
+    console.log(JSON.stringify({ summary, audits: operations.slice(0, 10).map((operation) => {
+      const night = operation.finishedAt && (operation.result?.type === "failed" || failing.has(operation.id)) ? auditNight(operation, operation.finishedAt, operation.head ?? null) : undefined;
+      return { id: operation.id, status: operation.status, slot: operation.slot,
+        ...operation.head ? { head: operation.head } : {}, ...operation.finishedAt ? { finishedAt: operation.finishedAt } : {},
+        ...night ? { category: night.category, categoryRecorded: night.recorded, failingTests: night.failingTests, ...night.firstError ? { firstError: night.firstError } : {} } : {},
+        ...operation.result?.type === "failed" ? { reason: operation.result.reason, ...operation.result.inconclusive ? { inconclusive: true } : {} } : {}, ...operation.cause ? { cause: operation.cause.cause } : {} };
+    }) }, null, 2));
     return 0;
   }
   if (args[0] !== "cause") throw new Error(usage);

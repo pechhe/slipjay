@@ -365,6 +365,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
             const passed = earlier.status === "landed" || old.some((row) => row.event.type === "verification_passed");
             if (passed && base?.type === "verification_base" && oldBase?.type === "verification_base" && base.base !== oldBase.base && earlier.commitId === current.commitId) {
               classification.interaction = { earlierOperation: earlier.id, fromBase: oldBase.base, toBase: base.base };
+              classification.category = { kind: "moved_base", evidence: `passed earlier at ${oldBase.base.slice(0, 12)}, fails at ${base.base.slice(0, 12)} after ${earlier.id} moved the base` };
               break;
             }
           }
@@ -665,7 +666,11 @@ function project(id: string, events: StoredEvent[], projections: OperationLogPro
   for (const stored of events) {
     const event = stored.event;
     switch (event.type) {
+      case "classified":
+        if (operation.kind === "audit") operation.classification = event;
+        break;
       case "stage":
+        if (operation.kind === "audit" && event.health && (event.stage === "verifying" || event.stage === "screening")) operation.verifyLoad = { load1: event.health.load1, cpus: event.health.cpus };
         operation.stage = event.stage;
         if (event.shortLanding) operation.shortLanding = true;
         if (event.stage !== "queued") operation.startedAt ??= stored.at;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "vite-plus/test";
 import { DIAGNOSTIC_STREAM_BYTES, summarizeVerificationFailure, verificationDiagnosticCollector } from "../../src/lib/infra/verification-failure.ts";
 
@@ -227,4 +228,26 @@ test("Svelte warnings before and after real errors cannot displace the errors or
   assert.equal(flooded.incomplete, true);
   assert.ok(flooded.output.endsWith("svelte-check found 400 errors and 0 warnings"));
   assert.ok(Buffer.byteLength(flooded.output) <= DIAGNOSTIC_STREAM_BYTES);
+});
+
+test("a failure's first error is the failing test's own error, not an earlier log line (T3 audit of 9 Nov 2026)", () => {
+  // The log of op_00mw8m5vkq_9f7e79787a78d662c9f8efcf: a passing test logged a StorageCleanup `error: {` long before
+  // `compiles src/Stack.tsx` failed on the syntax error a merge left in apps/mobile/src/Stack.tsx.
+  const stderr = readFileSync(new URL("../runner/fixtures/audit-stack-syntax-error.txt", import.meta.url), "utf8");
+  const summary = summarizeVerificationFailure({ code: 1, stderr });
+  assert.deepEqual(section(summary, "Failing tests"), ["unit  src/reactCompilerCoverage.test.ts > React Compiler coverage > compiles src/Stack.tsx"]);
+  assert.deepEqual(section(summary, "First error:"), ["SyntaxError: [CHECKOUT]/apps/mobile/src/Stack.tsx: Unexpected keyword 'import'. (114:0)"]);
+  assert.doesNotMatch(summary, /First error:\n\s+error: \{/);
+});
+
+test("a Bun failure's first error is the one printed just before its own (fail) line", () => {
+  const summary = summarizeVerificationFailure({ code: 1, stderr: [
+    "tests/a.test.ts:",
+    "error: a passing test logged this",
+    "(pass) a logs",
+    "error: expect(received).toBe(expected)",
+    "Expected: 1",
+    "(fail) a breaks [2.1ms]",
+  ].join("\n") });
+  assert.deepEqual(section(summary, "First error:"), ["error: expect(received).toBe(expected)", "Expected: 1"]);
 });
