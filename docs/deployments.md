@@ -73,9 +73,18 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   when compensation is permitted, or `0` when the promotion's migration policy
   prohibits it. Downstream activation commands must honor this flag before their
   own local compensation; declared environment keys cannot override its authority.
+- **Prebuild.** Production with a `machine` may declare `prebuild`, a command that builds what the deploy
+  will need. A batch check a release waits on (`slipjay promote --confirm`, or a scheduled slot's) starts it beside the
+  check, on the fixed machine serving the pool, in a source view of the head, with the deploy's environment and machine
+  variables. It keeps going after the check ends, so the deploy must tolerate it still running: the command takes its own lock, and
+  running it twice must be safe. Nothing depends on it: a failure is only logged and the deploy builds what it did not. It
+  never runs on boat, so a check nobody promotes never starts a VM, and a background check starts none.
 - **Build machine.** An environment may name a `machine` pool (`"machine": "images"`). Its
   deploy then has the repository's build machine leased to it (a production redeploy of the
-  commit production serves leases none, so it runs while boat is down) from the runner's remote
+  commit production serves leases none, so it runs while boat is down). A fixed machine in the
+  runner config whose `buildPool` names the pool goes first: it holds the commit in
+  `~/.slipjay-builds/slipjay-<owner>-<name>-<pool>.git` and bills nothing. When it cannot be reached the deploy says
+  so and leases from the runner's remote
   verifier (see [Remote verification on boat](runner.md#remote-verification-on-boat)): the boat VM
   `slipjay-<owner>-<name>-<pool>`, forked from the gate's image when missing and resumed when
   stopped, living for twice the environment's `timeoutMs` until its deploy ends and then fifteen idle minutes,

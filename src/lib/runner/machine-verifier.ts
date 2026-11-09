@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../infra/bounded-process.ts";
-import { cleanExclusions, collectRemoteReports, frozenInstall, loopbackPort, receiveCandidate, remoteCommand, remoteFiles, shellWord, sshFailed, worktreeTree, type RemoteRun } from "./remote-attempt.ts";
+import { cleanExclusions, collectRemoteReports, frozenInstall, loopbackPort, receiveBuildCommit, receiveCandidate, remoteCommand, remoteFiles, shellWord, sshFailed, worktreeTree, type RemoteRun } from "./remote-attempt.ts";
 import { TEST_REPORT_DIR_ENV } from "./test-reports.ts";
-import type { GateMachineConfig, MachineVerification, RemoteAttempt, RemoteMachine } from "./runner-types.ts";
+import { poolName } from "./boat-verifier.ts";
+import type { GateMachineConfig, LeaseBuildMachine, MachineVerification, RemoteAttempt, RemoteMachine } from "./runner-types.ts";
 
 /**
  * Read from inside a scope of the attempt, while its slice exists: the attempt slice's memory peak, and the out-of-memory
@@ -46,6 +47,43 @@ async function retainedPaths(run: RemoteRun, checkout: string, base: string): Pr
 
 export function machineSshArgs(config: Pick<GateMachineConfig, "account" | "ssh">): string[] {
   return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-l", config.account, config.ssh];
+}
+
+/**
+ * Builds on a fixed machine instead of a boat VM: the same contract as boat's lease, with no VM to resume, fence or stop
+ * and nothing billed. The deploy lane and a release's prebuild can hold it at once, so it ends nothing another lease
+ * started; a repository's build command takes its own lock. A machine that cannot be reached fails the lease, within
+ * seconds, and the deploy goes to boat.
+ */
+export function machineBuildLease(name: string, config: Pick<GateMachineConfig, "account" | "ssh">, options: { run?: RemoteRun; scratch?: string } = {}): LeaseBuildMachine {
+  const run = options.run ?? runBoundedProcess;
+  const files = remoteFiles(run);
+  const ssh = machineSshArgs(config);
+  const machine: RemoteMachine = { verifier: "machine", name, id: `${name}/build`, size: "machine", image: "fixed SSH machine" };
+  return async ({ repo, pool, gitDirectory, commitId, signal }) => {
+    const scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-machine-build-"));
+    try {
+      const control = async (what: string, script: string, { input, timeoutMs = 120_000 }: { input?: Buffer; timeoutMs?: number } = {}) => {
+        const result = await run({ executable: "ssh", args: [...ssh, `bash -lc ${shellWord(`set -euo pipefail\n${script}`)}`], cwd: tmpdir(), env: process.env, timeoutMs,
+          maxOutputBytes: 1024 * 1024, ...input ? { input } : {}, ...signal ? { abortSignal: signal } : {} });
+        if (result.exitCode !== 0 || result.timedOut) throw new Error(`${what} on ${name} failed: ${result.stderr.trim().slice(-500) || (result.timedOut ? "timed out" : `exit ${result.exitCode}`)}`);
+        return result.stdout.trim();
+      };
+      const gitDir = `${await control("find its home", 'echo "$HOME"')}/.slipjay-builds/${poolName(repo, pool)}.git`;
+      await control("make its build directory", `mkdir -p ${shellWord(dirname(gitDir))}`);
+      await receiveBuildCommit(control, files, { gitDirectory, gitDir, pool, commitId, bundle: join(scratch, "commit.bundle") });
+      const sshExecutable = join(scratch, "ssh");
+      await writeFile(sshExecutable, `#!/bin/sh\nexec ssh ${ssh.map(shellWord).join(" ")} "$@"\n`, { mode: 0o700 });
+      return {
+        machine,
+        env: { SLIPJAY_MACHINE_SSH: sshExecutable, SLIPJAY_MACHINE_GIT_DIR: gitDir },
+        async close() { await rm(scratch, { recursive: true, force: true }); return null; },
+      };
+    } catch (error) {
+      await rm(scratch, { recursive: true, force: true });
+      throw error;
+    }
+  };
 }
 
 /** A shared SSH machine. No provider lifecycle or VM-wide cleanup belongs here. */

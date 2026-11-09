@@ -563,6 +563,8 @@ every place held it queues for the next one freed. A landing slot of a machine-p
 every file first, and the next plain landing narrows it again. Each `stage_detail` records how many jj, git and gh
 commands the stage ran, their total time and the slowest five. Its commands see `SLIPJAY_GATE_PLACE` (0-based) and
 `SLIPJAY_GATE_PLACES`, so a repository that pins its own CPUs can give each place a different share of the machine.
+A machine's `buildPool` names the build machine pool it builds for, before boat
+(see [Build machine](deployments.md)). It uses none of the machine's places or `root`.
 Unknown machine names, a machine place without `verifier`, and a machine place combined
 with `hostPlaces: 1` are refused at startup. With `gateMachine` absent all existing placement
 behaviour is preserved. The choice stays at gate time: the free, healthy named place takes

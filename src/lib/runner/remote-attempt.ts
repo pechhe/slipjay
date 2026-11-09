@@ -101,6 +101,33 @@ export function remoteFiles(run: RemoteRun) {
 }
 
 /**
+ * Puts `commitId` into a build machine's bare repository `gitDir` (made if missing), sending a bundle of what it lacks.
+ * `control` runs a script on the machine. Two leases may do this at once, so the bundle's path on the machine is its own
+ * and they take turns to update the ref, which would otherwise fail on git's lock.
+ */
+export async function receiveBuildCommit(
+  control: (what: string, script: string, options?: { input?: Buffer; timeoutMs?: number }) => Promise<string>,
+  files: ReturnType<typeof remoteFiles>,
+  { gitDirectory, gitDir, pool, commitId, bundle }: { gitDirectory: string; gitDir: string; pool: string; commitId: string; bundle: string },
+): Promise<void> {
+  const dir = shellWord(gitDir);
+  const ref = `refs/slipjay/machine/${pool}`;
+  const heads = (await control("list commits", `git init --quiet --bare ${dir} && git --git-dir=${dir} for-each-ref --format='%(objectname)'`))
+    .split("\n").filter((line) => /^[0-9a-f]{40}$/.test(line));
+  await files.local("git", ["update-ref", ref, commitId], gitDirectory);
+  const input = await files.bundleMissing(gitDirectory, [ref], heads, bundle);
+  await control("receive the commit", `bundle=$(mktemp)
+cat > "$bundle"
+(
+  flock 9
+  if [ -s "$bundle" ]; then git --git-dir=${dir} fetch --quiet "$bundle" ${shellWord(`+${ref}:${ref}`)}; fi
+  git --git-dir=${dir} update-ref ${shellWord(ref)} ${shellWord(commitId)}
+) 9>>${shellWord(`${gitDir}.lock`)}
+rm -f "$bundle"
+git --git-dir=${dir} cat-file -e ${shellWord(`${commitId}^{commit}`)}`, { input, timeoutMs: SETUP_TIMEOUT_MS });
+}
+
+/**
  * `git clean`'s exclusions: always `node_modules` and `.jj`, plus `retain`, the untracked paths a fixed place keeps
  * between gates (`placeRetainedPaths`, read from the integration branch's policy, never the candidate's).
  */

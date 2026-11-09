@@ -648,15 +648,17 @@ export interface RemoteVerification {
   probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
   recover?(repos: readonly string[]): Promise<void>;
-  /** `repo`'s build machine of `pool`, holding `commitId` from `gitDirectory`, for one command of at most `lifetimeS`. */
-  lease?(input: { repo: string; pool: string; gitDirectory: string; commitId: string; lifetimeS: number; signal?: AbortSignal }): Promise<MachineLease>;
+  lease?: LeaseBuildMachine;
 }
+
+/** `repo`'s build machine of `pool`, holding `commitId` from `gitDirectory`, for one command of at most `lifetimeS`. */
+export type LeaseBuildMachine = (input: { repo: string; pool: string; gitDirectory: string; commitId: string; lifetimeS: number; signal?: AbortSignal }) => Promise<MachineLease>;
 
 /**
  * A build machine leased to one deploy. `env` is what the command is given: `SLIPJAY_MACHINE_SSH`, an executable
  * that runs ssh to the machine with the arguments it is given (options, then the remote command), and
- * `SLIPJAY_MACHINE_GIT_DIR`, the machine's Git directory holding the commit. `close` returns the machine to idle, which
- * stops it after a quiet period, and reads what it billed since the lease began.
+ * `SLIPJAY_MACHINE_GIT_DIR`, the machine's Git directory holding the commit. `close` ends the lease; on a boat VM it
+ * returns the machine to idle, which stops it after a quiet period, and reads what it billed since the lease began.
  */
 export interface MachineLease {
   readonly machine: RemoteMachine;
@@ -718,7 +720,9 @@ export type GateMachineConfig = { ssh: string; root: string; account: string;
    * `batchVerification.machine` is that pool run there, in `release-check` slices the machine's installer gives idle CPU
    * priority, and on the pool's boat VMs only while the place is down.
    */
-  checkPlace?: string };
+  checkPlace?: string;
+  /** The build machine pool (a deployment's `machine`) this machine builds for, before boat. See `machineBuildLease`. */
+  buildPool?: string };
 export interface MachineVerification extends RemoteVerification {
   available(): boolean;
   reason(): string;

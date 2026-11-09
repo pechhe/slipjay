@@ -35,6 +35,12 @@ export type DeploymentEnvironment = {
    * `MachineLease`), holding the deployed commit, and every command reaches it through `SLIPJAY_MACHINE_SSH`.
    */
   machine?: string;
+  /**
+   * Production only, with a `machine`: the command that builds what the deploy will need, run beside the release's check so
+   * the deploy finds it done. It must be safe to run twice, as the deploy still builds whatever this did not. It runs only
+   * on a fixed machine that serves the pool (`buildPool`), so a check nobody promotes never starts a boat VM.
+   */
+  prebuild?: FinalizationCommand;
 };
 
 /**
@@ -103,10 +109,13 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
       const declared = object(environment.migrations, "deployments production migrations");
       migrations = { verify: command(declared.verify, "Migration verify"), apply: command(declared.apply, "Migration apply") };
     }
+    if (environment.prebuild !== undefined && (name !== "production" || environment.machine === undefined))
+      throw new Error(`deployments ${name} declares prebuild; only production with a machine can build ahead of its deploy`);
     environments[name] = {
       minIntervalMs: minIntervalMs as number, timeoutMs: environment.timeoutMs as number,
       environmentKeys: environmentKeys(environment, "Deployment"), projects, ...migrations ? { migrations } : {},
       ...environment.machine === undefined ? {} : { machine: machineName(environment.machine, name) },
+      ...environment.prebuild === undefined ? {} : { prebuild: command(environment.prebuild, "Prebuild") },
     };
   }
   return { version: 1, environments };

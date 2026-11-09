@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.57.0
+
+- **A fixed machine can build a release's images, with boat as its fallback, and the build can start with the release:** a
+  machine in the runner config with `buildPool` takes that pool's builds, holding the commit in its own bare repository and
+  billing nothing. A deploy whose machine cannot be reached says so and leases from boat. Production may declare `prebuild`: a
+  release's check starts it beside itself on that machine, so the deploy finds the build done or joins it. A failed
+  prebuild is only logged, a background check starts none, and it never runs on boat.
+
 ## v3.56.1
 
 - **A release no longer waits behind agents' work, and boat stops billing for machines nothing uses:** a batch check a

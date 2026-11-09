@@ -16,7 +16,7 @@ import { createResetScheduler } from "../release/reset-scheduler.ts";
 import { auditInconclusive, auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
 import { createAuditScheduler } from "../release/audit-scheduler.ts";
 import { runReset } from "../release/reset.ts";
-import { ensureDeployCommit, ensureOnIntegrationBranch, runDeploy, schemaMayHaveChanged } from "../release/deploy.ts";
+import { ensureDeployCommit, ensureOnIntegrationBranch, prebuildRelease, runDeploy, schemaMayHaveChanged } from "../release/deploy.ts";
 import { readExactExecutionPolicy } from "../release/post-integration-source.ts";
 import { confirmRelease, passedVerification, planRelease, returnRelease, verifyRelease } from "../release/release.ts";
 import { boundedKeys, boundedOutput, boundedTests, runBatchCheck, type BatchCheckRecord, type BatchLanding, type BatchRun, type BatchScope, type SuiteState } from "../release/batch-check.ts";
@@ -43,11 +43,11 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import { machineVerification } from "./machine-verifier.ts";
+import { machineBuildLease, machineVerification } from "./machine-verifier.ts";
 import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, MachineVerification, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -177,6 +177,8 @@ export function createRunnerQueue(input: {
   machineVerifications?: Record<string, import("./runner-types.ts").MachineVerification | readonly import("./runner-types.ts").MachineVerification[]>;
   /** The release-check places by the boat pool each serves (SJ-202), for embedded runners and tests; absent, built from `checkPlace`. */
   machineCheckVerifications?: Record<string, import("./runner-types.ts").MachineVerification>;
+  /** Stands in for the machines `config.machines` names as a `buildPool`, by pool. */
+  machineBuilds?: Record<string, { machine: string; lease: LeaseBuildMachine }>;
   /** First availability probe after a boat outage; doubles up to one minute. */
   boatProbeMs?: number;
   /** Override pre-verification stage deadlines (milliseconds), for embedded runners and tests. */
@@ -310,6 +312,12 @@ export function createRunnerQueue(input: {
     : Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.checkPlace
       ? [[entry.checkPlace, { machine: name, place: machineVerification(name, entry, { scratch: join(home, "scratch"), check: true }) }]] : []));
   const machineCheckHolds = machinePlaceHolds();
+  /** The fixed machines that build for a pool, tried before boat (`buildPool`). */
+  const machineBuilds = input.machineBuilds ?? Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.buildPool
+    ? [[entry.buildPool, { machine: name, lease: machineBuildLease(name, entry, { scratch: join(home, "scratch") }) }]] : []));
+  /** Builds started beside a release's check. They outlive the check, and a runner shutting down stops them. */
+  const prebuilds = new Set<Promise<void>>();
+  const stopPrebuilds = new AbortController();
   /** A down place is recorded on the runner's own record once per outage, and logged, so boat use is never silent. */
   const machinePlaceDown = (name: string, reason: string) => {
     const last = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "machine_place" && row.event.name === name)?.event;
@@ -681,8 +689,18 @@ export function createRunnerQueue(input: {
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
         // The deploy lane runs one deploy per repository, so a repository's machine serves one deploy at a time. Its
         // lifetime covers the steps before a build (migrations) and the build itself, each bounded by the timeout.
-        ...remoteVerification?.lease ? { lease: (pool: string) => remoteVerification.lease!({ repo: operation.repo, pool, gitDirectory: exact.gitDirectory,
-          commitId: operation.commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000) }) } : {},
+        ...remoteVerification?.lease || Object.keys(machineBuilds).length ? { lease: async (pool: string) => {
+          const lease = { repo: operation.repo, pool, gitDirectory: exact.gitDirectory, commitId: operation.commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000) };
+          const served = machineBuilds[pool];
+          if (served) {
+            try { return await served.lease(lease); } catch (error) {
+              if (!remoteVerification?.lease) throw error;
+              progress(`warning: ${served.machine} cannot build for this deploy (${message(error)}); it builds on boat instead`);
+            }
+          }
+          if (!remoteVerification?.lease) throw new Error(`nothing on this runner can build for the pool ${pool}`);
+          return remoteVerification.lease(lease);
+        } } : {},
         run: async (request) => {
           const runId = randomUUID();
           const started = Date.now();
@@ -2297,6 +2315,8 @@ export function createRunnerQueue(input: {
           ...operation.submittedBy.endsWith(":background") ? { background: true } : {}, ...after ? { after: after.commitId } : {}, landings });
         progress(`[batch] checking ${batch.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`
           + (after ? `; ${after.commitId.slice(0, 12)} already passed, so diagnosis considers the ${landings.length} after it` : ""));
+        // A release waits on this check, so what it will deploy starts building now. A background check starts nothing.
+        if (!operation.submittedBy.endsWith(":background")) await startPrebuild(head, progress);
         let open: { commit: string; gate?: GateAttempt } | undefined;
         let budgetTaken = false;
         const releaseMachine = async () => {
@@ -2421,6 +2441,23 @@ export function createRunnerQueue(input: {
      * The release-check place serving boat pool `name` (SJ-202), held for this check until it ends; null when no place
      * serves it, or when it is down, which is said and recorded: the check then uses the pool or the host, never quietly.
      */
+    /** Starts `commitId`'s prebuild, when its policy declares one and a fixed machine serves its pool, and does not wait for it. */
+    async function startPrebuild(commitId: string, note: (line: string) => void): Promise<void> {
+      const gitDirectory = join(checkoutPath(operation), ".git");
+      const policy = await readExactExecutionPolicy(gitDirectory, commitId).then((exact) => exact.configuration?.deployments?.environments.production, () => undefined);
+      const served = policy?.machine ? machineBuilds[policy.machine] : undefined;
+      if (!policy?.prebuild || !policy.machine || !served) return;
+      const label = `[prebuild] ${operation.repo} ${commitId.slice(0, 12)}`;
+      note(`[prebuild] building ${commitId.slice(0, 12)} on ${served.machine} beside this check`);
+      const pool = policy.machine;
+      const building: Promise<void> = prebuildRelease({ gitDirectory, commitId, policy: { ...policy, prebuild: policy.prebuild },
+        readEnvironment: environment ?? (() => process.env), abortSignal: stopPrebuilds.signal, run: (request) => executor.run(request),
+        lease: () => served.lease({ repo: operation.repo, pool, gitDirectory, commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000), signal: stopPrebuilds.signal }) })
+        .then((failed) => { console.error(failed ? `${label} failed, so its deploy builds it: ${failed}` : `${label} finished`); },
+          (error: unknown) => { console.error(`${label} could not run, so its deploy builds it: ${message(error)}`); })
+        .finally(() => { prebuilds.delete(building); });
+      prebuilds.add(building);
+    }
     async function takeCheckPlace(name: string, fallback: string): Promise<{ machine: string; place: MachineVerification } | null> {
       const served = machineChecks[name];
       if (!served) return null;
@@ -2785,6 +2822,8 @@ export function createRunnerQueue(input: {
     releaseHeld,
     async drain() {
       draining = true;
+      stopPrebuilds.abort();
+      await Promise.allSettled(prebuilds);
       await deploying;
       await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));
       while (log.openOperations().some(inTail)) {
@@ -2794,7 +2833,7 @@ export function createRunnerQueue(input: {
     async idle() {
       for (;;) {
         if (recovering) await recovering;
-        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...backgroundConsiderations.values(), ...routes]);
+        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...backgroundConsiderations.values(), ...routes, ...prebuilds]);
         const lane = deploying;
         await lane;
         await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));

@@ -10,3 +10,11 @@ test("a machine's place count is a whole number from 1 to 8, and defaults to one
   for (const places of [undefined, 1, 3, 8]) assert.equal(runnerConfigProblem(config(places)), null, String(places));
   for (const places of [0, 9, 1.5, "3"]) assert.match(runnerConfigProblem(config(places)) ?? "", /"places" to a whole number from 1 to 8/, String(places));
 });
+
+test("a build pool is a pool's name, and one machine at most builds for it", () => {
+  const machine = { ssh: "peach-box", root: "/srv/slipjay-gate", account: "ubuntu" };
+  const machines = (entries: Record<string, unknown>): RunnerConfig => ({ jj: { "user.name": "n", "user.email": "e@x" }, repos: {}, machines: entries } as RunnerConfig);
+  assert.equal(runnerConfigProblem(machines({ a: { ...machine, buildPool: "images" }, b: { ...machine, buildPool: "other" } })), null);
+  assert.match(runnerConfigProblem(machines({ a: { ...machine, buildPool: "not a pool" } })) ?? "", /"buildPool" to the name of the build machine pool/);
+  assert.match(runnerConfigProblem(machines({ a: { ...machine, buildPool: "images" }, b: { ...machine, buildPool: "images" } })) ?? "", /the build pool "images" more than once/);
+});

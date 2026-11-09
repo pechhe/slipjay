@@ -51,6 +51,38 @@ async function changesSince(gitDirectory: string, previous: string | null, commi
 
 /** Why a finished command did not succeed, with the tail of its output; null when it did. */
 /** Why a step failed: the first error block in either stream when it printed one (an uncaught error's last lines are its stack), else its last lines. */
+/** What a deploy's commands run with: the declared keys, and which environment and commit they serve. */
+function commandEnvironment(policy: DeploymentEnvironment, environment: string, commitId: string, declared: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = sanitizedProcessEnv();
+  for (const key of policy.environmentKeys) if (declared[key] !== undefined) env[key] = declared[key];
+  return Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
+}
+
+/**
+ * Runs production's `prebuild` for `commitId` in a source view of it, on the machine `lease` gives, as its deploy would.
+ * Returns why it failed, or null. Nothing depends on it: the deploy builds whatever this did not.
+ */
+export async function prebuildRelease(input: {
+  gitDirectory: string;
+  commitId: string;
+  policy: DeploymentEnvironment & { prebuild: FinalizationCommand };
+  readEnvironment(): NodeJS.ProcessEnv;
+  lease(): Promise<MachineLease>;
+  run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
+  abortSignal: AbortSignal;
+}): Promise<string | null> {
+  const { policy, policy: { prebuild } } = input;
+  return withFinalizationSource(input.gitDirectory, input.commitId, async (root) => {
+    const lease = await input.lease();
+    try {
+      const result = await input.run({ executable: prebuild.executable, args: prebuild.args, cwd: path.join(root, prebuild.cwd),
+        env: { ...commandEnvironment(policy, "production", input.commitId, input.readEnvironment()), ...lease.env },
+        timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024, abortSignal: input.abortSignal });
+      return failure(result, policy.timeoutMs);
+    } finally { await lease.close().catch(() => null); }
+  }, sanitizedProcessEnv, input.abortSignal);
+}
+
 export function failure(result: BoundedProcessResult, timeoutMs: number): string | null {
   if (result.exitCode === 0 && !result.timedOut && !result.signal && !result.error) return null;
   const error = firstError(outputLines(result));
@@ -105,10 +137,7 @@ export async function runDeploy(input: {
   let migrations: DeployMigrations | undefined;
   let machine: DeployRecord["machine"];
   const projects = await withFinalizationSource(gitDirectory, commitId, async (root) => {
-    const declared = input.readEnvironment();
-    const env = sanitizedProcessEnv();
-    for (const key of policy.environmentKeys) if (declared[key] !== undefined) env[key] = declared[key];
-    Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
+    const env = commandEnvironment(policy, environment, commitId, input.readEnvironment());
     // The machine is the environment's for the whole deploy: its migrations may need it as much as its projects.
     // A production redeploy of the commit it serves needs none: whatever the machine built for that commit exists already.
     // A promotion retrying a commit production partly serves still leases, since what failed may need the machine.

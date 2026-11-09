@@ -455,7 +455,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 2400"], "the command's time plus the idle lifetime");
   assert.equal(lease.machine.name, "slipjay-pechhe-yardsmith-images");
   const fence = scripts.findIndex((script) => script.includes("loginctl terminate-session"));
-  assert.ok(fence >= 0 && fence < scripts.findIndex((script) => script.includes("cat > /tmp/slipjay-machine.bundle")), "an earlier lease's sessions end before the commit arrives");
+  assert.ok(fence >= 0 && fence < scripts.findIndex((script) => script.includes('cat > "$bundle"')), "an earlier lease's sessions end before the commit arrives");
   assert.equal(lease.env.SLIPJAY_MACHINE_GIT_DIR, "/home/user/slipjay-machine.git");
   assert.ok(inputs.some((input) => input.startsWith("# v2 git bundle") || input.startsWith("# v3 git bundle")), "the commit is sent as a bundle");
   const ssh = await readFile(lease.env.SLIPJAY_MACHINE_SSH!, "utf8");

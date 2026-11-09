@@ -138,10 +138,15 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
       return `The runner config's machine "${name}" sets "places" to a whole number from 1 to 8`;
     if (machine.checkPlace !== undefined && (typeof machine.checkPlace !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(machine.checkPlace)))
       return `The runner config's machine "${name}" sets "checkPlace" to the name of the boat pool its release-check place serves`;
+    if (machine.buildPool !== undefined && (typeof machine.buildPool !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(machine.buildPool)))
+      return `The runner config's machine "${name}" sets "buildPool" to the name of the build machine pool it builds for`;
   }
   const served = Object.entries(config.machines ?? {}).flatMap(([name, machine]) => machine?.checkPlace ? [[machine.checkPlace, name] as const] : []);
   const twice = served.find(([pool], index) => served.findIndex(([other]) => other === pool) !== index);
   if (twice) return `The runner config's machines name the release-check pool "${twice[0]}" more than once`;
+  const builders = Object.values(config.machines ?? {}).flatMap((machine) => machine?.buildPool ? [machine.buildPool] : []);
+  const built = builders.find((pool, index) => builders.indexOf(pool) !== index);
+  if (built) return `The runner config's machines name the build pool "${built}" more than once`;
   for (const repo of Object.values(config.repos)) {
     if (repo.gateMachine === undefined) continue;
     if (typeof repo.gateMachine !== "string" || !Object.hasOwn(config.machines ?? {}, repo.gateMachine)) return `A repository's "gateMachine" names an unknown machine`;

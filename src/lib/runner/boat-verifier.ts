@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:f
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../infra/bounded-process.ts";
-import { collectRemoteReports, frozenInstall, receiveCandidate, remoteFiles, remoteCommand, shellWord, sshFailed, worktreeTree, loopbackPort, SETUP_TIMEOUT_MS, CONTROL_OUTPUT } from "./remote-attempt.ts";
+import { collectRemoteReports, frozenInstall, receiveBuildCommit, receiveCandidate, remoteFiles, remoteCommand, shellWord, sshFailed, worktreeTree, loopbackPort, SETUP_TIMEOUT_MS, CONTROL_OUTPUT } from "./remote-attempt.ts";
 export { remoteCommand, shellWord, worktreeTree, loopbackPort } from "./remote-attempt.ts";
 import { TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import type { MachineLease, RemoteAttempt, RemoteMachine, RemoteOpenFailure, RemoteVerification, RunnerConfig, RuntimeIdentity } from "./runner-types.ts";
@@ -310,17 +310,9 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
         await rm(scratch, { recursive: true, force: true });
       };
       try {
-        const ref = `refs/slipjay/machine/${pool}`;
         await control(vm, "end the previous lease", FENCE_SCRIPT, { signal });
-        const heads = (await control(vm, "list commits", `git init --quiet --bare ${MACHINE_GIT_DIR} && git --git-dir=${MACHINE_GIT_DIR} for-each-ref --format='%(objectname)'`, { signal }))
-          .split("\n").filter((line) => /^[0-9a-f]{40}$/.test(line));
-        await local("git", ["update-ref", ref, commitId], gitDirectory);
-        const bundle = await bundleMissing(gitDirectory, [ref], heads, join(scratch, "commit.bundle"));
-        await control(vm, "receive the commit", `cat > /tmp/slipjay-machine.bundle
-if [ -s /tmp/slipjay-machine.bundle ]; then git --git-dir=${MACHINE_GIT_DIR} fetch --quiet /tmp/slipjay-machine.bundle ${shellWord(`+${ref}:${ref}`)}; fi
-rm -f /tmp/slipjay-machine.bundle
-git --git-dir=${MACHINE_GIT_DIR} update-ref ${shellWord(ref)} ${shellWord(commitId)}
-git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)}`, { input: bundle, timeoutMs: SETUP_TIMEOUT_MS, signal });
+        await receiveBuildCommit((what, script, options) => control(vm, what, script, { ...options, signal }), { local, bundleMissing },
+          { gitDirectory, gitDir: MACHINE_GIT_DIR, pool, commitId, bundle: join(scratch, "commit.bundle") });
         // One executable the command runs ssh through, so it needs neither the key nor the VM's address.
         const ssh = join(scratch, "ssh");
         await writeFile(ssh, `#!/bin/sh\nexec ssh ${sshArgs(vm).map(shellWord).join(" ")} "$@"\n`, { mode: 0o700 });
