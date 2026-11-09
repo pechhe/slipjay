@@ -59,6 +59,11 @@ const skipsStaging = (configuration: { process?: string } | null | undefined): b
 /** How long after the remote could not be read to learn a repository's audit policy the runner tries again. */
 const AUDIT_DISCOVERY_RETRY_MS = 600_000;
 /**
+ * How long before a scheduled promotion its build starts (`waitForSlot`): a cold build of YardSmith's three images takes
+ * about 7 minutes on peach-box, so this leaves room for one with the machine busy.
+ */
+const BUILD_AHEAD_MS = 15 * 60_000;
+/**
  * How many times a landing returns to the queue because its remote executor was not ready before any of the candidate's
  * gate commands ran: a slot whose disk boat had not restored. That is infrastructure, not a verdict on the source, but a
  * landing failed it outright and an agent had to notice and resubmit (54 landings failed on boat in the seven days to
@@ -315,9 +320,35 @@ export function createRunnerQueue(input: {
   /** The fixed machines that build for a pool, tried before boat (`buildPool`). */
   const machineBuilds = input.machineBuilds ?? Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.buildPool
     ? [[entry.buildPool, { machine: name, lease: machineBuildLease(name, entry, { scratch: join(home, "scratch") }) }]] : []));
-  /** Builds started beside a release's check. They outlive the check, and a runner shutting down stops them. */
-  const prebuilds = new Set<Promise<void>>();
+  /**
+   * Builds started ahead of a release, by repository and commit: beside its check, or ahead of its scheduled promotion. They outlive
+   * what started them, and a runner shutting down stops them.
+   */
+  const prebuilds = new Map<string, Promise<void>>();
   const stopPrebuilds = new AbortController();
+  /**
+   * Starts production's `prebuild` of `commitId` in `repo`, when its policy declares one and a fixed machine serves its
+   * pool, and does not wait for it. A build of that commit already running is left to finish; one that finished is
+   * asked again, which the command answers at once when what it built is still there.
+   */
+  async function startPrebuild(repo: string, commitId: string, why: string, note: (line: string) => void): Promise<void> {
+    const key = `${repo}\0${commitId}`;
+    if (prebuilds.has(key)) return;
+    const gitDirectory = join(repoCheckout(repo), ".git");
+    const policy = await readExactExecutionPolicy(gitDirectory, commitId).then((exact) => exact.configuration?.deployments?.environments.production, () => undefined);
+    const served = policy?.machine ? machineBuilds[policy.machine] : undefined;
+    if (!policy?.prebuild || !policy.machine || !served || prebuilds.has(key)) return;
+    const label = `[prebuild] ${repo} ${commitId.slice(0, 12)}`;
+    note(`[prebuild] building ${commitId.slice(0, 12)} on ${served.machine} ${why}`);
+    const pool = policy.machine;
+    const building: Promise<void> = prebuildRelease({ gitDirectory, commitId, policy: { ...policy, prebuild: policy.prebuild },
+      readEnvironment: environment ?? (() => process.env), abortSignal: stopPrebuilds.signal, run: (request) => executor.run(request),
+      lease: () => served.lease({ repo, pool, gitDirectory, commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000), signal: stopPrebuilds.signal }) })
+      .then((failed) => { console.error(failed ? `${label} failed, so its deploy builds it: ${failed}` : `${label} finished`); },
+        (error: unknown) => { console.error(`${label} could not run, so its deploy builds it: ${message(error)}`); })
+      .finally(() => { prebuilds.delete(key); });
+    prebuilds.set(key, building);
+  }
   /** A down place is recorded on the runner's own record once per outage, and logged, so boat use is never silent. */
   const machinePlaceDown = (name: string, reason: string) => {
     const last = log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "machine_place" && row.event.name === name)?.event;
@@ -815,6 +846,8 @@ export function createRunnerQueue(input: {
   const automaticPromotions = new Map<string, Promise<void>>();
   /** Per repository, the timer that asks again when its `promotionSchedule` next lets a promotion start. */
   const scheduledPromotions = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per repository, the timer that starts building what its scheduled promotion will deploy (`waitForSlot`). */
+  const buildsAhead = new Map<string, ReturnType<typeof setTimeout>>();
   const now = input.now ?? Date.now;
   /**
    * The commit `process: "development"` promotes: the newest landed commit whose pre-verification passed,
@@ -965,10 +998,7 @@ export function createRunnerQueue(input: {
       const last = log.releases(repo).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
       const due = nextPromotionAt(base.promotionSchedule, last ? Date.parse(last.submittedAt) : undefined, now());
       if (due > now()) {
-        clearTimeout(scheduledPromotions.get(repo));
-        const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
-        timer.unref?.();
-        scheduledPromotions.set(repo, timer);
+        waitForSlot(repo, due);
         return withheld(`waiting for the next scheduled promotion: ${describeSchedule(base.promotionSchedule)}`);
       }
     }
@@ -977,6 +1007,29 @@ export function createRunnerQueue(input: {
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
     console.error(`[runner] ${repo}: promoting ${commitId.slice(0, 12)} automatically (process: "development")`);
     wakeMain();
+  }
+  /**
+   * Asks again when the scheduled promotion is `due`, and starts building what it would promote `BUILD_AHEAD_MS` before,
+   * so its deploy finds the images built. What it would promote is read again then: the newest pre-verified candidate,
+   * else the newest landing, which the slot checks first. Nothing new to promote builds nothing.
+   */
+  function waitForSlot(repo: string, due: number): void {
+    clearTimeout(scheduledPromotions.get(repo));
+    const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
+    timer.unref?.();
+    scheduledPromotions.set(repo, timer);
+    clearTimeout(buildsAhead.get(repo));
+    buildsAhead.delete(repo);
+    if (due - BUILD_AHEAD_MS <= now()) return;
+    const ahead = setTimeout(() => {
+      buildsAhead.delete(repo);
+      const commitId = promotionCandidate(repo)?.commitId ?? log.lastLanded(repo)?.commitId;
+      if (!commitId || standsFor(repo, commitId)) return;
+      void startPrebuild(repo, commitId, "ahead of the scheduled promotion", (line) => console.error(`[runner] ${repo}: ${line.replace(/^\[prebuild\] /, "")}`))
+        .catch((error: unknown) => { console.error(`[prebuild] ${repo} ${commitId.slice(0, 12)} could not start: ${message(error)}`); });
+    }, due - BUILD_AHEAD_MS - now());
+    ahead.unref?.();
+    buildsAhead.set(repo, ahead);
   }
   /** The next look at each repository's background check (SJ-202). */
   const backgroundChecks = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1050,10 +1103,7 @@ export function createRunnerQueue(input: {
       const last = log.releases(repo).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
       const due = nextPromotionAt(base.promotionSchedule, last ? Date.parse(last.submittedAt) : undefined, now());
       if (due > now()) {
-        clearTimeout(scheduledPromotions.get(repo));
-        const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
-        timer.unref?.();
-        scheduledPromotions.set(repo, timer);
+        waitForSlot(repo, due);
         return;
       }
     }
@@ -2316,7 +2366,7 @@ export function createRunnerQueue(input: {
         progress(`[batch] checking ${batch.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`
           + (after ? `; ${after.commitId.slice(0, 12)} already passed, so diagnosis considers the ${landings.length} after it` : ""));
         // A release waits on this check, so what it will deploy starts building now. A background check starts nothing.
-        if (!operation.submittedBy.endsWith(":background")) await startPrebuild(head, progress);
+        if (!operation.submittedBy.endsWith(":background")) await startPrebuild(operation.repo, head, "beside this check", progress);
         let open: { commit: string; gate?: GateAttempt } | undefined;
         let budgetTaken = false;
         const releaseMachine = async () => {
@@ -2441,23 +2491,6 @@ export function createRunnerQueue(input: {
      * The release-check place serving boat pool `name` (SJ-202), held for this check until it ends; null when no place
      * serves it, or when it is down, which is said and recorded: the check then uses the pool or the host, never quietly.
      */
-    /** Starts `commitId`'s prebuild, when its policy declares one and a fixed machine serves its pool, and does not wait for it. */
-    async function startPrebuild(commitId: string, note: (line: string) => void): Promise<void> {
-      const gitDirectory = join(checkoutPath(operation), ".git");
-      const policy = await readExactExecutionPolicy(gitDirectory, commitId).then((exact) => exact.configuration?.deployments?.environments.production, () => undefined);
-      const served = policy?.machine ? machineBuilds[policy.machine] : undefined;
-      if (!policy?.prebuild || !policy.machine || !served) return;
-      const label = `[prebuild] ${operation.repo} ${commitId.slice(0, 12)}`;
-      note(`[prebuild] building ${commitId.slice(0, 12)} on ${served.machine} beside this check`);
-      const pool = policy.machine;
-      const building: Promise<void> = prebuildRelease({ gitDirectory, commitId, policy: { ...policy, prebuild: policy.prebuild },
-        readEnvironment: environment ?? (() => process.env), abortSignal: stopPrebuilds.signal, run: (request) => executor.run(request),
-        lease: () => served.lease({ repo: operation.repo, pool, gitDirectory, commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000), signal: stopPrebuilds.signal }) })
-        .then((failed) => { console.error(failed ? `${label} failed, so its deploy builds it: ${failed}` : `${label} finished`); },
-          (error: unknown) => { console.error(`${label} could not run, so its deploy builds it: ${message(error)}`); })
-        .finally(() => { prebuilds.delete(building); });
-      prebuilds.add(building);
-    }
     async function takeCheckPlace(name: string, fallback: string): Promise<{ machine: string; place: MachineVerification } | null> {
       const served = machineChecks[name];
       if (!served) return null;
@@ -2755,7 +2788,9 @@ export function createRunnerQueue(input: {
     auditDiscovery.clear();
     for (const timer of scheduledPromotions.values()) clearTimeout(timer);
     for (const timer of backgroundChecks.values()) clearTimeout(timer);
+    for (const timer of buildsAhead.values()) clearTimeout(timer);
     scheduledPromotions.clear();
+    buildsAhead.clear();
     for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
     recoveryRetries.clear();
   }
@@ -2823,7 +2858,7 @@ export function createRunnerQueue(input: {
     async drain() {
       draining = true;
       stopPrebuilds.abort();
-      await Promise.allSettled(prebuilds);
+      await Promise.allSettled(prebuilds.values());
       await deploying;
       await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));
       while (log.openOperations().some(inTail)) {
@@ -2833,7 +2868,7 @@ export function createRunnerQueue(input: {
     async idle() {
       for (;;) {
         if (recovering) await recovering;
-        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...backgroundConsiderations.values(), ...routes, ...prebuilds]);
+        await Promise.allSettled([...lanes.values(), ...attempts, ...discoveries, ...automaticPromotions.values(), ...backgroundConsiderations.values(), ...routes, ...prebuilds.values()]);
         const lane = deploying;
         await lane;
         await Promise.allSettled([...activeDeploys.values()].map((active) => active.pending));

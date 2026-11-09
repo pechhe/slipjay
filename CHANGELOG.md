@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.58.0
+
+- **A scheduled promotion's images are built before it starts:** fifteen minutes before a slot, the runner starts
+  production's `prebuild` for what the slot will promote, on the fixed machine that builds for its pool. A slot whose
+  candidate a background check already passed used to build at deploy time; its deploy now finds the images built. A
+  build of a commit already running is not started twice, and nothing new to promote builds nothing.
+
 ## v3.57.0
 
 - **A fixed machine can build a release's images, with boat as its fallback, and the build can start with the release:** a

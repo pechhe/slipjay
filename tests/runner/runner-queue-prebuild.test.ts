@@ -6,6 +6,7 @@ import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import type { LeaseBuildMachine, MachineLease, RemoteVerification } from "../../src/lib/runner/runner-types.ts";
+import { nextPromotionAt } from "../../src/lib/policy/promotion-schedule.ts";
 
 const schedule = (everyMinutes: number) => ({ everyMinutes, from: "00:00", until: "23:59", timeZone: "Europe/London" });
 
@@ -125,3 +126,28 @@ test("a background check starts no prebuild", async () => {
     assert.ok(!s.prebuilt().some((line) => line.includes(check.commitId)));
   } finally { await f.dispose(); }
 }, 180_000);
+
+test("a landing waiting for its scheduled promotion starts building fifteen minutes before it, on the fixed machine", async () => {
+  let clock = Date.now();
+  const s = stand();
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images", prebuild: s.prebuild }, false,
+    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "release-check" }, batchRemote: s.boat,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } }, releaseGates: () => ['console.log("release checks pass")'] });
+  try {
+    // The first landing promotes at once; the second waits for the slot thirty minutes after it.
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    await f.queue.idle();
+    const first = s.prebuilt().length;
+    const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
+    const due = nextPromotionAt(schedule(30), promotedAt, promotedAt);
+    clock = due - 15 * 60_000 - 1_500;
+    await f.land(f.submit(await f.candidate("two.txt")));
+    await settle(f);
+    const head = f.log.lastLanded(REPO)!.commitId;
+    await until(() => s.prebuilt().slice(first).find((line) => line.includes(head)));
+    assert.deepEqual(s.prebuilt().slice(first), [`production ${head} ssh-peach-box`], "it built the landing the slot will check, once");
+    assert.equal(f.log.releases(REPO).length, 1, "it promoted nothing early");
+    assert.ok(!s.leases.some((lease) => lease.startsWith("boat")), "boat built nothing");
+  } finally { await f.dispose(); }
+}, 120_000);

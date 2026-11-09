@@ -76,7 +76,10 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
 - **Prebuild.** Production with a `machine` may declare `prebuild`, a command that builds what the deploy
   will need. A batch check a release waits on (`slipjay promote --confirm`, or a scheduled slot's) starts it beside the
   check, on the fixed machine serving the pool, in a source view of the head, with the deploy's environment and machine
-  variables. It keeps going after the check ends, so the deploy must tolerate it still running: the command takes its own lock, and
+  variables. A landing waiting for a scheduled promotion starts it 15 minutes before the slot as well, for what the slot will
+  promote (the newest pre-verified candidate, else the newest landing), so a slot whose candidate was already checked
+  in the background deploys images that are built; nothing new to promote builds nothing. A build of a commit already
+  running is not started twice. It keeps going after the check ends, so the deploy must tolerate it still running: the command takes its own lock, and
   running it twice must be safe. Nothing depends on it: a failure is only logged and the deploy builds what it did not. It
   never runs on boat, so a check nobody promotes never starts a VM, and a background check starts none.
 - **Build machine.** An environment may name a `machine` pool (`"machine": "images"`). Its
