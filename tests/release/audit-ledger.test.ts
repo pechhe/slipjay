@@ -539,8 +539,15 @@ test("with an open failure and two inconclusive audits the failure is answered f
     summary = l.summary();
     const refusal = promotionRefusal(summary) ?? "";
     assert.ok(refusal.includes(second) && /last audit to judge the repository failed/.test(refusal), refusal);
-    l.cause(second, { kind: "culprits", landings: [sha("v1")] });
-    assert.equal(promotionRefusal(l.summary()), null);
+    // With the failure answered, the command the refusal advertises reaches the inconclusive run.
+    const next = auditToExplain(l.log.audits(REPO), summary);
+    assert.ok(next.ok && next.audit.id === second, "the default target is the newest inconclusive audit");
+    l.cause(next.audit.id, { kind: "culprits", landings: [sha("v1")] });
+    summary = l.summary();
+    assert.equal(promotionRefusal(summary), null);
+    // Nothing refuses now, so the default goes back to the failure, whose cause can still be corrected.
+    const correction = auditToExplain(l.log.audits(REPO), summary);
+    assert.ok(correction.ok && correction.audit.id === failed);
   } finally { l.log.close(); }
 });
 

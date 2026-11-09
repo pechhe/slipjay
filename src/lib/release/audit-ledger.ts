@@ -179,9 +179,10 @@ export function promotionRefusal(summary: AuditSummary): string | null {
 
 /**
  * The failing audit a cause attaches to: `requested`, which must have failed (an inconclusive audit counts, as it
- * recorded a failure it could not judge), or the newest audit of the open failure — answered first when there is one —
- * or the newest uncovered inconclusive audit of a refusing run. A cause covers its whole failure, or the inconclusive
- * audits up to when it was recorded, so which of its audits carries it is immaterial.
+ * recorded a failure it could not judge); or whichever refusal `promotionRefusal` names, the newest audit of an open
+ * failure with no cause and then the newest uncovered inconclusive audit of a refusing run; or the open failure's newest
+ * audit, to correct its cause. A cause covers its whole failure, or the inconclusive audits up to when it was recorded,
+ * so which of its audits carries it is immaterial.
  */
 export function auditToExplain<Audit extends AuditRecord>(audits: readonly Audit[], summary: AuditSummary, requested?: string): { ok: true; audit: Audit } | { ok: false; reason: string } {
   if (requested !== undefined) {
@@ -190,7 +191,9 @@ export function auditToExplain<Audit extends AuditRecord>(audits: readonly Audit
     return audit.result?.type === "failed" || (audit.result?.type === "audited" && verdictOf(audit)?.verdict === "failed")
       ? { ok: true, audit } : { ok: false, reason: `${requested} did not fail, so it has no cause to record` };
   }
-  const id = summary.openFailure?.audits.at(-1) ?? ((summary.inconclusive?.audits.length ?? 0) >= 2 ? summary.inconclusive!.audits.at(-1) : undefined);
+  const failure = summary.openFailure;
+  const run = summary.inconclusive?.audits ?? [];
+  const id = failure && !failure.cause ? failure.audits.at(-1) : run.length >= 2 ? run.at(-1) : failure?.audits.at(-1);
   const audit = audits.find((operation) => operation.id === id);
   return audit ? { ok: true, audit }
     : { ok: false, reason: "The latest audit did not fail, so there is no open failure to explain; name an earlier failing audit with --audit" };
