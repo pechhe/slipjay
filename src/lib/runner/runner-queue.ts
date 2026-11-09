@@ -46,7 +46,7 @@ import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bound
 import { machineVerification } from "./machine-verifier.ts";
 import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
-import { awaitHostBudget, type HostBudgetClass, type HostShell } from "./host-budget.ts";
+import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
 import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, MachineVerification, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
@@ -1414,11 +1414,16 @@ export function createRunnerQueue(input: {
     /**
      * Waits for the CPU budget of the host a job's commands are about to run on (SJ-212), in a stage of its own while it
      * is over budget, so the wait counts against neither its commands' timeouts, a stage's deadline nor the verify times
-     * its budgets judge. A boat VM is its own host.
+     * its budgets judge. A boat VM is its own host. A landing gate on a machine place does not wait: its slice already
+     * wins that machine's CPU over Development, so it only says it has started, for background work to leave room after it.
      */
     async function waitForHostBudget(placement: GatePlacement | undefined, jobClass: HostBudgetClass, signal: AbortSignal): Promise<void> {
       if (!input.hostShell || placement === "boat") return;
       const machine = placement?.startsWith("machine:") ? placement.slice("machine:".length) : null;
+      if (jobClass === "gate" && machine) {
+        await stampHostStart(input.hostShell(machine), signal);
+        return;
+      }
       let waiting = false;
       const { waited, waitedMs } = await awaitHostBudget({ shell: input.hostShell(machine), job: `This ${operation.kind}`, host: machine ?? config.name ?? "the runner host", jobClass, signal,
         onWait: (line) => {

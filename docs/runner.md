@@ -78,13 +78,14 @@ the runner's `limits` bound concurrent runs together.
 ### The host's CPU budget
 
 A gate, audit or release check that is about to run its commands on the runner host or a machine place first waits while
-that host is over its CPU budget (SJ-212). A boat VM is its own host, so a gate there does not wait. While it waits the
+that host is over its CPU budget (SJ-212). A boat VM is its own host, so a gate there does not wait, and neither does a
+landing gate on a machine place: its slice already wins that machine's CPU, and landings go first. While it waits the
 operation is in the `waiting-for-budget` stage, so the wait counts against neither its commands' timeouts, a stage's deadline
 nor the verify times its budgets judge. It reports a `[verify]` progress line naming the load and the limit, and the ledger
 records `host_budget_waited`. A release check takes the budget once, not for each run bisecting a failure.
 
-The budget reads the kernel's load figures and takes the larger of the one- and five-minute loads. A landing gate may
-start up to the host's CPU count and waits at most 2 minutes. Audits and release checks ("background" work) start up to
+The budget reads the kernel's load figures and takes the larger of the one- and five-minute loads. A landing gate on the
+runner host may start up to its CPU count and waits at most 2 minutes. Audits and release checks ("background" work) start up to
 three quarters of it, wait a further minute after any job started on the host, so jobs started together do not all read
 the same quiet host, and wait at most 30 minutes. A job at its limit runs anyway and says so: the budget never fails a
 job. A host whose figures cannot be read admits the job. A runner started with `SLIPJAY_HOST_BUDGET=off` takes no budget at all.

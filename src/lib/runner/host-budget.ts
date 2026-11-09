@@ -34,6 +34,9 @@ const claimScript = (jobClass: HostBudgetClass) => {
 /** A job past its wait goes whatever the host says, so it stamps as a gate does. */
 const STAMP_SCRIPT = claimScript("gate");
 
+/** Says a job has started on this host without reading its load, so background work still leaves room after it. */
+export const stampHostStart = (shell: HostShell, signal?: AbortSignal) => shell(STAMP_SCRIPT, signal);
+
 /** Null for anything but what the script prints on Linux: such a host has no budget to keep. */
 export function parseHostLoad(output: string): HostLoad | null {
   const [average, cpus] = output.trim().split("\n");
