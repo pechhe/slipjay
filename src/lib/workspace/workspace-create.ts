@@ -448,6 +448,37 @@ async function mayStartFromIntegrationHead(cwd: string, context: WorkspaceContex
 }
 
 /**
+ * A fetch only advances the local integration bookmark while it tracks the
+ * remote one. When it does not (the bookmark was renamed, or a colocated
+ * import left it untracked), the remote head sits behind a fetch that said
+ * nothing changed, and every start based on the bare local name would begin
+ * from stale code. Reconcile it here, the one place a start already fetches:
+ * a local bookmark behind the remote head fast-forwards to it and is tracked
+ * again, so one fetch serves every later start; a local one ahead of the
+ * remote (an unpublished landing) is left alone; a diverged pair fails the
+ * start loudly rather than guessing which head it should start from. Only a
+ * fast-forward moves the bookmark, and only through SlipJay.
+ */
+async function syncLocalIntegrationBookmark(context: WorkspaceContext, remote: string) {
+  const root = context.integration.root;
+  const branch = context.integrationBranch;
+  const tracked = await revisionFacts(root, `${branch}@${remote}`).catch(() => null);
+  if (!tracked) return;
+  const local = await revisionFacts(root, branch).catch(() => null);
+  if (!local || local.commitId === tracked.commitId) return;
+  const contains = async (ancestor: string, descendant: string) =>
+    Boolean((await tryJj(root, ["--ignore-working-copy", "log", "-r", `${ancestor} & ::${descendant}`, "--no-graph", "-T", "commit_id"])).stdout.trim());
+  if (await contains(local.commitId, tracked.commitId)) {
+    await jj(root, ["bookmark", "set", branch, "--revision", tracked.commitId]);
+    await tryJj(root, ["bookmark", "track", `${branch}@${remote}`]);
+    console.error(`[fetch] ${branch} was not tracking ${remote}: advanced the local bookmark to the fetched head ${tracked.commitId.slice(0, 12)} and re-tracked it`);
+    return;
+  }
+  if (await contains(tracked.commitId, local.commitId)) return;
+  throw new Error(`Local integration bookmark '${branch}' at ${local.commitId.slice(0, 12)} has diverged from ${branch}@${remote} at ${tracked.commitId.slice(0, 12)}: reconcile them explicitly before starting new work`);
+}
+
+/**
  * Bring the integration branch up to its declared remote before a new workspace
  * is based on it, so work started on one machine sees what another has landed.
  * A start within `START_FETCH_REUSE_MS` of the last successful one reuses that
@@ -466,14 +497,22 @@ async function refreshIntegration(context: WorkspaceContext) {
     const age = Date.now() - fetchedAt;
     return age >= 0 && age < START_FETCH_REUSE_MS;
   };
-  if (await fresh()) return;
+  if (await fresh()) {
+    // The fetch is reused, but the bookmark may have stopped tracking since.
+    await syncLocalIntegrationBookmark(context, remote);
+    return;
+  }
   // Held for one bounded fetch, and only by starts of this repository and branch.
   await withWorkspaceTransaction(`fetch:${key}`, async () => {
-    if (await fresh()) return;
+    if (await fresh()) {
+      await syncLocalIntegrationBookmark(context, remote);
+      return;
+    }
     const fetched = await fetchIntegration(context.integration.root, remote, context.integrationBranch, { timeoutMs: START_FETCH_TIMEOUT_MS });
     if (fetched.code === 0) {
       await mkdir(startFetchHome(), { recursive: true, mode: 0o700 });
       await writeFile(marker, "");
+      await syncLocalIntegrationBookmark(context, remote);
       await followIntegration(context);
       return;
     }

@@ -52,6 +52,33 @@ test("a claimed spare starts from the integration branch as published on the rem
   } finally { await f.dispose(); }
 });
 
+test("a start begins from the remote head when the local integration bookmark is untracked and behind it", async () => {
+  const f = await project();
+  try {
+    // A local bookmark no fetch advances (as in ~/projects/t3peach): the remote
+    // bookmark is listed separately, with no @origin nested under the local one.
+    jj(f.repo, ["bookmark", "untrack", "main@origin"]);
+    const landed = landElsewhere(f, "elsewhere.txt");
+    const created = await createWorkspace("task", f.repo);
+    assert.equal(created.pooled, false);
+    assert.equal(parentOf(created.workspacePath), landed);
+    assert.equal(await readFile(join(created.workspacePath, "elsewhere.txt"), "utf8"), "elsewhere\n");
+    assert.equal(jj(f.repo, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]), landed, "SlipJay advanced the local bookmark through the fetch");
+  } finally { await f.dispose(); }
+});
+
+test("a claimed spare starts from the remote head when the local integration bookmark is untracked and behind it", async () => {
+  const f = await project();
+  try {
+    await provisionSpare(f.repo);
+    jj(f.repo, ["bookmark", "untrack", "main@origin"]);
+    const landed = landElsewhere(f, "elsewhere.txt");
+    const created = await createWorkspace("task", f.repo);
+    assert.equal(created.pooled, true);
+    assert.equal(parentOf(created.workspacePath), landed);
+  } finally { await f.dispose(); }
+});
+
 test("an unreachable remote still starts the workspace from the local integration branch", async () => {
   const f = await project();
   try {
