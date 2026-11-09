@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.56.1
+
+- **A release no longer waits behind agents' work, and boat stops billing for machines nothing uses:** a batch check a
+  release waits on (`slipjay promote --confirm`, or a scheduled slot's check) goes first on its machine as a landing's gate
+  does, where it had waited a median of 5.5 minutes and as long as 30; a background check still leaves room. The runner no
+  longer resumes machines ahead of a scheduled promotion: that woke the batch pool for 55 minutes before every slot even
+  when the check runs on a machine place, and resuming a stopped build machine now takes about 97 s with no slower a
+  build. A build machine idles fifteen minutes after a deploy, not an hour.
+
 ## v3.56.0
 
 - **A failed landing or audit says whether it was a regression, a flake, infrastructure or a moved base (SJ-215):** the

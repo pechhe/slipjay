@@ -238,7 +238,7 @@ test("a build machine boat reports degraded with its disk unrestored is replaced
   const machine = degradedBuildMachine((id) => id === "bx_images" ? stuck : { hydrated: true });
   await assert.rejects(leaseImages(machine.run, 60_000), /Remote executor unavailable \(setup\)/);
   assert.ok(machine.boat().includes("delete bx_images --yes"), `a degraded build machine is deleted: ${machine.boat().join(", ")}`);
-  assert.ok(machine.boat().includes("fork bx_image --no-env --no-monitoring --ttl 3660 --type default"), "a fresh image is forked with the command's time and idle lifetime");
+  assert.ok(machine.boat().includes("fork bx_image --no-env --no-monitoring --ttl 960 --type default"), "a fresh image is forked with the command's time and idle lifetime");
   assert.ok(machine.boat().includes("rename bx_new slipjay-pechhe-yardsmith-images"), "the fresh VM takes the machine's name");
 });
 
@@ -452,7 +452,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   };
   const scratch = await mkdtemp(join(tmpdir(), "boat-scratch-"));
   const lease = await boatVerification({ image: "bx_image", cli: "boat", run, scratch }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory, commitId, lifetimeS: 1500 });
-  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 5100"], "the command's time plus the idle lifetime");
+  assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 2400"], "the command's time plus the idle lifetime");
   assert.equal(lease.machine.name, "slipjay-pechhe-yardsmith-images");
   const fence = scripts.findIndex((script) => script.includes("loginctl terminate-session"));
   assert.ok(fence >= 0 && fence < scripts.findIndex((script) => script.includes("cat > /tmp/slipjay-machine.bundle")), "an earlier lease's sessions end before the commit arrives");
@@ -462,7 +462,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
   assert.match(ssh, /^#!\/bin\/sh\nexec ssh .*'-p' '19000' 'user@198\.51\.100\.1' "\$@"\n$/);
   billed = 400;
   assert.deepEqual(await lease.close(), { seconds: 300, dollars: 0.003 });
-  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 3600", "a build machine idles an hour");
+  assert.equal(machine.boat().at(-1), "extend bx_images --ttl 900", "a build machine idles fifteen minutes");
   assert.deepEqual(await readdir(scratch), [], "the wrapper goes with the lease");
 });
 
@@ -585,7 +585,7 @@ test("boat's rate limit is an availability failure, retried and held like an out
   assert.ok(calls > 1, "retried before giving up");
 });
 
-test("warming a stopped build machine resumes it once, and a lease asked meanwhile waits and only extends it", async () => {
+test("a lease resumes a stopped build machine once, for its command and fifteen idle minutes, and a second lease waits and only extends it", async () => {
   let state = "stopped";
   const boatCalls: string[] = [];
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
@@ -598,14 +598,12 @@ test("warming a stopped build machine resumes it once, and a lease asked meanwhi
     return result(JSON.stringify({ ok: true }));
   };
   const verification = boatVerification({ image: "bx_image", cli: "boat", run });
-  const warmed = verification.warm!({ repo: "pechhe/yardsmith", pool: "images", lifetimeS: 2400 });
-  const leased = verification.lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
-  await warmed;
-  // The lease goes on to set the machine up, which this fake refuses: only how it acquired the machine matters here.
-  await assert.rejects(leased, /Remote executor unavailable \(setup\)/);
+  const lease = () => verification.lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+  // Each lease goes on to set the machine up, which this fake refuses: only how it acquired the machine matters here.
+  const leases = [lease(), lease()];
+  for (const leased of leases) await assert.rejects(leased, /Remote executor unavailable \(setup\)/);
   assert.equal(boatCalls.filter((call) => call.startsWith("resume")).length, 1, boatCalls.join("\n"));
   assert.equal(boatCalls.filter((call) => call.startsWith("fork")).length, 0);
-  const extends_ = boatCalls.filter((call) => call.startsWith("extend"));
-  assert.match(extends_[0] ?? "", /--ttl 2400/, "the warm-up gives the machine its own lifetime first");
-  assert.ok(extends_.slice(1).some((call) => /--ttl 3660/.test(call)), "the lease then extends the running machine for its command and idle time");
+  assert.ok(boatCalls.some((call) => call.startsWith("extend") && /--ttl 960/.test(call)), boatCalls.join("\n"));
+  assert.ok(boatCalls.filter((call) => call.startsWith("extend")).at(-1)?.includes("--ttl 900"), "a closed lease leaves the machine fifteen idle minutes");
 });

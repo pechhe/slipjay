@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test, fixture } from "./fixtures/runner-queue-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
-import { builderWarmAt } from "../../src/lib/runner/runner-queue.ts";
 
 test("a promotionSchedule batches development promotions and a confirmed promotion is never held", async () => {
   // Operations record wall-clock times, so the test clock is set relative to the newest release's.
@@ -44,8 +43,3 @@ test("a promotionSchedule batches development promotions and a confirmed promoti
   } finally { await f.dispose(); }
 }, 240_000);
 
-test("a scheduled promotion's build machine is resumed twenty-five minutes ahead, or at once when the promotion is nearer", () => {
-  const due = Date.parse("2026-11-05T08:00:00Z");
-  assert.equal(builderWarmAt(due, Date.parse("2026-11-05T00:15:00Z")), Date.parse("2026-11-05T07:35:00Z"));
-  assert.equal(builderWarmAt(due, Date.parse("2026-11-05T07:50:00Z")), Date.parse("2026-11-05T07:50:00Z"));
-});

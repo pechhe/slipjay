@@ -150,10 +150,7 @@ to ship now, `slipjay promote` shows the candidate and `slipjay promote --confir
 it at once, which also restarts the interval. Instead of an interval, `"promotionSchedule": { "at": ["00:00", "12:00", "18:00"], "timeZone": "Europe/London" }`
 promotes at fixed times of the local day: each stays open for an hour, once, so a candidate ready or a check re-run within
 that hour still ships in its slot, and later than that a candidate waits for the next time. An owner's promotion leaves
-the next time in place. When production deploys through a build machine
-(`machine`), the runner resumes that machine 25 minutes before a held candidate's slot (or at once when
-the slot is nearer), so the deploy does not wait on the disk restore of a machine boat stopped while
-idle; a warmed machine whose promotion never comes stops 30 minutes after its slot. It needs a runner on SlipJay 3.47.0 or later: an older
+the next time in place. It needs a runner on SlipJay 3.47.0 or later: an older
 runner keeps the field without reading it and promotes every verified landing, so restart the runner
 on the new build before relying on it.
 
@@ -168,9 +165,7 @@ falls due and something new has landed, the runner freezes the integration head 
 pre-verification that runs `requiredReleaseVerification` over the combined change from the commit Production serves
 (its last healthy deploy, so a failed deploy or rollback is accounted for; the release branch while nothing is served)
 to that head. Landings after the freeze wait for the next batch. The check runs on the build machine of pool
-`machine`, a boat VM held for it alone (on the runner host when the runner has no remote verifier), and the runner
-resumes that VM, with production's build machine, 25 minutes before the slot, so the check starts warm; with nothing
-new since the last promotion no machine is warmed. A green check promotes and deploys as before; nothing deploys
+`machine`, a boat VM held for it alone (on the runner host when the runner has no remote verifier). A green check promotes and deploys as before; nothing deploys
 without a complete green batch check of the exact commit. `slipjay promote --confirm` of a candidate without one asks
 the runner for its batch check at once, whatever the schedule, follows it to its end and confirms only if it passed;
 an open or passed check of that commit is reused, and a red one refuses.

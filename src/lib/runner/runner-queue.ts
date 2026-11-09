@@ -70,18 +70,8 @@ const REMOTE_UNAVAILABLE_RETRIES = 2;
 /** What such a landing yields to, and how the ledger counts the retries it already spent. */
 const AWAITING_REMOTE_EXECUTOR = "a remote executor that was not ready";
 
-/**
- * How far ahead of a scheduled promotion its build machine is resumed: a stopped machine's disk restore took 12 minutes
- * on 4 Nov 2026 and a replacement's 21 on 31 Oct, so 25 minutes covers both.
- */
-const BUILDER_WARM_LEAD_MS = 25 * 60_000;
-/** How long a warmed build machine stays up after the promotion it was warmed for was due, if that promotion never comes. */
-const BUILDER_WARM_IDLE_S = 30 * 60;
 /** A check changed the source it ran on, or its machine's tree could not be read back: its result is not evidence for that source. */
 class GateDrift extends Error {}
-
-/** When to resume the build machine for a promotion due at `due`: `BUILDER_WARM_LEAD_MS` before it, or now when nearer. */
-export const builderWarmAt = (due: number, now: number): number => Math.max(now, due - BUILDER_WARM_LEAD_MS);
 
 /** How long after a recovery of a held integration fails the runner queues another, doubling per failure up to the cap. */
 const RECOVERY_RETRY_MS = 30_000;
@@ -807,36 +797,6 @@ export function createRunnerQueue(input: {
   const automaticPromotions = new Map<string, Promise<void>>();
   /** Per repository, the timer that asks again when its `promotionSchedule` next lets a promotion start. */
   const scheduledPromotions = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Per repository and pool, the timer that resumes a machine ahead of a scheduled promotion (`builderWarmAt`). */
-  const builderWarmups = new Map<string, ReturnType<typeof setTimeout>>();
-  const warmupKey = (repo: string, pool: string) => `${repo}\0${pool}`;
-  function clearWarmups(repo: string): void {
-    for (const [key, timer] of builderWarmups) if (key.startsWith(`${repo}\0`)) { clearTimeout(timer); builderWarmups.delete(key); }
-  }
-  /**
-   * Resume `repo`'s build machine of `pool` in time for a promotion due at `due`, so its deploy does not wait on the disk
-   * restore of a machine boat stopped while idle (12 minutes on 4 Nov 2026, before a build that then ran twice as slow).
-   * Skipped while a release or production deploy is open: that deploy holds the machine, and warming would shorten its
-   * lifetime; and once no candidate is held for the slot any more, as after the owner promoted it meanwhile. The machine stops by itself an idle period after `due` when the promotion does not come.
-   */
-  function warmBuilder(repo: string, pool: string, due: number, wanted: () => boolean = () => Boolean(promotionCandidate(repo))): void {
-    if (!remoteVerification?.warm) return;
-    const key = warmupKey(repo, pool);
-    clearTimeout(builderWarmups.get(key));
-    const timer = setTimeout(() => {
-      builderWarmups.delete(key);
-      if (closed || draining) return;
-      if (log.openOperations(repo).some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return;
-      // Only for work still held for its slot: a candidate the owner promoted meanwhile, or one that shipped, needs no machine.
-      if (!scheduledPromotions.has(repo) || !wanted()) return;
-      const lifetimeS = Math.ceil(Math.max(0, due - now()) / 1000) + BUILDER_WARM_IDLE_S;
-      console.error(`[runner] ${repo}: resuming its ${pool} build machine for the promotion due ${new Date(due).toISOString()}`);
-      void remoteVerification.warm!({ repo, pool, lifetimeS })
-        .catch((error: unknown) => { console.error(`[runner] ${repo}: its ${pool} build machine could not be warmed: ${message(error)}`); });
-    }, Math.max(0, builderWarmAt(due, now()) - now()));
-    timer.unref?.();
-    builderWarmups.set(key, timer);
-  }
   const now = input.now ?? Date.now;
   /**
    * The commit `process: "development"` promotes: the newest landed commit whose pre-verification passed,
@@ -991,13 +951,9 @@ export function createRunnerQueue(input: {
         const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
         timer.unref?.();
         scheduledPromotions.set(repo, timer);
-        const pool = base.deployments?.environments.production?.machine;
-        if (pool) warmBuilder(repo, pool, due);
         return withheld(`waiting for the next scheduled promotion: ${describeSchedule(base.promotionSchedule)}`);
       }
     }
-    // Promoting now: its deploy acquires the machine itself, so a warm-up for a later slot is no longer wanted.
-    clearWarmups(repo);
     const automatic = { setting: "process", value: "development" } as const;
     append(next, { type: "submitted", kind: "release", repo, commitId, migrationsReady: false, submittedBy: `${executor.host}:automatic`, automatic });
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });
@@ -1052,8 +1008,7 @@ export function createRunnerQueue(input: {
   const BATCH_ATTEMPTS = 3;
   /**
    * `batchVerification` (SJ-192): the newest landing has no passing batch check. When the scheduled promotion is due,
-   * freeze it as the batch head and queue its batch check; before then, ask again at the due time and warm the batch
-   * machine (and the build machine) ahead of it. Nothing new since the last promotion warms nothing. A red batch waits
+   * freeze it as the batch head and queue its batch check; before then, ask again at the due time. A red batch waits
    * for a new landing; a flaky or infrastructure failure checks the same head again, a bounded number of times.
    */
   async function considerBatch(repo: string, head: string, base: NonNullable<Awaited<ReturnType<typeof releasePolicy>>>): Promise<void> {
@@ -1081,15 +1036,9 @@ export function createRunnerQueue(input: {
         const timer = setTimeout(() => { scheduledPromotions.delete(repo); void promoteAutomatically(repo); }, due - now());
         timer.unref?.();
         scheduledPromotions.set(repo, timer);
-        // Warm only while the head still waits for its check: a promotion of it meanwhile needs neither machine.
-        const pending = () => { const last = log.lastLanded(repo); return Boolean(last && !standsFor(repo, last.commitId)); };
-        warmBuilder(repo, base.batchVerification!.machine, due, pending);
-        const pool = base.deployments?.environments.production?.machine;
-        if (pool) warmBuilder(repo, pool, due, pending);
         return;
       }
     }
-    clearWarmups(repo);
     console.error(`[runner] ${repo}: the scheduled promotion is due; batch-checking ${head.slice(0, 12)}`);
     queueVerification(repo, head, "batch");
   }
@@ -2389,8 +2338,9 @@ export function createRunnerQueue(input: {
           const indexes = scope ? scope.checks : plan.checks.map((_, index) => index);
           const runIds: string[] = [];
           let failure: RequiredVerificationError | undefined;
-          // Once per check: a later run bisecting its failure waits for nothing but this check's own load to fade.
-          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, "background", controller.signal); }
+          // Once per check: a later run bisecting its failure waits for nothing but this check's own load to fade. A release
+          // waiting on this check goes first, as a landing's gate does; only a background look at the newest landing leaves room.
+          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, operation.submittedBy.endsWith(":background") ? "background" : "gate", controller.signal); }
           try {
             await runRequiredVerification({ root: checkout, checks: indexes.map((index) => plan.checks[index]), environment: releaseEnvironment(base, commit, scope?.suites),
               onProgress: progress, abortSignal: controller.signal,
@@ -2769,8 +2719,6 @@ export function createRunnerQueue(input: {
     for (const timer of scheduledPromotions.values()) clearTimeout(timer);
     for (const timer of backgroundChecks.values()) clearTimeout(timer);
     scheduledPromotions.clear();
-    for (const timer of builderWarmups.values()) clearTimeout(timer);
-    builderWarmups.clear();
     for (const { timer } of recoveryRetries.values()) clearTimeout(timer);
     recoveryRetries.clear();
   }

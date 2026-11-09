@@ -4,7 +4,7 @@ import { MACHINE_POOL } from "./deployment-policy.ts";
  * `batchVerification` (SJ-192): opt-in batch checks for a `process: "development"` repository. Declared, a landing no
  * longer queues a pre-verification of its own. When a scheduled promotion falls due, the runner freezes the integration
  * head, runs `requiredReleaseVerification` once over the combined change from the commit Production serves to that head,
- * on the build machine of pool `machine` (a boat VM held for this check alone, warmed ahead of the promotion), and
+ * on the build machine of pool `machine` (a boat VM held for this check alone), and
  * promotes only a head whose complete check passed. A red batch is rerun once for flakiness, then diagnosed landing by
  * landing; each culprit is recorded on its own Forge work. Undeclared, the repository behaves as before. Like every
  * promotion setting it is read from the release branch's policy, never from the candidate's.

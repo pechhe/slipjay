@@ -26,13 +26,12 @@ const batchEvents = <T extends OperationEvent["type"]>(f: Awaited<ReturnType<typ
   f.log.events({ operationId: id }).map((row) => row.event).filter((event): event is Extract<OperationEvent, { type: T }> => event.type === type);
 
 /** A remote verifier whose machine runs each command here, in the runner's own checkout, as a warm boat VM would. */
-function localRemote(warmed: { pool: string }[]): RemoteVerification {
+function localRemote(): RemoteVerification {
   return {
     async open() {
       return { executor: { host: "boat:slipjay-fixture-repo-batch", run: runBoundedProcess }, machine: { verifier: "boat", id: "vm-1", name: "slipjay-fixture-repo-batch", size: "fixture", image: "fixture" },
         tree: "tree", usage: null, async finish() { return { tree: "tree", trackedChanges: 0, usage: null }; }, async close() {} };
     },
-    async warm(input) { warmed.push({ pool: input.pool }); },
   };
 }
 
@@ -117,26 +116,21 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
   } finally { await f.dispose(); }
 }, 300_000);
 
-test("a flaky batch routes nothing and its head deploys only after a complete green check, on the batch machine warmed ahead of it", async () => {
+test("a flaky batch routes nothing and its head deploys only after a complete green check, on the batch machine", async () => {
   let clock = Date.now();
-  const warmed: { pool: string }[] = [];
   let routed = 0;
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
     { process: "development", promotionSchedule: schedule(1), now: () => clock, batchVerification: { machine: "batch" }, releaseGates: (root) => [batchCheck(root)],
-      batchRemote: localRemote(warmed), recordBatchCheck: async () => { routed++; return { kind: "accepted", value: {} }; } });
+      batchRemote: localRemote(), recordBatchCheck: async () => { routed++; return { kind: "accepted", value: {} }; } });
   try {
     await f.land(f.submit(await f.candidate("zero.txt")));
     await settle(f);
     const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
-    assert.deepEqual(warmed, [], "a promotion due at once warms nothing");
 
-    // A landing before the next slot warms the batch machine for it.
     clock = promotedAt + 30_000;
     await writeFile(join(f.root, "flaky-once"), "");
     await f.land(f.submit(await f.candidate("one.txt")));
     await settle(f);
-    await until(() => warmed.length ? true : undefined);
-    assert.deepEqual(warmed, [{ pool: "batch" }]);
     const head = f.main();
 
     clock = promotedAt + 61_000;

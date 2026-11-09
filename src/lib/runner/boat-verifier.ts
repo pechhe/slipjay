@@ -43,14 +43,12 @@ const CONTROL_TIMEOUT_MS = 120_000;
 /**
  * Boat stops a VM when its lifetime runs out, snapshotting its disk for a later resume, so the lifetime is the idle
  * timer: long enough for any attempt while one runs, IDLE_LIFETIME_S once it closes. A runner restart loses no timer.
- * Fifteen minutes keeps a gate VM warm through a burst of landings without billing a quiet hour; a build machine
- * keeps its warm Docker build cache between release builds (171 s warm against 25+ min cold), so it idles
- * BUILD_IDLE_LIFETIME_S: an hour, so a batched promotion schedule (every 30 minutes) that skips one batch for want of a
- * candidate still finds it warm, while a quiet afternoon stops it.
+ * Fifteen minutes keeps a VM warm through a burst of landings or a retried deploy without billing a quiet hour. A build
+ * machine's Docker build cache is on the disk a stop keeps, and resuming it took about 97 s with no slower a build
+ * (Nov 2026), so it idles no longer than a gate VM.
  */
 const ATTEMPT_LIFETIME_S = 3 * 3600;
 const IDLE_LIFETIME_S = 15 * 60;
-const BUILD_IDLE_LIFETIME_S = 60 * 60;
 /** Boat states in which a VM holds no running machine: it resumes from its snapshot. */
 const STOPPED = ["stopped", "stopping", "archived"];
 /** How long recovery keeps retrying to clean the pool after a restart. */
@@ -166,9 +164,8 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
    * given `lifetimeS` to live, after which boat stops it.
    */
   /**
-   * Each build machine's acquisitions, one at a time: a warm-up and a deploy's lease each resume the same VM, and two
-   * acquisitions of a missing VM at once would fork it twice. A lease after a warm-up waits for it, then finds the VM
-   * running and only extends it.
+   * Each build machine's acquisitions, one at a time: two acquisitions of a missing VM at once would fork it twice. A later
+   * one waits for the first, then finds the VM running and only extends it.
    */
   const buildTurns = new Map<string, Promise<unknown>>();
   function buildMachine(repo: string, pool: string, signal: AbortSignal | undefined, lifetimeS: number): Promise<Vm> {
@@ -302,18 +299,14 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
         if ((error as RemoteOpenFailure)?.boatUnavailable) throw error;
       }
     },
-    async warm({ repo, pool, lifetimeS, signal }): Promise<void> {
-      // Resumed and restored now, so a deploy due later finds it ready; it stops by itself after `lifetimeS`.
-      await buildMachine(repo, pool, signal, lifetimeS);
-    },
     async lease({ repo, pool, gitDirectory, commitId, lifetimeS, signal }): Promise<MachineLease> {
       // The command's own time, then the idle lifetime: a runner that dies mid-command still leaves the VM to stop.
-      const vm = await buildMachine(repo, pool, signal, lifetimeS + BUILD_IDLE_LIFETIME_S);
+      const vm = await buildMachine(repo, pool, signal, lifetimeS + IDLE_LIFETIME_S);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       const billed = await usage(vm, signal);
       const scratch = await scratchDirectory();
       const idle = async () => {
-        await boat(["extend", vm.id, "--ttl", String(BUILD_IDLE_LIFETIME_S)]).catch(() => undefined);
+        await boat(["extend", vm.id, "--ttl", String(IDLE_LIFETIME_S)]).catch(() => undefined);
         await rm(scratch, { recursive: true, force: true });
       };
       try {
@@ -347,7 +340,7 @@ git --git-dir=${MACHINE_GIT_DIR} cat-file -e ${shellWord(`${commitId}^{commit}`)
     },
     async open({ repo, slot: inputSlot, pool, screening, retrying, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
       const slot = pool ?? (screening ? `${inputSlot}-screen` : inputSlot);
-      // A named pool (a batch check's VM, SJ-192) takes turns with its warm-ups, as a build machine does, and is never forked afresh while it is merely slow.
+      // A named pool (a batch check's VM, SJ-192) takes turns as a build machine does, and is never forked afresh while it is merely slow.
       const vm = pool ? await buildMachine(repo, pool, signal, ATTEMPT_LIFETIME_S) : await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true, false, retrying === true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.

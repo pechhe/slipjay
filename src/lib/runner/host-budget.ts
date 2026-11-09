@@ -8,7 +8,7 @@ import { spawn } from "node:child_process";
 
 /**
  * A `gate` keeps a landing moving: it may run up to the host's CPU count and waits briefly. `background` work (a nightly
- * audit, a release check, a preview) leaves a quarter of the host free and waits far longer, so gates and agents go first.
+ * audit, a background check of the newest landing, a preview) leaves a quarter of the host free and waits far longer, so gates and agents go first.
  */
 export type HostBudgetClass = "gate" | "background";
 

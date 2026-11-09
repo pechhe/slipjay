@@ -640,7 +640,7 @@ export interface RemoteVerification {
   /** A machine for `slot` of `repo`, holding exactly `candidate` on `base` with `integrationBranch` at `base`.
    * `screening` selects a separate pool, never an authoritative numeric slot. */
   /** `retrying`: a landing's attempt after one whose machine was not ready; it reuses the slot's VM and forks none. */
-  /** `pool` names a held VM of its own (a batch check's, SJ-192) instead of a gate slot; it shares warm-ups' turns like a build machine. */
+  /** `pool` names a held VM of its own (a batch check's, SJ-192) instead of a gate slot; it takes turns like a build machine. */
   open(input: { repo: string; slot: number; pool?: string; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string;
     /** Runner-provided services a fixed place must connect before any gate command starts. */
     environment?: NodeJS.ProcessEnv; signal: AbortSignal }): Promise<RemoteAttempt>;
@@ -650,8 +650,6 @@ export interface RemoteVerification {
   recover?(repos: readonly string[]): Promise<void>;
   /** `repo`'s build machine of `pool`, holding `commitId` from `gitDirectory`, for one command of at most `lifetimeS`. */
   lease?(input: { repo: string; pool: string; gitDirectory: string; commitId: string; lifetimeS: number; signal?: AbortSignal }): Promise<MachineLease>;
-  /** Resume `repo`'s build machine of `pool` and wait until it is ready, leaving it to stop after `lifetimeS`. */
-  warm?(input: { repo: string; pool: string; lifetimeS: number; signal?: AbortSignal }): Promise<void>;
 }
 
 /**

@@ -29,7 +29,6 @@ function boat(used: string[]): RemoteVerification {
       return { executor: { host: "boat", run: runBoundedProcess }, machine: { verifier: "boat", id: "vm-1", name: "release-check", size: "fixture", image: "fixture" },
         tree: "tree", usage: null, async finish() { return { tree: "tree", trackedChanges: 0, usage: null }; }, async close() {} };
     },
-    async warm() {},
   };
 }
 
@@ -53,14 +52,12 @@ test("a batch check whose machine names a release-check place runs there, apart 
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("a release check waits for the CPU budget of its machine", async () => {
+test("a check a release waits on goes first on its machine, whatever the machine's load", async () => {
   const state = { up: true, opened: 0, closed: 0 };
-  const asked: (string | null)[] = [];
-  let reads = 0;
+  const stamped: (string | null)[] = [];
   const hostShell = (machine: string | null) => async (script: string) => {
-    if (script.includes("flock")) return "claimed\n";
-    asked.push(machine);
-    return `${machine === "peach-box" && !reads++ ? "99 99" : "1 1"} 1.00 1/100 200\n32\n`;
+    if (script.includes("flock")) { stamped.push(machine); return "claimed\n"; }
+    return `${machine === "peach-box" ? "99 99" : "1 1"} 1.00 1/100 200\n32\n`;
   };
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
     { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "peach-box" }, batchRemote: boat([]), hostShell,
@@ -70,13 +67,43 @@ test("a release check waits for the CPU budget of its machine", async () => {
     await settle(f);
     const check = f.log.verifications(REPO)[0]!;
     await until(() => f.log.operation(check.id)?.result ?? undefined);
-    assert.ok(asked.includes("peach-box"));
+    assert.ok(!check.submittedBy.endsWith(":background"));
+    assert.deepEqual(events(f, check.id, "host_budget_waited"), []);
+    assert.ok(!events(f, check.id, "stage").some((event) => event.stage === "waiting-for-budget"));
+    assert.ok(stamped.includes("peach-box"), "it still says it started, so background work leaves room after it");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a background check waits for the CPU budget of its machine", async () => {
+  let clock = Date.now();
+  const state = { up: true, opened: 0, closed: 0 };
+  let reads = 0;
+  const hostShell = (machine: string | null) => async (script: string) => {
+    if (script.includes("flock")) return "claimed\n";
+    return `${machine === "peach-box" && !reads++ ? "99 99" : "1 1"} 1.00 1/100 200\n32\n`;
+  };
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
+    { process: "development", promotionSchedule: schedule(600), now: () => clock, batchVerification: { machine: "peach-box", everyMinutes: 20 }, batchRemote: boat([]), hostShell,
+      machineCheckVerifications: { "peach-box": checkPlace(state) }, releaseGates: () => ['console.log("release checks pass")'] });
+  try {
+    // The first landing promotes at once. Nothing else is due for hours, so only the background interval checks the second.
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
+    reads = 0;
+    clock = promotedAt + 60_000;
+    await f.land(f.submit(await f.candidate("two.txt")));
+    await settle(f);
+    clock = promotedAt + 21 * 60_000;
+    await f.queue.recover();
+    await settle(f);
+    const check = await until(() => f.log.verifications(REPO).find((entry) => entry.submittedBy.endsWith(":background") && entry.result));
     assert.ok(events(f, check.id, "host_budget_waited").some((event) => event.placement === "machine:peach-box"));
     assert.ok(events(f, check.id, "progress").some((event) => /This verification is waiting for peach-box's CPU budget: load 99\.0 is over 24\.0/.test(event.line)));
     const stages = events(f, check.id, "stage").map((event) => event.stage);
     assert.equal(stages[stages.indexOf("waiting-for-budget") + 1], "verifying", "verifying restarts after the wait, so its deadline does not include it");
   } finally { await f.dispose(); }
-}, 120_000);
+}, 180_000);
 
 test("with the release-check place down, a batch check says so and runs on the boat pool instead", async () => {
   const state = { up: false, opened: 0, closed: 0 };
