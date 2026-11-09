@@ -301,9 +301,12 @@ function executedVerify(op: OperationHistory): number | undefined {
   if (!isLandingSubmission(op.submitted)) return undefined;
   if (op.events.some((row) => row.event.type === "verification_skipped" || row.event.type === "cancelled")) return undefined;
   if (!op.events.some((row) => row.event.type === "verification_base")) return undefined;
-  const gate = (stage: string) => op.events.find((row) => row.event.type === "stage_detail" && row.event.stage === stage && validDuration(row.event.durationMs));
-  const detail = gate("verifying") ?? gate("screening");
-  return detail?.event.type === "stage_detail" ? detail.event.durationMs : undefined;
+  // A wait at the host's CPU budget splits the stage in two; the wait is its own stage, so the sum is the gate's time.
+  const gate = (stage: string) => {
+    const slices = op.events.flatMap((row) => row.event.type === "stage_detail" && row.event.stage === stage && validDuration(row.event.durationMs) ? [row.event.durationMs] : []);
+    return slices.length ? slices.reduce((total, ms) => total + ms, 0) : undefined;
+  };
+  return gate("verifying") ?? gate("screening");
 }
 
 function budgetStatus(budgets: TimeBudgets | null, verify: MetricTiming | null, overFiles: number): BudgetStatus {

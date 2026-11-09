@@ -290,6 +290,16 @@ test("a screened landing's gate counts toward the verify budget: the screen, or 
   assert.equal(stale.verify?.medianMs, 200_000, "the rerun on the moved base is the landing's gate");
 });
 
+test("a landing that waited at the host's CPU budget counts its whole gate and none of the wait", () => {
+  const waited = (id: string, stage: "verifying" | "screening") => verifiedLanding(id, 1, 3_600_000, 5_000, [
+    { type: "stage_detail", stage: "waiting-for-budget", durationMs: 600_000 },
+    { type: "host_budget_waited", placement: "host", waitedMs: 600_000 },
+    { type: "stage_detail", stage: "verifying", durationMs: 200_000 },
+  ]).map((stored) => stored.event.type === "stage_detail" && stored.event.stage === "verifying" ? { ...stored, event: { ...stored.event, stage } } : stored);
+  assert.equal(pipelineMetrics(waited("gate", "verifying"), at(0), { now: NOW }).repositories[0]!.verify?.medianMs, 205_000);
+  assert.equal(pipelineMetrics(waited("screen", "screening"), at(0), { now: NOW }).repositories[0]!.verify?.medianMs, 205_000);
+});
+
 test("ranks test files from recorded reports, finds growing ones, and judges the per-file budget on serial file-cost runs over their own window", () => {
   const report = (runId: string, files: [string, number][]): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: files.map(([file, ms]) => ({ file, suite: "vitest", ms, status: "passed" })) });
   const cost = (runId: string, files: [string, number][]): OperationEvent => ({ type: "test_report", runId, status: "recorded", files: files.map(([file, ms]) => ({ file, suite: "file-cost", ms, status: "passed" })) });

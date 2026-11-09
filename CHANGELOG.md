@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.55.1
+
+- **A landing that waited for its host's CPU budget reports its whole verify time (SJ-212):** the wait splits the gate's
+  stage in two, and `slipjay metrics` read only the slice before it, so busy hosts looked faster than they are. It now
+  adds the slices, without the wait.
+
 ## v3.55.0
 
 - **Heavy jobs wait for their host's CPU budget (SJ-212):** a landing gate, nightly audit or release check about to run on
