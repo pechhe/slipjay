@@ -180,10 +180,11 @@ test("a runner killed while a short landing runs beside two long ones ends each 
     child.kill("SIGKILL"); await exited;
     await f.queue.recover(); await f.queue.recover();
     for (const id of [a, b, c]) {
-      assert.equal(f.result(id)?.type, "failed", JSON.stringify(f.result(id)));
-      assert.match(JSON.stringify(f.result(id)), /runner restarted/);
-      assert.equal(f.log.events({ operationId: id }).filter(({ event }) => event.type === "failed").length, 1, "each ends once");
-      assert.ok(!f.log.events({ operationId: id }).some(({ event }) => event.type === "integrated" || event.type === "landed"));
+      // None had integrated, so each waits in the queue for another attempt; their authors withdraw them, since their gates hang.
+      assert.equal(f.log.operation(id)!.status, "queued", JSON.stringify(f.log.operation(id)));
+      assert.ok(!f.log.events({ operationId: id }).some(({ event }) => event.type === "failed" || event.type === "integrated" || event.type === "landed"));
+      f.log.append(id, { type: "cancelled", reason: "cancelled by the author" });
+      f.queue.cancelled(f.log.operation(id)!);
     }
     assert.deepEqual({ repo: f.main(), other: f.otherMain() }, before, "nothing was published");
     if (assertSystemdOrSkip()) assert.deepEqual(left.map(alive), left.map(() => false), "recovery stopped every command the killed runner left");

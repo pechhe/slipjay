@@ -446,8 +446,10 @@ systemdTest("after the runner is killed outright, the next process stops only th
     await f.queue.recover();
     assert.deepEqual(left.map(alive), [false, false, false, false], "recovery stopped every command the killed runner left");
     assert.deepEqual(others.map(alive), [true, true, true, true], "another runner's commands are untouched");
-    assert.equal(f.result(stuck)?.type, "failed", JSON.stringify(f.result(stuck)));
-    assert.match(JSON.stringify(f.result(stuck)), /runner restarted/);
+    // It had not integrated, so it waits in the queue for another attempt; its author withdraws it, since its gate hangs.
+    assert.equal(f.log.operation(stuck)!.status, "queued", JSON.stringify(f.log.operation(stuck)));
+    f.log.append(stuck, { type: "cancelled", reason: "cancelled by the author" });
+    f.queue.cancelled(f.log.operation(stuck)!);
     assert.equal((await f.land(f.submit(await f.candidate("after.txt"))))?.type, "landed", "the checkout is reused only after recovery");
     bystanderStop.abort();
     await bystander;

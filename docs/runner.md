@@ -363,9 +363,19 @@ and held state through the existing recovery path.
   where it cannot find the runner it fails loudly in the journal, and systemd then stops the whole unit at once, which a
   stop hook cannot prevent, so the idle check above is the only guard there.
 
-  On restart, queued operations resume. A landing that was running is recorded as
-  landed if its commit already reached the remote, and as failed ("land again")
-  otherwise. A release that was running is recorded as failed with the
+  On restart, queued operations resume. A landing that was running and had recorded
+  neither a publication intent nor an integration published nothing, so it returns to the
+  queue (`yielded` to `a runner restart`) and its next attempt prepares its candidate
+  afresh; after three such returns a fourth interruption fails it ("land again"), so a
+  landing that brings the runner down cannot loop. A landing past its publication intent
+  is not returned to the queue: its candidate may already be the integration branch's
+  tip in the runner's checkout, and a second attempt would integrate the same change
+  onto it again. It is recorded as landed if its commit already reached the remote;
+  otherwise the runner holds that integration (`integration_held`) and its recovery
+  publishes it, and the landing is recorded as failed ("land again"), which a reland
+  reconciles once the held commit publishes. An upgrade or `systemctl restart` reaches
+  this case only when the stop hook could not wait (see above): it waits for every
+  landing that is integrating, finalizing or publishing. A release that was running is recorded as failed with the
   `slipjay promote --confirm` command that reruns it. A pre-verification that was
   running is queued again; one whose green staging deploy was recorded without it is
   queued then. A reset that was running is

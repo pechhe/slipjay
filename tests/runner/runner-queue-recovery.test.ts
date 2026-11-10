@@ -4,17 +4,35 @@ import { join } from "node:path";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES, recoveryKey } from "../../src/lib/runner/runner-contract.ts";
 import { test, jj, fixture, until } from "./fixtures/runner-queue-fixture.ts";
 
-test("recovery fails interrupted verification and leaves queued operations for wake", async () => {
+test("a restart returns a gating and a queued landing to the queue, and both land with no resubmission", async () => {
   const f = await fixture();
   try {
     const interrupted = f.submit(await f.candidate("interrupted.txt"));
     f.log.append(interrupted, { type: "stage", stage: "verifying" });
     const queued = f.submit(await f.candidate("queued.txt"));
     await f.queue.recover();
-    assert.deepEqual(f.result(interrupted), { type: "failed", stage: "verifying", reason: "runner restarted during verifying; land again" });
+    assert.equal(f.log.operation(interrupted)!.status, "queued");
     assert.equal(f.log.operation(queued)!.status, "queued");
+    assert.equal(f.log.events({ operationId: interrupted }).filter(({ event }) => event.type === "failed").length, 0);
     f.queue.wake(); await f.queue.idle();
+    assert.equal(f.result(interrupted)?.type, "landed", JSON.stringify(f.result(interrupted)));
     assert.equal(f.result(queued)?.type, "landed", JSON.stringify(f.result(queued)));
+    assert.equal(f.log.events().filter(({ event }) => event.type === "submitted").length, 2);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a landing a restart interrupts a fourth time before it integrates fails, naming the restart", async () => {
+  const f = await fixture();
+  try {
+    const interrupted = f.submit(await f.candidate("interrupted.txt"));
+    for (let restart = 0; restart < 3; restart++) {
+      f.log.append(interrupted, { type: "stage", stage: "screening" });
+      await f.queue.recover();
+      assert.equal(f.log.operation(interrupted)!.status, "queued");
+    }
+    f.log.append(interrupted, { type: "stage", stage: "screening" });
+    await f.queue.recover();
+    assert.deepEqual(f.result(interrupted), { type: "failed", stage: "screening", reason: "runner restarted during screening; land again" });
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -32,21 +50,22 @@ test("restart recovery closes both interrupted lanes once, preserves a pause and
     f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "owner" });
     await f.queue.recover();
     await f.queue.recover();
-    for (const id of [landing, release]) {
-      assert.equal(f.result(id)?.type, "failed");
-      assert.equal(f.log.events({ operationId: id }).filter(({ event }) => TERMINAL_EVENT_TYPES.includes(event.type as never)).length, 1);
-    }
+    // The release fails once, naming its rerun; the landing, which never integrated, waits in the queue behind the pause.
+    assert.equal(f.result(release)?.type, "failed");
+    assert.equal(f.log.events({ operationId: release }).filter(({ event }) => TERMINAL_EVENT_TYPES.includes(event.type as never)).length, 1);
+    assert.equal(f.result(landing), undefined);
+    assert.equal(f.log.operation(landing)!.stage, "paused");
     assert.equal(f.main(), integration);
     assert.equal(f.releaseRef(), releaseBase);
     assert.equal(f.log.operation(other)!.stage, "paused");
     f.queue.wake();
     await f.queue.idle();
     assert.equal(f.log.operation(other)!.status, "queued");
-    // Recovery never invents a source retry or publication for either interrupted operation.
+    // Recovery invents no publication: the landing publishes only through its own queued turn below.
     assert.equal(jj(f.author, ["--ignore-working-copy", "log", "-r", candidate.commitId, "--no-graph", "-T", "commit_id"]), candidate.commitId);
     f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "owner" });
     assert.equal((await f.land(other))?.type, "landed");
-    assert.equal(f.result(landing)?.type, "failed");
+    assert.equal(f.result(landing)?.type, "landed", JSON.stringify(f.result(landing)));
     assert.equal(f.result(release)?.type, "failed");
   } finally { await f.dispose(); }
 }, 120_000);

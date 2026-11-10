@@ -144,18 +144,18 @@ test("depth-two actual runner process loss retains durable attempts and recovers
     assert.equal(f.main(), base);
     assert.ok(f.log.paused());
     for (const id of [a, b]) {
-      assert.equal(f.result(id)?.type, "failed", JSON.stringify(f.result(id)));
-      assert.match(JSON.stringify(f.result(id)), /runner restarted/);
-      assert.equal(f.log.events({ operationId: id }).filter((row) => row.event.type === "failed").length, 1);
-      assert.ok(!f.log.events({ operationId: id }).some((row) => row.event.type === "integrated"));
+      // Neither had integrated, so each waits in the queue (behind the pause) for another attempt.
+      assert.equal(f.log.operation(id)?.status, "queued", JSON.stringify(f.log.operation(id)));
+      assert.ok(!f.log.events({ operationId: id }).some((row) => row.event.type === "failed" || row.event.type === "integrated"));
     }
-    const retry = f.submit(original);
     f.queue.wake(); await f.queue.idle();
-    assert.equal(f.log.operation(retry)?.status, "queued");
+    assert.equal(f.main(), base, "nothing starts while paused");
     f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "fixture-owner" });
-    assert.equal((await f.land(retry))?.type, "landed", JSON.stringify(f.result(retry)));
-    assert.equal(f.log.operation(retry)!.commitId, original.commitId);
-    assert.equal(f.log.events().filter((row) => row.event.type === "integrated").length, 1);
+    // Both land from their original submissions, with no resubmission, each integrated once.
+    for (const id of [a, b]) assert.equal((await f.land(id))?.type, "landed", JSON.stringify(f.result(id)));
+    assert.equal(f.log.operation(a)!.commitId, original.commitId);
+    assert.equal(f.log.events().filter((row) => row.event.type === "integrated").length, 2);
+    assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 2);
     for (const event of artifacts)
       assert.equal(jj(event.checkout, ["log", "-r", event.candidate, "--no-graph", "-T", "commit_id"]), event.candidate);
   } finally { child?.kill("SIGKILL"); await exited; await f.dispose(); }

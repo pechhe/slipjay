@@ -74,6 +74,9 @@ const BUILD_AHEAD_MS = 15 * 60_000;
 const REMOTE_UNAVAILABLE_RETRIES = 2;
 /** What such a landing yields to, and how the ledger counts the retries it already spent. */
 const AWAITING_REMOTE_EXECUTOR = "a remote executor that was not ready";
+/** What a landing a restart interrupted before it integrated yields to; it returns to the queue at most this many times. */
+const RUNNER_RESTART = "a runner restart";
+const RESTART_REQUEUES = 3;
 
 /** A check changed the source it ran on, or its machine's tree could not be read back: its result is not evidence for that source. */
 class GateDrift extends Error {}
@@ -2726,6 +2729,19 @@ export function createRunnerQueue(input: {
         }
       } catch (error) {
         append(operation.id, { type: "progress", line: `Recovery could not confirm publication: ${message(error)}` });
+      }
+      // A landing stopped before it integrated published nothing and ran no verdict on its source: it returns to the queue
+      // with its submission, admission and follower, and its next attempt prepares the candidate afresh. Past
+      // RESTART_REQUEUES restarts (a landing that brings the runner down, say) it fails as before.
+      // `publication_intent` is recorded before the only step that integrates, so a landing with neither it nor an
+      // integration never moved the integration branch.
+      const recorded = log.events({ operationId: operation.id }).map(({ event }) => event);
+      const unintegrated = !integrated && !recorded.some((event) => event.type === "publication_intent");
+      const restarts = recorded.filter((event) => event.type === "yielded" && event.to === RUNNER_RESTART).length;
+      if (verdict.type === "failed" && unintegrated && restarts < RESTART_REQUEUES) {
+        append(operation.id, { type: "progress", line: `[runner] restarted during ${operation.stage}; this landing had not integrated, so it returns to the queue (${restarts + 1} of ${RESTART_REQUEUES})` });
+        append(operation.id, { type: "yielded", to: RUNNER_RESTART });
+        continue;
       }
       if (remote) await cleanup(operation, checkout, remote);
       if (verdict.type === "failed") await freezeProvenance(operation.id, checkout, verdict);

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { jjEnvironment, landingCommandEnvironment, runWorkspaceCommand } from "../infra/workspace-command.ts";
 import { jj } from "../infra/workspace-jj.ts";
 import { repositoryKey } from "../runner/runner-contract.ts";
-import type { Executor, OperationEvent, SubmitRequest } from "../runner/runner-types.ts";
+import type { Executor, OperationEvent, OperationLog, SubmitRequest } from "../runner/runner-types.ts";
 
 export type RetainedSubmission = Extract<OperationEvent, { type: "source_retained" }>;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -72,6 +72,37 @@ export async function retainSubmissionSource(input: {
     try { await handle.sync(); } finally { await handle.close(); }
   }
   return { type: "source_retained", commitId: request.commitId, manifestSha256: digest(manifest), sourceRef: ref, handoffComplete: false };
+}
+
+/**
+ * Record `source_identity` for every retained submission that has none: the changed paths of its commit against its
+ * first parent, each with the blob it leaves (or none where it deletes), hashed in path order. A rebase that leaves those
+ * files as they were keeps the digest; one that merges another change into them does not, so equal digests are the same
+ * source. A submission whose source is already gone gets none. Returns how many it recorded.
+ */
+export async function identifyRetainedSources(input: { home: string; log: OperationLog; executor: Executor; env?: NodeJS.ProcessEnv; gitExecutable?: string }): Promise<number> {
+  const { home, log, executor } = input;
+  let recorded = 0;
+  for (const operationId of log.retainedEvidence()) {
+    const events = log.events({ operationId }).map((row) => row.event);
+    const retained = events.find((event) => event.type === "source_retained");
+    const submitted = events.find((event) => event.type === "submitted");
+    if (retained?.type !== "source_retained" || submitted?.type !== "submitted" || events.some((event) => event.type === "source_identity" || event.type === "evidence_expired")) continue;
+    const result = await executor.run({ executable: input.gitExecutable ?? "git", cwd: home, env: landingCommandEnvironment(input.env), timeoutMs: 120_000,
+      args: ["--git-dir", submissionStorePath(home, submitted.repo), "diff-tree", "-r", "--no-renames", "--no-commit-id", "--root", "-m", "--first-parent", "-z", retained.commitId],
+      maxOutputBytes: 8 * 1024 * 1024, maxOutputBytesPerStream: 8 * 1024 * 1024 });
+    if (result.exitCode !== 0 || result.signal || result.timedOut || result.cancelled || result.stdoutTruncated) continue;
+    // `-z` output: ":<old mode> <new mode> <old blob> <new blob> <status>" then the path, each NUL-terminated.
+    const fields = result.stdout.split("\0");
+    const changed: string[] = [];
+    for (let index = 0; index + 1 < fields.length; index += 2) {
+      const [, , , blob] = fields[index]!.slice(1).split(" ");
+      if (blob) changed.push(`${fields[index + 1]}\t${blob}`);
+    }
+    log.append(operationId, { type: "source_identity", digest: digest(changed.sort().join("\n")) });
+    recorded++;
+  }
+  return recorded;
 }
 
 /** Restore from runner-owned objects even after the upstream candidate or warm checkout disappears. */

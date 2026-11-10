@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.60.0
+
+- **A runner restart no longer fails a landing that had not integrated (YS-1305):** recovery returns it to the queue with
+  its submission, admission and follower (`yielded` to `a runner restart`), and its next attempt prepares the candidate
+  afresh, so the author need not land again. Only a landing that recorded a publication intent or an integration is
+  settled as before (landed if its commit reached the remote, else failed). A landing restarts interrupt four times
+  before it integrates fails as before, naming the restart, so one that brings the runner down cannot loop.
+- **`slipjay metrics --failures --repo <owner/name> --since <time> [--until <time> | --first <n>]`** classifies every failed
+  landing in the window as flake, catchable, gate, infrastructure or conflict (`src/lib/runner/landing-failures.ts` gives
+  each rule), with its evidence, marks a gate failure that names no test, error or location, and reports the failure rate
+  excluding conflicts and the window's landing preflights. A failure is a flake when the same source landed later: the
+  retention pass records each retained submission's `source_identity` (its changed paths and their content), which
+  survives a rebase that leaves those files as they were.
+- **A landing preflight's outcome is recorded in the runner's ledger:** `land` posts a `preflight` client fact (passed or
+  refused, its time, and a refusal's last line) to the runner it lands to, in a detached process, so refusals before
+  submission can be counted beside the gate's failures.
+
 ## v3.59.0
 
 - **A landing's runner overhead is shorter at both ends (SJ-223):** a landing is recorded as landed as soon as its push

@@ -284,14 +284,16 @@ test("restart during a screen recovers remote leases and records an interrupted 
     f.queue.close();
     restarted = createRunnerQueue({ log: f.log, executor: f.executor, home: f.home,
       config: { repos: { "fixture/repo": { url: f.origin, verifier: "boat", screeningLanes: 3 } } }, remoteVerification: r.remote });
+    // Paused, so the requeued landing waits instead of opening a fresh screen this test would have to release.
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "test" });
     await restarted.recover();
     await restarted.idle();
     assert.deepEqual(recovered, ["fixture/repo"]);
-    const outcome = f.result(id);
-    assert.equal(outcome?.type, "failed");
-    assert.match(outcome?.type === "failed" ? outcome.reason : "", /restart.*screening/);
+    // It had not integrated, so it waits in the queue for a fresh screen.
+    assert.equal(f.log.operation(id)?.status, "queued");
+    assert.equal(f.result(id), undefined);
     assert.ok(!f.log.events({ operationId: id }).some(({ event }) => event.type === "publication_intent"));
-  } finally { restarted?.close(); await restarted?.idle(); await f.dispose(); }
+  } finally { r.releaseAll(); restarted?.close(); await restarted?.idle(); await f.dispose(); }
 });
 
 test("screens that pass while paused publish in predicted order, each on its own screen", async () => {

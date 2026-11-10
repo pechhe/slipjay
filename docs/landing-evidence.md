@@ -85,7 +85,11 @@ timeout or failure to start prints the command's output tail and refuses the lan
 nothing is submitted. A passing check that changes tracked source also refuses, leaving
 those edits for you to review before rerunning `land`. Use checks, rather than formatters
 that rewrite files. `slipjay land --skip-preflight` bypasses the command and says it was
-skipped. With no declaration, no command runs. Results are never cached, and the
+skipped. With no declaration, no command runs. Each preflight that ran is posted to the
+runner it lands to as a `preflight` client fact (passed or refused, its duration, and a
+refusal's last line), by a detached process: `land` waits only for it to start, never
+for the runner, and a fact that cannot be posted is one line in `pool-refill.log`;
+`slipjay metrics --failures` counts them. Results are never cached, and the
 preflight never runs on the runner: its landing gate still decides whether a candidate
 may integrate. A preflight reruns on each invocation, including when following an
 existing operation; `--skip-preflight` can bypass a broken check to follow it.

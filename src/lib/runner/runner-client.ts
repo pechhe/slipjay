@@ -31,6 +31,7 @@ import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infr
 import { listWorkspaces, metadataPath, readLandingState, statePath, workspaceMetadata } from "../workspace/workspace-state.ts";
 import { poolRefillLogPath, stateHome } from "../workspace/workspace-paths.ts";
 import { runnerSetting } from "../policy/machine-config.ts";
+import { RUNNER_LOCATION_ENV } from "./runner-env.ts";
 import { startLandedHousekeeping } from "../workspace/workspace-housekeeping.ts";
 import { callerPids } from "../workspace/workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
@@ -628,7 +629,15 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
   const env = options.env ?? process.env;
   const onLine = options.onLine ?? console.log;
   const { context, target: preview } = await landingPreview(cwd, { allowDefaultWorkspace: options.direct });
-  await runLandingPreflight(context.current.root, preview.commitId, { ...options, onLine });
+  // Each preflight that ran is a client fact in the runner's ledger, so its refusals can be counted beside the gate's.
+  const recording: Promise<void>[] = [];
+  try {
+    await runLandingPreflight(context.current.root, preview.commitId, { ...options, onLine, onOutcome: (outcome) => {
+      // To the runner this landing goes to, which may be one the caller named rather than the machine's.
+      recording.push(recordClientFactsInBackground(cwd, [{ kind: "preflight", workspace: context.current.name, commitId: preview.commitId, ...outcome }],
+        { ...env, [RUNNER_LOCATION_ENV]: options.location }));
+    } });
+  } finally { await Promise.all(recording); }
   const remote = publicationRemote(context);
   if (!remote) throw new Error("Runner landing requires a publication remote");
   const repo = githubRepository(await jj(cwd, ["git", "remote", "list"]), remote);

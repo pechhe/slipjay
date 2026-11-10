@@ -61,6 +61,8 @@ test("the candidate bookmark is gone from origin before a landing verdict other 
     assert.equal((await f.land(failed))?.type, "failed");
     const interrupted = f.submit(await f.candidate("interrupted.txt"));
     f.log.append(interrupted, { type: "stage", stage: "verifying" });
+    // A restart requeues a landing that has not integrated, three times; the fourth ends it (YS-1305).
+    for (let restart = 0; restart < 3; restart++) { await f.queue.recover(); f.log.append(interrupted, { type: "stage", stage: "verifying" }); }
     await f.queue.recover();
     assert.equal(f.result(interrupted)?.type, "failed");
     assert.deepEqual([landed, failed, interrupted].map((id) => f.candidateAtVerdict.get(id)), [true, false, false]);

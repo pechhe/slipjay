@@ -43,7 +43,7 @@ test("a passing preflight checks the committed candidate in the workspace root a
   } finally { await f.dispose(); }
 });
 
-test("a failing preflight prints both output tails without contacting the runner or publishing a candidate", async () => {
+test("a failing preflight prints both output tails, submits nothing and records its refusal in the runner's ledger", async () => {
   const f = await fixture();
   const fetch = vi.spyOn(globalThis, "fetch");
   try {
@@ -52,7 +52,14 @@ test("a failing preflight prints both output tails without contacting the runner
     assert.ok(f.lines.includes("format failure"));
     assert.ok(f.lines.includes("lint failure"));
     assert.equal(fetch.mock.calls.length, 0);
-    assert.equal(f.log.events().length, 0);
+    // A detached child records the refusal, naming the command's last line; nothing is submitted.
+    const recorded = () => f.log.events().find((row) => row.event.type === "client" && row.event.fact.kind === "preflight")?.event;
+    await waitFor(recorded);
+    const fact = recorded();
+    assert.ok(fact?.type === "client" && fact.fact.kind === "preflight");
+    const candidate = jj(f.cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    assert.deepEqual([fact.fact.outcome, fact.fact.commitId, fact.fact.reason], ["refused", candidate, "lint failure"]);
+    assert.ok(!f.log.events().some((row) => row.event.type === "submitted"));
     assert.throws(() => execFileSync("git", ["--git-dir", f.remote, "rev-parse", `refs/heads/${candidateBookmark(f.change)}`], { stdio: "pipe" }));
   } finally { fetch.mockRestore(); await f.dispose(); }
 });

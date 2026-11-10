@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { readSubmissionManifest, retainSubmissionSource } from "../landing/submission-source.ts";
+import { identifyRetainedSources, readSubmissionManifest, retainSubmissionSource } from "../landing/submission-source.ts";
 import { submissionProbe } from "../landing/submission-probe.ts";
 import { readCommandArtifact } from "./command-artifact.ts";
 import { pruneRetainedEvidence } from "./evidence-retention.ts";
@@ -127,6 +127,9 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   // A pass that fails is journalled, and the next interval runs it again.
   const retention = createRetention({
     async pass() {
+      // Before anything expires: a source's identity is what tells a later reader whether a failure's source landed.
+      await identifyRetainedSources({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] })
+        .catch((error: unknown) => console.error(`[retention] source identities: ${error instanceof Error ? error.message : String(error)}`));
       const { unfinished } = await pruneRetainedEvidence({ home, log, executor, env, gitExecutable: config.jj?.["git.executable-path"] });
       // What no reader has finished with stays whole: an attempt whose files a cut-short deletion left behind (it must
       // be found again to finish), and one whose receipts Build has not taken (the history is what says what to send).

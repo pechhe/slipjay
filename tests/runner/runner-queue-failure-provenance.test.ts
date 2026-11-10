@@ -46,6 +46,8 @@ test("restart freezes prepared candidate provenance once without a live run or a
     const base = f.main();
     f.log.append(id, { type: "stage", stage: "verifying" });
     f.log.append(id, { type: "attempt_prepared", attempt: 1, source: request.commitId, candidate: request.commitId, base, checkout, overlap: true });
+    // A restart requeues a landing that has not integrated, three times; the fourth ends it (YS-1305).
+    for (let restart = 0; restart < 3; restart++) { await f.queue.recover(); f.log.append(id, { type: "stage", stage: "verifying" }); }
     await f.queue.recover(); await f.queue.recover();
     const rows = f.log.events({ operationId: id }).filter(row => row.event.type === "provenance");
     assert.equal(rows.length, 1);

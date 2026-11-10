@@ -89,7 +89,9 @@ export type ClientFact =
   | { kind: "pool_claim"; workspace: string; hit: boolean; spareCount: number; durationMs: number; steps?: StartSteps }
   | { kind: "land_follow"; reattached: boolean }
   | { kind: "ssh_forward_failure"; reason: string; observedAt: string }
-  | { kind: "preview_start"; workspace: string; port: number };
+  | { kind: "preview_start"; workspace: string; port: number }
+  /** A repository's landing preflight ran on `commitId` before submission; `reason` is its last line when it refused. */
+  | { kind: "preflight"; workspace: string; commitId: string; outcome: "passed" | "refused"; durationMs: number; reason?: string };
 
 /** One failed verification check of a `failed` event; `runId` names its run when the runner ran it. */
 export type VerificationFailureRef = { checkIndex: number; command: string; outcome: "nonzero_exit" | "timeout" | "cancelled" | "signal" | "spawn_failure"; runId?: string };
@@ -199,6 +201,11 @@ export type OperationEvent =
   /** A settings landing: only `fields` of the policy changed, so its landing checks did not run (see `policy-settings.ts`). */
   | { type: "verification_skipped"; base: string; candidate: string; fields: string[]; reason: string }
   | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
+  /**
+   * What the retained source changes: a digest of each path its commit adds, changes or deletes against its first parent,
+   * with the content it leaves there. Two submissions with one digest submitted the same source (YS-1305).
+   */
+  | { type: "source_identity"; digest: string }
   /** Retained source, manifest and command artifacts were deleted under the runner's retention policy. */
   | { type: "evidence_expired"; policy: "published" | "unadopted" }
   /** Immutable request-to-operation binding; survives terminal outcomes and follower loss. */

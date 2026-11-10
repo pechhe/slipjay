@@ -598,7 +598,8 @@ function validClientFact(value: unknown): value is ClientFact {
   const fact = value as Record<string, unknown>;
   const duration = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 30 * 86400_000;
   const integer = (value: unknown, max: number) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
-  const keys: Record<string, string[]> = { workspace_start: ["kind", "workspace", "machine", "startedAt"], pool_claim: ["kind", "workspace", "hit", "spareCount", "durationMs", "steps"], land_follow: ["kind", "reattached"], ssh_forward_failure: ["kind", "reason", "observedAt"], preview_start: ["kind", "workspace", "port"] };
+  const keys: Record<string, string[]> = { workspace_start: ["kind", "workspace", "machine", "startedAt"], pool_claim: ["kind", "workspace", "hit", "spareCount", "durationMs", "steps"], land_follow: ["kind", "reattached"], ssh_forward_failure: ["kind", "reason", "observedAt"], preview_start: ["kind", "workspace", "port"],
+    preflight: ["kind", "workspace", "commitId", "outcome", "durationMs", "reason"] };
   if (typeof fact.kind !== "string" || !keys[fact.kind] || Object.keys(fact).some((key) => !keys[fact.kind as string]!.includes(key))) return false;
   switch (fact.kind) {
     case "workspace_start": return boundedString(fact.workspace) && boundedString(fact.machine) && typeof fact.startedAt === "string" && /^\d{4}-\d\d-\d\dT/.test(fact.startedAt) && Number.isFinite(Date.parse(fact.startedAt));
@@ -608,6 +609,8 @@ function validClientFact(value: unknown): value is ClientFact {
     case "land_follow": return typeof fact.reattached === "boolean";
     case "ssh_forward_failure": return boundedString(fact.reason) && typeof fact.observedAt === "string" && /^\d{4}-\d\d-\d\dT/.test(fact.observedAt) && Number.isFinite(Date.parse(fact.observedAt));
     case "preview_start": return boundedString(fact.workspace) && integer(fact.port, 65535) && fact.port !== 0;
+    case "preflight": return boundedString(fact.workspace) && typeof fact.commitId === "string" && /^[0-9a-f]{40}$/.test(fact.commitId)
+      && (fact.outcome === "passed" || fact.outcome === "refused") && duration(fact.durationMs) && (fact.reason === undefined || boundedString(fact.reason));
     default: return false;
   }
 }
