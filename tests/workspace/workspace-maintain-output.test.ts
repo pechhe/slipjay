@@ -6,10 +6,13 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
+import { quietDisk } from "../support/host-disk-quiet.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { recordWorkspaceActivity } from "../../src/lib/workspace/workspace-eviction.ts";
 
+// The disk policy runs in every pass; keep it from touching this host.
+quietDisk();
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
 const HOUR = 60 * 60_000;
 /** The listing `workspaceContext` makes, which is what a repository it cannot read fails. */
@@ -49,6 +52,7 @@ test("maintain reports an unreadable request instead of nothing to archive or ev
   const home = await mkdtemp(join(tmpdir(), "slipjay-maintain-"));
   const requests = join(home, ".slipjay", "state", "archive-requests");
   await mkdir(requests, { recursive: true });
+  quietDisk(home);
   await writeFile(join(requests, "broken.json"), "{ not a request");
   // A disposable HOME keeps the pass out of real state, and a home rather than a checkout
   // leaves it nothing to evict.

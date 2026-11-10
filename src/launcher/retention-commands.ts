@@ -7,6 +7,9 @@ import { landingIO } from "../lib/landing/landing-steps.ts";
 import { primaryCheckoutDisposition } from "../lib/landing/landing-candidate.ts";
 import type { PrimaryCheckoutOutcome } from "../lib/landing/landing-candidate.ts";
 import { resolve } from "node:path";
+import { hostDisk } from "../lib/host-disk/host-disk.ts";
+import type { HostDiskOutcome } from "../lib/host-disk/host-disk.ts";
+import { diskLines, diskReadBuild } from "./disk-command.ts";
 import { configuredUpgradeSource } from "../lib/policy/machine-config.ts";
 import { upgradeMachine } from "../lib/workspace/workspace-upgrade.ts";
 import type { UpgradeOutcome } from "../lib/workspace/workspace-upgrade.ts";
@@ -209,7 +212,15 @@ export async function runMaintain(rest: string[]): Promise<void> {
   } catch (error) {
     evictionError = error instanceof Error ? error.message : String(error);
   }
-  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, requests: outcomes, evictions: eviction, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError }, ...evictionError === null ? {} : { evictionError } }, null, 2));
+  // The host disk policy runs after eviction, in this process. Its failure is reported and never stops the pass.
+  let disk: HostDiskOutcome | null = null;
+  let diskError: string | null = null;
+  try {
+    disk = await hostDisk({ readBuild: diskReadBuild() });
+  } catch (error) {
+    diskError = error instanceof Error ? error.message : String(error);
+  }
+  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, requests: outcomes, evictions: eviction, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError }, ...evictionError === null ? {} : { evictionError } }, null, 2));
   else {
     if (upgrade) {
       // `upgraded` names what it moved between, `current` the install the slot already had.
@@ -231,8 +242,20 @@ export async function runMaintain(rest: string[]): Promise<void> {
       if (!outcomes.length && !eviction.results.length && !eviction.unretirable.length) console.log("Nothing to archive or evict.");
     }
   }
+  if (!json && disk) {
+    if (disk.state === "busy") console.log(`disk\t${disk.reason}`);
+    else for (const line of diskLines(disk, false)) console.log(line);
+  }
   if (evictionError !== null) {
     console.error(`maintain could not evict: ${evictionError}`);
+    process.exitCode = 1;
+  }
+  if (diskError !== null) {
+    console.error(`maintain could not apply the disk policy: ${diskError}`);
+    process.exitCode = 1;
+  }
+  if (disk?.state === "applied" && disk.failures) {
+    console.error(`maintain: ${disk.failures} disk removal(s) failed`);
     process.exitCode = 1;
   }
 }

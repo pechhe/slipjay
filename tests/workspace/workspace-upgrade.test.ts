@@ -1,3 +1,4 @@
+import { quietDisk } from "../support/host-disk-quiet.ts";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -68,6 +69,7 @@ beforeEach(async () => {
   await rm(slipjayHome(), { recursive: true, force: true });
   // The adopted command too: it points into the slot that was just removed.
   await rm(dirname(dirname(commandLinkPath())), { recursive: true, force: true });
+  quietDisk(); // `maintain` runs the host disk policy; it must not touch this host
   process.env.PATH = `${noUnitBin}:${BASE_PATH}`;
   process.env.XDG_RUNTIME_DIR ??= "/run/user/fixture";
 });

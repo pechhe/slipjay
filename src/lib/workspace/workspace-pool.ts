@@ -1,4 +1,7 @@
 import { timed } from "./start-steps.ts";
+import { readDiskConfig } from "../host-disk/disk-config.ts";
+import { readRootUsage } from "../host-disk/disk-usage.ts";
+import type { DiskUsageReader } from "../host-disk/disk-usage.ts";
 import type { StartSteps } from "./start-steps.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -367,19 +370,34 @@ const REFILL_WAIT_MS = 60 * 60_000;
  * different repositories interleave, installing one at a time (`refillDependencies`). Claims
  * never take either lock.
  */
-export async function refillPool(root: string, report: (outcome: object) => void): Promise<void> {
+export async function refillPool(root: string, report: (outcome: object) => void, options: {
+  /** The root filesystem's usage (default `df /`); null when unreadable, which does not stop a refill. */
+  readUsage?: DiskUsageReader;
+  /** The percentage at which a refill stops (default: the machine's `disk.thresholds.refillPercent`). */
+  refillPercent?: number;
+  provision?: (root: string) => Promise<ProvisionOutcome>;
+} = {}): Promise<void> {
   const integrationRoot = (await workspaceContext(root))?.integration.root ?? root;
   await withWorkspaceTransaction(`refill:${resolve(integrationRoot)}`, async () => {
     // Named so a spare-marked checkout a thread is using is visible, not silently left out.
     for (const { workspaceName, holders } of (await poolSpares(integrationRoot)).held) report({ held: workspaceName, holders });
     for (const retired of await retireExcessSpares(root)) report({ retired });
     await repairDamagedSpares(root, report);
+    // A full disk gets no new spare: the host disk policy (SJ-226) says where. Read again before every spare.
+    const refillPercent = options.refillPercent ?? readDiskConfig().thresholds.refillPercent;
+    let stopped = false;
     for (;;) {
-      const outcome = await provisionSpare(root);
+      const usage = await (options.readUsage ?? readRootUsage)().catch(() => null);
+      if (usage && usage.percent >= refillPercent) {
+        report({ provisioned: false, state: "skipped", reason: `disk at ${usage.percent}% (threshold ${refillPercent}%)` });
+        stopped = true;
+        break;
+      }
+      const outcome = await (options.provision ?? provisionSpare)(root);
       report(outcome);
       if (!outcome.provisioned) break;
     }
-    for (const refreshed of await refreshSpares(root)) report({ refreshed });
+    if (!stopped) for (const refreshed of await refreshSpares(root)) report({ refreshed });
   }, { waitMs: REFILL_WAIT_MS });
 }
 

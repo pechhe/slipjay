@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **A host disk policy (`slipjay disk`):** one host's repositories filled its root disk with run evidence, `/tmp` scratch
+  and caches, and nothing owned the whole. The machine config's new `disk` key sets thresholds (warn 80, shed 88, refill
+  93, critical 96) and the managed roots. `slipjay disk [--plan] [--json]` removes regenerable caches at shed, scratch
+  past its TTL (never what a live process holds, an unreadable holder list, a foreign owner or a path outside its root),
+  and evicts idle workspaces through the existing eviction; it archives a closed, expired Issue's small evidence files
+  with a provenance record before removing its directory, and otherwise only reports evidence, flagging Issues over
+  20 GiB. At critical it releases an 8 GiB ballast file and recreates it below 85%. `maintain` runs the same pass
+  (`disk` / `diskError` in `--json`; a failure exits 1 without stopping the other steps), and a pool refill stops at 93%. A full disk no longer
+  leaves the runner down: its unit sets no start limit and runs `scripts/disk-rescue.sh` (plain shell; frees the regenerable
+  paths, then the ballast) before each start, and `scripts/install-disk-guard.sh` installs the rescue and a five-minute
+  `slipjay disk` timer.
+
 ## v3.61.3
 
 - **A batch check's diagnosis no longer finds its own machine place busy:** a machine place cleans up after an attempt

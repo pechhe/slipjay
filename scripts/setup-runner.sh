@@ -66,10 +66,15 @@ cat > "$HOME/.config/systemd/user/slipjay-runner.service" <<UNIT
 [Unit]
 Description=SlipJay runner
 After=network-online.target
+# A full disk must not leave the runner dead: systemd's default of five starts in ten seconds would give
+# up on it, so retry for ever, and free what can be freed before each start (the "-" keeps a missing or
+# failing rescue from blocking the start; scripts/install-disk-guard.sh installs it).
+StartLimitIntervalSec=0
 
 [Service]
 Environment=PATH=$shims:$PATH
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ExecStartPre=-$HOME/.local/bin/slipjay-disk-rescue
 ExecStart=$(command -v bws) run -- $slot/src/launcher/workspace.ts runner serve
 Restart=always
 RestartSec=5
