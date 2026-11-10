@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.59.0
+
+- **A landing's runner overhead is shorter at both ends (SJ-223):** a landing is recorded as landed as soon as its push
+  succeeds, and the landing behind it may publish from then on; deleting the candidate bookmark, returning the slot
+  checkout to the integration and scheduling deploys follow the record, and the landed record reuses the policy read when
+  the commit was integrated. Any other verdict still deletes the candidate bookmark first. A machine place's cleanup runs
+  after its gate while the landing publishes; the place stays held until the cleanup is confirmed. Taking a machine
+  place is one round trip (recovery of a stale holder, the hold, the quota check and the checkout's preparation), and
+  its ready record names the time each step of the open took (`steps`). Every fetch, `ls-remote` and push the runner
+  makes over SSH shares one connection per host and account (`<runner home>/ssh/git-%C`): opening one to GitHub was
+  about 1 s of each. A landing whose source the runner retained fetches the integration branch only when it moved, a
+  checkout's Git directory is read once, and what the gate reads from Build is asked for while the candidate is still
+  being prepared.
+
 ## v3.58.0
 
 - **A scheduled promotion's images are built before it starts:** fifteen minutes before a slot, the runner starts

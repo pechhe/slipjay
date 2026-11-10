@@ -43,9 +43,10 @@ function stand() {
     execFileSync("bash", ["-n"], { input: script });
     scripts.push(script);
     if (!reachable) return result("", 255, "ssh: Connection refused");
+    // Taking the place recovers a stale holder in the same script (SJ-223); a clean the machine refuses fails it.
+    if (script.includes("slipjay-prepare-")) return cleanAllowed ? result(heads.join("\n")) : result("", 1, "cgroup still populated");
     if (script.includes("docker ps -aq")) return cleanAllowed ? result() : result("", 1, "cgroup still populated");
     if (script.includes('echo "$HOME"')) return result("/home/ubuntu");
-    if (script.includes("slipjay-prepare-")) return result(heads.join("\n"));
     if (script.includes("slipjay-reinitialise-")) {
       if (reinitialiseFailure) return result("", 1, "checkout reinitialisation failed");
       heads = []; return result();
@@ -255,6 +256,25 @@ test("successive attempts transfer only missing commits and retain the place che
   for (const script of commands) assert.ok(script.includes("BUN_INSTALL_CACHE_DIR=/gate-root/bun-cache"));
   const ids = commands.map((script) => script.match(/SLIPJAY_ATTEMPT_ID=([a-f0-9]{32})/)![1]);
   assert.notEqual(ids[0], ids[1], "scratch, labels and scopes retain separate attempt identities");
+});
+
+test("opening a place takes one round trip before the candidate's transfer: recovery, hold, quota and checkout preparation together (SJ-223)", async () => {
+  const s = stand(), m = s.make(); await m.recover!([]);
+  const before = s.scripts.length;
+  const first = await open(m); await first.close();
+  const opened = s.scripts.length;
+  const second = await open(m); await second.close();
+  const untilReceive = (scripts: string[]) => scripts.slice(0, scripts.findIndex((script) => script.includes("slipjay-receive-")));
+  // The first open asks the machine for the account's home once; every open then takes the place in one script.
+  assert.deepEqual(untilReceive(s.scripts.slice(before, opened)).map((script) => script.includes('echo "$HOME"') ? "home" : "acquire"), ["home", "acquire"]);
+  const [acquire] = untilReceive(s.scripts.slice(opened));
+  assert.equal(untilReceive(s.scripts.slice(opened)).length, 1);
+  for (const part of ["flock -n 9", "mkdir '/gate-root/holder'", "quota-ready", "slipjay-prepare-", "for-each-ref"]) assert.ok(acquire!.includes(part), part);
+  // A holder a crashed gate left is cleaned under the same lock, before this attempt takes the place.
+  assert.ok(acquire!.indexOf("docker ps -aq") < acquire!.indexOf("mkdir '/gate-root/holder'"));
+  // The lock is released before the checkout's preparation runs in the attempt's slice.
+  assert.ok(acquire!.indexOf("exec 9>&-") < acquire!.indexOf("slipjay-prepare-"));
+  assert.deepEqual(Object.keys(second.steps ?? {}).sort(), ["acquire", "setup", "transfer"]);
 });
 
 test("a machine's further places keep their own checkout and holder, and share its install cache and quota marker", async () => {

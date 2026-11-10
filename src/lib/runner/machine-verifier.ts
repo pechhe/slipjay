@@ -165,6 +165,12 @@ fi
 rm -rf -- ${shellWord(`${root}/${id}`)}
 rm -rf -- ${shellWord(holder)}`;
   }
+  /** Under the place's lock: clean whatever a holder that is no longer running left behind. */
+  const recoverHolder = () => `if [ -d ${shellWord(holder)} ]; then
+  id=$(cat ${shellWord(`${holder}/id`)})
+  [[ "$id" =~ ^[0-9a-f]{32}$ ]]
+  ${clean("HOLDERID").replaceAll("HOLDERID", '\'"${id}"\'')}
+fi`;
   async function recover(): Promise<void> {
     if (busy) return;
     recovering ??= (async () => {
@@ -172,25 +178,30 @@ rm -rf -- ${shellWord(holder)}`;
         await control(`mkdir -p ${shellWord(root)}
 exec 9>${shellWord(`${root}/control.lock`)}
 flock -n 9
-if [ -d ${shellWord(holder)} ]; then
-  id=$(cat ${shellWord(`${holder}/id`)})
-  [[ "$id" =~ ^[0-9a-f]{32}$ ]]
-  ${clean("HOLDERID").replaceAll("HOLDERID", '\'"${id}"\'')}
-fi`);
+${recoverHolder()}`);
         quarantine = "";
       } catch (error) { quarantine = String(error); }
     })().finally(() => { recovering = undefined; });
     await recovering;
   }
+  /** The account's home on the machine, which every scoped command names; it does not change while the runner runs. */
+  let home: string | undefined;
   return {
     available: () => !busy && !quarantine,
     reason: () => busy ? "machine place busy" : quarantine,
     recover,
     async open({ checkout, candidate, base, integrationBranch, environment, signal }): Promise<RemoteAttempt> {
       if (busy) throw fail("machine place busy");
-      await recover();
-      if (busy || quarantine) throw fail(quarantine || "machine place busy");
+      // Opening recovers the place itself, under the same lock it takes it with; it only waits for a recovery already running.
+      if (recovering) await recovering;
+      if (busy) throw fail("machine place busy");
       busy = true;
+      /** Where the open spent its time, for the ready record (SJ-223). */
+      const steps: Record<string, number> = {};
+      const step = async <T>(name: string, work: () => Promise<T>): Promise<T> => {
+        const started = Date.now();
+        try { return await work(); } finally { steps[name] = (steps[name] ?? 0) + Date.now() - started; }
+      };
       const id = randomUUID().replaceAll("-", "");
       const path = `${root}/${id}`;
       const slice = sliceOf(id);
@@ -219,28 +230,35 @@ fi`);
       try {
         // mkdir is atomic; a crash before the atomic id rename leaves a quarantined marker, with no work started.
         quarantine = "holder acquisition unconfirmed";
-        const home = await control(`exec 9>${shellWord(`${root}/control.lock`)}
+        // Untracked state the place keeps between gates, from the base's policy so a candidate cannot widen it.
+        retain = await retainedPaths(run, checkout, base);
+        const account = home ??= await step("home", () => control('echo "$HOME"', signal));
+        await mkdir(options.scratch ?? tmpdir(), { recursive: true });
+        scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-machine-"));
+        const scoped = (script: string, unit: string) => remoteCommand({ executable: "bash", args: ["-c", `set -euo pipefail\n${script}`], cwd: path, env: attemptEnv }, unit, { home: account, account: config.account, slice });
+        const resetCheckout = `rm -rf -- ${shellWord(repo)}\ngit init --quiet ${shellWord(repo)}`;
+        // A failure past the holder's creation leaves it for close to clean; close checks the holder is this attempt's.
+        acquired = true;
+        // One round trip takes the place (SJ-223): under its lock, recover what a holder that is no longer running left,
+        // hold it, check its quota, then (the lock released) prepare its checkout in the attempt's slice and list what
+        // it already holds. Each was its own round trip.
+        const heads = (await step("acquire", () => control(`mkdir -p ${shellWord(root)}
+exec 9>${shellWord(`${root}/control.lock`)}
 flock -n 9
+${recoverHolder()}
 mkdir ${shellWord(holder)}
 printf '%s\\n' ${shellWord(id)} > ${shellWord(`${holder}/id.new`)}
 mv ${shellWord(`${holder}/id.new`)} ${shellWord(`${holder}/id`)}
-echo "$HOME"`, signal);
-        acquired = true;
-        await control(`mkdir -p ${shellWord(`${path}/scratch`)}
+mkdir -p ${shellWord(`${path}/scratch`)}
 # Installer attests an enforced filesystem quota, bounding the dedicated root.
-[ -f ${shellWord(`${machineRoot}/quota-ready`)} ] || { echo 'gate root needs filesystem quota and quota-ready marker' >&2; exit 1; }`, signal);
-        await mkdir(options.scratch ?? tmpdir(), { recursive: true });
-        scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-machine-"));
-        const scoped = (script: string, unit: string) => remoteCommand({ executable: "bash", args: ["-c", `set -euo pipefail\n${script}`], cwd: path, env: attemptEnv }, unit, { home, account: config.account, slice });
-        const resetCheckout = `rm -rf -- ${shellWord(repo)}\ngit init --quiet ${shellWord(repo)}`;
-        // Untracked state the place keeps between gates, from the base's policy so a candidate cannot widen it.
-        retain = await retainedPaths(run, checkout, base);
-        const heads = (await control(scoped(`mkdir -p ${shellWord(`${machineRoot}/bun-cache`)}
+[ -f ${shellWord(`${machineRoot}/quota-ready`)} ] || { echo 'gate root needs filesystem quota and quota-ready marker' >&2; exit 1; }
+exec 9>&-
+${scoped(`mkdir -p ${shellWord(`${machineRoot}/bun-cache`)}
 if ! git -C ${shellWord(repo)} rev-parse --git-dir >/dev/null 2>&1 || ! git -C ${shellWord(repo)} for-each-ref --format='%(objectname)' >/dev/null 2>&1; then
   ${resetCheckout}
 fi
 git -C ${shellWord(repo)} clean -ffdxq ${cleanExclusions(retain)}
-git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepare-${id}`), signal))
+git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepare-${id}`)}`, signal)))
           .split("\n").filter((head) => /^[0-9a-f]{40}$/.test(head));
         const ref = `refs/slipjay/machine/${id}`;
         const transfer = async (known: string[]) => {
@@ -257,21 +275,23 @@ git update-ref -d ${shellWord(`${ref}/base`)}`, `slipjay-receive-${id}`), signal
             await local("git", ["update-ref", "-d", `${ref}/base`], checkout);
           }
         };
-        try { await transfer(heads); }
-        catch (error) {
-          signal.throwIfAborted();
-          if ((error as { connectionLost?: boolean }).connectionLost) throw error;
-          // An unusable object store or checkout is setup infrastructure. Retry once with a fresh place checkout;
-          // install and gate failures never take this path, and the shared Bun cache remains warm.
-          await control(scoped(resetCheckout, `slipjay-reinitialise-${id}`), signal);
-          await transfer([]);
-        }
+        await step("transfer", async () => {
+          try { await transfer(heads); }
+          catch (error) {
+            signal.throwIfAborted();
+            if ((error as { connectionLost?: boolean }).connectionLost) throw error;
+            // An unusable object store or checkout is setup infrastructure. Retry once with a fresh place checkout;
+            // install and gate failures never take this path, and the shared Bun cache remains warm.
+            await control(scoped(resetCheckout, `slipjay-reinitialise-${id}`), signal);
+            await transfer([]);
+          }
+        });
         const tree = await local("git", ["rev-parse", `${candidate}^{tree}`], checkout);
-        const observed = await control(scoped(`cd ${shellWord(repo)}
+        const observed = await step("setup", () => control(scoped(`cd ${shellWord(repo)}
 ${frozenInstall(`${path}/install.log`, "machine")}
 observed=$(${worktreeTree(tree, `${root}/tree-index`)})
 echo "tree $observed"
-${memoryReading}`, `slipjay-setup-${id}`), signal, undefined, 900_000);
+${memoryReading}`, `slipjay-setup-${id}`), signal, undefined, 900_000));
         const line = (label: string) => observed.split("\n").findLast((entry) => entry.startsWith(`${label} `))?.slice(label.length + 1) ?? "";
         if (line("tree") !== tree) throw fail("candidate tree changed during setup");
         const killsBefore = parseMemory(line("memory"))?.limitKills;
@@ -301,10 +321,10 @@ ${memoryReading}`, `slipjay-setup-${id}`), signal, undefined, 900_000);
         }
         // A failed service forward is setup infrastructure and can still fall back to boat safely.
         const build = loopbackPort(environment?.SLIPJAY_BUILD_READ_URL);
-        if (build) await forward(build);
+        if (build) await step("forward", () => forward(build));
         quarantine = "";
         return {
-          machine, tree, usage: null,
+          machine, tree, usage: null, steps,
           executor: {
             host: `machine:${name}`,
             reportRoot: repo,
@@ -324,7 +344,7 @@ ${memoryReading}`, `slipjay-setup-${id}`), signal, undefined, 900_000);
                 stopping.signal.throwIfAborted();
                 request.abortSignal?.throwIfAborted();
                 const abortSignal = AbortSignal.any([stopping.signal, ...request.abortSignal ? [request.abortSignal] : []]);
-                const result = await run({ ...request, abortSignal, executable: "ssh", args: [...ssh, `bash -lc ${shellWord(remoteCommand({ ...request, cwd: join(repo, subdirectory), env }, unit, { home, account: config.account, slice }))}`], cwd: tmpdir(), env: process.env });
+                const result = await run({ ...request, abortSignal, executable: "ssh", args: [...ssh, `bash -lc ${shellWord(remoteCommand({ ...request, cwd: join(repo, subdirectory), env }, unit, { home: account, account: config.account, slice }))}`], cwd: tmpdir(), env: process.env });
                 // The local ssh client dying by a signal it did not ask for (killed, or the runner's host under pressure)
                 // loses the command as surely as a dropped connection: its exit says nothing about the candidate.
                 const clientKilled = result.signal !== null && !result.cancelled && !result.timedOut;

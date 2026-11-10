@@ -200,13 +200,24 @@ export function publicationRemote(context: { configuration: { remote?: string | 
 export const fetchIntegration = (cwd: string, remote: string, branch: string, { ignoreWorkingCopy = false, ...options }: { timeoutMs?: number; ignoreWorkingCopy?: boolean } = {}): ReturnType<typeof import("../infra/workspace-command.ts").runWorkspaceCommand> =>
   run("jj", ["--color=never", ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
 
+/** A checkout's own Git repository never moves, so it is read once per checkout (about 0.4 s a read, SJ-223). */
+const gitRoots = new Map<string, Promise<string>>();
+const gitRoot = (cwd: string): Promise<string> => {
+  let root = gitRoots.get(cwd);
+  if (!root) {
+    gitRoots.set(cwd, root = jj(cwd, ["--ignore-working-copy", "git", "root"]));
+    root.catch(() => gitRoots.delete(cwd));
+  }
+  return root;
+};
+
 /**
  * Fetch `branch` only when the remote's tip differs from the one `cwd` tracks, and say whether it fetched. `git ls-remote`
  * reads the remote as freshly as a fetch would, without jj importing every ref and recording an operation (SJ-200).
  */
 export async function fetchIntegrationIfMoved(cwd: string, remote: string, branch: string, git?: string): Promise<boolean> {
   // jj's own Git repository and Git: a checkout need not be colocated, and jj may run Git through a wrapper.
-  const gitDirectory = await jj(cwd, ["--ignore-working-copy", "git", "root"]);
+  const gitDirectory = await gitRoot(cwd);
   const listed = await run(git ?? await jjGitExecutable(cwd), ["--git-dir", gitDirectory, "ls-remote", remote, `refs/heads/${branch}`], { cwd });
   const remoteTip = listed.code === 0 ? listed.stdout.trim().split(/\s+/)[0] : undefined;
   const tracked = remoteTip ? await revisionFacts(cwd, `${branch}@${remote}`, { ignoreWorkingCopy: true }).then((facts) => facts.commitId, () => undefined) : undefined;

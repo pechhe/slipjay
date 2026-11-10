@@ -36,6 +36,17 @@ const PROBE_BUDGET_MS = 30_000;
 export const runnerHome = (): string => join(homedir(), ".slipjay", "runner");
 
 /**
+ * The SSH command the runner's Git transport uses: every fetch, `ls-remote` and push to one host and account shares one
+ * connection, as the machine places' commands do. Opening one to GitHub took about 1 s of each of the three or four a
+ * landing makes (1.5 s against 0.5 s for an `ls-remote` from peach-live, SJ-223). `%C` names the host, port and account.
+ */
+export const gitSshCommand = (home: string): string => {
+  const connections = join(home, "ssh");
+  mkdirSync(connections, { recursive: true, mode: 0o700 });
+  return `ssh -o ControlMaster=auto -o ControlPath=${join(connections, "git-%C")} -o ControlPersist=600`;
+};
+
+/**
  * Start the runner: recover what a previous process held, then serve the API on
  * loopback and process the queue. The token comes from the environment (the
  * systemd unit runs this under `bws run`).
@@ -53,6 +64,8 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const problem = runnerConfigProblem(config);
   if (problem) throw new Error(`${problem}; rerun scripts/setup-runner.sh or add it to ${join(home, "config.json")}`);
   mkdirSync(home, { recursive: true });
+  // An operator's own GIT_SSH_COMMAND stands; the runner's process environment is what its Git and jj commands inherit.
+  if (!options.env && !process.env.GIT_SSH_COMMAND) process.env.GIT_SSH_COMMAND = gitSshCommand(home);
   // Tests whose subject is not containment run commands directly (tests/support/executor.ts).
   const executor = options.executor ?? localExecutor({ host: config.name ?? hostname(), env, ...config.limits ? { limits: config.limits } : {}, home });
   // The ledger records; these are the interpretations the runner reports from it, composed here.

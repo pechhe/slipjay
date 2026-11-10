@@ -47,25 +47,46 @@ test("a missing renamed integration bookmark names the local and remote failure"
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("the candidate bookmark is gone from origin before any landing verdict, including after a restart or a queued cancel", async () => {
+test("the candidate bookmark is gone from origin before a landing verdict other than landed, including after a restart or a queued cancel, and right after a landed one (SJ-223)", async () => {
   // The only fixture user that reads `candidateAtVerdict` here, so it asks for the observation it asserts.
   const f = await fixture(false, false, undefined, false, { observeCandidateAtVerdict: true });
   try {
-    const landed = f.submit(await f.candidate("landed.txt"));
+    const published = await f.candidate("landed.txt");
+    const landed = f.submit(published);
     assert.equal((await f.land(landed))?.type, "landed");
+    // A landing is recorded as landed once its push succeeded; deleting its candidate follows the record.
+    await f.queue.idle();
+    assert.equal(execFileSync("git", ["--git-dir", f.origin, "for-each-ref", `refs/heads/${published.bookmark}`], { encoding: "utf8" }), "");
     const failed = f.submit(await f.candidate("fail"));
     assert.equal((await f.land(failed))?.type, "failed");
     const interrupted = f.submit(await f.candidate("interrupted.txt"));
     f.log.append(interrupted, { type: "stage", stage: "verifying" });
     await f.queue.recover();
     assert.equal(f.result(interrupted)?.type, "failed");
-    assert.deepEqual([landed, failed, interrupted].map((id) => f.candidateAtVerdict.get(id)), [false, false, false]);
+    assert.deepEqual([landed, failed, interrupted].map((id) => f.candidateAtVerdict.get(id)), [true, false, false]);
     const request = await f.candidate("cancelled.txt");
     const cancelled = f.submit(request);
     f.log.append(cancelled, { type: "cancelled", reason: "cancelled by the author" });
     f.queue.cancelled(f.log.operation(cancelled)!);
     await f.queue.idle();
     assert.equal(execFileSync("git", ["--git-dir", f.origin, "for-each-ref", `refs/heads/${request.bookmark}`], { encoding: "utf8" }), "");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a candidate bookmark a stopped runner left after recording landed is deleted at the next startup (SJ-223)", async () => {
+  const f = await fixture();
+  try {
+    const request = await f.candidate("left.txt");
+    const id = f.submit(request);
+    assert.equal((await f.land(id))?.type, "landed");
+    await f.queue.idle();
+    // As if the runner stopped between the landed record and the bookmark's deletion.
+    execFileSync("git", ["--git-dir", f.origin, "update-ref", `refs/heads/${request.bookmark}`, request.commitId]);
+    await f.queue.recover();
+    // The deletion runs beside admission, after recovery: wait for it rather than for a fixed time.
+    const left = () => execFileSync("git", ["--git-dir", f.origin, "for-each-ref", `refs/heads/${request.bookmark}`], { encoding: "utf8" });
+    for (let tries = 0; left() !== "" && tries < 300; tries++) await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(left(), "");
   } finally { await f.dispose(); }
 }, 120_000);
 

@@ -80,6 +80,8 @@ class GateDrift extends Error {}
 
 /** How long after a recovery of a held integration fails the runner queues another, doubling per failure up to the cap. */
 const RECOVERY_RETRY_MS = 30_000;
+/** How many of a repository's latest landings delete their candidate bookmark again at startup: landings publish one at a time, and a predecessor's deletion overlaps at most its successor's publication. */
+const RECOVERED_CANDIDATE_LANDINGS = 3;
 const RECOVERY_RETRY_MAX_MS = 900_000;
 
 const configuredRepository = (config: RunnerConfig, repo: string) =>
@@ -489,7 +491,7 @@ export function createRunnerQueue(input: {
     if (!git) gits.set(checkout, git = jjGitExecutable(checkout));
     return git;
   };
-  async function cleanup(operation: LandingOperation, checkout: string, remote: string): Promise<void> {
+  async function cleanup(operation: LandingOperation, checkout: string, remote: string, { forgetLocal = true }: { forgetLocal?: boolean } = {}): Promise<void> {
     // A replacement of a running screen owns the same remote bookmark now.
     if (log.operationsForChange(operation.repo, operation.changeId).some((entry) => entry.id !== operation.id
       && entry.bookmark === operation.bookmark && (entry.status === "queued" || entry.status === "running"))) return;
@@ -506,7 +508,7 @@ export function createRunnerQueue(input: {
     if (deleted.code !== 0 && !/remote ref does not exist/i.test(deleted.stderr))
       append(operation.id, { type: "progress", line: `Candidate bookmark cleanup failed: ${(deleted.stderr || deleted.stdout).trim()}` });
     // Leave no local copy behind either: a resubmission fetches the candidate afresh.
-    await jj(checkout, ["bookmark", "forget", "--include-remotes", operation.bookmark]).catch(() => {});
+    if (forgetLocal) await jj(checkout, ["bookmark", "forget", "--include-remotes", operation.bookmark]).catch(() => {});
   }
   /** The release branch's policy: at the base a pre-verification ran against, never the candidate's; else at the branch's head. */
   async function releasePolicy(repo: string, commitId: string, ranAgainst?: string) {
@@ -1326,6 +1328,13 @@ export function createRunnerQueue(input: {
     const scratch = scratchOf(checkout);
     let remote: string | undefined;
     let integrationBranch: string | undefined;
+    /** What the integrated commit's policy declares, read once when it is integrated and carried by its landed record. */
+    let integratedEnvironments: { commitId: string; environments: Awaited<ReturnType<typeof declaredEnvironments>> } | undefined;
+    const readIntegratedEnvironments = async (commitId: string) => {
+      const environments = await declaredEnvironments(operation.repo, commitId, readLandedPolicy);
+      integratedEnvironments = { commitId, environments };
+      return environments;
+    };
     const progress = (line: string) => append(operation.id, { type: "progress", line });
     // Set once the integration policy is read: landing checks in a Build-tracked repository may read Build.
     let tracker: "github" | "build" | "forge" | undefined;
@@ -1495,7 +1504,7 @@ export function createRunnerQueue(input: {
           try {
             const attempt = await places[place]!.open({ repo: operation.repo, slot, screening, checkout, base, candidate, integrationBranch, environment: await buildCheckEnvironment(), signal });
             const placement = `machine:${name}` as const;
-            append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, placement, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: null });
+            append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, placement, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: null, ...attempt.steps ? { steps: attempt.steps } : {} });
             progress(`[verify] gate runs on ${attempt.executor.host}`);
             machinePlaceUp(name);
             return { attempt, started, placement, place };
@@ -1578,19 +1587,26 @@ export function createRunnerQueue(input: {
       } finally {
         // A machine place whose cleanup cannot be confirmed quarantines itself (machine-verifier.ts); that is the place's
         // problem, not the candidate's, so it neither fails a green gate nor hides a gate that changed the candidate.
-        try {
-          await attempt.close().catch((error: unknown) => {
-            if (!placement.startsWith("machine:")) throw error;
-            progress(`[verify] ${placement} quarantined after this gate: ${message(error).slice(0, 500)}`);
-          });
-        }
-        finally {
-          if (placement.startsWith("machine:") && place !== undefined) { machineGates.release(placement.slice("machine:".length), place); wakeMain(); }
-          if (placement === "host" && hostGates.get(repositoryKey(operation.repo)) === operation.id) {
-            hostGates.delete(repositoryKey(operation.repo));
-            wakeMain();
+        const closing = (async () => {
+          try {
+            await attempt.close().catch((error: unknown) => {
+              if (!placement.startsWith("machine:")) throw error;
+              progress(`[verify] ${placement} quarantined after this gate: ${message(error).slice(0, 500)}`);
+            });
           }
-        }
+          finally {
+            if (placement.startsWith("machine:") && place !== undefined) { machineGates.release(placement.slice("machine:".length), place); wakeMain(); }
+            if (placement === "host" && hostGates.get(repositoryKey(operation.repo)) === operation.id) {
+              hostGates.delete(repositoryKey(operation.repo));
+              wakeMain();
+            }
+          }
+        })();
+        // A machine place cleans up after the gate while the landing goes on to publish (SJ-223): the place stays held
+        // until its cleanup is confirmed, and the verdict never depended on it. A host place gates in this checkout, so
+        // the landing waits for it.
+        if (placement.startsWith("machine:")) closing.catch((error: unknown) => console.error(`[runner] ${operation.repo}: ${placement} cleanup: ${message(error)}`));
+        else await closing;
       }
     }
     // Finalization, then publication, of an integrated commit (completeLanding).
@@ -1665,7 +1681,9 @@ export function createRunnerQueue(input: {
       await configureCheckout(checkout, { ...RUNNER_JJ_DEFAULTS, ...config.jj, ...integrationTrunkConfig(branch, remote) });
       const retained = operation.kind === "landing" ? log.events({ operationId: operation.id }).find((row) => row.event.type === "source_retained")?.event : undefined;
       const retainedSource = retained?.type === "source_retained" ? retained : undefined;
-      await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, ...operation.kind === "landing" && !retainedSource ? ["--branch", operation.bookmark] : []]);
+      // A landing whose source the runner retained needs only the integration branch, and only when it moved (SJ-223).
+      if (operation.kind === "landing" && !retainedSource) await jj(checkout, ["git", "fetch", "--remote", remote, "--branch", branch, "--branch", operation.bookmark]);
+      else await fetchIntegrationIfMoved(checkout, remote, branch, await gitOf(checkout));
       // A landing gated on a machine place, which receives the candidate as a bundle, needs the candidate's files here
       // only to generate migrations, so its slot checkout holds just slipjay.json: each working-copy switch then takes
       // about 0.15 s on peach-live instead of 4 s (SJ-200). Installing for a migration widens it first. A host place
@@ -1753,6 +1771,9 @@ export function createRunnerQueue(input: {
       if (!context) throw new Error("Runner checkout context is unavailable");
       provenancePolicy = context.configuration;
       tracker = context.configuration.tracker;
+      // What the gate reads from Build depends only on the admitted submission, not on the candidate: ask for it now, so it
+      // is ready when the gate place opens (SJ-223). A failure is reported where the gate awaits it.
+      if (operation.kind === "landing") buildCheckEnvironment().catch(() => undefined);
       if (operation.kind === "reset") {
         verdict = await reset(branch);
         return;
@@ -1879,7 +1900,7 @@ export function createRunnerQueue(input: {
         verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
         return;
       }
-      append(operation.id, { type: "integrated", base, commitId: artifact.commitId, process: (await declaredEnvironments(operation.repo, artifact.commitId, readLandedPolicy)).process });
+      append(operation.id, { type: "integrated", base, commitId: artifact.commitId, process: (await readIntegratedEnvironments(artifact.commitId)).process });
       await finishIntegration(candidateContext, artifact.commitId);
       verdict = { type: "landed", base, commitId: artifact.commitId, branch, remote };
       async function integratePrefix(prepared: PreparedLandingCandidate) {
@@ -1948,7 +1969,7 @@ export function createRunnerQueue(input: {
           await jj(publisher, ["new", artifact.candidate]);
           append(operation.id, { type: "publication_intent", attempt: artifact.attempt, base: artifact.base, candidate: artifact.candidate });
           const result = await integratePreparedCandidate(publisher, { ...verified, context: canonical }, candidateOptions, landingIO);
-          append(operation.id, { type: "integrated", base: artifact.base, commitId: artifact.candidate, process: (await declaredEnvironments(operation.repo, artifact.candidate, readLandedPolicy)).process });
+          append(operation.id, { type: "integrated", base: artifact.base, commitId: artifact.candidate, process: (await readIntegratedEnvironments(artifact.candidate)).process });
           await finishIntegration(canonical, artifact.candidate, publisher, artifact.base);
           restartOvertakenScreens(operation.repo, operation.id, artifact.candidate);
           // Recorded once published, so the ledger never claims a reuse for a publication that failed.
@@ -2085,9 +2106,14 @@ export function createRunnerQueue(input: {
       ending.add(operation.id);
       try {
         if (stage !== "queued") append(operation.id, stageDetail());
-        // Delete the candidate bookmark before the verdict: an author's repository that fetches
-        // every bookmark after that would otherwise import it and pin the submitted commit.
-        if (!retryPrefix && verdict?.type !== "yielded" && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+        const removeCandidate = async () => {
+          if (!retryPrefix && verdict?.type !== "yielded" && remote && operation.kind === "landing") await cleanup(operation, checkout, remote);
+        };
+        // A published landing is recorded as landed once its push succeeded, and the landing behind it may publish from
+        // then on (SJ-223): deleting the candidate bookmark, returning this checkout to the integration and scheduling
+        // deploys all follow the record. Any other verdict deletes the candidate bookmark first, so an author's repository
+        // that fetches every bookmark once it reads the verdict does not import it and pin the submitted commit.
+        if (verdict?.type !== "landed") await removeCandidate();
         // This checkout belongs to the runner: leave failed candidates in history,
         // and start the next turn from the integration (including any held commit).
         const returnToIntegration = async () => {
@@ -2104,13 +2130,18 @@ export function createRunnerQueue(input: {
         if (verdict?.type === "landed") {
           const publishedCommit = verdict.commitId;
           const integrated = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "integrated" && event.commitId === publishedCommit);
-          verdict = { ...verdict, ...await declaredEnvironments(operation.repo, verdict.commitId, readLandedPolicy),
-            ...integrated?.type === "integrated" && integrated.process ? { process: integrated.process } : {} };
+          // The policy was read when the commit was integrated; only a landing that published an earlier turn's commit reads it here.
+          const environments = integratedEnvironments?.commitId === publishedCommit ? integratedEnvironments.environments : await declaredEnvironments(operation.repo, publishedCommit, readLandedPolicy);
+          verdict = { ...verdict, ...environments, ...integrated?.type === "integrated" && integrated.process ? { process: integrated.process } : {} };
         }
         if (verdict?.type === "failed" && operation.kind === "landing")
           await freezeProvenance(operation.id, checkout, verdict, checkedCandidate, provenancePolicy);
         if (verdict && (!prefix?.screen || !log.operation(operation.id)?.result)) append(operation.id, verdict);
-        if (verdict?.type === "landed") await returnToIntegration();
+        if (verdict?.type === "landed") {
+          prefix?.completed.resolve(true);
+          await removeCandidate();
+          await returnToIntegration();
+        }
         // A passed pre-verification may promote; a release that ended frees the queue for a newer candidate.
         if (operation.kind === "verification" || operation.kind === "release") await promoteAutomatically(operation.repo, operation.kind === "verification" ? operation.id : undefined);
         if (operation.kind === "recovery") retryFailedRecovery(operation.repo, verdict?.type === "failed");
@@ -2701,6 +2732,24 @@ export function createRunnerQueue(input: {
       append(operation.id, verdict);
     }
   }
+  /**
+   * A landing is recorded as landed before its candidate bookmark is deleted (SJ-223), so a runner that stopped in
+   * between left it on the remote. At startup the latest landings of each repository delete theirs again: deleting one
+   * already gone is a no-op, and the lease keeps an author's newer push.
+   */
+  async function removeLandedCandidates(): Promise<void> {
+    for (const repo of Object.keys(config.repos).map(repositoryKey)) {
+      for (const published of log.landings(repo).slice(-RECOVERED_CANDIDATE_LANDINGS)) {
+        const operation = log.operation(published.operationId);
+        if (operation?.kind !== "landing") continue;
+        const landed = log.events({ operationId: operation.id }).map((row) => row.event).findLast((event) => event.type === "landed");
+        if (landed?.type !== "landed") continue;
+        // Only the remote copy: the integration checkout may already hold a resubmission of the same change, which
+        // a landing admitted beside this pass is about to push.
+        await cleanup(operation, repoCheckout(repo), landed.remote, { forgetLocal: false }).catch((error: unknown) => console.error(`[runner] ${repo}: candidate cleanup for ${operation.id}: ${message(error)}`));
+      }
+    }
+  }
   // Reconcile warm repositories even when their failed operation is already terminal.
   // Failure to observe the remote is not evidence that an existing hold recovered.
   async function reconcileHeld(): Promise<void> {
@@ -2839,6 +2888,8 @@ export function createRunnerQueue(input: {
       })
         .finally(() => { recovering = undefined; });
       await recovering;
+      // Off admission's path: a slow or unreachable remote must not hold back the queue at startup.
+      void removeLandedCandidates().catch((error: unknown) => console.error(`[runner] candidate cleanup at startup: ${message(error)}`));
       for (const repo of Object.keys(config.repos).map(repositoryKey)) {
         // A hold nothing else will publish: the landing that held it ended, and Build refuses a reland while it is held.
         recoverHeld(repo);

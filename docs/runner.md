@@ -156,6 +156,9 @@ when its external target is read by the gate: its optional boolean `readByGate`
 flag defaults to `true`. Set `postIntegration.readByGate: false` only when gates do
 not read that target; the step still runs after integration, and migration-triggering
 predecessors still block overlap. The policy parser rejects non-boolean values.
+A landing is recorded as `landed` once its push succeeded, and a successor waiting for that publication proceeds then:
+the deletion of the candidate bookmark, the slot checkout's return to the integration and deploy scheduling follow the
+record. Every other verdict deletes the candidate bookmark before it is recorded.
 Queued resets and releases fence later prefix admission. Restart retains artifacts,
 ends interrupted verifier attempts, and reconciles canonical publication intent
 and held state through the existing recovery path.
@@ -567,7 +570,12 @@ The runner keeps one SSH connection open to each place, check place, build lease
 (`<runner home>/ssh/<machine>-<place>/master`, ten minutes after its last command), so a command costs about 0.04 s
 rather than a new connection's 0.45 s. A gate's parallel commands share its place's connection, so the machine's
 sshd allows more than its default ten sessions per connection: peach-box sets `MaxSessions 64` in
-`/etc/ssh/sshd_config.d/slipjay.conf`.
+`/etc/ssh/sshd_config.d/slipjay.conf`. The runner's Git transport does the same for its fetches, `ls-remote` and pushes
+(`GIT_SSH_COMMAND`, sockets `<runner home>/ssh/git-%C`), unless its environment sets its own `GIT_SSH_COMMAND`.
+Taking a place is one round trip: under the place's lock it recovers what a holder no longer running left, holds the
+place and checks its quota, then prepares the checkout in the attempt's slice. Its `remote_verification` ready record
+carries `steps`, the milliseconds each step of the open took. After the gate the place cleans up while the landing goes
+on to publish; it takes no other gate until the cleanup is confirmed, and an unconfirmed cleanup quarantines it as before.
 A machine's `buildPool` names the build machine pool it builds for, before boat
 (see [Build machine](deployments.md)). It uses none of the machine's places or `root`.
 Unknown machine names, a machine place without `verifier`, and a machine place combined

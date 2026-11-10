@@ -183,7 +183,7 @@ export type OperationEvent =
    * when setup failed on a machine it had.
    */
   /** `placement` is where the attempt's gate was placed when its commands were about to run; rows before SJ-189 lack it and were all `boat`. */
-  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; placement?: GatePlacement; slot: number; screening?: boolean; pool?: string; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null }
+  | { type: "remote_verification"; phase: "ready"; machine: RemoteMachine; placement?: GatePlacement; slot: number; screening?: boolean; pool?: string; candidate: string; tree: string; setupMs: number; usage?: RemoteUsage | null; steps?: Readonly<Record<string, number>> }
   | { type: "remote_verification"; phase: "finished"; machine: RemoteMachine; tree: string | null; trackedChanges: number; machineMs: number; usage?: RemoteUsage | null; memory?: AttemptMemory }
   /** The machine was acquired but never came to hold the candidate; its readings before and after setup keep it in the window's spend. */
   | { type: "remote_verification"; phase: "failed"; machine: RemoteMachine; infrastructure?: boolean; placement?: GatePlacement; setupMs?: number; reason: string; usageBefore: RemoteUsage | null; usage: RemoteUsage | null }
@@ -683,6 +683,8 @@ export interface RemoteAttempt {
   readonly tree: string;
   /** The machine's billing when it took the attempt. */
   readonly usage: RemoteUsage | null;
+  /** Where opening it spent its time, by step, in milliseconds: a fixed machine's place records these (SJ-223). */
+  readonly steps?: Readonly<Record<string, number>>;
   /** The checkout's files after the gate: `tree` null, and a count, when they no longer match the candidate. */
   /** `memory`: a fixed machine's whole-attempt memory peak and out-of-memory kills, so a kill inside its limit is not
    * mistaken for the candidate's own failure. */
