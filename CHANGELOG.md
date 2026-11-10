@@ -1,5 +1,13 @@
 # Changelog
 
+## v3.61.3
+
+- **A batch check's diagnosis no longer finds its own machine place busy:** a machine place cleans up after an attempt
+  while a landing publishes (SJ-223), so when a batch check moved to its next commit the place was still held, the step
+  ended `infrastructure`, its immediate retry did too, and diagnosis came out `incomplete` (13 of 30 steps on peach-box
+  on 10 Nov). Opening a place now waits for a cleanup already running; a place held by a running attempt is still
+  refused at once.
+
 ## v3.61.2
 
 - **A regression is the same failure twice:** a release check whose rerun failed any suite the first run failed ended

@@ -221,6 +221,21 @@ test("reports collected from a different remote root retain repository-relative 
   } finally { await a.close(); await rm(root, { recursive: true, force: true }); await rm(output, { recursive: true, force: true }); }
 });
 
+test("opening waits for the last attempt's cleanup still running, so a batch check's next commit never finds the place busy", async () => {
+  const s = stand(), m = s.make(); await m.recover!([]);
+  const first = await open(m);
+  const closed = first.close();
+  assert.equal(m.available(), false, "the place is held until its cleanup is confirmed");
+  const next = await open(m);
+  await closed;
+  assert.equal(m.available(), false, "the next attempt holds the place");
+  await next.close(); assert.equal(m.available(), true);
+  // A place held by a running attempt, not a closing one, is still refused at once.
+  const held = await open(m);
+  await assert.rejects(open(m), /busy/);
+  await held.close();
+});
+
 test("closing an attempt cancels in-flight commands and refuses late scopes before releasing its place", async () => {
   const s = stand(), m = s.make(); await m.recover!([]); const a = await open(m);
   s.hold();

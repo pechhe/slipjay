@@ -124,6 +124,8 @@ export function machineVerification(name: string, config: GateMachineConfig, opt
   let busy = false;
   let quarantine = "runner restart: recovery has not confirmed the place clean";
   let recovering: Promise<void> | undefined;
+  /** The last attempt's cleanup while it runs: a gate's landing publishes without waiting for it (SJ-223), so it may still hold the place. */
+  let closing: Promise<void> | undefined;
   const machine: RemoteMachine = { verifier: "machine", name, id: check ? `${name}/check` : place ? `${name}/${place}` : name, size: "machine", image: "fixed SSH machine" };
   const fail = (reason: string) => new Error(`Remote executor unavailable (machine ${name}): ${reason}`);
   async function control(script: string, signal?: AbortSignal, input?: Buffer, timeoutMs = 120_000): Promise<string> {
@@ -191,6 +193,9 @@ ${recoverHolder()}`);
     reason: () => busy ? "machine place busy" : quarantine,
     recover,
     async open({ checkout, candidate, base, integrationBranch, environment, signal }): Promise<RemoteAttempt> {
+      // Opening waits for the last attempt's cleanup still running: a batch check opens the place again at its next commit
+      // the moment the last run ends, and without the wait every diagnosis step after a run found the place busy.
+      if (closing) await closing;
       if (busy) throw fail("machine place busy");
       // Opening recovers the place itself, under the same lock it takes it with; it only waits for a recovery already running.
       if (recovering) await recovering;
@@ -216,6 +221,8 @@ ${recoverHolder()}`);
       const stopping = new AbortController();
       const commands = new Set<Promise<BoundedProcessResult>>();
       const close = async () => {
+        let released!: () => void;
+        closing = new Promise<void>((resolve) => { released = resolve; });
         stopping.abort();
         // Nothing may start a new scope or a forward after cleanup has proved the place empty.
         await Promise.allSettled([...commands]);
@@ -225,7 +232,7 @@ ${recoverHolder()}`);
           if (acquired) await control(`exec 9>${shellWord(`${root}/control.lock`)}\nflock -n 9\n[ "$(cat ${shellWord(`${holder}/id`)})" = ${shellWord(id)} ]\n${clean(id)}`);
           if (acquired) quarantine = "";
         } catch (error) { quarantine = `cleanup unconfirmed: ${String(error)}`; throw fail(quarantine); }
-        finally { busy = false; if (scratch) await rm(scratch, { recursive: true, force: true }); }
+        finally { busy = false; closing = undefined; released(); if (scratch) await rm(scratch, { recursive: true, force: true }); }
       };
       try {
         // mkdir is atomic; a crash before the atomic id rename leaves a quarantined marker, with no work started.
