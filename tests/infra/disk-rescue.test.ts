@@ -79,3 +79,19 @@ test("the runner unit retries for ever and runs the rescue before each start", (
   assert.match(setup, /^StartLimitIntervalSec=0$/m);
   assert.match(setup, /^ExecStartPre=-\$HOME\/\.local\/bin\/slipjay-disk-rescue$/m);
 });
+
+test("the pressure timer's unit can find the interpreter slipjay needs", () => {
+  // A stand-in `slipjay` that, like the real one, needs `bun` on PATH, and no-op systemd tools.
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  for (const tool of ["systemctl", "loginctl"]) writeFileSync(join(bin, tool), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  writeFileSync(join(bin, "slipjay"), "#!/bin/sh\n", { mode: 0o755 });
+  const installed = spawnSync("bash", [join(repoRoot, "scripts", "install-disk-guard.sh")], {
+    encoding: "utf8", env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home },
+  });
+  assert.equal(installed.status, 0, installed.stderr);
+  const unit = readFileSync(join(home, ".config/systemd/user/slipjay-disk.service"), "utf8");
+  // The unit's PATH is the installing shell's, so it includes the directory slipjay (and so bun) was found in.
+  assert.match(unit, new RegExp(`^Environment=PATH=.*${bin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "m"));
+  assert.ok(existsSync(join(home, ".local/bin/slipjay-disk-rescue")));
+});

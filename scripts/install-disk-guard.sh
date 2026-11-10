@@ -23,6 +23,9 @@ Description=SlipJay disk-pressure pass
 
 [Service]
 Type=oneshot
+# slipjay is a \`#!/usr/bin/env bun\` script and a user unit's PATH holds neither ~/.bun/bin nor ~/.local/bin: give it
+# the PATH this shell sees (as setup-runner.sh does for the runner), or the pass dies at once with status 127.
+Environment=PATH=$PATH
 ExecStart=$slipjay_bin disk
 Nice=10
 UNIT
