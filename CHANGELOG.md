@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A repository declares a landed migration previous-release-compatible in `slipjay.json`:** a generated migration
+  cannot gain the first-line declaration once it has landed, so a non-additive one whose candidate reads what it adds
+  failed every promotion at the health check, which ran before it. `migrationFinalization.previousReleaseCompatible`
+  lists such SQL files (under `artifactPaths`), and the plan takes each as additive, as it would one carrying the line.
 - **A host disk policy (`slipjay disk`):** one host's repositories filled its root disk with run evidence, `/tmp` scratch
   and caches, and nothing owned the whole. The machine config's new `disk` key sets thresholds (warn 80, shed 88, refill
   93, critical 96) and the managed roots. `slipjay disk [--plan] [--json]` removes regenerable caches at shed, scratch

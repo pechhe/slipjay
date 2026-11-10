@@ -40,6 +40,30 @@ test("a release carrying migration artifacts needs --migrations-ready and names 
   }
 });
 
+test("a policy declares a landed migration previous-release-compatible without rewriting it", async () => {
+  const f = await releaseProject({ migrations: true });
+  try {
+    const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
+    await mkdir(join(f.repo, "migrations"), { recursive: true });
+    await writeFile(join(f.repo, "migrations", "0001.sql"), "drop index k; create unique index k on t (a) where b is null;\n");
+    await writeFile(join(f.repo, "migrations", "0002.sql"), "alter table t drop column c;\n");
+    const policyPath = join(f.repo, "slipjay.json");
+    const policy = JSON.parse(await readFile(policyPath, "utf8"));
+    policy.migrationFinalization.previousReleaseCompatible = ["migrations/0001.sql"];
+    await writeFile(policyPath, `${JSON.stringify(policy, null, 2)}\n`);
+    git(["add", "-A"]);
+    git(["commit", "-qm", "Add migrations and declare one"]);
+    git(["push", "-q", "origin", "main"]);
+    jj(f.repo, ["git", "import"]);
+    const plan = await releaseIntegration(f.repo);
+    assert.ok(plan.ok && plan.status === "planned", JSON.stringify(plan));
+    // The declared file counts as additive, as with the first line; the undeclared one still does not.
+    assert.deepEqual(plan.nonAdditiveMigrations, ["migrations/0002.sql"]);
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("a promotion's migrations are the runner's to apply: it needs a declared production step and refuses --migrations-ready", async () => {
   const f = await releaseProject({ migrations: true, promotes: true });
   try {

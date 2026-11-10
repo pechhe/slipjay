@@ -13,6 +13,11 @@ export type MigrationFinalizationPolicy = {
   artifactPaths: string[];
   generate: MigrationCommand;
   verify: MigrationCommand;
+  /**
+   * Generated SQL files, under `artifactPaths`, that the repository declares previous-release-compatible after they
+   * landed without the first-line declaration, which an artifact cannot gain once generated.
+   */
+  previousReleaseCompatible?: string[];
 };
 
 /** A parsed version-1 policy: landing sections normalized, every other declaration kept as declared. */
@@ -168,9 +173,14 @@ const migrationCommand = (value: unknown, field: string): MigrationCommand => {
 function migrationFinalization(value: unknown): MigrationFinalizationPolicy | null {
   if (value == null) return null;
   if (!isObject(value) || value.mode !== "late_bound_serialized") fail("migrationFinalization.mode must be late_bound_serialized");
-  return { mode: value.mode, triggerPaths: migrationPaths(value.triggerPaths, "triggerPaths"),
-    artifactPaths: migrationPaths(value.artifactPaths, "artifactPaths"),
-    generate: migrationCommand(value.generate, "generate"), verify: migrationCommand(value.verify, "verify") };
+  const artifactPaths = migrationPaths(value.artifactPaths, "artifactPaths");
+  const declared = value.previousReleaseCompatible === undefined ? undefined
+    : migrationPaths(value.previousReleaseCompatible, "previousReleaseCompatible");
+  if (declared?.some((file) => !file.endsWith(".sql") || !artifactPaths.some((root) => file.startsWith(`${root}/`))))
+    fail("migrationFinalization.previousReleaseCompatible must list SQL files under artifactPaths");
+  return { mode: value.mode, triggerPaths: migrationPaths(value.triggerPaths, "triggerPaths"), artifactPaths,
+    generate: migrationCommand(value.generate, "generate"), verify: migrationCommand(value.verify, "verify"),
+    ...declared ? { previousReleaseCompatible: declared } : {} };
 }
 
 /** Fixture identities are literal repository paths, never globs or commands. */

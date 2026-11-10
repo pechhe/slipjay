@@ -271,6 +271,12 @@ release that accepts both spellings, the rewrite, and a later removal of the old
 classified and ordered as above, and the migration runs last, just before traffic moves, so the candidate must not
 write the new spelling at start-up.
 
+A generated migration cannot gain the line once it has landed, since landing refuses an edit to a generated artifact.
+The repository declares such a file instead in `migrationFinalization.previousReleaseCompatible`, a list of its SQL
+paths under `artifactPaths`; the candidate's policy is the one read, and the plan takes a listed file as it would one
+carrying the line. It is the remedy for a file that landed undeclared but whose candidate cannot pass its health check
+on the schema before it: one whose new code reads what the migration adds.
+
 ## Confirming and publishing
 
 1. `slipjay promote` fetches and plans: the candidate (the integration branch on

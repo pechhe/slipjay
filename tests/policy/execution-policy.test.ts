@@ -173,6 +173,8 @@ test("the strict rules reject unsafe or malformed policies", () => {
   rejects(policy({ remote: "origin upstream" }), /publication remote/);
   rejects(policy({ postIntegration: { ...yardsmithPolicy.postIntegration, timeoutMs: 600001 } }), /deadline/);
   rejects(policy({ migrationFinalization: { ...yardsmithPolicy.migrationFinalization, generate: check("../bun") } }), /safe command/);
+  for (const previousReleaseCompatible of [["elsewhere/0001.sql"], ["apps/planner-workbench/drizzle/0001.ts"], []])
+    rejects(policy({ migrationFinalization: { ...yardsmithPolicy.migrationFinalization, previousReleaseCompatible } }), /previousReleaseCompatible/);
 });
 
 test("a release branch declares its own checks, and unsafe release declarations are refused", () => {

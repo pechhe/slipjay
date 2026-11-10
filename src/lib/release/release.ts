@@ -389,6 +389,8 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   const changed = commits.length ? lines(await jjOut(root, ["diff", "--from", base, "--to", candidate, "--name-only"])) : [];
   const migrationArtifacts = changed.filter((file) => under(artifactPaths, file));
   const nonAdditiveMigrations: string[] = [];
+  // Files the candidate's policy declares, as the first line would; deleting one is still not additive.
+  const declared = new Set(policy.migrationFinalization?.previousReleaseCompatible ?? []);
   // JSON beside a migration is metadata (Drizzle's snapshots and journal), not a migration.
   // Any other file that is not SQL cannot be read for additivity, so it is not known to be additive.
   for (const file of migrationArtifacts.filter((name) => !name.endsWith(".json"))) {
@@ -398,7 +400,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
     }
     const shown = await jjRun(root, ["file", "show", "-r", candidate, "--", `root-file:${symbol(file)}`]);
     // A migration the release deletes is not additive either.
-    if (shown.code !== 0 || nonAdditiveSql(shown.stdout)) nonAdditiveMigrations.push(file);
+    if (shown.code !== 0 || (!declared.has(file) && nonAdditiveSql(shown.stdout))) nonAdditiveMigrations.push(file);
   }
   const production = policy.deployments?.environments.production;
   const { policy: basePolicy } = await readExecutionPolicyAtCommit(root, base).catch(() => ({ policy: null }));
