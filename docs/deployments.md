@@ -75,7 +75,7 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   own local compensation; declared environment keys cannot override its authority.
 - **Prebuild.** Production with a `machine` may declare `prebuild`, a command that builds what the deploy
   will ship. Every batch check (a release's, a scheduled slot's or a background one) runs it on its head beside the
-  release checks, on the fixed machine serving the pool, in a source view of the head, with the deploy's environment and
+  release checks (a background check only once the host's CPU budget admits its checks; one a release waits on at once), on the fixed machine serving the pool, in a source view of the head, with the deploy's environment and
   machine variables, and its result is one more suite of the check, `prebuild`: a head whose images do not build never
   passes, so a slot ships the newest commit that passed its checks and whose build did not fail. A failed build is rebuilt once to tell
   a flaky build from a broken one, and a broken one is diagnosed by building at each landing of the batch, so its culprit

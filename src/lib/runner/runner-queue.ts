@@ -2412,10 +2412,14 @@ export function createRunnerQueue(input: {
           ...operation.submittedBy.endsWith(":background") ? { background: true } : {}, ...after ? { after: after.commitId } : {}, landings });
         progress(`[batch] checking ${batch.length} landing(s) from ${base.slice(0, 12)} to ${head.slice(0, 12)} on ${placed}`
           + (after ? `; ${after.commitId.slice(0, 12)} already passed, so diagnosis considers the ${landings.length} after it` : ""));
-        // What the head's deploy will ship starts building now, beside its checks: the build is one of the check's suites
-        // (PREBUILD_KEY), so a head whose images cannot build never passes. Only a fixed machine builds it, never boat.
-        let headBuild = await prebuild(operation.repo, head, "beside this check", progress);
-        const builds = headBuild !== null;
+        // What the head's deploy will ship builds beside its checks: the build is one of the check's suites (PREBUILD_KEY), so
+        // a head whose images cannot build never passes. Only a fixed machine builds it, never boat. A release waiting on this
+        // check starts it now; a background check starts it only once the host admits its checks, so a busy host is not
+        // handed a build that the check's own admission would have held back.
+        const background = operation.submittedBy.endsWith(":background");
+        let headBuild = background ? null : await prebuild(operation.repo, head, "beside this check", progress);
+        /** Whether the head's build ran in this check, so a green check without a passing build is recorded `unproven`. */
+        let builds = headBuild !== null;
         let headSuites: Record<string, SuiteState> = {};
         /** A build, or the operation's kill: a killed or preempted check never waits out a build, and never passes on one. */
         const awaitBuild = async (building: Build | null): Promise<PrebuildResult | null> => {
@@ -2452,9 +2456,13 @@ export function createRunnerQueue(input: {
           const startBuild = async () => {
             if (scope && !scope.suites.includes(PREBUILD_KEY)) return null;
             if (commit === head && headBuild) { const started = headBuild; headBuild = null; return started; }
-            return prebuild(operation.repo, commit, "for this check", progress);
+            const started = await prebuild(operation.repo, commit, commit === head ? "beside this check" : "for this check", progress);
+            if (started && commit === head && !scope) builds = true;
+            return started;
           };
-          const building = await startBuild();
+          // A background check's complete run builds after its admission below; everything else starts building now.
+          const deferred = background && !scope;
+          let building = deferred ? null : await startBuild();
           // A rerun or diagnosis of the build alone needs no checkout: it frees the check machine and waits on the build.
           if (scope && !scope.checks.length) {
             await releaseMachine();
@@ -2496,7 +2504,10 @@ export function createRunnerQueue(input: {
           let failure: RequiredVerificationError | undefined;
           // Once per check: a later run bisecting its failure waits for nothing but this check's own load to fade. A release
           // waiting on this check goes first, as a landing's gate does; only a background look at the newest landing leaves room.
-          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, operation.submittedBy.endsWith(":background") ? "background" : "gate", controller.signal); }
+          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, background ? "background" : "gate", controller.signal); }
+          // The budget wait returns on an abort rather than throwing: a check stopped while it waited builds nothing.
+          if (controller.signal.aborted) throw authorityError();
+          if (deferred) building = await startBuild();
           try {
             await runRequiredVerification({ root: checkout, checks: indexes.map((index) => plan.checks[index]), environment: releaseEnvironment(base, commit, scope?.suites.filter((suite) => suite !== PREBUILD_KEY)),
               onProgress: progress, abortSignal: controller.signal,

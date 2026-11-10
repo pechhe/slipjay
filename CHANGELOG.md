@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.61.1
+
+- **A background check builds only once the host admits it:** its head's image build used to start with the check, before
+  the CPU-budget wait that holds a background check's tests back on a busy host, so a loaded machine was handed a build
+  anyway (peach-box at load 130-170 on 32 CPUs on 10 Nov). A background check now starts the build after that admission;
+  a check a release waits on still starts it at once.
+
 ## v3.61.0
 
 - **A release check builds what its deploy ships, and a commit whose images do not build never passes:** production's
