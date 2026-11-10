@@ -103,7 +103,9 @@ export function remoteFiles(run: RemoteRun) {
 /**
  * Puts `commitId` into a build machine's bare repository `gitDir` (made if missing), sending a bundle of what it lacks.
  * `control` runs a script on the machine. Two leases may do this at once, so the bundle's path on the machine is its own
- * and they take turns to update the ref, which would otherwise fail on git's lock.
+ * and they take a turn each to make the repository and to update the ref; git fails both on its own lock's "File exists"
+ * rather than waiting for it, and a lease losing that race fails the whole build. Only the machine side takes turns: the
+ * local ref both leases bundle from is shared and unsynchronised.
  */
 export async function receiveBuildCommit(
   control: (what: string, script: string, options?: { input?: Buffer; timeoutMs?: number }) => Promise<string>,
@@ -112,17 +114,21 @@ export async function receiveBuildCommit(
 ): Promise<void> {
   const dir = shellWord(gitDir);
   const ref = `refs/slipjay/machine/${pool}`;
-  const heads = (await control("list commits", `git init --quiet --bare ${dir} && git --git-dir=${dir} for-each-ref --format='%(objectname)'`))
+  /** `script` alone, holding the repository's lock for at most `waitS` seconds: one lease's turn, making the repository or moving a ref. */
+  const turn = (script: string, waitS: number) => `(
+  flock -w ${waitS} 9
+${script}
+) 9>>${shellWord(`${gitDir}.lock`)}`;
+  const ensure = `git --git-dir=${dir} rev-parse --git-dir >/dev/null 2>&1 || git init --quiet --bare ${dir}`;
+  const heads = (await control("list commits", turn(`${ensure}
+git --git-dir=${dir} for-each-ref --format='%(objectname)'`, 110)))
     .split("\n").filter((line) => /^[0-9a-f]{40}$/.test(line));
   await files.local("git", ["update-ref", ref, commitId], gitDirectory);
   const input = await files.bundleMissing(gitDirectory, [ref], heads, bundle);
   await control("receive the commit", `bundle=$(mktemp)
 cat > "$bundle"
-(
-  flock 9
-  if [ -s "$bundle" ]; then git --git-dir=${dir} fetch --quiet "$bundle" ${shellWord(`+${ref}:${ref}`)}; fi
-  git --git-dir=${dir} update-ref ${shellWord(ref)} ${shellWord(commitId)}
-) 9>>${shellWord(`${gitDir}.lock`)}
+${turn(`if [ -s "$bundle" ]; then git --git-dir=${dir} fetch --quiet "$bundle" ${shellWord(`+${ref}:${ref}`)}; fi
+git --git-dir=${dir} update-ref ${shellWord(ref)} ${shellWord(commitId)}`, Math.floor(SETUP_TIMEOUT_MS / 1000) - 10)}
 rm -f "$bundle"
 git --git-dir=${dir} cat-file -e ${shellWord(`${commitId}^{commit}`)}`, { input, timeoutMs: SETUP_TIMEOUT_MS });
 }
