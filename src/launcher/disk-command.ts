@@ -18,6 +18,7 @@ export function diskLines(outcome: Exclude<HostDiskOutcome, { state: "busy" }>, 
     const mb = (row.sizeBytes / 1024 / 1024).toFixed(1);
     lines.push(`${all ? row.action : row.outcome}\t${row.class}\t${mb} MB\t${row.owner ?? "-"}\t${row.path}\t${row.detail}`);
   }
+  if (outcome.rescueEnvError) lines.push(`rescue\tfailed\t${outcome.rescueEnvError}`);
   if (outcome.ballastResult && (all || outcome.ballastResult.outcome !== "kept")) {
     lines.push(`ballast\t${outcome.ballastResult.outcome}\t${outcome.ballastResult.path}\t${outcome.ballastResult.detail}`);
   } else if (all && outcome.ballast) lines.push(`ballast\t${outcome.ballast.action}\t${outcome.ballast.path}\t${outcome.ballast.reason}`);

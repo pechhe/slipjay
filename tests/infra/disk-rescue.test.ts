@@ -74,6 +74,19 @@ test("settings can come from ~/.slipjay/disk-rescue.env", () => {
   assert.equal(existsSync(cache), false);
 });
 
+test("an empty configured list removes nothing, and glob characters are not expanded", () => {
+  const result = run(90, { SLIPJAY_RESCUE_REGENERABLE: "" });
+  assert.equal(result.status, 0);
+  assert.ok(existsSync(cache), "an empty list is not the default list");
+  const literal = join(home, "star*");
+  mkdirSync(literal);
+  const sibling = join(home, "starfish");
+  mkdirSync(sibling);
+  run(90, { SLIPJAY_RESCUE_REGENERABLE: literal });
+  assert.equal(existsSync(literal), false);
+  assert.ok(existsSync(sibling), "the glob did not expand to its neighbours");
+});
+
 test("the runner unit retries for ever and runs the rescue before each start", () => {
   const setup = readFileSync(join(repoRoot, "scripts", "setup-runner.sh"), "utf8");
   assert.match(setup, /^StartLimitIntervalSec=0$/m);

@@ -47,7 +47,7 @@ export type HostDiskOptions = {
 
 export type HostDiskOutcome =
   | { state: "busy"; reason: string }
-  | ({ state: "planned" | "applied"; applied: boolean } & HostDiskPlan & { results: ApplyResult["rows"]; ballastResult: ApplyResult["ballast"]; failures: number });
+  | ({ state: "planned" | "applied"; applied: boolean } & HostDiskPlan & { results: ApplyResult["rows"]; ballastResult: ApplyResult["ballast"]; failures: number; rescueEnvError?: string });
 
 /** The distinct `integrationRoot` of every registered workspace, as `maintain.sh` finds the roots to maintain. */
 export async function registeredIntegrationRoots(): Promise<string[]> {
@@ -79,6 +79,8 @@ async function readManifest(directory: string): Promise<ManifestRead> {
   if (forgeNumber !== undefined && (typeof forgeNumber !== "number" || !Number.isInteger(forgeNumber) || forgeNumber <= 0)) return { problem: "forgeNumber must be a positive integer" };
   return { manifest: { issue, owner, created, ...forgeNumber === undefined ? {} : { forgeNumber: forgeNumber as number }, ...expires === undefined ? {} : { expires }, ...pin === true ? { pin: true } : {} } };
 }
+
+const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 function realHost(options: HostDiskOptions, config: DiskConfig): DiskHost {
   let processes: Promise<ProcessWorkingDirectory[] | null> | undefined;
@@ -209,8 +211,9 @@ export async function hostDisk(options: HostDiskOptions = {}): Promise<HostDiskO
     if (options.plan) return { state: "planned", applied: false, ...plan, results: plan.rows.map((row) => ({ ...row, outcome: "kept" as const, detail: row.reason })), ballastResult: null, failures: 0 };
     const ops: DiskOps = { ...realOps(host, evictAllRoots(options.integrationRoots ?? registeredIntegrationRoots)), held: freshlyHeld, ...options.ops };
     const applied = await applyHostDisk(plan, ops, now);
-    await writeRescueEnv(config).catch(() => {});
-    return { state: "applied", applied: true, ...plan, results: applied.rows, ballastResult: applied.ballast, failures: applied.failures };
+    // A rescue env that could not be written leaves the rescue on stale values: say so, and count it as a failure.
+    const rescueEnvError = await writeRescueEnv(config).then(() => undefined, (error: unknown) => message(error));
+    return { state: "applied", applied: true, ...plan, results: applied.rows, ballastResult: applied.ballast, failures: applied.failures + (rescueEnvError === undefined ? 0 : 1), ...rescueEnvError === undefined ? {} : { rescueEnvError } };
   };
   if (options.plan) return pass();
   try {

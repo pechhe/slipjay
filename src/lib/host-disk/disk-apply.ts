@@ -4,7 +4,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdir, open, rename, rm, stat } from "node:fs/promises";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { archiveEvidence } from "./disk-archive.ts";
 import type { ArchiveSummary } from "./disk-archive.ts";
 import type { BallastPlan, DiskHost, DiskRow, HostDiskPlan } from "./disk-plan.ts";
@@ -138,6 +138,10 @@ async function archiveAndPrune(row: DiskRow, ops: DiskOps, now: number): Promise
   if (!("manifest" in read)) return { ...row, outcome: "kept", detail: `kept: manifest unreadable at removal (${read.problem})` };
   // Judged again at the moment of removal: a pin added since the plan keeps it.
   if (read.manifest.pin === true) return { ...row, action: "report", outcome: "kept", detail: "kept: pinned since it was planned" };
+  // The expiry and the manifest's own issue are judged again too: an extension or a rename since the plan keeps it.
+  const expires = read.manifest.expires === undefined ? NaN : Date.parse(read.manifest.expires);
+  if (!Number.isFinite(expires) || expires > now) return { ...row, action: "report", outcome: "kept", detail: "kept: no longer expired since it was planned" };
+  if (read.manifest.issue !== basename(row.path)) return { ...row, action: "report", outcome: "kept", detail: "kept: the manifest's issue no longer matches the directory" };
   let archive: ArchiveSummary;
   try { archive = await ops.archive(row.path, read.manifest, now); }
   catch (error) { return { ...row, action: "report", outcome: "kept", detail: `kept everything: ${message(error)}` }; }

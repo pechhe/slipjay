@@ -134,6 +134,24 @@ test("evidence without a usable manifest, pinned, unexpired, not closed or unrea
   }
 });
 
+test("an expiry extended or an issue renamed after the plan keeps the evidence at removal", async () => {
+  const extended = await evidence("30", manifest("30", { expires: "2026-01-01" }));
+  const renamed = await evidence("31", manifest("31", { expires: "2026-01-01" }));
+  let changed = false;
+  const outcome = await pass(50, { ops: { held: async () => {
+    // The plan is made first; the manifests change before the pass applies it.
+    if (!changed) {
+      changed = true;
+      await writeFile(join(extended, "manifest.json"), JSON.stringify(manifest("30", { expires: "2027-01-01" })));
+      await writeFile(join(renamed, "manifest.json"), JSON.stringify(manifest("99", { forgeNumber: 31, expires: "2026-01-01" })));
+    }
+    return false;
+  } } });
+  assert.equal(existsSync(extended) && existsSync(renamed), true);
+  assert.match(rowFor(outcome, extended).detail, /no longer expired/);
+  assert.match(rowFor(outcome, renamed).detail, /no longer matches/);
+});
+
 test("closed and expired evidence is archived, small files first, then removed", async () => {
   const big = Buffer.alloc(2 * MIB, 1);
   const dir = await evidence("20", manifest("20", { expires: "2026-01-01" }), { "report.md": "report", "log.txt": "log line", "dump.bin": big });

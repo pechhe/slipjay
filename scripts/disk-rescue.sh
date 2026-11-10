@@ -15,7 +15,8 @@ home="${HOME:-/root}"
 shed="${SLIPJAY_RESCUE_SHED_PERCENT:-88}"
 critical="${SLIPJAY_RESCUE_CRITICAL_PERCENT:-96}"
 ballast="${SLIPJAY_RESCUE_BALLAST:-$home/.slipjay/disk-ballast}"
-regenerable="${SLIPJAY_RESCUE_REGENERABLE:-/tmp/node-compile-cache}"
+# `-` not `:-`: a configured empty list means "remove nothing", not "use the default".
+regenerable="${SLIPJAY_RESCUE_REGENERABLE-/tmp/node-compile-cache}"
 root="${SLIPJAY_RESCUE_ROOT:-/}"
 
 usage="${SLIPJAY_RESCUE_USAGE_PERCENT:-}"
@@ -26,6 +27,7 @@ say() { echo "disk-rescue: ${usage}% $*"; logger -t slipjay-disk-rescue "${usage
 
 if [ "$usage" -ge "$shed" ]; then
   # One path per whitespace-separated word; paths with spaces are not supported here, by design.
+  set -f # a glob character in a configured path is a name, not a pattern
   for path in $regenerable; do
     [ -e "$path" ] && rm -rf "$path" && say "removed $path"
   done
