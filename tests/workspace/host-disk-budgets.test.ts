@@ -181,7 +181,7 @@ test("the real Docker reader parses a stand-in docker CLI, and answers null when
   const saved = process.env.PATH;
   try {
     await writeFile(join(bin, "docker"), `#!/bin/sh
-if [ "$1" = system ]; then echo '{"Volumes":[{"Name":"pgdata","Size":"2MB"},{"Name":"orphan","Size":"1kB"}]}'; else echo '{"Names":"db","Mounts":"pgdata,other"}'; fi
+if [ "$1" = system ]; then echo '{"Volumes":[{"Name":"pgdata","Size":"2MB"},{"Name":"orphan","Size":"1kB"}]}'; elif echo "$*" | grep -q -- --no-trunc; then echo '{"Names":"db","Mounts":"pgdata,other"}'; else echo '{"Names":"db","Mounts":"pgd…"}'; fi
 `, { mode: 0o755 });
     process.env.PATH = `${bin}:${saved}`;
     assert.deepEqual(await readDockerVolumes(), [{ name: "pgdata", sizeBytes: 2e6, containers: ["db"] }, { name: "orphan", sizeBytes: 1e3, containers: [] }]);
@@ -243,4 +243,16 @@ test("a manifest with no expires is prunable over budget; an unparseable expires
   assert.equal(row(none).action, "archive-and-prune");
   assert.equal(row(unparseable).action, "report");
   assert.match(row(unparseable).reason, /expires is not a date/);
+});
+
+test("a closed directory too small to matter is left when a large one holds evidence over budget", async () => {
+  const tiny = await evidence("1", { created: "2025-01-01T00:00:00Z" });
+  const live = await evidence("2", { created: "2026-01-01T00:00:00Z" });
+  const host = { sizeOf: sizes({ 1: 2 * MIB, 2: 600 * MIB }), issueClosed: async (number: number) => number === 1 };
+  const outcome = await pass(configWith({ evidenceBytes: 500 * MIB }), 50, { host });
+  assert.ok(outcome.state === "applied");
+  const row = (path: string) => outcome.results.find((entry) => entry.path === path)!;
+  assert.equal(existsSync(tiny), true);
+  assert.equal(row(tiny).outcome, "kept");
+  assert.ok(!row(tiny).keepsOverBudget && row(live).keepsOverBudget, "only the large directory is named as holding the class over");
 });

@@ -23,7 +23,7 @@ const jsonLines = (text: string): Array<Record<string, unknown>> => text.split("
 export async function readDockerVolumes(): Promise<DockerVolume[] | null> {
   try {
     const df = await run("docker", ["system", "df", "-v", "--format", "json"], { timeoutMs: 120_000 });
-    const ps = await run("docker", ["ps", "-a", "--format", "json"], { timeoutMs: 60_000 });
+    const ps = await run("docker", ["ps", "-a", "--no-trunc", "--format", "json"], { timeoutMs: 60_000 });
     if (df.code !== 0 || ps.code !== 0) return null;
     const users = new Map<string, string[]>();
     for (const container of jsonLines(ps.stdout)) {

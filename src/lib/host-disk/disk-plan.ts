@@ -204,12 +204,14 @@ async function plannedEvidence(config: DiskConfig, now: number, host: DiskHost):
     projected -= sumBytes(rows.filter((row) => row.action === "archive-and-prune"));
     for (const { index, check } of candidates.sort((a, b) => a.created - b.created || a.name.localeCompare(b.name))) {
       if (projected <= budgetBytes) break;
-      if (await check() !== null) continue;
       const row = rows[index]!;
+      // A directory under 1% of the budget cannot bring the class under it: pruning it only moves small evidence away from its owner.
+      if (row.sizeBytes * 100 < budgetBytes) continue;
+      if (await check() !== null) continue;
       rows[index] = { ...row, action: "archive-and-prune", budgetPrune: true, reason: `evidence is over its ${budgetBytes}-byte budget: Issue closed, oldest first (${row.reason})` };
       projected -= row.sizeBytes;
     }
-    if (projected > budgetBytes) rows.forEach((row, index) => { if (row.action !== "archive-and-prune" && row.sizeBytes > 0) rows[index] = { ...row, keepsOverBudget: true }; });
+    if (projected > budgetBytes) rows.forEach((row, index) => { if (row.action !== "archive-and-prune" && row.sizeBytes * 100 >= budgetBytes) rows[index] = { ...row, keepsOverBudget: true }; });
   }
   return { rows, flags, budget: { budgetBytes, usedBytes, over: usedBytes > budgetBytes } };
 }
