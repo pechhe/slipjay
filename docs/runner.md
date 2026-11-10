@@ -84,7 +84,9 @@ operation is in the `waiting-for-budget` stage, so the wait counts against neith
 nor the verify times its budgets judge. It reports a `[verify]` progress line naming the load and the limit, and the ledger
 records `host_budget_waited`. A release check takes the budget once, not for each run bisecting a failure. A check a
 release waits on (`slipjay promote --confirm`, or a scheduled slot's batch check) goes first as a gate does, so on a machine
-place it does not wait; only a background check of the newest landing does.
+place it does not wait, and neither does a background check on a release-check place, whose slice the machine ranks above
+agent work: on a busy peach-box each one waited its whole 30-minute limit, then ran anyway. Only a background check on the
+runner host waits.
 
 The budget reads the kernel's load figures and takes the larger of the one- and five-minute loads. A landing gate on the
 runner host may start up to its CPU count and waits at most 2 minutes. Audits and background checks ("background" work) start up to

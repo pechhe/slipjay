@@ -74,12 +74,13 @@ test("a check a release waits on goes first on its machine, whatever the machine
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("a background check waits for the CPU budget of its machine", async () => {
+test("a background check on a release-check place starts at once, whatever its machine's load", async () => {
   let clock = Date.now();
   const state = { up: true, opened: 0, closed: 0 };
   let reads = 0;
+  const stamped: (string | null)[] = [];
   const hostShell = (machine: string | null) => async (script: string) => {
-    if (script.includes("flock")) return "claimed\n";
+    if (script.includes("flock")) { stamped.push(machine); return "claimed\n"; }
     return `${machine === "peach-box" && !reads++ ? "99 99" : "1 1"} 1.00 1/100 200\n32\n`;
   };
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
@@ -98,10 +99,10 @@ test("a background check waits for the CPU budget of its machine", async () => {
     await f.queue.recover();
     await settle(f);
     const check = await until(() => f.log.verifications(REPO).find((entry) => entry.submittedBy.endsWith(":background") && entry.result));
-    assert.ok(events(f, check.id, "host_budget_waited").some((event) => event.placement === "machine:peach-box"));
-    assert.ok(events(f, check.id, "progress").some((event) => /This verification is waiting for peach-box's CPU budget: load 99\.0 is over 24\.0/.test(event.line)));
-    const stages = events(f, check.id, "stage").map((event) => event.stage);
-    assert.equal(stages[stages.indexOf("waiting-for-budget") + 1], "verifying", "verifying restarts after the wait, so its deadline does not include it");
+    // Its slice outranks agent work for CPU, so waiting for that work's load to fade would only delay it.
+    assert.deepEqual(events(f, check.id, "host_budget_waited"), []);
+    assert.ok(!events(f, check.id, "stage").some((event) => event.stage === "waiting-for-budget"));
+    assert.ok(stamped.includes("peach-box"), "it still says it started, so background work leaves room after it");
   } finally { await f.dispose(); }
 }, 180_000);
 

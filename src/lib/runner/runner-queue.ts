@@ -2503,8 +2503,11 @@ export function createRunnerQueue(input: {
           const runIds: string[] = [];
           let failure: RequiredVerificationError | undefined;
           // Once per check: a later run bisecting its failure waits for nothing but this check's own load to fade. A release
-          // waiting on this check goes first, as a landing's gate does; only a background look at the newest landing leaves room.
-          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, background ? "background" : "gate", controller.signal); }
+          // waiting on this check goes first, as a landing's gate does, and so does any check on a release-check place, whose
+          // slice the machine ranks above agent work: waiting for that work's load to fade only delayed it, by the whole
+          // 30 min limit on a busy machine. Only a background check on the runner host leaves room.
+          const budgetClass = background && !checkPlace ? "background" : "gate";
+          if (!budgetTaken) { budgetTaken = true; await waitForHostBudget(open!.gate?.placement, budgetClass, controller.signal); }
           // The budget wait returns on an abort rather than throwing: a check stopped while it waited builds nothing.
           if (controller.signal.aborted) throw authorityError();
           if (deferred) building = await startBuild();

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A background check on a release-check place starts at once.** It waited for its machine's load to fall to three
+  quarters of its CPUs, which agent work on peach-box never let happen, so every background check sat out its whole
+  30-minute limit and then ran anyway. The place's slice now outranks agent work for CPU (`docs/runner.md`), so the
+  check runs as a release's own check does. A background check on the runner host still waits.
 - **A repository declares a landed migration previous-release-compatible in `slipjay.json`:** a generated migration
   cannot gain the first-line declaration once it has landed, so a non-additive one whose candidate reads what it adds
   failed every promotion at the health check, which ran before it. `migrationFinalization.previousReleaseCompatible`
