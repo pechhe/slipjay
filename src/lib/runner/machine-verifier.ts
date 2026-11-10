@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
@@ -45,8 +46,26 @@ async function retainedPaths(run: RemoteRun, checkout: string, base: string): Pr
   return kept;
 }
 
-export function machineSshArgs(config: Pick<GateMachineConfig, "account" | "ssh">): string[] {
-  return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3", "-l", config.account, config.ssh];
+/** A connection directory of the runner's: one per place, check place, build lease and host-load reader of a machine. */
+export const machineConnections = (home: string, machine: string, user: number | "check" | "build" | "host") => join(home, "ssh", `${machine}-${user}`);
+
+/**
+ * The SSH options for a machine. Given `connections` (a directory of the runner's, one per place, build lease and host
+ * reader), every command sent through it to that machine and account shares one persistent connection: each used to
+ * open its own, about 0.4 s from peach-live to peach-box against 0.04 s over a shared one, and a landing opens a dozen
+ * in sequence (SJ-200). One connection per place keeps a gate's parallel commands within sshd's `MaxSessions` (10 by
+ * default; peach-box allows 64, `/etc/ssh/sshd_config.d/slipjay.conf`). A command line that
+ * names its own master (`-M -S <socket>`, the attempt tunnel) keeps it, since ssh takes the first value it is given. A
+ * socket left by a dead master is replaced by the next connection, and a lost master fails its commands as a lost
+ * connection always has, so the place is quarantined.
+ */
+export function machineSshArgs(config: Pick<GateMachineConfig, "account" | "ssh">, connections?: string): string[] {
+  if (connections) mkdirSync(connections, { recursive: true, mode: 0o700 });
+  return ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3",
+    // The directory serves one machine and account, so a short socket name, not the 40-character `%C` hash, keeps the
+    // path and ssh's temporary suffix well inside the 108-byte Unix socket limit.
+    ...connections ? ["-o", "ControlMaster=auto", "-o", `ControlPath=${join(connections, "master")}`, "-o", "ControlPersist=600"] : [],
+    "-l", config.account, config.ssh];
 }
 
 /**
@@ -55,10 +74,10 @@ export function machineSshArgs(config: Pick<GateMachineConfig, "account" | "ssh"
  * started; a repository's build command takes its own lock. A machine that cannot be reached fails the lease, within
  * seconds, and the deploy goes to boat.
  */
-export function machineBuildLease(name: string, config: Pick<GateMachineConfig, "account" | "ssh">, options: { run?: RemoteRun; scratch?: string } = {}): LeaseBuildMachine {
+export function machineBuildLease(name: string, config: Pick<GateMachineConfig, "account" | "ssh">, options: { run?: RemoteRun; scratch?: string; connections?: string } = {}): LeaseBuildMachine {
   const run = options.run ?? runBoundedProcess;
   const files = remoteFiles(run);
-  const ssh = machineSshArgs(config);
+  const ssh = machineSshArgs(config, options.connections);
   const machine: RemoteMachine = { verifier: "machine", name, id: `${name}/build`, size: "machine", image: "fixed SSH machine" };
   return async ({ repo, pool, gitDirectory, commitId, signal }) => {
     const scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-machine-build-"));
@@ -87,10 +106,10 @@ export function machineBuildLease(name: string, config: Pick<GateMachineConfig, 
 }
 
 /** A shared SSH machine. No provider lifecycle or VM-wide cleanup belongs here. */
-export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string; place?: number; check?: boolean } = {}): MachineVerification {
+export function machineVerification(name: string, config: GateMachineConfig, options: { run?: RemoteRun; scratch?: string; place?: number; check?: boolean; connections?: string } = {}): MachineVerification {
   const run = options.run ?? runBoundedProcess;
   const { local, bundleMissing } = remoteFiles(run);
-  const ssh = machineSshArgs(config);
+  const ssh = machineSshArgs(config, options.connections);
   // A machine with several places (SJ-200) keeps place 0 at its root, so its warm checkout survives, and place N in
   // `place-N` under it. The bounded filesystem, its quota-ready marker and the install cache stay machine-wide.
   const machineRoot = config.root.replace(/\/$/, "");

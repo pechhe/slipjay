@@ -43,7 +43,7 @@ import { retainCommandArtifact } from "./command-artifact.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import { machineBuildLease, machineVerification } from "./machine-verifier.ts";
+import { machineBuildLease, machineConnections, machineVerification } from "./machine-verifier.ts";
 import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
@@ -306,7 +306,7 @@ export function createRunnerQueue(input: {
   const machinePlaces: Record<string, readonly MachineVerification[]> = input.machineVerifications
     ? Object.fromEntries(Object.entries(input.machineVerifications).map(([name, places]) => [name, Array.isArray(places) ? places : [places]]))
     : Object.fromEntries(Object.entries(config.machines ?? {}).map(([name, entry]) =>
-      [name, Array.from({ length: entry.places ?? 1 }, (_, place) => machineVerification(name, entry, { scratch: join(home, "scratch"), place }))]));
+      [name, Array.from({ length: entry.places ?? 1 }, (_, place) => machineVerification(name, entry, { scratch: join(home, "scratch"), connections: machineConnections(home, name, place), place }))]));
   const machineGates = machinePlaceHolds();
   /**
    * The release-check places (SJ-202), by the boat pool each serves, with the machine it is on: gates never use one, and
@@ -315,11 +315,11 @@ export function createRunnerQueue(input: {
   const machineChecks: Record<string, { machine: string; place: MachineVerification }> = input.machineCheckVerifications
     ? Object.fromEntries(Object.entries(input.machineCheckVerifications).map(([pool, place]) => [pool, { machine: pool, place }]))
     : Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.checkPlace
-      ? [[entry.checkPlace, { machine: name, place: machineVerification(name, entry, { scratch: join(home, "scratch"), check: true }) }]] : []));
+      ? [[entry.checkPlace, { machine: name, place: machineVerification(name, entry, { scratch: join(home, "scratch"), connections: machineConnections(home, name, "check"), check: true }) }]] : []));
   const machineCheckHolds = machinePlaceHolds();
   /** The fixed machines that build for a pool, tried before boat (`buildPool`). */
   const machineBuilds = input.machineBuilds ?? Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.buildPool
-    ? [[entry.buildPool, { machine: name, lease: machineBuildLease(name, entry, { scratch: join(home, "scratch") }) }]] : []));
+    ? [[entry.buildPool, { machine: name, lease: machineBuildLease(name, entry, { scratch: join(home, "scratch"), connections: machineConnections(home, name, "build") }) }]] : []));
   /**
    * Builds started ahead of a release, by repository and commit: beside its check, or ahead of its scheduled promotion. They outlive
    * what started them, and a runner shutting down stops them.

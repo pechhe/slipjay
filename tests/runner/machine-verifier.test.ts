@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
-import { machineVerification } from "../../src/lib/runner/machine-verifier.ts";
+import { machineConnections, machineSshArgs, machineVerification } from "../../src/lib/runner/machine-verifier.ts";
 import { shellWord } from "../../src/lib/runner/remote-attempt.ts";
 
 const tree = "e".repeat(40);
@@ -337,4 +340,25 @@ test("the place keeps only the untracked paths the base's policy declares, and r
   const latest = s.scripts.findLast((script) => script.includes("jj edit"))!;
   assert.doesNotMatch(latest, /svelte-kit/, "no policy at the base keeps nothing extra");
   await b.close();
+});
+
+test("the runner shares one SSH connection per machine and account; without its directory each command connects alone (SJ-200)", () => {
+  const home = mkdtempSync(join(tmpdir(), "machine-ssh-"));
+  try {
+    const connections = join(home, "ssh");
+    const shared = machineSshArgs({ account: "ubuntu", ssh: "peach-box" }, connections);
+    assert.ok(shared.includes("ControlMaster=auto") && shared.includes("ControlPersist=600"));
+    assert.ok(shared.includes("ControlPath=" + join(connections, "master")));
+    assert.equal(statSync(connections).mode & 0o777, 0o700);
+    assert.deepEqual(shared.slice(-3), ["-l", "ubuntu", "peach-box"]);
+    assert.ok(!machineSshArgs({ account: "ubuntu", ssh: "peach-box" }).some((argument) => argument.startsWith("Control")));
+    // Each place, the check place, the build lease and the host reader get their own connection, so a gate's parallel
+    // commands stay within sshd's MaxSessions; the socket path stays inside the 108-byte limit with ssh's suffix.
+    const users = [0, 1, 2, "check", "build", "host"] as const;
+    const directories = users.map((user) => machineConnections("/home/ubuntu/.slipjay/runner", "peach-box", user));
+    assert.equal(new Set(directories).size, users.length);
+    for (const directory of directories) assert.ok(Buffer.byteLength(join(directory, "master")) + ".XXXXXXXXXXXXXXXX".length < 108);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

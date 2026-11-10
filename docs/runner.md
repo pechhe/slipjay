@@ -563,6 +563,11 @@ every place held it queues for the next one freed. A landing slot of a machine-p
 every file first, and the next plain landing narrows it again. Each `stage_detail` records how many jj, git and gh
 commands the stage ran, their total time and the slowest five. Its commands see `SLIPJAY_GATE_PLACE` (0-based) and
 `SLIPJAY_GATE_PLACES`, so a repository that pins its own CPUs can give each place a different share of the machine.
+The runner keeps one SSH connection open to each place, check place, build lease and host-load reader of a machine
+(`<runner home>/ssh/<machine>-<place>/master`, ten minutes after its last command), so a command costs about 0.04 s
+rather than a new connection's 0.45 s. A gate's parallel commands share its place's connection, so the machine's
+sshd allows more than its default ten sessions per connection: peach-box sets `MaxSessions 64` in
+`/etc/ssh/sshd_config.d/slipjay.conf`.
 A machine's `buildPool` names the build machine pool it builds for, before boat
 (see [Build machine](deployments.md)). It uses none of the machine's places or `root`.
 Unknown machine names, a machine place without `verifier`, and a machine place combined
