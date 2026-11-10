@@ -39,7 +39,8 @@ test("disk --plan lists the managed directories and changes nothing; disk applie
     assert.equal(planned.level, "shed");
     // Open files are read from /proc, so only Linux can judge scratch; elsewhere it is kept, never guessed at.
     const linux = platform() === "linux";
-    assert.deepEqual(planned.rows.map((row) => `${row.class}:${row.action}`).sort(), ["regenerable:remove", linux ? "scratch:remove" : "scratch:keep"]);
+    // The real disk's unexplained-space row is report-only and its size is the host's, so it is left out here.
+    assert.deepEqual(planned.rows.filter((row) => row.class !== "unexplained" && !row.class.endsWith("-volume") && row.class !== "loop-image").map((row) => `${row.class}:${row.action}`).sort(), ["regenerable:remove", linux ? "scratch:remove" : "scratch:keep"]);
     const text = cliRun(home, ["disk", "--plan"]);
     assert.match(text.stdout, linux ? /^remove\tscratch\t.*old-scratch\t/m : /^keep\tscratch\t.*old-scratch\t/m);
     assert.equal(existsSync(join(home, "tmp", "cache")) && existsSync(join(home, "tmp", "old-scratch")), true, "--plan changed nothing");

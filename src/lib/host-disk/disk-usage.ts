@@ -13,5 +13,5 @@ export const readRootUsage: DiskUsageReader = async () => {
   const available = Number(columns?.[3]);
   if (!Number.isFinite(used) || !Number.isFinite(available) || used + available <= 0) return null;
   const totalBytes = (used + available) * 1024;
-  return { percent: Math.ceil((used / (used + available)) * 100), totalBytes, freeBytes: available * 1024 };
+  return { percent: Math.ceil((used / (used + available)) * 100), totalBytes, freeBytes: available * 1024, usedBytes: used * 1024 };
 };

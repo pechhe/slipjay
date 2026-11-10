@@ -36,7 +36,8 @@ const usage = (percent: number) => async () => ({ percent, totalBytes: 1000 * 10
 const age = (path: string, hours: number) => utimes(path, new Date(NOW - hours * HOUR), new Date(NOW - hours * HOUR));
 const pass = (percent: number, options: HostDiskOptions = {}) => hostDisk({
   config, now: NOW, readUsage: usage(percent), integrationRoots: async () => [], ...options,
-  host: { holders: async () => [], recentlyModified: async () => false, issueClosed: async () => true, ...options.host },
+  // No Docker or loop devices: the report-only readers would otherwise list this machine's own.
+  host: { holders: async () => [], recentlyModified: async () => false, issueClosed: async () => true, dockerVolumes: async () => [], loopImages: async () => [], ...options.host },
   ops: { held: async () => false, ...options.ops },
 });
 const rowFor = (outcome: Awaited<ReturnType<typeof hostDisk>>, path: string) => {

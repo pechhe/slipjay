@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The host disk policy gives workspaces and run evidence a size budget, and accounts for the whole disk (SJ-235):** the
+  `disk.budgets` key (`workspacesBytes`, `evidenceBytes`; absent means no budget) makes an over-budget workspace class evict
+  idle checkouts even below shed, and an over-budget evidence class archive and prune closed, unpinned, unheld directories
+  before their expiry, oldest first, until under budget (nothing else about the evidence rules changes). `slipjay disk`
+  and `maintain` print one `over budget` line per class still over, and `--json` carries `budgets`. The plan also lists, report-only,
+  each Docker volume with its container, each loop-mounted image's host bytes against its filesystem's, and the used space no row explains.
 - **A background check on a release-check place starts at once.** It waited for its machine's load to fall to three
   quarters of its CPUs, which agent work on peach-box never let happen, so every background check sat out its whole
   30-minute limit and then ran anyway. The place's slice now outranks agent work for CPU (`docs/runner.md`), so the

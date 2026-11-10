@@ -7,7 +7,7 @@ import { mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { archiveEvidence } from "./disk-archive.ts";
 import type { ArchiveSummary } from "./disk-archive.ts";
-import type { BallastPlan, DiskHost, DiskRow, HostDiskPlan } from "./disk-plan.ts";
+import type { BallastPlan, ClassBudgets, DiskHost, DiskRow, HostDiskPlan } from "./disk-plan.ts";
 
 export type RowOutcome = "removed" | "archived" | "kept" | "failed";
 
@@ -25,7 +25,7 @@ export type DiskOps = {
   allocate(path: string, bytes: number): Promise<void>;
   archive(directory: string, manifest: { issue: string; owner: string }, now: number): Promise<ArchiveSummary>;
   /** Runs the existing idle-workspace eviction and answers which checkouts it evicted (by root). */
-  evictWorkspaces(idleMs: number): Promise<{ evicted: Set<string>; failed: Array<{ root: string; reason: string }> }>;
+  evictWorkspaces(idleMs: number): Promise<{ evicted: Set<string>; failed: Array<{ root: string; reason: string }>; freedBytes?: number }>;
   /** Whether a process holds the path right now (a fresh look, not the plan's): true also when that cannot be read. */
   held?(path: string): Promise<boolean>;
   readManifest: DiskHost["readManifest"];
@@ -76,7 +76,22 @@ export const realOps = (host: Pick<DiskHost, "readManifest">, evictWorkspaces: D
 
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-export type ApplyResult = { rows: RowResult[]; ballast: BallastResult | null; failures: number };
+/** Each budgeted class after the pass: what the rows removed or evicted leaves, and whether it is still over. */
+function budgetsAfter(plan: HostDiskPlan, rows: RowResult[], freedWorkspaceBytes: number): ClassBudgets {
+  const after: ClassBudgets = {};
+  const { workspaces, evidence } = plan.budgets;
+  if (workspaces) {
+    const usedBytes = Math.max(0, workspaces.usedBytes - freedWorkspaceBytes);
+    after.workspaces = { ...workspaces, usedBytes, over: usedBytes > workspaces.budgetBytes };
+  }
+  if (evidence) {
+    const usedBytes = evidence.usedBytes - rows.filter((row) => row.class === "evidence" && row.outcome === "archived").reduce((sum, row) => sum + row.sizeBytes, 0);
+    after.evidence = { ...evidence, usedBytes, over: usedBytes > evidence.budgetBytes };
+  }
+  return after;
+}
+
+export type ApplyResult = { rows: RowResult[]; ballast: BallastResult | null; failures: number; budgets: ClassBudgets };
 
 /** Execute the plan. Failures never stop the rest; each is a `failed` outcome and counted. */
 export async function applyHostDisk(plan: HostDiskPlan, ops: DiskOps, now: number): Promise<ApplyResult> {
@@ -93,7 +108,9 @@ export async function applyHostDisk(plan: HostDiskPlan, ops: DiskOps, now: numbe
   const workspaceRows = plan.rows.filter((row) => row.class === "workspace");
   // On a healthy disk the plan still shows eviction's verdict, but `maintain`'s hourly pass does the evicting: this pass
   // runs every few minutes and must stay cheap.
-  const deferWorkspaces = plan.level === "ok" || plan.level === "warn";
+  // A workspace class over its budget is evicted whatever the level, but only when a row is evictable (SJ-235).
+  const evictable = workspaceRows.some((row) => row.action === "remove");
+  const deferWorkspaces = (plan.level === "ok" || plan.level === "warn") && !(plan.budgets.workspaces?.over && evictable);
   if (workspaceRows.length && !deferWorkspaces) {
     workspaces = await ops.evictWorkspaces(plan.workspaceIdleMs).catch((error: unknown) => ({ evicted: new Set<string>(), failed: [{ root: "", reason: message(error) }] }));
   }
@@ -129,7 +146,12 @@ export async function applyHostDisk(plan: HostDiskPlan, ops: DiskOps, now: numbe
     );
   } else if (plan.ballast && !ballast) ballast = { ...plan.ballast, outcome: "kept", detail: plan.ballast.reason };
   const failures = rows.filter((row) => row.outcome === "failed").length + (ballast?.outcome === "failed" ? 1 : 0);
-  return { rows, ballast, failures };
+  const budgets = budgetsAfter(plan, rows, workspaces?.freedBytes ?? 0);
+  // A row planned for a budget prune that apply kept still holds the class over budget.
+  if (budgets.evidence?.over) {
+    for (const [index, row] of rows.entries()) if (row.class === "evidence" && row.budgetPrune && row.outcome !== "archived") rows[index] = { ...row, keepsOverBudget: true };
+  }
+  return { rows, ballast, failures, budgets };
 }
 
 async function archiveAndPrune(row: DiskRow, ops: DiskOps, now: number): Promise<RowResult> {
@@ -139,8 +161,9 @@ async function archiveAndPrune(row: DiskRow, ops: DiskOps, now: number): Promise
   // Judged again at the moment of removal: a pin added since the plan keeps it.
   if (read.manifest.pin === true) return { ...row, action: "report", outcome: "kept", detail: "kept: pinned since it was planned" };
   // The expiry and the manifest's own issue are judged again too: an extension or a rename since the plan keeps it.
+  // A budget-pruned row was never expired, so only it skips this check.
   const expires = read.manifest.expires === undefined ? NaN : Date.parse(read.manifest.expires);
-  if (!Number.isFinite(expires) || expires > now) return { ...row, action: "report", outcome: "kept", detail: "kept: no longer expired since it was planned" };
+  if (!row.budgetPrune && (!Number.isFinite(expires) || expires > now)) return { ...row, action: "report", outcome: "kept", detail: "kept: no longer expired since it was planned" };
   if (read.manifest.issue !== basename(row.path)) return { ...row, action: "report", outcome: "kept", detail: "kept: the manifest's issue no longer matches the directory" };
   let archive: ArchiveSummary;
   try { archive = await ops.archive(row.path, read.manifest, now); }

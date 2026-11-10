@@ -34,6 +34,8 @@ export type DiskConfig = {
   scratchRoots: ScratchRoot[];
   regenerable: string[];
   issueCapBytes: number;
+  /** SJ-235: an optional size budget per class; absent means no budget and today's behaviour. */
+  budgets: { workspacesBytes?: number; evidenceBytes?: number };
 };
 
 export const DEFAULT_THRESHOLDS: Readonly<DiskThresholds> = {
@@ -57,6 +59,7 @@ export function defaultDiskConfig(): DiskConfig {
     scratchRoots: [{ path: "/tmp", match: ["*-scratch", "ys-attack-build-*"], ttlHours: 72 }],
     regenerable: ["/tmp/node-compile-cache"],
     issueCapBytes: 20 * GIB,
+    budgets: {},
   };
 }
 
@@ -95,7 +98,7 @@ export function readDiskConfig(config: Record<string, unknown> = readMachineConf
   const raw = config.disk;
   if (raw === undefined) return defaults;
   const disk = object(raw, "disk");
-  known(disk, ["thresholds", "ballast", "runRoot", "scratchRoots", "regenerable", "issueCapBytes"], "disk");
+  known(disk, ["thresholds", "ballast", "runRoot", "scratchRoots", "regenerable", "issueCapBytes", "budgets"], "disk");
   const result: DiskConfig = { ...defaults };
   if (disk.thresholds !== undefined) {
     const given = object(disk.thresholds, "thresholds");
@@ -136,7 +139,16 @@ export function readDiskConfig(config: Record<string, unknown> = readMachineConf
     result.regenerable = disk.regenerable.map((path, index) => absolutePath(path, `regenerable[${index}]`));
   }
   if (disk.issueCapBytes !== undefined) result.issueCapBytes = number(disk.issueCapBytes, "issueCapBytes", { min: 1, max: 2 ** 50, integer: true });
-  // Evidence is never removed by age or pressure, so nothing else may be allowed to remove it: no scratch root,
+  if (disk.budgets !== undefined) {
+    const given = object(disk.budgets, "budgets");
+    known(given, ["workspacesBytes", "evidenceBytes"], "budgets");
+    result.budgets = {};
+    for (const key of ["workspacesBytes", "evidenceBytes"] as const) {
+      if (given[key] !== undefined) result.budgets[key] = number(given[key], `budgets.${key}`, { min: 1, max: 2 ** 50, integer: true });
+    }
+  }
+  // Evidence is never removed by age or pressure, except over an evidence budget (SJ-235: then a closed, unpinned,
+  // unheld directory is archived and pruned before its expiry, oldest first, until the class is under budget). So nothing else may be allowed to remove it: no scratch root,
   // regenerable path or ballast may equal, contain or sit inside the run root.
   const nested = (a: string, b: string): boolean => a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
   for (const [name, path] of [

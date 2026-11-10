@@ -5,7 +5,7 @@
  */
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 import { trackerIsBuild, trackerOf, workItemClosed } from "../build/tracker.ts";
@@ -18,6 +18,7 @@ import type { ProcessWorkingDirectory } from "../workspace/workspace-holders.ts"
 import { machineConfigPath, metadataHome, stateHome } from "../workspace/workspace-paths.ts";
 import { applyHostDisk, realOps } from "./disk-apply.ts";
 import type { ApplyResult, DiskOps } from "./disk-apply.ts";
+import { readDockerVolumes, readLoopImages } from "./disk-readers.ts";
 import { readDiskConfig } from "./disk-config.ts";
 import type { DiskConfig } from "./disk-config.ts";
 import { HOUR_MS, planHostDisk } from "./disk-plan.ts";
@@ -134,6 +135,7 @@ function realHost(options: HostDiskOptions, config: DiskConfig): DiskHost {
             rows.push({
               path: plan.root, class: "workspace", sizeBytes: plan.sizeBytes ?? 0, owner: plan.name,
               action: plan.action === "evict" ? "remove" : "keep", reason: plan.reason,
+              ...resolve(plan.root) === resolve(root) ? { integration: true as const } : {},
             });
           }
         } catch (error) {
@@ -142,6 +144,8 @@ function realHost(options: HostDiskOptions, config: DiskConfig): DiskHost {
       }
       return rows;
     },
+    dockerVolumes: readDockerVolumes,
+    loopImages: readLoopImages,
     ...options.host,
   } satisfies DiskHost;
 }
@@ -151,18 +155,20 @@ function evictAllRoots(roots: () => Promise<string[]>): DiskOps["evictWorkspaces
   return async (idleMs) => {
     const evicted = new Set<string>();
     const failed: Array<{ root: string; reason: string }> = [];
+    let freedBytes = 0;
     for (const root of await roots()) {
       try {
         const { outcome } = await evictIdleWorkspaces(root, { idleMs });
         for (const result of outcome.results) {
           if (result.evicted) evicted.add(result.root);
+          freedBytes += result.freedBytes ?? 0;
           if (result.failedPaths.length) failed.push({ root: result.root, reason: `could not remove ${result.failedPaths.join(", ")}` });
         }
       } catch (error) {
         failed.push({ root, reason: `eviction failed: ${error instanceof Error ? error.message : String(error)}` });
       }
     }
-    return { evicted, failed };
+    return { evicted, failed, freedBytes };
   };
 }
 
@@ -207,13 +213,13 @@ export async function hostDisk(options: HostDiskOptions = {}): Promise<HostDiskO
   const pass = async (): Promise<HostDiskOutcome> => {
     const usage = await (options.readUsage ?? readRootUsage)();
     if (!usage) throw new Error("cannot read the root filesystem's usage");
-    const plan = await planHostDisk({ config, usage, now, host });
+    const plan = await planHostDisk({ config, usage, now, host, plan: options.plan });
     if (options.plan) return { state: "planned", applied: false, ...plan, results: plan.rows.map((row) => ({ ...row, outcome: "kept" as const, detail: row.reason })), ballastResult: null, failures: 0 };
     const ops: DiskOps = { ...realOps(host, evictAllRoots(options.integrationRoots ?? registeredIntegrationRoots)), held: freshlyHeld, ...options.ops };
     const applied = await applyHostDisk(plan, ops, now);
     // A rescue env that could not be written leaves the rescue on stale values: say so, and count it as a failure.
     const rescueEnvError = await writeRescueEnv(config).then(() => undefined, (error: unknown) => message(error));
-    return { state: "applied", applied: true, ...plan, results: applied.rows, ballastResult: applied.ballast, failures: applied.failures + (rescueEnvError === undefined ? 0 : 1), ...rescueEnvError === undefined ? {} : { rescueEnvError } };
+    return { state: "applied", applied: true, ...plan, budgets: applied.budgets, results: applied.rows, ballastResult: applied.ballast, failures: applied.failures + (rescueEnvError === undefined ? 0 : 1), ...rescueEnvError === undefined ? {} : { rescueEnvError } };
   };
   if (options.plan) return pass();
   try {
