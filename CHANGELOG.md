@@ -16,7 +16,8 @@
   (`disk` / `diskError` in `--json`; a failure exits 1 without stopping the other steps), and a pool refill stops at 93%. A full disk no longer
   leaves the runner down: its unit sets no start limit and runs `scripts/disk-rescue.sh` (plain shell; frees the regenerable
   paths, then the ballast) before each start, and `scripts/install-disk-guard.sh` installs the rescue and a five-minute
-  `slipjay disk` timer.
+  `slipjay disk` timer. Directory sizes are cached for 30 minutes in `~/.slipjay/state/disk-sizes.json`, so a timer pass
+  no longer re-runs `du` over every run directory.
 - **`batchVerification.promoteFlaky`: a flaky check whose rerun passed can promote.** Opt-in. A check that failed some
   tests once and passed every one of them on its rerun at the same head shows no regression, so it verifies the head
   (when its images built) instead of waiting for a complete green check. On 10 Nov a loaded peach-box gave 1 green

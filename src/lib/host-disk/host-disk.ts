@@ -15,13 +15,14 @@ import { processWorkingDirectories, workspaceHolders } from "../workspace/worksp
 import { holdersOfOpenFiles, openPathsByProcess } from "./disk-holders.ts";
 import type { OpenPaths } from "./disk-holders.ts";
 import type { ProcessWorkingDirectory } from "../workspace/workspace-holders.ts";
-import { machineConfigPath, metadataHome } from "../workspace/workspace-paths.ts";
+import { machineConfigPath, metadataHome, stateHome } from "../workspace/workspace-paths.ts";
 import { applyHostDisk, realOps } from "./disk-apply.ts";
 import type { ApplyResult, DiskOps } from "./disk-apply.ts";
 import { readDiskConfig } from "./disk-config.ts";
 import type { DiskConfig } from "./disk-config.ts";
 import { HOUR_MS, planHostDisk } from "./disk-plan.ts";
 import type { DiskHost, DiskRow, HostDiskPlan, ManifestRead } from "./disk-plan.ts";
+import { cachedSizeOf } from "./size-cache.ts";
 import { readRootUsage } from "./disk-usage.ts";
 import type { DiskUsageReader } from "./disk-usage.ts";
 
@@ -83,6 +84,7 @@ function realHost(options: HostDiskOptions, config: DiskConfig): DiskHost {
   let processes: Promise<ProcessWorkingDirectory[] | null> | undefined;
   let openFiles: Promise<OpenPaths | null> | undefined;
   const roots = options.integrationRoots ?? registeredIntegrationRoots;
+  const sizes = cachedSizeOf(directorySize, join(stateHome(), "disk-sizes.json"));
   return {
     readDir: async (path) => readdir(path).then((names) => names, (error: NodeJS.ErrnoException) => error.code === "ENOENT" ? [] : null),
     stat: async (path) => {
@@ -90,7 +92,7 @@ function realHost(options: HostDiskOptions, config: DiskConfig): DiskHost {
       if (!info) return null;
       return { mtimeMs: info.mtimeMs, uid: info.uid, isDirectory: info.isDirectory(), isSymlink: info.isSymbolicLink(), realPath: await realpath(path).catch(() => path) };
     },
-    sizeOf: directorySize,
+    sizeOf: sizes,
     // Working directories and open or mapped files both count; either unreadable keeps the path.
     holders: async (path) => {
       const working = await workspaceHolders(path, { processes: await (processes ??= processWorkingDirectories()) }).catch(() => null);
