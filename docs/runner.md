@@ -600,8 +600,12 @@ place until its commands and cleanup finish, because its gate uses the remote ma
 place, `check` under the root, that gates never use, serving the boat pool it names. A repository whose release policy
 names that pool as `batchVerification.machine` runs its batch checks (scheduled, background and confirmed) and its
 nightly audit there, one at a time, instead of on the pool's boat VMs or the runner host. One machine serves a pool. Its attempts run in `release-check-<id>.slice` beside the
-gate slices, and see `SLIPJAY_RELEASE_CHECK=1` instead of a gate place; the installer gives `release-check.slice`
-`CPUWeight=idle` and a `MemoryMax`, so gates and anything else on the machine win every contended core. Database
+gate slices, and see `SLIPJAY_RELEASE_CHECK=1` instead of a gate place; the installer bounds `release-check.slice`
+with a `MemoryMax` and gives `release.slice`, which holds it, a `CPUWeight` above the slices agents run in (peach-box
+gives it 1000, the weight its installer gives `slipjay.slice`, which holds `slipjay-attempt.slice`, against 100
+for `app.slice`), so agent work yields to a check. Never
+give `release-check.slice` `CPUWeight=idle`: that makes every check process `SCHED_IDLE`, pre-empted by any task that wakes on its core, and a
+loaded machine then fails a different timing test in every check. Database
 containers a check starts belong to Docker's own slice and run outside that bound. With the place down, the check
 says so (`warning: … release-check place is down`), records the machine as down, and runs on a VM of the pool it
 serves (the audit, and any check without a remote verifier, on the runner host); it never falls back quietly. The place

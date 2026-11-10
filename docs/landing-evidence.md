@@ -591,7 +591,7 @@ matches decides, and the evidence is the line that matched; anything the evidenc
 
 | `kind` | When |
 | --- | --- |
-| `flake` | The failed event says a batch check was flaky (it failed and passed on its rerun). |
+| `flake` | The failed event says a batch check was flaky (it failed, and its rerun passed or failed only other tests). |
 | `moved_base` | A rebase conflict; a predecessor or prefix invalidated; a refused move of the integration bookmark; or a gate failure of a commit that passed earlier at another base (`interaction`). |
 | `infrastructure` | The event names a runner, remote or credential breakage (a restart, a fetch or push failure, an unavailable executor, a missing toolchain, a full disk, a deploy timeout); or a gate failure whose tests timed out while the host's load average was at least twice its CPU count when the check began. |
 | `regression` | A gate check failed and names an error, a `Failure cause:` or a diagnostic of its own. A failing test alone, with no error attributable to it, is `unresolved`. |

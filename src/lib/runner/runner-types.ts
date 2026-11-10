@@ -264,7 +264,7 @@ export type OperationEvent =
   | { type: "batch_run"; phase: "complete" | "rerun" | "diagnosis"; commit: string; status: "passed" | "failed" | "infrastructure";
       keys?: string[]; failingTests?: string[]; reason?: string; setupMs?: number; durationMs: number }
   /**
-   * How the batch check ended. `green` promotes as before; `flaky` failed once and passed its rerun, so it routes
+   * How the batch check ended. `green` promotes as before; `flaky` failed once and its rerun passed or failed only other tests, so it routes
    * nothing and the head needs another complete check; `infrastructure` is a machine, setup or tooling failure, never
    * routed; `red` names each culprit landing and the suites that started failing there, and may offer
    * `shorterCandidate`, which still needs its own complete check; `stopped` was stopped for a release the owner pushed
@@ -728,8 +728,8 @@ export type GateMachineConfig = { ssh: string; root: string; account: string;
   /**
    * One further place, `check` under the root, that gates never use (SJ-202), serving the boat pool this names: the
    * release checks (background, scheduled or for a confirm) and the nightly audit of a repository whose
-   * `batchVerification.machine` is that pool run there, in `release-check` slices the machine's installer gives idle CPU
-   * priority, and on the pool's boat VMs only while the place is down.
+   * `batchVerification.machine` is that pool run there, in `release-check` slices the machine's installer bounds and
+   * ranks with the gates, and on the pool's boat VMs only while the place is down.
    */
   checkPlace?: string;
   /** The build machine pool (a deployment's `machine`) this machine builds for, before boat. See `machineBuildLease`. */

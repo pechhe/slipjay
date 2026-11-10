@@ -114,7 +114,7 @@ export function machineVerification(name: string, config: GateMachineConfig, opt
   // `place-N` under it. The bounded filesystem, its quota-ready marker and the install cache stay machine-wide.
   const machineRoot = config.root.replace(/\/$/, "");
   // The release-check place (SJ-202) lives in `check`, apart from the gate places, and its slices are `release-check-*`,
-  // which the machine gives idle CPU priority, rather than the gates' `slipjay-attempt-*`.
+  // which the machine ranks above agent work for CPU, rather than the gates' `slipjay-attempt-*`.
   const check = options.check === true;
   const place = options.place ?? 0;
   const root = check ? `${machineRoot}/check` : place ? `${machineRoot}/place-${place}` : machineRoot;

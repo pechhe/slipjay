@@ -2574,7 +2574,7 @@ export function createRunnerQueue(input: {
         }
         if (outcome.outcome === "flaky") {
           append(operation.id, { type: "batch_outcome", outcome: "flaky", ...recorded, keys: boundedKeys(outcome.keys) });
-          return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed and passed on its rerun; nothing is routed, and the head needs a complete green check before it deploys` };
+          return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed, and its rerun passed or failed only other tests; nothing is routed, and the head needs a complete green check before it deploys` };
         }
         const culprits = outcome.culprits.map((culprit) => ({ ...culprit, keys: boundedKeys(culprit.keys), workspace: log.operation(culprit.operationId)?.submittedBy ?? null }));
         append(operation.id, { type: "batch_outcome", outcome: "red", ...recorded, keys: boundedKeys(outcome.keys), diagnosis: outcome.diagnosis,

@@ -182,7 +182,7 @@ never a failure, never infrastructure, never routed) and its head is checked aga
 considers only the landings after the newest one whose complete check passed (`after` on `batch_started`), and a
 culprit an earlier check already routed for the same suites is recorded `batch_unrouted` (`already routed by batch
 check …`) instead of being sent to Forge again. When a runner machine's release-check place serves the pool `machine` names
-([runner](runner.md#named-ssh-gate-places)), checks and the nightly audit run there at idle CPU priority, and on the
+([runner](runner.md#named-ssh-gate-places)), checks and the nightly audit run there, ranked above agent work for CPU, and on the
 pool's boat VMs only while it is down (the audit, which never used boat, runs on the runner host then, and says so);
 otherwise the audit runs on the runner host as before. A flaky or infrastructure background check is checked again on
 the interval, at most three complete checks of one head.
@@ -201,8 +201,11 @@ A failed batch is handled in this order:
 - **Infrastructure** (the VM never became ready, setup or install failed, a command could not be spawned, or a
   capability was missing) is never a regression: the batch ends `infrastructure`, routes nothing, and the same head is
   checked again, at most three complete checks in all.
-- **Flaky:** what failed is rerun once on the same head; if it passes, the batch ends `flaky`, routes nothing, and the
-  head needs another complete green check before it deploys.
+- **Flaky:** what failed is rerun once on the same head; if it passes, or fails only tests the first run passed, the
+  batch ends `flaky`, routes nothing, and the head needs another complete green check before it deploys. A regression
+  is the same failure twice; a loaded machine fails a different timing test each time. When either run names no failing
+  test, or either run's list reached its 100-test bound, any suite failing twice counts. A build failing twice is
+  never flaky.
 - **Red: diagnosis.** Only what failed is rerun at each landing's commit, in landing order, from the same base. Every
   landing at which a failing suite goes from passing to failing is a **culprit** (a suite missing at a revision keeps
   its last state), so a batch with several independent regressions names each. A diagnosis step lost to

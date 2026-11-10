@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.61.2
+
+- **A regression is the same failure twice:** a release check whose rerun failed any suite the first run failed ended
+  `red`, even when the rerun failed different tests, so a loaded machine failing a different timing test each time
+  blamed random landings and held Production (no check passed on peach-box for five hours on 10 Nov). A rerun that
+  fails only tests the first run passed now ends `flaky`. When either run names no failing test, or either run's
+  list reached its 100-test bound, a suite failing twice still counts, and a build failing twice is never flaky.
+- **The release-check place is no longer idle-priority:** `docs/runner.md` now tells installers to rank
+  `release-check.slice` with the gates; `CPUWeight=idle` made every check process `SCHED_IDLE`, pre-empted by any task
+  waking on its core.
+
 ## v3.61.1
 
 - **A background check builds only once the host admits it:** its head's image build used to start with the check, before

@@ -1,7 +1,9 @@
 /**
  * The batch check of a promotion (SJ-192), apart from where its commands run. `runBatchCheck` runs the complete
  * release verification on the frozen head; a failure is rerun once on the same head, narrowed to what failed, to tell
- * a flaky test from a regression; a regression is then diagnosed by rerunning only what failed at each landing's commit,
+ * a flaky test from a regression. A regression is the same failure twice: a rerun that fails only tests the first run
+ * passed shows the suites unstable, not broken (a loaded machine fails a different timing test each time), so it is
+ * flaky too, when both runs name their failing tests and neither list is at its bound. A regression is then diagnosed by rerunning only what failed at each landing's commit,
  * in landing order. Every landing at which a failing suite goes from passing to failing is a culprit, so a batch with
  * two independent regressions names both, and a regression a later landing repaired is still named for the landing
  * that caused it. A suite missing at a revision says nothing about it: the suite keeps the state it last had.
@@ -98,7 +100,14 @@ export async function runBatchCheck(input: {
   const scope = scopeOf(complete, keys);
   const rerun = await timed("rerun", input.head, scope);
   if (rerun.status === "infrastructure") return { outcome: "infrastructure", reason: rerun.reason };
-  const still = keys.filter((key) => stateOf(rerun, key) === "failed");
+  // Whether a test failed in both runs; unknowable, so assumed, when either run names none or either list is at its bound.
+  // It is decided for the batch, not per suite: a run names its failing tests without their suites, so one repeated
+  // test keeps every suite that failed twice, as before.
+  const comparable = (tests: readonly string[]) => tests.length > 0 && tests.length < FAILING_TESTS_LIMIT;
+  const repeated = rerun.status !== "failed" || !comparable(complete.failingTests) || !comparable(rerun.failingTests)
+    || rerun.failingTests.some((test) => complete.failingTests.includes(test));
+  // A build is not a test: a build that fails twice is broken whatever the tests beside it did.
+  const still = keys.filter((key) => stateOf(rerun, key) === "failed" && (repeated || key === PREBUILD_KEY));
   // A rebuild that could not run says nothing, so a build that failed once and was not rebuilt is not known to be flaky.
   if (!still.length && keys.includes(PREBUILD_KEY) && stateOf(rerun, PREBUILD_KEY) === "missing")
     return { outcome: "infrastructure", reason: `${PREBUILD_KEY} failed at ${input.head.slice(0, 12)} and its rebuild could not run, so whether it is broken or flaky is unknown` };
@@ -162,5 +171,11 @@ export function boundedOutput(output: string): string {
   const bytes = Buffer.from(output, "utf8");
   return bytes.byteLength <= BATCH_OUTPUT_BYTES ? output : bytes.subarray(bytes.byteLength - BATCH_OUTPUT_BYTES).toString("utf8").replace(/^�+/, "");
 }
-export const boundedTests = (tests: readonly string[]) => bounded(tests, 100, 500);
+/**
+ * The most failing tests a `BatchRun` keeps: a list this long may leave tests out. Each run's list is already capped at
+ * `failure-classification.ts`'s `MAX_ITEMS` (100), so this must not exceed it, or a list the parser cut short would read
+ * as complete and a repeated failure it dropped would make a regression `flaky`.
+ */
+export const FAILING_TESTS_LIMIT = 100;
+export const boundedTests = (tests: readonly string[]) => bounded(tests, FAILING_TESTS_LIMIT, 500);
 export const boundedKeys = (keys: readonly string[]) => bounded(keys, 100, 200);
