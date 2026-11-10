@@ -17,6 +17,12 @@
   leaves the runner down: its unit sets no start limit and runs `scripts/disk-rescue.sh` (plain shell; frees the regenerable
   paths, then the ballast) before each start, and `scripts/install-disk-guard.sh` installs the rescue and a five-minute
   `slipjay disk` timer.
+- **`batchVerification.promoteFlaky`: a flaky check whose rerun passed can promote.** Opt-in. A check that failed some
+  tests once and passed every one of them on its rerun at the same head shows no regression, so it verifies the head
+  (when its images built) instead of waiting for a complete green check. On 10 Nov a loaded peach-box gave 1 green
+  complete check in 14, each failing a different few tests, and Production waited six hours. A rerun that failed other
+  tests or skipped a failed suite, a red check and an unproven build still promote nothing; the outcome is recorded
+  `flaky` with `verified: true`.
 
 ## v3.61.3
 

@@ -45,7 +45,9 @@ export type BatchCulprit = BatchLanding & {
 
 export type BatchOutcome =
   | { outcome: "green" }
-  | { outcome: "flaky"; keys: string[]; failingTests: string[] }
+  | { outcome: "flaky"; keys: string[]; failingTests: string[];
+      /** Whether the rerun passed and reported every key that failed as passed, rather than failing other tests or skipping one. */
+      rerunPassed: boolean }
   | { outcome: "infrastructure"; reason: string }
   | { outcome: "red"; culprits: BatchCulprit[]; shorterCandidate: string | null; keys: string[]; diagnosis: "complete" | "incomplete"; reason?: string;
       /** Failures first seen after a landing diagnosis could not run at: their culprit is one of the landings since `after`. */
@@ -111,7 +113,9 @@ export async function runBatchCheck(input: {
   // A rebuild that could not run says nothing, so a build that failed once and was not rebuilt is not known to be flaky.
   if (!still.length && keys.includes(PREBUILD_KEY) && stateOf(rerun, PREBUILD_KEY) === "missing")
     return { outcome: "infrastructure", reason: `${PREBUILD_KEY} failed at ${input.head.slice(0, 12)} and its rebuild could not run, so whether it is broken or flaky is unknown` };
-  if (!still.length) return { outcome: "flaky", keys, failingTests: complete.failingTests };
+  // A suite the rerun did not report (missing) was never run again, so it says nothing: only every failed key passing counts.
+  if (!still.length) return { outcome: "flaky", keys, failingTests: complete.failingTests,
+    rerunPassed: rerun.status === "passed" && keys.every((key) => stateOf(rerun, key) === "passed") };
   // Production's served commit passed its own batch check, so every key starts passing.
   const state = new Map<string, KeyState>(still.map((key) => [key, "passed"]));
   const culprits: BatchCulprit[] = [];
@@ -154,6 +158,15 @@ export async function runBatchCheck(input: {
   const earliest = Math.min(...[firstCulprit, unattributed.length ? firstUnknown ?? -1 : -1].filter((index) => index >= 0));
   return { outcome: "red", culprits, keys: still, diagnosis: incomplete ? "incomplete" : "complete", unattributed,
     shorterCandidate: Number.isFinite(earliest) && earliest > 0 ? input.landings[earliest - 1]!.commitId : null, ...incomplete ? { reason: incomplete } : {} };
+}
+
+/**
+ * Whether a flaky check verifies its head under `batchVerification.promoteFlaky`: its rerun passed every key that
+ * failed, and its images built (in the complete run, or on the rebuild a failed build is given), unless no build
+ * belongs to the check. An inconclusive build in the complete run (`complete` undefined) proves nothing, so it refuses.
+ */
+export function flakyVerifies(outcome: Extract<BatchOutcome, { outcome: "flaky" }>, build: { ran: boolean; complete: SuiteState | undefined }): boolean {
+  return outcome.rerunPassed && (!build.ran || build.complete === "passed" || outcome.keys.includes(PREBUILD_KEY));
 }
 
 /** Forge's `recordBatchCheck` input: one culprit of one batch, keyed by both, so a replay records nothing twice. */

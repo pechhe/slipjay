@@ -166,7 +166,8 @@ pre-verification that runs `requiredReleaseVerification` over the combined chang
 (its last healthy deploy, so a failed deploy or rollback is accounted for; the release branch while nothing is served)
 to that head. Landings after the freeze wait for the next batch. The check runs on the build machine of pool
 `machine`, a boat VM held for it alone (on the runner host when the runner has no remote verifier). A green check promotes and deploys as before; nothing deploys
-without a complete green batch check of the exact commit. `slipjay promote --confirm` of a candidate without one asks
+without a complete green batch check of the exact commit, or, with `promoteFlaky`, a flaky one whose rerun passed every
+suite that failed (below). `slipjay promote --confirm` of a candidate without one asks
 the runner for its batch check at once, whatever the schedule, follows it to its end and confirms only if it passed;
 an open or passed check of that commit is reused, and a red one refuses.
 
@@ -185,7 +186,7 @@ check …`) instead of being sent to Forge again. When a runner machine's releas
 ([runner](runner.md#named-ssh-gate-places)), checks and the nightly audit run there, ranked above agent work for CPU, and on the
 pool's boat VMs only while it is down (the audit, which never used boat, runs on the runner host then, and says so);
 otherwise the audit runs on the runner host as before. A flaky or infrastructure background check is checked again on
-the interval, at most three complete checks of one head.
+the interval, at most three complete checks of one head, unless `promoteFlaky` verified it.
 A check that changed the source it ran on (a boat VM's tree differs once the check ends, or the host checkout differs
 from the commit) is not evidence for it: the batch fails, routes nothing and is checked again like infrastructure.
 
@@ -206,6 +207,9 @@ A failed batch is handled in this order:
   is the same failure twice; a loaded machine fails a different timing test each time. When either run names no failing
   test, or either run's list reached its 100-test bound, any suite failing twice counts. A build failing twice is
   never flaky.
+  With `batchVerification.promoteFlaky: true`, a flaky check whose rerun passed everything it ran (every test that
+  failed once passed on the same head, and none failed twice) verifies its head instead, provided its images built,
+  and its `batch_outcome` says `verified: true`. A rerun that failed other tests still needs a complete green check.
 - **Red: diagnosis.** Only what failed is rerun at each landing's commit, in landing order, from the same base. Every
   landing at which a failing suite goes from passing to failing is a **culprit** (a suite missing at a revision keeps
   its last state), so a batch with several independent regressions names each. A diagnosis step lost to

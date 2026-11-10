@@ -147,6 +147,35 @@ test("a flaky batch routes nothing and its head deploys only after a complete gr
   } finally { await f.dispose(); }
 }, 300_000);
 
+test("with promoteFlaky, a flaky batch whose rerun passed verifies its head and deploys it, routing nothing", async () => {
+  let clock = Date.now();
+  let routed = 0;
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
+    { process: "development", promotionSchedule: schedule(1), now: () => clock, batchVerification: { machine: "batch", promoteFlaky: true }, releaseGates: (root) => [batchCheck(root)],
+      batchRemote: localRemote(), recordBatchCheck: async () => { routed++; return { kind: "accepted", value: {} }; } });
+  try {
+    await f.land(f.submit(await f.candidate("zero.txt")));
+    await settle(f);
+    const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
+
+    clock = promotedAt + 30_000;
+    await writeFile(join(f.root, "flaky-once"), "");
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    const head = f.main();
+
+    clock = promotedAt + 61_000;
+    await f.queue.recover();
+    await settle(f);
+    const checks = f.log.verifications(REPO).filter((entry) => entry.commitId === head);
+    // One check: it failed once, passed its rerun, and that verified the head without a second complete check.
+    assert.deepEqual(checks.map((entry) => entry.status), ["verified"]);
+    assert.deepEqual(batchEvents(f, checks[0]!.id, "batch_outcome").map((event) => [event.outcome, event.keys, event.verified]), [["flaky", ["workbench"], true]]);
+    assert.equal(routed, 0);
+    assert.equal(f.log.releases(REPO)[0]!.commitId, head);
+  } finally { await f.dispose(); }
+}, 300_000);
+
 test("a batch machine that never becomes ready is infrastructure: checked again a bounded number of times, never routed or promoted", async () => {
   let routed = 0;
   const unavailable: RemoteVerification = { async open() { throw Object.assign(new Error("Remote executor unavailable (boat): slipjay-fixture-repo-batch not reachable"), { machineUnavailable: true }); } };

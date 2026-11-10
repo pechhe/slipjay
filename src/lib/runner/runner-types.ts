@@ -265,7 +265,8 @@ export type OperationEvent =
       keys?: string[]; failingTests?: string[]; reason?: string; setupMs?: number; durationMs: number }
   /**
    * How the batch check ended. `green` promotes as before; `flaky` failed once and its rerun passed or failed only other tests, so it routes
-   * nothing and the head needs another complete check; `infrastructure` is a machine, setup or tooling failure, never
+   * nothing and the head needs another complete check, unless `batchVerification.promoteFlaky` let a rerun that passed
+   * every failed suite verify it (`verified`); `infrastructure` is a machine, setup or tooling failure, never
    * routed; `red` names each culprit landing and the suites that started failing there, and may offer
    * `shorterCandidate`, which still needs its own complete check; `stopped` was stopped for a release the owner pushed
    * (SJ-202): no verdict, never routed, and the head is checked again later.
@@ -276,7 +277,9 @@ export type OperationEvent =
       /** Failures first seen past a landing diagnosis could not run at: one of the landings after `after` (null: the base) caused each; none is routed. */
       unattributed?: { keys: string[]; after: string | null; firstFailing: string }[];
       /** A green check's suites that could not run at its head (an inconclusive prebuild): it passed, but proves nothing about them, so no diagnosis starts after it. */
-      unproven?: string[] }
+      unproven?: string[];
+      /** A flaky check whose rerun passed everything it ran, which verified its head under `batchVerification.promoteFlaky`. */
+      verified?: true }
   /** A culprit's failure was recorded on its Forge work: `runId` holds the blocking finding, `noteId` the message to its open lead thread. */
   | { type: "batch_routed"; commitId: string; operationId: string; specId: string; number: number | null; runId: string; noteId: string | null }
   /** A culprit has no Forge association (a chore, or a landing Forge never recorded): it stays reported here only. */

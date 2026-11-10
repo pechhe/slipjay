@@ -19,8 +19,8 @@ import { runReset } from "../release/reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, prebuildRelease, runDeploy, schemaMayHaveChanged, type PrebuildResult } from "../release/deploy.ts";
 import { readExactExecutionPolicy } from "../release/post-integration-source.ts";
 import { confirmRelease, passedVerification, planRelease, returnRelease, verifyRelease } from "../release/release.ts";
-import { boundedKeys, boundedOutput, boundedTests, PREBUILD_KEY, runBatchCheck, type BatchCheckRecord, type BatchLanding, type BatchRun, type BatchScope, type SuiteState } from "../release/batch-check.ts";
-import { RELEASE_BASE_ENV, RELEASE_ENV_KEYS, RELEASE_HEAD_ENV, RELEASE_SUITES_ENV } from "../policy/batch-verification.ts";
+import { boundedKeys, boundedOutput, boundedTests, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchCheckRecord, type BatchLanding, type BatchRun, type BatchScope, type SuiteState } from "../release/batch-check.ts";
+import { RELEASE_BASE_ENV, RELEASE_ENV_KEYS, RELEASE_HEAD_ENV, RELEASE_SUITES_ENV, type BatchVerification } from "../policy/batch-verification.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
 import type { BuildRouteAnswer } from "../build/build-admission.ts";
 import type { BuildReader } from "../build/tracker.ts";
@@ -2372,7 +2372,7 @@ export function createRunnerQueue(input: {
       const releaseBase = await releasePolicy(operation.repo, operation.commitId);
       const base = await servedBase(operation.repo, checkout);
       // A batching release branch checks the batch on its own machine and diagnoses a failure (SJ-192).
-      if (releaseBase?.process === "development" && releaseBase.batchVerification && base) return batchVerify(releaseBase.batchVerification.machine, base);
+      if (releaseBase?.process === "development" && releaseBase.batchVerification && base) return batchVerify(releaseBase.batchVerification, base);
       const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(base, operation.commitId), abortSignal: controller.signal });
       // A kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
@@ -2387,7 +2387,7 @@ export function createRunnerQueue(input: {
      * host when it has no remote verifier); the complete check and its rerun share the head's. Only a complete green
      * check of the exact head verifies it; anything else fails it, saying how, and a red batch routes its culprits.
      */
-    async function batchVerify(machine: string, base: string): Promise<OperationEvent> {
+    async function batchVerify({ machine, promoteFlaky }: BatchVerification, base: string): Promise<OperationEvent> {
       const plan = await planRelease(checkout, { candidate: operation.commitId }).catch((error: unknown) => error as Error);
       if (plan instanceof Error) return { type: "failed", stage, reason: message(plan) };
       if (!plan.commits.length) return { type: "failed", stage, reason: `${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}` };
@@ -2573,6 +2573,12 @@ export function createRunnerQueue(input: {
           return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} did not run (infrastructure, not a regression): ${outcome.reason}` };
         }
         if (outcome.outcome === "flaky") {
+          // `promoteFlaky`: a rerun that passed every failed key shows no regression, so it verifies a head whose images built.
+          if (promoteFlaky && flakyVerifies(outcome, { ran: builds, complete: headSuites[PREBUILD_KEY] })) {
+            append(operation.id, { type: "batch_outcome", outcome: "flaky", ...recorded, keys: boundedKeys(outcome.keys), verified: true });
+            progress(`[batch] ${head.slice(0, 12)} was flaky (${outcome.keys.join(", ")} failed once and passed on its rerun); promoteFlaky verifies it`);
+            return { type: "verified", base: plan.base, candidate: head, checks: plan.checks, nonAdditiveMigrations: plan.nonAdditiveMigrations };
+          }
           append(operation.id, { type: "batch_outcome", outcome: "flaky", ...recorded, keys: boundedKeys(outcome.keys) });
           return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed, and its rerun passed or failed only other tests; nothing is routed, and the head needs a complete green check before it deploys` };
         }

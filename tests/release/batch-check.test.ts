@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { FAILING_TESTS_LIMIT, PREBUILD_KEY, runBatchCheck, type BatchRun, type BatchScope } from "../../src/lib/release/batch-check.ts";
+import { FAILING_TESTS_LIMIT, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchRun, type BatchScope } from "../../src/lib/release/batch-check.ts";
 
 const landing = (n: number) => ({ commitId: `${n}`.repeat(40).slice(0, 40), operationId: `op-${n}` });
 const L = [1, 2, 3, 4, 5].map(landing);
@@ -38,7 +38,7 @@ test("a failure that passes its rerun is flaky and diagnoses nothing; infrastruc
   let runs = 0;
   const flaky = await runBatchCheck({ head: L[0]!.commitId, landings: L.slice(0, 1),
     run: async () => (runs++ === 0 ? fail({ weave: "failed" }) : pass({ weave: "passed" })) });
-  assert.deepEqual(flaky, { outcome: "flaky", keys: ["weave"], failingTests: [] });
+  assert.deepEqual(flaky, { outcome: "flaky", keys: ["weave"], failingTests: [], rerunPassed: true });
   assert.equal(runs, 2);
 
   const machine = await runBatchCheck({ head: L[0]!.commitId, landings: L.slice(0, 1),
@@ -59,7 +59,7 @@ test("a regression is the same failure twice: a rerun failing only other tests i
   };
   // A loaded machine fails a different timing test in the same suites each time.
   const unstable = await twice(fail({ weave: "failed", ui: "failed" }, ["weave > a", "ui > b"]), fail({ weave: "failed", ui: "failed" }, ["weave > c", "ui > d"]));
-  assert.deepEqual(unstable, { outcome: "flaky", keys: ["ui", "weave"], failingTests: ["weave > a", "ui > b"] });
+  assert.deepEqual(unstable, { outcome: "flaky", keys: ["ui", "weave"], failingTests: ["weave > a", "ui > b"], rerunPassed: false });
   // One test failing in both runs keeps every suite that failed twice.
   const broken = await twice(fail({ weave: "failed", ui: "failed" }, ["weave > a", "ui > b"]), fail({ weave: "failed", ui: "failed" }, ["weave > a", "ui > d"]));
   assert.equal(broken.outcome, "red");
@@ -73,6 +73,36 @@ test("a regression is the same failure twice: a rerun failing only other tests i
   const build = await twice(fail({ weave: "failed", [PREBUILD_KEY]: "failed" }, ["weave > a"]), fail({ weave: "failed", [PREBUILD_KEY]: "failed" }, ["weave > c"]));
   assert.equal(build.outcome, "red");
   if (build.outcome === "red") assert.deepEqual(build.keys, [PREBUILD_KEY]);
+});
+
+test("a flaky check verifies its head under promoteFlaky only when its rerun passed every failed suite and its images built", async () => {
+  const head = L[0]!.commitId;
+  const twice = (first: BatchRun, second: BatchRun) => {
+    let runs = 0;
+    return runBatchCheck({ head, landings: [L[0]!], run: async () => (runs++ === 0 ? first : second) });
+  };
+  // A suite the rerun never reported was not run again: it says nothing, so the rerun did not pass it.
+  const unrun = await twice(fail({ weave: "failed" }, ["weave > a"]), pass({ weave: "missing" }));
+  assert.deepEqual(unrun, { outcome: "flaky", keys: ["weave"], failingTests: ["weave > a"], rerunPassed: false });
+  const passed = await twice(fail({ weave: "failed" }, ["weave > a"]), pass({ weave: "passed" }));
+  const otherFailures = await twice(fail({ weave: "failed" }, ["weave > a"]), fail({ weave: "failed" }, ["weave > b"]));
+  assert.ok(passed.outcome === "flaky" && otherFailures.outcome === "flaky" && unrun.outcome === "flaky");
+  if (passed.outcome !== "flaky" || otherFailures.outcome !== "flaky" || unrun.outcome !== "flaky") return;
+  // No build belongs to the check (a boat pool), or the head's images built in the complete run.
+  assert.equal(flakyVerifies(passed, { ran: false, complete: undefined }), true);
+  assert.equal(flakyVerifies(passed, { ran: true, complete: "passed" }), true);
+  // A rerun that failed other tests, or never ran a failed suite, verifies nothing.
+  assert.equal(flakyVerifies(otherFailures, { ran: true, complete: "passed" }), false);
+  assert.equal(flakyVerifies(unrun, { ran: true, complete: "passed" }), false);
+  // A build that could not run in the complete run proves nothing about the images.
+  assert.equal(flakyVerifies(passed, { ran: true, complete: undefined }), false);
+  // A build that failed once and built on its rebuild verifies, like any suite that passed its rerun.
+  let builds = 0;
+  const rebuilt = await runBatchCheck({ head, landings: [L[0]!], run: async () => ++builds === 1
+    ? { status: "failed", failedChecks: [], command: "bun scripts/images.ts build", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "killed" }
+    : pass({ [PREBUILD_KEY]: "passed" }) });
+  assert.ok(rebuilt.outcome === "flaky");
+  if (rebuilt.outcome === "flaky") assert.equal(flakyVerifies(rebuilt, { ran: true, complete: "failed" }), true);
 });
 
 test("a suite missing at an older landing keeps its last state, and a command with no suites is diagnosed by its check", async () => {
@@ -146,7 +176,7 @@ test("a build that fails and then builds is flaky, and one that never says anyth
   const flaky = await runBatchCheck({ head, landings: [L[0]!], run: async () => ++builds === 1
     ? { status: "failed", failedChecks: [], command: "bun scripts/images.ts build", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "killed" }
     : pass({ [PREBUILD_KEY]: "passed" }) });
-  assert.deepEqual(flaky, { outcome: "flaky", keys: [PREBUILD_KEY], failingTests: [] });
+  assert.deepEqual(flaky, { outcome: "flaky", keys: [PREBUILD_KEY], failingTests: [], rerunPassed: true });
   assert.deepEqual(await runBatchCheck({ head, landings: [L[0]!], run: async () => pass() }), { outcome: "green" });
 });
 

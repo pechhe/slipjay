@@ -9,6 +9,9 @@ test("batch verification is opt-in per repository, names its machine pool, and n
   assert.deepEqual(parseExecutionPolicy(policy({ batchVerification: { machine: "release-check" } })).batchVerification, { machine: "release-check" });
   assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "0" } })), /machine pool name/);
   assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "batch", every: 5 } })), /unknown fields: every/);
+  assert.deepEqual(parseExecutionPolicy(policy({ batchVerification: { machine: "batch", promoteFlaky: true } })).batchVerification, { machine: "batch", promoteFlaky: true });
+  assert.deepEqual(parseExecutionPolicy(policy({ batchVerification: { machine: "batch", promoteFlaky: false } })).batchVerification, { machine: "batch" });
+  assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "batch", promoteFlaky: "yes" } })), /promoteFlaky must be true or false/);
   assert.throws(() => parseExecutionPolicy(JSON.stringify({ version: 1, requiredLandingVerification: [], batchVerification: { machine: "batch" } })), /without a releaseBranch/);
 });
 

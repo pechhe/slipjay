@@ -19,18 +19,25 @@ export type BatchVerification = {
    * only when a promotion falls due, as before.
    */
   everyMinutes?: number;
+  /**
+   * A flaky check verifies its head when its rerun passed everything it ran: every test that failed once passed on the
+   * same head, and none failed twice, so it shows no regression. Absent, a flaky head needs a complete green check, which
+   * a loaded machine that fails a different timing test in every run may never give.
+   */
+  promoteFlaky?: boolean;
 };
 
 /** Validates a declared opt-in; undefined when undeclared. */
 export function batchVerification(declared: unknown, fail: (message: string) => never): BatchVerification | undefined {
   if (declared === undefined) return undefined;
   if (declared === null || typeof declared !== "object" || Array.isArray(declared)) fail("batchVerification must be an object");
-  const { machine, everyMinutes, ...rest } = declared as Record<string, unknown>;
+  const { machine, everyMinutes, promoteFlaky, ...rest } = declared as Record<string, unknown>;
   if (Object.keys(rest).length) fail(`batchVerification declares unknown fields: ${Object.keys(rest).join(", ")}`);
   if (typeof machine !== "string" || !MACHINE_POOL.test(machine)) fail("batchVerification.machine must be a machine pool name (a-z, 0-9, -)");
   if (everyMinutes !== undefined && !(Number.isInteger(everyMinutes) && (everyMinutes as number) >= 1 && (everyMinutes as number) <= 1440))
     fail("batchVerification.everyMinutes must be a whole number of minutes from 1 to 1440");
-  return { machine, ...everyMinutes === undefined ? {} : { everyMinutes: everyMinutes as number } };
+  if (promoteFlaky !== undefined && typeof promoteFlaky !== "boolean") fail("batchVerification.promoteFlaky must be true or false");
+  return { machine, ...everyMinutes === undefined ? {} : { everyMinutes: everyMinutes as number }, ...promoteFlaky ? { promoteFlaky: true } : {} };
 }
 
 /**
