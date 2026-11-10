@@ -274,7 +274,9 @@ export type OperationEvent =
       keys?: string[]; diagnosis?: "complete" | "incomplete"; shorterCandidate?: string | null;
       culprits?: { commitId: string; operationId: string; workspace: string | null; keys: string[]; failingTests: string[]; command: string | null; output: string }[];
       /** Failures first seen past a landing diagnosis could not run at: one of the landings after `after` (null: the base) caused each; none is routed. */
-      unattributed?: { keys: string[]; after: string | null; firstFailing: string }[] }
+      unattributed?: { keys: string[]; after: string | null; firstFailing: string }[];
+      /** A green check's suites that could not run at its head (an inconclusive prebuild): it passed, but proves nothing about them, so no diagnosis starts after it. */
+      unproven?: string[] }
   /** A culprit's failure was recorded on its Forge work: `runId` holds the blocking finding, `noteId` the message to its open lead thread. */
   | { type: "batch_routed"; commitId: string; operationId: string; specId: string; number: number | null; runId: string; noteId: string | null }
   /** A culprit has no Forge association (a chore, or a landing Forge never recorded): it stays reported here only. */

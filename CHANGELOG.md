@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.61.0
+
+- **A release check builds what its deploy ships, and a commit whose images do not build never passes:** production's
+  `prebuild` now runs in every batch check, background ones included, as one more suite (`prebuild`). A failed build is
+  rebuilt once (flaky versus broken), and a broken one is diagnosed by building at each landing, so its culprit is named
+  and routed like a failing suite's, and a slot ships the newest commit that passed and built instead of failing at
+  deploy. A build that could not run (no fixed machine, a timeout or signal, or an exit code the prebuild lists in its new
+  `inconclusiveExitCodes`) says nothing about the commit, which still passes and builds at its deploy; such a green check
+  is recorded `unproven`, so no later diagnosis starts after it, and a failed build whose rebuild could not run is
+  infrastructure, never flaky. A killed or preempted check stops waiting for its build and never passes on it, and a
+  rebuild or diagnosis of the build alone frees the check machine first. Builds still run only on a fixed machine, never
+  on boat.
+
 ## v3.60.0
 
 - **A runner restart no longer fails a landing that had not integrated (YS-1305):** recovery returns it to the queue with

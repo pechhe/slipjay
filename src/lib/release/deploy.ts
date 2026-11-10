@@ -3,7 +3,7 @@ import { runBoundedProcess, sanitizedProcessEnv } from "../infra/bounded-process
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { withFinalizationSource } from "./post-integration-source.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { DeploymentEnvironment } from "../policy/deployment-policy.ts";
+import type { DeploymentEnvironment, PrebuildCommand } from "../policy/deployment-policy.ts";
 import type { FinalizationCommand } from "../policy/post-integration-policy.ts";
 import type { DeployMigrations, DeployProjectOutcome, DeployRecord, DeployStepTiming, MachineLease } from "../runner/runner-types.ts";
 import { firstError, outputLines } from "../infra/verification-failure.ts";
@@ -59,28 +59,44 @@ function commandEnvironment(policy: DeploymentEnvironment, environment: string, 
 }
 
 /**
+ * What a prebuild of one commit came to: `built`; `failed`, the source did not build; or `inconclusive`, it could not
+ * build for a reason that is not the source (no machine, a timeout or signal, a declared inconclusive exit code), which
+ * says nothing about the commit.
+ */
+export type PrebuildResult = { status: "built" } | { status: "failed"; reason: string; command: string } | { status: "inconclusive"; reason: string; command: string };
+
+/**
  * Runs production's `prebuild` for `commitId` in a source view of it, on the machine `lease` gives, as its deploy would.
- * Returns why it failed, or null. Nothing depends on it: the deploy builds whatever this did not.
+ * The deploy builds whatever this did not.
  */
 export async function prebuildRelease(input: {
   gitDirectory: string;
   commitId: string;
-  policy: DeploymentEnvironment & { prebuild: FinalizationCommand };
+  policy: DeploymentEnvironment & { prebuild: PrebuildCommand };
   readEnvironment(): NodeJS.ProcessEnv;
   lease(): Promise<MachineLease>;
   run(request: BoundedProcessRequest): Promise<BoundedProcessResult>;
   abortSignal: AbortSignal;
-}): Promise<string | null> {
+}): Promise<PrebuildResult> {
   const { policy, policy: { prebuild } } = input;
-  return withFinalizationSource(input.gitDirectory, input.commitId, async (root) => {
-    const lease = await input.lease();
-    try {
-      const result = await input.run({ executable: prebuild.executable, args: prebuild.args, cwd: path.join(root, prebuild.cwd),
-        env: { ...commandEnvironment(policy, "production", input.commitId, input.readEnvironment()), ...lease.env },
-        timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024, abortSignal: input.abortSignal });
-      return failure(result, policy.timeoutMs);
-    } finally { await lease.close().catch(() => null); }
-  }, sanitizedProcessEnv, input.abortSignal);
+  const shown = [prebuild.executable, ...prebuild.args].join(" ");
+  try {
+    return await withFinalizationSource(input.gitDirectory, input.commitId, async (root) => {
+      const lease = await input.lease();
+      try {
+        const result = await input.run({ executable: prebuild.executable, args: prebuild.args, cwd: path.join(root, prebuild.cwd),
+          env: { ...commandEnvironment(policy, "production", input.commitId, input.readEnvironment()), ...lease.env },
+          timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024, abortSignal: input.abortSignal });
+        const failed = failure(result, policy.timeoutMs);
+        if (!failed) return { status: "built" } as const;
+        const sourceFailed = !result.timedOut && !result.signal && !result.error && result.exitCode !== null
+          && !prebuild.inconclusiveExitCodes?.includes(result.exitCode);
+        return sourceFailed ? { status: "failed", reason: failed, command: shown } : { status: "inconclusive", reason: failed, command: shown };
+      } finally { await lease.close().catch(() => null); }
+    }, sanitizedProcessEnv, input.abortSignal);
+  } catch (error) {
+    return { status: "inconclusive", reason: `could not run: ${error instanceof Error ? error.message : String(error)}`, command: shown };
+  }
 }
 
 export function failure(result: BoundedProcessResult, timeoutMs: number): string | null {

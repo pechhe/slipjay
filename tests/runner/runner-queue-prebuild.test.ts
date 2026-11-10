@@ -104,7 +104,7 @@ test("with no fixed machine for the pool, a check starts no prebuild, so boat is
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("a background check starts no prebuild", async () => {
+test("a background check builds its head beside its checks, and its build is part of the check", async () => {
   let clock = Date.now();
   const s = stand();
   const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images", prebuild: s.prebuild }, false,
@@ -122,10 +122,97 @@ test("a background check starts no prebuild", async () => {
     await settle(f);
     const check = await until(() => f.log.verifications(REPO).find((entry) => entry.submittedBy.endsWith(":background") && entry.result));
     await f.queue.idle();
-    assert.deepEqual(started(f, check.id), []);
-    assert.ok(!s.prebuilt().some((line) => line.includes(check.commitId)));
+    assert.match(started(f, check.id)[0] ?? "", /building .* on peach-box beside this check/);
+    assert.ok(s.prebuilt().includes(`production ${check.commitId} ssh-peach-box`));
+    assert.equal(f.log.operation(check.id)?.result?.type, "verified");
+    assert.ok(!s.leases.some((lease) => lease.startsWith("boat")), "a background check never builds on boat");
   } finally { await f.dispose(); }
 }, 180_000);
+
+test("a head whose images do not build fails its check, names the landing that broke them, and is not deployed", async () => {
+  const s = stand();
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images",
+    prebuild: `${s.prebuild}; if (require("node:fs").existsSync("broken.txt")) { console.error("Error: the app does not build"); process.exit(1) }` }, false,
+    { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "release-check" }, batchRemote: s.boat,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } }, releaseGates: () => ['console.log("release checks pass")'] });
+  try {
+    const landing = f.submit(await f.candidate("broken.txt"));
+    await f.land(landing);
+    await settle(f);
+    const check = f.log.verifications(REPO)[0]!;
+    await until(() => f.log.operation(check.id)?.result ?? undefined);
+    await f.queue.idle();
+    const result = f.log.operation(check.id)?.result;
+    assert.equal(result?.type, "failed");
+    assert.match(result?.type === "failed" ? result.reason : "", /failed: prebuild; culprits/);
+    const outcome = f.log.events({ operationId: check.id }).map((row) => row.event).find((event) => event.type === "batch_outcome");
+    assert.equal(outcome?.type === "batch_outcome" ? outcome.outcome : undefined, "red");
+    assert.deepEqual(outcome?.type === "batch_outcome" && outcome.outcome === "red" ? (outcome.culprits ?? []).map((culprit) => culprit.keys) : [], [["prebuild"]]);
+    assert.equal(s.prebuilt().filter((line) => line.includes(check.commitId)).length, 2, "it rebuilt once to rule out a flaky build");
+    assert.deepEqual(f.log.deployments(REPO).filter((entry) => entry.environment === "production"), [], "nothing deployed");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a build that could not run says nothing about the head, which passes and builds at its deploy", async () => {
+  const s = stand();
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images",
+    prebuild: `${s.prebuild}; console.error("image build lock still held"); process.exit(2)`, prebuildInconclusive: [2] }, false,
+    { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "release-check" }, batchRemote: s.boat,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } }, releaseGates: () => ['console.log("release checks pass")'] });
+  try {
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    const check = f.log.verifications(REPO)[0]!;
+    await until(() => f.log.operation(check.id)?.result ?? undefined);
+    await f.queue.idle();
+    assert.equal(f.log.operation(check.id)?.result?.type, "verified");
+    const lines = f.log.events({ operationId: check.id }).flatMap((row) => row.event.type === "progress" ? [row.event.line] : []);
+    assert.ok(lines.some((line) => /prebuild could not build, which says nothing about the source: exited 2/.test(line)));
+    const outcome = f.log.events({ operationId: check.id }).map((row) => row.event).find((event) => event.type === "batch_outcome");
+    assert.deepEqual(outcome?.type === "batch_outcome" ? outcome.unproven : undefined, ["prebuild"], "a green check that could not build proves nothing about the build");
+    assert.ok(deployProgress(f).includes("[deploy] on peach-box"), "the deploy went ahead");
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("the build runs beside the release checks, not before them", async () => {
+  const s = stand();
+  const order = join(mkdtempSync(join(tmpdir(), "prebuild-order-")), "order");
+  const write = (line: string) => `require("node:fs").appendFileSync(${JSON.stringify(order)}, ${JSON.stringify(line)} + "\\n")`;
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images",
+    prebuild: `${s.prebuild}; ${write("build started")}; setTimeout(() => { ${write("build finished")} }, 4000)` }, false,
+    { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "release-check" }, batchRemote: s.boat,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } }, releaseGates: () => [`${write("checks ran")}; console.log("release checks pass")`] });
+  try {
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    const check = f.log.verifications(REPO)[0]!;
+    await until(() => f.log.operation(check.id)?.result ?? undefined);
+    await f.queue.idle();
+    assert.equal(f.log.operation(check.id)?.result?.type, "verified");
+    const lines = readFileSync(order, "utf8").trim().split("\n");
+    assert.ok(lines.indexOf("checks ran") < lines.indexOf("build finished"), `the checks ran while the build was still going: ${lines.join(", ")}`);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a check killed while its build runs is never verified, and stops waiting for the build", async () => {
+  const s = stand();
+  const checked = join(mkdtempSync(join(tmpdir(), "prebuild-kill-")), "checked");
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images",
+    prebuild: `${s.prebuild}; setTimeout(() => {}, 60_000)` }, false,
+    { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "release-check" }, batchRemote: s.boat,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } },
+      releaseGates: () => [`require("node:fs").writeFileSync(${JSON.stringify(checked)}, "done"); console.log("release checks pass")`] });
+  try {
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await until(() => existsSync(checked) || undefined);
+    const check = await until(() => f.log.verifications(REPO)[0]);
+    const killedAt = Date.now();
+    assert.equal(f.queue.kill(check.id).status, "killed");
+    const result = await until(() => f.log.operation(check.id)?.result ?? undefined);
+    assert.equal(result.type, "cancelled", "a killed check ends cancelled, never verified");
+    assert.ok(Date.now() - killedAt < 30_000, "it did not wait out the build");
+  } finally { await f.dispose(); }
+}, 120_000);
 
 test("a landing waiting for its scheduled promotion starts building fifteen minutes before it, on the fixed machine", async () => {
   let clock = Date.now();

@@ -74,14 +74,19 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   prohibits it. Downstream activation commands must honor this flag before their
   own local compensation; declared environment keys cannot override its authority.
 - **Prebuild.** Production with a `machine` may declare `prebuild`, a command that builds what the deploy
-  will need. A batch check a release waits on (`slipjay promote --confirm`, or a scheduled slot's) starts it beside the
-  check, on the fixed machine serving the pool, in a source view of the head, with the deploy's environment and machine
-  variables. A landing waiting for a scheduled promotion starts it 15 minutes before the slot as well, for what the slot will
-  promote (the newest pre-verified candidate, else the newest landing), so a slot whose candidate was already checked
-  in the background deploys images that are built; nothing new to promote builds nothing. A build of a commit already
-  running is not started twice. It keeps going after the check ends, so the deploy must tolerate it still running: the command takes its own lock, and
-  running it twice must be safe. Nothing depends on it: a failure is only logged and the deploy builds what it did not. It
-  never runs on boat, so a check nobody promotes never starts a VM, and a background check starts none.
+  will ship. Every batch check (a release's, a scheduled slot's or a background one) runs it on its head beside the
+  release checks, on the fixed machine serving the pool, in a source view of the head, with the deploy's environment and
+  machine variables, and its result is one more suite of the check, `prebuild`: a head whose images do not build never
+  passes, so a slot ships the newest commit that passed its checks and whose build did not fail. A failed build is rebuilt once to tell
+  a flaky build from a broken one, and a broken one is diagnosed by building at each landing of the batch, so its culprit
+  is named like any failing suite's (`batch-check.ts`). A build that could not run says nothing about the commit: no
+  machine, a timeout or signal, or an exit code listed in the prebuild's `inconclusiveExitCodes` (2-125; say what the
+  command means by each) leaves the suite out of that run, and the deploy builds what it did not. A landing waiting for
+  a scheduled promotion also starts it 15 minutes before the slot, for what the slot will promote (the newest
+  pre-verified candidate, else the newest landing). A build of a commit already running is shared, not started twice,
+  and a finished one is asked again, which the command answers at once when its images are still there. It keeps going
+  after a check that stops early, so the deploy must tolerate it still running: the command takes its own lock, and
+  running it twice must be safe. It never runs on boat, so a check never starts a VM to build.
 - **Build machine.** An environment may name a `machine` pool (`"machine": "images"`). Its
   deploy then has the repository's build machine leased to it (a production redeploy of the
   commit production serves leases none, so it runs while boat is down). A fixed machine in the

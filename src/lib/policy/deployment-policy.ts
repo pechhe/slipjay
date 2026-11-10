@@ -36,12 +36,18 @@ export type DeploymentEnvironment = {
    */
   machine?: string;
   /**
-   * Production only, with a `machine`: the command that builds what the deploy will need, run beside the release's check so
-   * the deploy finds it done. It must be safe to run twice, as the deploy still builds whatever this did not. It runs only
-   * on a fixed machine that serves the pool (`buildPool`), so a check nobody promotes never starts a boat VM.
+   * Production only, with a `machine`: the command that builds what the deploy will need. Every release check runs it on
+   * its head beside the release checks, and its result is part of the check (`PREBUILD_KEY`), so a commit whose deploy
+   * could not build never passes; the deploy then finds it done. It must be safe to run twice, as the deploy still builds
+   * whatever this did not. It runs only on a fixed machine that serves the pool (`buildPool`), never on boat. An exit code
+   * in `inconclusiveExitCodes` says it could not build for a reason that is not the source (its machine, a lock, the
+   * registry): that run says nothing about the commit, which the deploy then builds.
    */
-  prebuild?: FinalizationCommand;
+  prebuild?: PrebuildCommand;
 };
+
+/** A prebuild: its command, and the exit codes that say it could not build rather than that the source does not. */
+export type PrebuildCommand = FinalizationCommand & { inconclusiveExitCodes?: number[] };
 
 /**
  * How a promotion migrates production, in the same source view and environment as the
@@ -115,8 +121,18 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
       minIntervalMs: minIntervalMs as number, timeoutMs: environment.timeoutMs as number,
       environmentKeys: environmentKeys(environment, "Deployment"), projects, ...migrations ? { migrations } : {},
       ...environment.machine === undefined ? {} : { machine: machineName(environment.machine, name) },
-      ...environment.prebuild === undefined ? {} : { prebuild: command(environment.prebuild, "Prebuild") },
+      ...environment.prebuild === undefined ? {} : { prebuild: prebuildCommand(environment.prebuild) },
     };
   }
   return { version: 1, environments };
+}
+
+/** A prebuild declaration; its inconclusive exit codes are bounded as an audit command's are (2-125: 1 is a failure, 126+ the shell's). */
+function prebuildCommand(value: unknown): PrebuildCommand {
+  const parsed = command(value, "Prebuild");
+  const codes = (value as Record<string, unknown>).inconclusiveExitCodes;
+  if (codes === undefined) return parsed;
+  if (!Array.isArray(codes) || !codes.length || codes.some((code) => !Number.isInteger(code) || code < 2 || code >= 126))
+    throw new Error("deployments production prebuild inconclusiveExitCodes must be a non-empty list of exit codes from 2 to 125");
+  return { ...parsed, inconclusiveExitCodes: [...new Set(codes as number[])] };
 }

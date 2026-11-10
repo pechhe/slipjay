@@ -15,3 +15,9 @@ test("a prebuild needs production and a machine to build on", () => {
   assert.throws(() => policy("production", { prebuild: command }), /only production with a machine/);
   assert.throws(() => policy("staging", { machine: "images", prebuild: command }), /only production with a machine/);
 });
+
+test("a prebuild may name exit codes that say it could not build, bounded as an audit command's are", () => {
+  assert.deepEqual(policy("production", { machine: "images", prebuild: { ...command, inconclusiveExitCodes: [2, 2] } })?.environments.production?.prebuild?.inconclusiveExitCodes, [2]);
+  for (const codes of [[], [1], [126], ["2"]])
+    assert.throws(() => policy("production", { machine: "images", prebuild: { ...command, inconclusiveExitCodes: codes } }), /inconclusiveExitCodes/);
+});

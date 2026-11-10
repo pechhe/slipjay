@@ -8,6 +8,13 @@
  * A diagnosis step lost to infrastructure is retried once; if it is lost again, every failing suite's state there is
  * unknown, and a suite next seen failing is left unattributed (never blamed on the later landing) and reported as such.
  *
+ * Production's prebuild, when a fixed machine builds for it, is one more suite of every run, `PREBUILD_KEY`: the head's
+ * images are built beside its checks, a failed build is rebuilt once to tell a flaky build from a broken one, and a
+ * broken one is diagnosed by building at each landing like any failing suite. A build that could not run (its machine,
+ * a timeout, an inconclusive exit) leaves the suite `missing` for that run, so it says nothing either way: a failed build
+ * whose rebuild could not run is `infrastructure`, never flaky, and a green check whose head could not build proves
+ * nothing about the build, so the runner never starts a diagnosis after it.
+ *
  * Infrastructure (a machine, setup or tooling failure) is never a regression: the check ends `infrastructure` and
  * nothing is diagnosed or routed. Diagnosis never authorises a promotion: its only offer is `shorterCandidate`, the
  * landing before the first culprit, which the runner promotes only after its own complete batch check passes.
@@ -46,12 +53,15 @@ export type BatchOutcome =
 export type BatchRunRecord = { phase: "complete" | "rerun" | "diagnosis"; commit: string; run: BatchRun; durationMs: number };
 
 const CHECK_KEY = /^check (\d+)$/;
+/** The suite key of production's prebuild: whether the commit's deploy can build what it ships. */
+export const PREBUILD_KEY = "prebuild";
 const checkKey = (index: number) => `check ${index + 1}`;
 
 /** What failed, as keys a later run can be compared on: the failing suites, else the failing checks themselves. */
 export function failureKeys(run: Extract<BatchRun, { status: "failed" }>): string[] {
-  const suites = Object.entries(run.suites).filter(([, state]) => state === "failed").map(([suite]) => suite).sort();
-  return suites.length ? suites : run.failedChecks.map(checkKey);
+  const suites = Object.entries(run.suites).filter(([suite, state]) => state === "failed" && suite !== PREBUILD_KEY).map(([suite]) => suite).sort();
+  const checks = suites.length ? suites : run.failedChecks.map(checkKey);
+  return run.suites[PREBUILD_KEY] === "failed" ? [...checks, PREBUILD_KEY] : checks;
 }
 
 /** The scope a rerun of `keys` needs: the checks that failed, narrowed to the failing suites when there are any. */
@@ -89,6 +99,9 @@ export async function runBatchCheck(input: {
   const rerun = await timed("rerun", input.head, scope);
   if (rerun.status === "infrastructure") return { outcome: "infrastructure", reason: rerun.reason };
   const still = keys.filter((key) => stateOf(rerun, key) === "failed");
+  // A rebuild that could not run says nothing, so a build that failed once and was not rebuilt is not known to be flaky.
+  if (!still.length && keys.includes(PREBUILD_KEY) && stateOf(rerun, PREBUILD_KEY) === "missing")
+    return { outcome: "infrastructure", reason: `${PREBUILD_KEY} failed at ${input.head.slice(0, 12)} and its rebuild could not run, so whether it is broken or flaky is unknown` };
   if (!still.length) return { outcome: "flaky", keys, failingTests: complete.failingTests };
   // Production's served commit passed its own batch check, so every key starts passing.
   const state = new Map<string, KeyState>(still.map((key) => [key, "passed"]));

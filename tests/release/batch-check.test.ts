@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { runBatchCheck, type BatchRun, type BatchScope } from "../../src/lib/release/batch-check.ts";
+import { PREBUILD_KEY, runBatchCheck, type BatchRun, type BatchScope } from "../../src/lib/release/batch-check.ts";
 
 const landing = (n: number) => ({ commitId: `${n}`.repeat(40).slice(0, 40), operationId: `op-${n}` });
 const L = [1, 2, 3, 4, 5].map(landing);
@@ -95,4 +95,42 @@ test("a diagnosis step lost to infrastructure twice leaves the failure unattribu
   } });
   assert.ok(retried.outcome === "red" && retried.diagnosis === "complete" && retried.unattributed.length === 0);
   if (retried.outcome === "red") assert.deepEqual(retried.culprits.map((culprit) => culprit.operationId), ["op-2"]);
+});
+
+test("a build that breaks is diagnosed like a suite, and a check failure beside it keeps its own key", async () => {
+  // Landing 3 breaks the build; landing 4 also fails a check that names no suite.
+  const build = (state: "passed" | "failed"): BatchRun => state === "passed" ? pass({ [PREBUILD_KEY]: "passed" })
+    : { status: "failed", failedChecks: [], command: "bun scripts/images.ts build", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "exit code: 1" };
+  const head = L[3]!.commitId;
+  const states: Record<string, BatchRun> = {
+    [L[0]!.commitId]: build("passed"), [L[1]!.commitId]: build("passed"), [L[2]!.commitId]: build("failed"),
+    [head]: { status: "failed", failedChecks: [0], command: "bun run check", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "typecheck" },
+  };
+  const calls: { commit: string; scope: BatchScope | null }[] = [];
+  const outcome = await runBatchCheck({ head, landings: L.slice(0, 4), run: async (commit, scope) => { calls.push({ commit, scope }); return states[commit]!; } });
+  assert.equal(outcome.outcome, "red");
+  if (outcome.outcome !== "red") return;
+  assert.deepEqual(outcome.keys, ["check 1", PREBUILD_KEY]);
+  assert.deepEqual(outcome.culprits.map((culprit) => [culprit.operationId, culprit.keys]), [["op-3", [PREBUILD_KEY]], ["op-4", ["check 1"]]]);
+  assert.equal(outcome.shorterCandidate, L[1]!.commitId);
+  assert.deepEqual(calls[1]!.scope, { checks: [0], suites: [PREBUILD_KEY] }, "the rerun repeats the failed check and rebuilds");
+});
+
+test("a build that fails and then builds is flaky, and one that never says anything leaves the head green", async () => {
+  const head = L[0]!.commitId;
+  let builds = 0;
+  const flaky = await runBatchCheck({ head, landings: [L[0]!], run: async () => ++builds === 1
+    ? { status: "failed", failedChecks: [], command: "bun scripts/images.ts build", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "killed" }
+    : pass({ [PREBUILD_KEY]: "passed" }) });
+  assert.deepEqual(flaky, { outcome: "flaky", keys: [PREBUILD_KEY], failingTests: [] });
+  assert.deepEqual(await runBatchCheck({ head, landings: [L[0]!], run: async () => pass() }), { outcome: "green" });
+});
+
+test("a failed build whose rebuild could not run is infrastructure, never flaky", async () => {
+  const head = L[0]!.commitId;
+  let runs = 0;
+  const outcome = await runBatchCheck({ head, landings: [L[0]!], run: async () => ++runs === 1
+    ? { status: "failed", failedChecks: [], command: "bun scripts/images.ts build", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "exit code: 1" }
+    : pass() });
+  assert.equal(outcome.outcome, "infrastructure");
 });
