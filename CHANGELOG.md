@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The host disk policy reads the disk its state lives on, so macOS sheds again.** `slipjay disk` and `maintain` measured
+  `/`, which on macOS is the sealed system volume holding only the OS: it read 40% while the Data volume holding
+  `~/.slipjay`, the workspaces, the ballast and `~/runs` read 96%, so the host stayed `ok` at warn 80 and never shed,
+  evicted or stopped a refill while the disk filled. Usage is now read from `~/.slipjay`'s filesystem (`df -Pk
+  ~/.slipjay`), which is normally the root filesystem on Linux and is the Data volume on macOS; a machine with no state
+  home yet measures the home it will be created in. `scripts/disk-rescue.sh` reads the same filesystem instead of `/`,
+  and `SLIPJAY_RESCUE_ROOT` in `~/.slipjay/disk-rescue.env` carries the path the pass measured so the two cannot drift.
 - **The host disk policy gives workspaces and run evidence a size budget, and accounts for the whole disk (SJ-235):** the
   `disk.budgets` key (`workspacesBytes`, `evidenceBytes`; absent means no budget) makes an over-budget workspace class evict
   idle checkouts even below shed, and an over-budget evidence class archive and prune closed, unpinned, unheld directories

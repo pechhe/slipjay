@@ -66,6 +66,26 @@ test("it needs no SlipJay, Node or jj and never blocks a start", () => {
   assert.equal(unreadable.status, 0);
 });
 
+test("it measures the filesystem holding the home it manages, not the sealed system volume", () => {
+  // A `df` that records which path it was asked about and answers as macOS's Data volume does.
+  const bin = join(home, "bin");
+  mkdirSync(bin);
+  writeFileSync(join(bin, "df"), [
+    "#!/bin/sh",
+    "for last; do :; done",
+    `printf '%s\\n' "$last" > ${JSON.stringify(join(home, "df-asked-about"))}`,
+    "printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n/dev/disk3s1 482443008 431584716 20462480 96% /System/Volumes/Data\\n'",
+  ].join("\n"), { mode: 0o755 });
+  const result = spawnSync("sh", [rescue], {
+    encoding: "utf8",
+    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SLIPJAY_RESCUE_REGENERABLE: cache, SLIPJAY_RESCUE_BALLAST: ballast },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(home, "df-asked-about"), "utf8").trim(), home, "never /");
+  assert.equal(existsSync(cache), false, "96% sheds");
+  assert.equal(existsSync(ballast), false, "96% also releases the ballast");
+});
+
 test("settings can come from ~/.slipjay/disk-rescue.env", () => {
   mkdirSync(join(home, ".slipjay"));
   writeFileSync(join(home, ".slipjay", "disk-rescue.env"), "SLIPJAY_RESCUE_SHED_PERCENT=50\n");

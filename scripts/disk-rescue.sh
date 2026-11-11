@@ -7,6 +7,10 @@
 #   - at or above SLIPJAY_RESCUE_CRITICAL_PERCENT (default 96): also delete the ballast file, the
 #     reserve `slipjay disk` keeps for exactly this moment.
 #
+# Usage is read from the filesystem holding the home these paths live in (SLIPJAY_RESCUE_ROOT, written by
+# `slipjay disk`), never from `/`: on macOS that is the sealed system volume, which holds only the OS and
+# reads far emptier than the Data volume holding everything SlipJay manages.
+#
 # Settings come from ~/.slipjay/disk-rescue.env (shell variable assignments, which every `slipjay disk` pass
 # rewrites from the machine config's `disk` key, so this script and the policy never disagree) or from the environment.
 # SLIPJAY_RESCUE_USAGE_PERCENT overrides the measured usage, for tests. Always exits 0.
@@ -17,7 +21,7 @@ critical="${SLIPJAY_RESCUE_CRITICAL_PERCENT:-96}"
 ballast="${SLIPJAY_RESCUE_BALLAST:-$home/.slipjay/disk-ballast}"
 # `-` not `:-`: a configured empty list means "remove nothing", not "use the default".
 regenerable="${SLIPJAY_RESCUE_REGENERABLE-/tmp/node-compile-cache}"
-root="${SLIPJAY_RESCUE_ROOT:-/}"
+root="${SLIPJAY_RESCUE_ROOT:-$home}"
 
 usage="${SLIPJAY_RESCUE_USAGE_PERCENT:-}"
 [ -n "$usage" ] || usage=$(df -P "$root" 2>/dev/null | awk 'NR==2 { gsub("%", "", $5); print $5 }')

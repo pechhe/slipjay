@@ -1,6 +1,6 @@
 import { timed } from "./start-steps.ts";
 import { readDiskConfig } from "../host-disk/disk-config.ts";
-import { readRootUsage } from "../host-disk/disk-usage.ts";
+import { readHostUsage } from "../host-disk/disk-usage.ts";
 import type { DiskUsageReader } from "../host-disk/disk-usage.ts";
 import type { StartSteps } from "./start-steps.ts";
 import { randomUUID } from "node:crypto";
@@ -371,7 +371,7 @@ const REFILL_WAIT_MS = 60 * 60_000;
  * never take either lock.
  */
 export async function refillPool(root: string, report: (outcome: object) => void, options: {
-  /** The root filesystem's usage (default `df /`); null when unreadable, which does not stop a refill. */
+  /** The usage of the disk SlipJay's state lives on (default `readHostUsage`); null when unreadable, which does not stop a refill. */
   readUsage?: DiskUsageReader;
   /** The percentage at which a refill stops (default: the machine's `disk.thresholds.refillPercent`). */
   refillPercent?: number;
@@ -387,7 +387,7 @@ export async function refillPool(root: string, report: (outcome: object) => void
     const refillPercent = options.refillPercent ?? readDiskConfig().thresholds.refillPercent;
     let stopped = false;
     for (;;) {
-      const usage = await (options.readUsage ?? readRootUsage)().catch(() => null);
+      const usage = await (options.readUsage ?? readHostUsage)().catch(() => null);
       if (usage && usage.percent >= refillPercent) {
         report({ provisioned: false, state: "skipped", reason: `disk at ${usage.percent}% (threshold ${refillPercent}%)` });
         stopped = true;

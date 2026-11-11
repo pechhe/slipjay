@@ -1,7 +1,7 @@
 /**
  * The host disk pass (SJ-226), shared by `slipjay disk` and `slipjay maintain`: read the policy and the
- * root filesystem's usage, plan every managed directory, and (unless planning) apply the plan under the
- * host-wide `host-disk` lock. Every reader is injectable; the defaults read the real host.
+ * usage of the disk SlipJay's state lives on, plan every managed directory, and (unless planning) apply the
+ * plan under the host-wide `host-disk` lock. Every reader is injectable; the defaults read the real host.
  */
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
@@ -24,7 +24,7 @@ import type { DiskConfig } from "./disk-config.ts";
 import { HOUR_MS, planHostDisk } from "./disk-plan.ts";
 import type { DiskHost, DiskRow, HostDiskPlan, ManifestRead } from "./disk-plan.ts";
 import { cachedSizeOf } from "./size-cache.ts";
-import { readRootUsage } from "./disk-usage.ts";
+import { readHostUsage, usagePath } from "./disk-usage.ts";
 import type { DiskUsageReader } from "./disk-usage.ts";
 
 /** The idle threshold the pass applies to workspaces once the host sheds: one hour. */
@@ -193,6 +193,8 @@ export async function writeRescueEnv(config: DiskConfig): Promise<void> {
     `SLIPJAY_RESCUE_SHED_PERCENT=${config.thresholds.shedPercent}`,
     `SLIPJAY_RESCUE_CRITICAL_PERCENT=${config.thresholds.criticalPercent}`,
     `SLIPJAY_RESCUE_BALLAST=${quote(config.ballast.path)}`,
+    // The filesystem this pass measured, so the rescue on a host without one cannot measure a different one instead.
+    `SLIPJAY_RESCUE_ROOT=${quote(usagePath())}`,
     `SLIPJAY_RESCUE_REGENERABLE=${quote(regenerable)}`,
     "",
   ].join("\n");
@@ -211,8 +213,8 @@ export async function hostDisk(options: HostDiskOptions = {}): Promise<HostDiskO
   const host = realHost(options, config);
   const now = options.now ?? Date.now();
   const pass = async (): Promise<HostDiskOutcome> => {
-    const usage = await (options.readUsage ?? readRootUsage)();
-    if (!usage) throw new Error("cannot read the root filesystem's usage");
+    const usage = await (options.readUsage ?? readHostUsage)();
+    if (!usage) throw new Error(`cannot read the usage of ${usagePath()}'s filesystem`);
     const plan = await planHostDisk({ config, usage, now, host, plan: options.plan });
     if (options.plan) return { state: "planned", applied: false, ...plan, results: plan.rows.map((row) => ({ ...row, outcome: "kept" as const, detail: row.reason })), ballastResult: null, failures: 0 };
     const ops: DiskOps = { ...realOps(host, evictAllRoots(options.integrationRoots ?? registeredIntegrationRoots)), held: freshlyHeld, ...options.ops };

@@ -12,7 +12,7 @@ import { machineConfigPath } from "../workspace/workspace-paths.ts";
 const GIB = 1024 ** 3;
 
 export type DiskThresholds = {
-  /** Percent of the root filesystem used at which the host is `warn`. */
+  /** Percent of the disk SlipJay's state lives on used at which the host is `warn` (`disk-usage.ts`'s `usagePath`). */
   warnPercent: number;
   /** Regenerable caches and idle workspaces are shed from here. */
   shedPercent: number;

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "vite-plus/test";
 import { evidenceHome } from "../../src/lib/workspace/workspace-paths.ts";
@@ -310,4 +310,6 @@ test("an applying pass writes the rescue's settings from the policy; a plan does
   assert.match(text, /^SLIPJAY_RESCUE_CRITICAL_PERCENT=96$/m);
   assert.match(text, new RegExp(`^SLIPJAY_RESCUE_BALLAST='${config.ballast.path}'$`, "m"));
   assert.match(text, new RegExp(`^SLIPJAY_RESCUE_REGENERABLE='${join(base, "cache")}'$`, "m"));
+  // The rescue reads the same filesystem this pass measured, never `/`.
+  assert.match(text, new RegExp(`^SLIPJAY_RESCUE_ROOT='${homedir()}(/\\.slipjay)?'$`, "m"));
 });
