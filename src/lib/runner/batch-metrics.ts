@@ -15,7 +15,7 @@ export type BatchMetrics = {
   /** CPU time the checks' attempts used on a machine place, where its slice could be read (SJ-202). */
   checkCpuMs: number;
   /**
-   * From a landing publishing to the end of the first green or red check whose head includes it, for landings published
+   * From a landing publishing to the end of the first green, red or accepted flaky check whose head includes it, for landings published
    * 08:00 to 20:00 London (SJ-202). Landings no check has covered yet are left out.
    */
   landingToCheck: MetricTiming | null;
@@ -34,14 +34,14 @@ const DAY_MS = 86_400_000;
 const londonHour = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "numeric", hourCycle: "h23" });
 
 /**
- * For each landing published in the window between 08:00 and 20:00 London, the time to the end of the first green or
- * red check whose head published at or after it: develop is linear, so that head includes it.
+ * For each landing published in the window between 08:00 and 20:00 London, the time to the end of the first green, red or
+ * accepted flaky check whose head published at or after it: develop is linear, so that head includes it.
  */
-function coverage(landings: readonly { at: number; commitId: string }[], checks: readonly { head: string; outcome?: string; endedAt: number | null }[], since: number): number[] {
+function coverage(landings: readonly { at: number; commitId: string }[], checks: readonly { head: string; outcome?: string; verified?: boolean; endedAt: number | null }[], since: number): number[] {
   const publishedAt = new Map(landings.map((entry) => [entry.commitId, entry.at]));
   const verdicts = checks.flatMap((check) => {
     const head = publishedAt.get(check.head);
-    return (check.outcome === "green" || check.outcome === "red") && check.endedAt !== null && head !== undefined ? [{ head, endedAt: check.endedAt }] : [];
+    return (check.outcome === "green" || check.outcome === "red" || (check.outcome === "flaky" && check.verified === true)) && check.endedAt !== null && head !== undefined ? [{ head, endedAt: check.endedAt }] : [];
   });
   return landings.flatMap((entry) => {
     const hour = Number(londonHour.format(entry.at));
@@ -58,7 +58,7 @@ export function batchMetrics(events: readonly StoredEvent[], since: number, timi
     rows.push(row);
     byOperation.set(row.operationId, rows);
   }
-  type Batch = { id: string; repo: string; startedAt: number; endedAt: number | null; outcome?: string; scheduled: boolean; background: boolean; setupMs?: number;
+  type Batch = { id: string; repo: string; startedAt: number; endedAt: number | null; outcome?: string; verified?: boolean; scheduled: boolean; background: boolean; setupMs?: number;
     cpuMs: number; head: string; culprits: BatchMetrics["culprits"] };
   /** Each landing's publication, by repository and commit. */
   const landed = new Map<string, { at: number; commitId: string }[]>();
@@ -95,7 +95,7 @@ export function batchMetrics(events: readonly StoredEvent[], since: number, timi
     const routed = new Map(rows.flatMap((row) => row.event.type === "batch_routed" ? [[row.event.commitId, row.event.number] as const] : []));
     const unrouted = new Set(rows.flatMap((row) => row.event.type === "batch_unrouted" ? [row.event.commitId] : []));
     const cpuMs = rows.reduce((total, row) => total + (row.event.type === "remote_verification" && row.event.phase === "finished" ? row.event.memory?.cpuMs ?? 0 : 0), 0);
-    batches.push({ id, repo, startedAt: Date.parse(started.at), endedAt: ended ? Date.parse(ended.at) : null, ...outcome ? { outcome: outcome.outcome } : {},
+    batches.push({ id, repo, startedAt: Date.parse(started.at), endedAt: ended ? Date.parse(ended.at) : null, ...outcome ? { outcome: outcome.outcome, verified: outcome.verified } : {},
       scheduled: started.event.scheduled, background: started.event.background === true, cpuMs, head: started.event.head, ...complete?.type === "batch_run" && complete.setupMs !== undefined ? { setupMs: complete.setupMs } : {},
       culprits: (outcome?.culprits ?? []).map((culprit) => ({ commitId: culprit.commitId, operationId: culprit.operationId, batch: id,
         forge: routed.get(culprit.commitId) ?? null, routed: routed.has(culprit.commitId) ? "routed" : unrouted.has(culprit.commitId) ? "unrouted" : "pending" })) });

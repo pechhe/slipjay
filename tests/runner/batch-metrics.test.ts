@@ -16,7 +16,7 @@ const landing = (id: string, minutes: number, n: number): StoredEvent[] => [
   row(id, minutes + 2, { type: "stage_detail", stage: "verifying", durationMs: 90_000 }),
   row(id, minutes + 2, { type: "landed", base: commit(0), commitId: commit(n), branch: "develop", remote: "origin" }),
 ];
-const batch = (id: string, minutes: number, head: number, outcome: "green" | "red" | "flaky" | "infrastructure", culprits: number[] = [], routed: number[] = []): StoredEvent[] => [
+const batch = (id: string, minutes: number, head: number, outcome: "green" | "red" | "flaky" | "infrastructure" | "stopped", culprits: number[] = [], routed: number[] = []): StoredEvent[] => [
   row(id, minutes, { type: "submitted", kind: "verification", repo, commitId: commit(head), submittedBy: "peach-box:batch" }),
   row(id, minutes, { type: "batch_started", base: commit(0), head: commit(head), machine: "batch", scheduled: true, landings: [] }),
   row(id, minutes + 1, { type: "batch_run", phase: "complete", commit: commit(head), status: outcome === "green" ? "passed" : "failed", setupMs: 40_000, durationMs: 600_000 }),
@@ -65,4 +65,52 @@ test("slipjay metrics reports background checks, stops, their CPU time and how l
   assert.equal(metrics!.landingToCheck?.samples, 2);
   assert.deepEqual([metrics!.landingToCheck?.medianMs, metrics!.landingToCheck?.p90Ms], [31 * 60_000, 36 * 60_000]);
   assert.match(formatPipelineMetrics(pipelineMetrics(events, at(-60), { now: Date.parse(at(23 * 60)) })), /Background checks: 3 of 3/);
+});
+
+// Rehydrate recorded ledger rows, including older/non-accepting records whose verified flag is false.
+const recorded = (events: unknown[]): StoredEvent[] => JSON.parse(JSON.stringify(events));
+const acceptedFlaky = (id: string, minutes: number, head: number): StoredEvent[] => batch(id, minutes, head, "flaky").map((entry) =>
+  entry.event.type === "batch_outcome" ? { ...entry, event: { ...entry.event, verified: true } } : entry);
+
+test("accepted flaky coverage uses its completion ahead of a later green without changing outcome counts", () => {
+  const events = recorded([
+    ...landing("land-1", 0, 1), ...landing("land-2", 5, 2),
+    ...acceptedFlaky("accepted", 10, 2), ...batch("later-green", 30, 2, "green"),
+  ]);
+  const [metrics] = pipelineMetrics(events, at(-60), { now: Date.parse(at(60)) }).batches;
+  assert.deepEqual(metrics!.landingToCheck, { samples: 2, medianMs: 15.5 * 60_000, p90Ms: 18 * 60_000 });
+  assert.deepEqual(metrics!.checks, { run: 2, green: 1, red: 0, flaky: 1, infrastructure: 0, stopped: 0, background: 0, perDay: 2 });
+  assert.equal(metrics!.redToGreen, null);
+  assert.deepEqual(metrics!.unresolvedRed, []);
+});
+
+test("coverage excludes unaccepted flaky, infrastructure, stopped, cancelled and incomplete ledger operations", () => {
+  const explicitlyUnaccepted = batch("false-flaky", 10, 1, "flaky").map((entry) =>
+    entry.event.type === "batch_outcome" ? { ...entry, event: { ...entry.event, verified: false } } : entry);
+  const events = recorded([
+    ...landing("land-1", 0, 1),
+    ...batch("missing-flag", 5, 1, "flaky"), ...explicitlyUnaccepted,
+    ...batch("infrastructure", 15, 1, "infrastructure"), ...batch("stopped", 20, 1, "stopped"),
+    ...batch("cancelled", 25, 1, "green").filter((entry) => entry.event.type !== "batch_outcome"),
+    row("cancelled", 36, { type: "cancelled", reason: "owner cancelled the check" }),
+    ...batch("incomplete", 30, 1, "green").filter((entry) => entry.event.type !== "batch_outcome"),
+  ]);
+  const [metrics] = pipelineMetrics(events, at(-60), { now: Date.parse(at(60)) }).batches;
+  assert.equal(metrics!.landingToCheck, null);
+  assert.deepEqual(metrics!.checks, { run: 6, green: 0, red: 0, flaky: 2, infrastructure: 1, stopped: 1, background: 0, perDay: 6 });
+});
+
+test("coverage follows the latest batch outcome and never borrows acceptance from another event", () => {
+  const superseded = acceptedFlaky("superseded", 5, 1);
+  const unaccepted = batch("superseded", 10, 1, "flaky").filter((entry) => entry.event.type === "batch_outcome");
+  const events = recorded([
+    ...landing("land-1", 0, 1), ...superseded, ...unaccepted,
+    ...batch("no-outcome", 15, 1, "green").filter((entry) => entry.event.type !== "batch_outcome"),
+    row("no-outcome", 26, { type: "verified", base: commit(0), candidate: commit(1), checks: [] }),
+    ...batch("red", 30, 1, "red"), ...batch("green", 40, 1, "green"),
+  ]);
+  const [metrics] = pipelineMetrics(events, at(-60), { now: Date.parse(at(60)) }).batches;
+  assert.deepEqual(metrics!.landingToCheck, { samples: 1, medianMs: 38 * 60_000, p90Ms: 38 * 60_000 });
+  assert.deepEqual(metrics!.checks, { run: 4, green: 1, red: 1, flaky: 1, infrastructure: 0, stopped: 0, background: 0, perDay: 4 });
+  assert.equal(metrics!.redToGreen?.medianMs, 10 * 60_000);
 });
