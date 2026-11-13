@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { test } from "vite-plus/test";
+import { test, vi } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { activateWorkspaceClaims, requireWorkspaceClaimActivation, workspaceClaimCapability, managedCleanupInventory } from "../../src/lib/workspace/workspace-claim-activation.ts";
@@ -29,8 +29,29 @@ test("activation refuses old and unknown managed workers, then succeeds after th
     assert.ok(!inventory.pids.includes(foreign.pid!), "another authority HOME does not block this activation");
     await assert.rejects(activateWorkspaceClaims(async () => ({ complete: false, pids: [] })), { code: "CLAIM_ACTIVATION_UNKNOWN" });
     await assert.rejects(activateWorkspaceClaims(), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
-    const done = once(old, "exit"); old.kill(); await done;
-    const ready = await activateWorkspaceClaims();
+    let sampledBeforeExit = inventory;
+    const ready = await activateWorkspaceClaims(async () => {
+      sampledBeforeExit = await managedCleanupInventory();
+      assert.ok(sampledBeforeExit.complete && sampledBeforeExit.pids.includes(old.pid!));
+      const done = once(old, "exit"); old.kill(); await done;
+      return sampledBeforeExit;
+    });
+    await requireWorkspaceClaimActivation(ready.activationId, async () => sampledBeforeExit);
+    await assert.rejects(requireWorkspaceClaimActivation(ready.activationId, async () => ({ complete: true, pids: [foreign.pid!] })), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+    for (const pid of [0, -1, 1.5, Number.NaN]) {
+      await assert.rejects(activateWorkspaceClaims(async () => ({ complete: true, pids: [pid] })), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+    }
+    const kill = process.kill.bind(process);
+    for (const failure of [Object.assign(new Error("Permission denied"), { code: "EPERM" }), Object.assign(new Error("Unknown failure"), { code: "EIO" }), new Error("Unproved process absence"), undefined, null]) {
+      const probe = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        if (pid === old.pid && signal === 0) throw failure;
+        return kill(pid, signal);
+      });
+      try {
+        await assert.rejects(activateWorkspaceClaims(async () => sampledBeforeExit), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+        await assert.rejects(requireWorkspaceClaimActivation(ready.activationId, async () => sampledBeforeExit), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+      } finally { probe.mockRestore(); }
+    }
     assert.deepEqual(await activateWorkspaceClaims(async () => ({ complete: true, pids: [] })), ready, "activation replay doesn't strand prior consumers");
     await requireWorkspaceClaimActivation(ready.activationId, async () => ({ complete: true, pids: [] }));
     await assert.rejects(requireWorkspaceClaimActivation("old-capability", async () => ({ complete: true, pids: [] })), { code: "CLAIM_CAPABILITY_REQUIRED" });

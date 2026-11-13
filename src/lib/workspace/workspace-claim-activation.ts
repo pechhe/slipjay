@@ -66,6 +66,14 @@ export async function withManagedCleanupWorker<T>(operation: () => Promise<T>): 
   await writeWorkspaceJson(path, { version: 1, controller: await claimController() });
   try { return await operation(); } finally { await rm(path, { force: true }); }
 }
+// Only absence is proof that a sampled cleanup worker can no longer execute.
+// Identity failures, permission errors and live unannounced workers still block activation.
+function sampledWorkerExited(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); }
+  catch (error) { return (error as NodeJS.ErrnoException | null)?.code === "ESRCH"; }
+  return false;
+}
 async function barrier(reader: CleanupInventoryReader) {
   const inventory = await reader();
   if (!inventory.complete) throw new WorkspaceClaimError("CLAIM_ACTIVATION_UNKNOWN", "Managed cleanup worker inventory unavailable; drain cannot be established");
@@ -79,7 +87,7 @@ async function barrier(reader: CleanupInventoryReader) {
   const old: number[] = [];
   for (const pid of inventory.pids.filter((pid) => pid !== process.pid)) {
     const identity = await claimController(pid);
-    if (!identity || !announced.some((entry) => sameClaimController(entry, identity))) old.push(pid);
+    if ((!identity || !announced.some((entry) => sameClaimController(entry, identity))) && !sampledWorkerExited(pid)) old.push(pid);
   }
   if (old.length) throw new WorkspaceClaimError("CLAIM_ACTIVATION_DRAIN_REQUIRED", `Prior or unknown managed cleanup workers must drain: ${old.join(", ")}`);
 }
