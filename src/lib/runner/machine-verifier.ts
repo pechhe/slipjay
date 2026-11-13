@@ -8,6 +8,7 @@ import { cleanExclusions, collectRemoteReports, frozenInstall, loopbackPort, rec
 import { TEST_REPORT_DIR_ENV } from "./test-reports.ts";
 import { poolName } from "./boat-verifier.ts";
 import type { GateMachineConfig, LeaseBuildMachine, MachineVerification, RemoteAttempt, RemoteMachine } from "./runner-types.ts";
+import { admitMachineCapacity, capacityPolicyScript, decodeCapacityPolicy } from "./host-capacity-remote.ts";
 
 /**
  * Read from inside a scope of the attempt, while its slice exists: the attempt slice's memory peak, and the out-of-memory
@@ -192,7 +193,7 @@ ${recoverHolder()}`);
     available: () => !busy && !quarantine,
     reason: () => busy ? "machine place busy" : quarantine,
     recover,
-    async open({ checkout, candidate, base, integrationBranch, environment, signal }): Promise<RemoteAttempt> {
+    async open({ checkout, candidate, base, integrationBranch, environment, signal, onCapacityWait }): Promise<RemoteAttempt> {
       // Opening waits for the last attempt's cleanup still running: a batch check opens the place again at its next commit
       // the moment the last run ends, and without the wait every diagnosis step after a run found the place busy.
       if (closing) await closing;
@@ -244,12 +245,18 @@ ${recoverHolder()}`);
         scratch = await mkdtemp(join(options.scratch ?? tmpdir(), "slipjay-machine-"));
         const scoped = (script: string, unit: string) => remoteCommand({ executable: "bash", args: ["-c", `set -euo pipefail\n${script}`], cwd: path, env: attemptEnv }, unit, { home: account, account: config.account, slice });
         const resetCheckout = `rm -rf -- ${shellWord(repo)}\ngit init --quiet ${shellWord(repo)}`;
+        const prepareCheckout = scoped(`mkdir -p ${shellWord(`${machineRoot}/bun-cache`)}
+if ! git -C ${shellWord(repo)} rev-parse --git-dir >/dev/null 2>&1 || ! git -C ${shellWord(repo)} for-each-ref --format='%(objectname)' >/dev/null 2>&1; then
+  ${resetCheckout}
+fi
+git -C ${shellWord(repo)} clean -ffdxq ${cleanExclusions(retain)}
+git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepare-${id}`);
         // A failure past the holder's creation leaves it for close to clean; close checks the holder is this attempt's.
         acquired = true;
         // One round trip takes the place (SJ-223): under its lock, recover what a holder that is no longer running left,
         // hold it, check its quota, then (the lock released) prepare its checkout in the attempt's slice and list what
         // it already holds. Each was its own round trip.
-        const heads = (await step("acquire", () => control(`mkdir -p ${shellWord(root)}
+        const acquiredLines = (await step("acquire", () => control(`mkdir -p ${shellWord(root)}
 exec 9>${shellWord(`${root}/control.lock`)}
 flock -n 9
 ${recoverHolder()}
@@ -260,13 +267,19 @@ mkdir -p ${shellWord(`${path}/scratch`)}
 # Installer attests an enforced filesystem quota, bounding the dedicated root.
 [ -f ${shellWord(`${machineRoot}/quota-ready`)} ] || { echo 'gate root needs filesystem quota and quota-ready marker' >&2; exit 1; }
 exec 9>&-
-${scoped(`mkdir -p ${shellWord(`${machineRoot}/bun-cache`)}
-if ! git -C ${shellWord(repo)} rev-parse --git-dir >/dev/null 2>&1 || ! git -C ${shellWord(repo)} for-each-ref --format='%(objectname)' >/dev/null 2>&1; then
-  ${resetCheckout}
-fi
-git -C ${shellWord(repo)} clean -ffdxq ${cleanExclusions(retain)}
-git -C ${shellWord(repo)} for-each-ref --format='%(objectname)'`, `slipjay-prepare-${id}`)}`, signal)))
-          .split("\n").filter((head) => /^[0-9a-f]{40}$/.test(head));
+capacity=$(
+${capacityPolicyScript}
+)
+printf '%s\\n' "$capacity"
+# Keep SJ-223's one-round-trip unconfigured path; an opted-in host admits before checkout preparation.
+if [ "$capacity" = '{"configured":false}' ]; then
+${prepareCheckout}
+fi`, signal))).split("\n");
+        const capacityPolicy = decodeCapacityPolicy(acquiredLines[0] ?? "");
+        steps.hostCapacityWait = await admitMachineCapacity({ control, id, job: `${check ? "Release check" : "Landing gate"} ${candidate.slice(0, 12)}`, lane: check ? "release" : "landing",
+          owner: { kind: "holder", path: `${holder}/id`, identity: id }, slice, signal, policy: capacityPolicy, onWait: onCapacityWait });
+        const heads = (capacityPolicy.configured ? (await step("prepare", () => control(prepareCheckout, signal))).split("\n") : acquiredLines.slice(1))
+          .filter((head) => /^[0-9a-f]{40}$/.test(head));
         const ref = `refs/slipjay/machine/${id}`;
         const transfer = async (known: string[]) => {
           await local("git", ["update-ref", `${ref}/candidate`, candidate], checkout);

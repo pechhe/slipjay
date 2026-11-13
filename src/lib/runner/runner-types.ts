@@ -655,7 +655,9 @@ export interface RemoteVerification {
   /** `pool` names a held VM of its own (a batch check's, SJ-192) instead of a gate slot; it takes turns like a build machine. */
   open(input: { repo: string; slot: number; pool?: string; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string;
     /** Runner-provided services a fixed place must connect before any gate command starts. */
-    environment?: NodeJS.ProcessEnv; signal: AbortSignal }): Promise<RemoteAttempt>;
+    environment?: NodeJS.ProcessEnv; signal: AbortSignal;
+    /** Admission progress before verification commands, separate from their timeouts. */
+    onCapacityWait?: (line: string, waitedMs: number, finished: boolean) => void }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */
   probe?(signal: AbortSignal): Promise<void>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */

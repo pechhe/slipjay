@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
+import { admitMachineCapacity } from "../../src/lib/runner/host-capacity-remote.ts";
 import { machineVerification } from "../../src/lib/runner/machine-verifier.ts";
 import { runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
 import { pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
@@ -188,6 +189,7 @@ test("failed repair of the real machine verifier's corrupt checkout falls back t
     if (request.executable === "git") return request.args[0] === "bundle" ? response("", 128, "Refusing to create empty bundle.") : response();
     const script = request.args.at(-1)!;
     if (script.includes('echo "$HOME"')) return response("/home/ubuntu");
+    if (script.includes("# SlipJay host capacity policy")) return response('{"configured":false}');
     if (script.includes("slipjay-receive-")) return response("", 1, "corrupt checkout: fetch failed");
     if (script.includes("slipjay-reinitialise-")) return response("", 1, "checkout reinitialisation failed");
     assert.ok(!script.includes("slipjay-command-"), "the failed setup never starts gate commands");
@@ -287,4 +289,31 @@ test("a machine-place landing slot keeps only slipjay.json, and widens to every 
     assert.equal((await f.land(next))?.type, "landed");
     assert.equal(sparse(next), "slipjay.json", "the next plain landing narrows it again");
   } finally { await f.dispose(); }
+});
+
+
+test("configured capacity acquisition failures never invoke the Boat verifier or mark the machine down", async () => {
+  for (const failure of ["cgroup", "ledger", "decode"]) {
+    const p = places();
+    let boatOpens = 0;
+    p.boat.open = async () => { boatOpens++; throw new Error("Boat must never open for a capacity failure"); };
+    p.machine.open = async (input) => {
+      await admitMachineCapacity({ id: "a".repeat(32), job: "fixture gate", lane: "landing", owner: { kind: "holder", path: "/fixture/holder/id", identity: "a".repeat(32) },
+        slice: "slipjay-attempt-fixture.slice", signal: input.signal, policy: { configured: true }, control: async (script) => {
+          if (script.startsWith("systemctl")) return failure === "cgroup" ? "" : "/fixture/cgroup";
+          if (failure === "ledger") throw new Error("ledger unavailable");
+          return "invalid-json";
+        } });
+      throw new Error("failed admission cannot open an attempt");
+    };
+    const f = await fixture(false, false, undefined, false, { ...options(p), gates: (root) => [gate(root)] });
+    try {
+      const id = f.submit(await f.candidate(`capacity-${failure}`));
+      const result = await f.land(id);
+      assert.notEqual(result?.type, "landed");
+      assert.equal(boatOpens, 0);
+      assert.ok(!f.log.events().some(({ event }) => event.type === "gate_fallback"));
+      assert.ok(!f.log.events().some(({ event }) => event.type === "machine_place" && event.state === "down"));
+    } finally { await f.dispose(); }
+  }
 });

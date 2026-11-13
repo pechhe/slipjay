@@ -47,6 +47,7 @@ import { machineBuildLease, machineConnections, machineVerification } from "./ma
 import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
+import { HostCapacityUnavailable } from "./host-capacity-remote.ts";
 import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
@@ -1471,6 +1472,11 @@ export function createRunnerQueue(input: {
       if (waited) append(operation.id, { type: "host_budget_waited", placement: placement ?? "host", waitedMs });
       if (waiting) setStage("verifying");
     }
+    const capacityProgress = (placement: GatePlacement) => (line: string, waitedMs: number, finished: boolean) => {
+      setStage(finished ? "verifying" : "waiting-for-budget");
+      progress(`[verify] ${line}`);
+      if (finished) append(operation.id, { type: "host_budget_waited", placement, waitedMs });
+    };
     /**
      * Where this attempt's gate runs, chosen as its commands are about to run (SJ-189): the repository's runner-host gate
      * place when it has one and it is free, otherwise the remote verifier. While boat is held, a gate that finds the host
@@ -1514,7 +1520,8 @@ export function createRunnerQueue(input: {
           const screening = prefix?.screenSlot !== undefined && prefix.screen?.phase !== "authoritative";
           const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
           try {
-            const attempt = await places[place]!.open({ repo: operation.repo, slot, screening, checkout, base, candidate, integrationBranch, environment: await buildCheckEnvironment(), signal });
+            const attempt = await places[place]!.open({ repo: operation.repo, slot, screening, checkout, base, candidate, integrationBranch, environment: await buildCheckEnvironment(), signal,
+              onCapacityWait: capacityProgress(`machine:${name}`) });
             const placement = `machine:${name}` as const;
             append(operation.id, { type: "remote_verification", phase: "ready", machine: attempt.machine, placement, slot, ...(screening ? { screening: true } : {}), candidate, tree: attempt.tree, setupMs: Date.now() - started, usage: null, ...attempt.steps ? { steps: attempt.steps } : {} });
             progress(`[verify] gate runs on ${attempt.executor.host}`);
@@ -1523,6 +1530,8 @@ export function createRunnerQueue(input: {
           } catch (error) {
             machineGates.release(name, place);
             signal.throwIfAborted();
+            // Capacity denial says nothing about machine health and must never spill into an unaccounted Boat job.
+            if (error instanceof HostCapacityUnavailable) throw error;
             reason = message(error).slice(0, 2000);
             const remote = (error as RemoteOpenFailure)?.remote;
             if (remote) append(operation.id, { type: "remote_verification", phase: "failed", ...remote, placement: `machine:${name}`, setupMs: Date.now() - started, infrastructure: true, reason });
@@ -2477,7 +2486,8 @@ export function createRunnerQueue(input: {
               await jj(checkout, ["new", commit]);
               open = { commit };
               if (checkPlace) {
-                open.gate = { attempt: await checkPlace.open({ repo: operation.repo, slot: 0, screening: false, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, environment: await buildCheckEnvironment(), signal: controller.signal }), started, placement: placed as GatePlacement };
+                open.gate = { attempt: await checkPlace.open({ repo: operation.repo, slot: 0, screening: false, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, environment: await buildCheckEnvironment(), signal: controller.signal,
+                  onCapacityWait: capacityProgress(placed as GatePlacement) }), started, placement: placed as GatePlacement };
                 append(operation.id, { type: "remote_verification", phase: "ready", machine: open.gate.attempt.machine, placement: placed as GatePlacement, slot: 0, candidate: commit, tree: open.gate.attempt.tree, setupMs: Date.now() - started, usage: null });
               } else if (remoteVerification) open.gate = { attempt: await remoteVerification.open({ repo: operation.repo, slot: 0, pool: machine, checkout, base, candidate: commit, integrationBranch: integrationBranch ?? plan.integrationBranch, signal: controller.signal })
                 .catch((error: RemoteOpenFailure) => {

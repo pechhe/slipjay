@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "vite-plus/test";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { machineConnections, machineSshArgs, machineVerification } from "../../src/lib/runner/machine-verifier.ts";
+import { HostCapacityUnavailable } from "../../src/lib/runner/host-capacity-remote.ts";
 import { shellWord } from "../../src/lib/runner/remote-attempt.ts";
 
 const tree = "e".repeat(40);
@@ -27,6 +28,8 @@ function stand() {
   let archive = "";
   let held = false;
   let tunnelFailure = false;
+  let capacity = false;
+  let capacityFailure = false;
   let memoryBefore = "memory - -";
   let memoryAfter = "memory - -";
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
@@ -43,8 +46,13 @@ function stand() {
     execFileSync("bash", ["-n"], { input: script });
     scripts.push(script);
     if (!reachable) return result("", 255, "ssh: Connection refused");
+    if (capacity && script.includes("capacity=$(")) return result('{"configured":true}');
+    if (capacity && script.includes("\nsystemctl --user start")) return result("/fixture/attempt-cgroup");
+    if (capacity && script.includes("\nslipjay host-budget poll")) return capacityFailure ? result("", 1, "ledger unreadable")
+      : result('{"configured":true,"outcome":"admitted","decision":{"reason":"fixture admitted","oldestWaitMs":0}}');
+    if (capacity && script.includes("slipjay-prepare-")) return result(heads.join("\n"));
     // Taking the place recovers a stale holder in the same script (SJ-223); a clean the machine refuses fails it.
-    if (script.includes("slipjay-prepare-")) return cleanAllowed ? result(heads.join("\n")) : result("", 1, "cgroup still populated");
+    if (script.includes("slipjay-prepare-")) return cleanAllowed ? result(`{"configured":false}\n${heads.join("\n")}`) : result("", 1, "cgroup still populated");
     if (script.includes("docker ps -aq")) return cleanAllowed ? result() : result("", 1, "cgroup still populated");
     if (script.includes('echo "$HOME"')) return result("/home/ubuntu");
     if (script.includes("slipjay-reinitialise-")) {
@@ -70,7 +78,7 @@ function stand() {
     return result();
   };
   const make = (place?: number, check = false) => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run, ...place === undefined ? {} : { place }, ...check ? { check } : {} });
-  return { scripts, bundles, make, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
+  return { scripts, bundles, make, capacity: (failed = false) => { capacity = true; capacityFailure = failed; }, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
 }
 const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv) => m.open({ environment, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 const command = { executable: "bun", args: ["run", "test"], cwd: "/runner/checkout", timeoutMs: 1000, maxOutputBytes: 1024 };
@@ -289,7 +297,7 @@ test("opening a place takes one round trip before the candidate's transfer: reco
   assert.ok(acquire!.indexOf("docker ps -aq") < acquire!.indexOf("mkdir '/gate-root/holder'"));
   // The lock is released before the checkout's preparation runs in the attempt's slice.
   assert.ok(acquire!.indexOf("exec 9>&-") < acquire!.indexOf("slipjay-prepare-"));
-  assert.deepEqual(Object.keys(second.steps ?? {}).sort(), ["acquire", "setup", "transfer"]);
+  assert.deepEqual(Object.keys(second.steps ?? {}).sort(), ["acquire", "hostCapacityWait", "setup", "transfer"]);
 });
 
 test("a machine's further places keep their own checkout and holder, and share its install cache and quota marker", async () => {
@@ -396,4 +404,32 @@ test("the runner shares one SSH connection per machine and account; without its 
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+
+test("configured machine admission precedes preparation and its holder survives until exact cleanup or restart recovery", async () => {
+  const s = stand(); s.capacity();
+  const machine = s.make(); await machine.recover!([]);
+  const attempt = await open(machine);
+  const poll = s.scripts.findIndex((script) => script.includes("\nslipjay host-budget poll"));
+  const prepare = s.scripts.findIndex((script) => !script.includes("capacity=$(") && script.includes("slipjay-prepare-"));
+  assert.ok(poll >= 0 && prepare > poll);
+  assert.equal(attempt.steps?.hostCapacityWait, 0);
+  s.lose(); s.clean(false);
+  await assert.rejects(attempt.executor.run(command), /executor lost/);
+  await assert.rejects(attempt.close(), /cleanup unconfirmed/);
+  const restarted = s.make(); await restarted.recover!([]);
+  assert.equal(restarted.available(), false);
+  s.clean(true); await restarted.recover!([]);
+  assert.equal(restarted.available(), true);
+});
+
+test("configured machine ledger failure cleans its exact holder without running checkout preparation or a gate", async () => {
+  const s = stand(); s.capacity(true);
+  const machine = s.make(); await machine.recover!([]);
+  await assert.rejects(open(machine), HostCapacityUnavailable);
+  assert.equal(machine.available(), true);
+  assert.ok(!s.scripts.some((script) => !script.includes("capacity=$(") && script.includes("slipjay-prepare-")));
+  assert.ok(!s.scripts.some((script) => script.includes("slipjay-command-")));
+  assert.ok(s.scripts.at(-1)?.includes("docker ps -aq"));
 });

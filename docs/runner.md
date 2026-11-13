@@ -725,3 +725,69 @@ and interrupted operations report the existing clear “land again” outcome.
 Superseded or cancelled screens lose publication authority and stop their own
 commands. Events, outcomes and `slipjay metrics` name the gate's `screening` stage
 and record its duration separately from a later authoritative `verifying` stage.
+
+
+## Completion-aware host capacity (SJ-241)
+
+A host opts in with `hostBudget` in its own `~/.slipjay/config.json`. All participants
+must use a SlipJay version supporting `host-budget policy|poll|status|recover|run`.
+Start with `mode: "shadow"`; the default commitment budget is 48 GiB, service reserve
+8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
+limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
+16 GiB; preview 4 GiB. These are conservative configured commitments, not estimates
+of exact usage or proof that external processes cannot grow. Tune them only with
+recorded peaks and concurrent-load evidence. An ordinary one-compiler agent check
+may fit a smaller profile; multi-compiler audit commands need their full working set.
+
+Example (merge this property into the host config, preserving other settings):
+
+```json
+{"hostBudget":{"mode":"shadow","budgetBytes":51539607552,"reserveBytes":8589934592}}
+```
+
+Machine attempts register their holder identity before checkout preparation and keep
+one commitment across every setup/check command. Holder deletion certifies exact
+slice and labelled Docker cleanup. Cooperative jobs use:
+
+```sh
+slipjay host-budget run --class agent --job 'bounded check' -- bun run check:changed
+slipjay host-budget status
+slipjay host-budget recover
+```
+
+Command jobs run in an exact per-job slice under `app.slice`. Enforce mode sets its
+MemoryMax to the selected profile and disables swap; shadow adds no new memory cap.
+Nested cooperative commands inherit `SLIPJAY_SYSTEMD_SLICE` and the claim id. Machine
+attempts retain their existing lane bounds; their configured commitment is separately
+reported. Docker/BuildKit memory is external host usage unless actually contained in
+the recorded group; it must never be subtracted as if the wrapper measured it.
+
+One private SQLite ledger uses atomic transactions for observed available memory,
+remaining commitments and aged queue decisions. New landings receive a bounded
+initial preference; an old background or large request eventually precedes new work.
+Backfill leaves the head request's whole commitment available. Finite waiting requires
+finite jobs and admissible demand. Timeouts, unreadable ownership/memory/PSI or overload
+never authorize an unconditional start in enforce mode. Capacity denial is distinct
+from machine failure and never sends a denied gate to Boat. Unconfigured hosts retain
+legacy immediate-machine-gate and load-average behavior (Decision 7079); shadow
+records would-wait decisions and runs without blocking (Decision 7780).
+
+`status` reports effective policy, owners, current memory/PSI and recent bounded decision
+and completion evidence. Completion includes queue/run time and nullable memory peak,
+CPU, pressure and OOM/reclaim counters captured before command cleanup. Existing machine
+attempt resource events remain the authority for machine completion measurements.
+A missing measurement stays unknown. Active ownership is never pruned to bound history.
+
+Cancellation stops the exact job slice and verifies it empty before releasing the
+claim. Controller crashes retain a populated slice and its commitment until the next
+admitter or explicit `recover` verifies the recorded controller ended and stops only
+that exact owned slice. No wildcard kills, heartbeat expiry or age-based claim downgrade.
+Unknown cleanup remains visible and counted. Machine holders remain the verifier's
+responsibility; ledger recovery does not delete their resources itself.
+
+Activate enforce mode only after shadow replay and representative overlapping jobs
+validate the selected profiles. Roll back safely by changing mode to `shadow`, keeping
+the ledger and live owners. Do not delete the ledger, remove `hostBudget`, or age out
+claims while jobs remain. Fully remove the configuration only after verified cleanup
+and an empty `status.requests`. This policy reduces controlled contention; it cannot
+promise global no-OOM safety against arbitrary provider tools or external daemon growth.
