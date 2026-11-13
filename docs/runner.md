@@ -791,3 +791,27 @@ the ledger and live owners. Do not delete the ledger, remove `hostBudget`, or ag
 claims while jobs remain. Fully remove the configuration only after verified cleanup
 and an empty `status.requests`. This policy reduces controlled contention; it cannot
 promise global no-OOM safety against arbitrary provider tools or external daemon growth.
+
+### Explicit smaller agent commands (SJ-242, Decision 7795)
+
+`slipjay host-budget run --class agent --memory-max 2G --job 'bounded typecheck' -- bun run typecheck`
+selects a hard whole-command bound, not a guessed working set. Sizes accept exact
+page-aligned bytes or integer binary K/M/G units. The bound must fit the configured
+agent profile; other lanes and remote holder polling cannot request smaller claims.
+Without the option the lane profile and unconfigured behavior are unchanged.
+
+The command requires configured Linux cgroup/systemd support. It sets and verifies
+its dedicated slice's MemoryMax before admission, freezes the same byte count in
+the ledger, and denies swap. Explicit bounds apply in shadow mode too because the
+caller requested a hard limit; default shadow jobs remain uncapped as before. A
+missing cap, invalid bound, profile change or unavailable policy refuses execution.
+An over-limit command fails under its own cap. Cleanup/cancellation still verify the
+exact slice before releasing its commitment; active claims are never shrunk by age
+or recent usage.
+
+The child receives its claim id, slice and explicit bound in the existing environment
+contract. YardSmith's wrapper verifies its current cgroup ancestry and actual slice
+memory.max before relying on that bound in place of its legacy memory slots. CPU lanes
+and command lifetime guards remain separate. Roll out the supporting PeachBox CLI and
+PeachLive runner before new callers. Rollback stops requesting the new option, keeping
+the ledger and running claims; no new host configuration fields are required.

@@ -1,5 +1,5 @@
 import { awaitHostBudget, hostShell, type HostBudgetClass } from "../lib/runner/host-budget.ts";
-import { CAPACITY_CLASSES, type CapacityClass, type CapacityRequest } from "../lib/runner/host-capacity.ts";
+import { CAPACITY_CLASSES, parseCapacityMemoryMax, type CapacityClass, type CapacityRequest } from "../lib/runner/host-capacity.ts";
 import { hostCapacityStatus, pollHostCapacity, recoverHostCapacity, runWithHostCapacity } from "../lib/runner/host-capacity-command.ts";
 import { readCapacityPolicy } from "../lib/runner/host-capacity-local.ts";
 
@@ -29,18 +29,20 @@ export async function runHostBudget(args: string[]): Promise<number> {
   }
   if (args[0] === "run") {
     let lane: CapacityClass = "agent", name = "Heavy command";
+    let memoryMaxBytes: number | undefined;
     let index = 1;
     for (; index < args.length && args[index] !== "--"; index += 2) {
       if (args[index] === "--class" && CAPACITY_CLASSES.includes(args[index + 1] as CapacityClass)) lane = args[index + 1] as CapacityClass;
       else if (args[index] === "--job" && args[index + 1]) name = args[index + 1]!;
-      else throw new Error("usage: slipjay host-budget run [--class agent|image|landing|release|audit|preview] [--job name] -- command [args]");
+      else if (args[index] === "--memory-max" && args[index + 1] && memoryMaxBytes === undefined) memoryMaxBytes = parseCapacityMemoryMax(args[index + 1]!);
+      else throw new Error("usage: slipjay host-budget run [--class agent|image|landing|release|audit|preview] [--job name] [--memory-max bytes|size] -- command [args]");
     }
     const command = args.slice(index + 1);
     if (args[index] !== "--" || !command.length) throw new Error("host-budget run requires -- followed by a command");
     const stopping = new AbortController();
     const stop = () => stopping.abort();
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(signal, stop);
-    try { return await runWithHostCapacity({ lane, job: name, command, signal: stopping.signal, onWait: (line) => console.error(line) }); }
+    try { return await runWithHostCapacity({ lane, job: name, command, memoryMaxBytes, signal: stopping.signal, onWait: (line) => console.error(line) }); }
     catch (error) { if (stopping.signal.aborted) return 130; throw error; }
     finally { for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.removeListener(signal, stop); }
   }

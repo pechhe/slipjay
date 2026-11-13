@@ -3,6 +3,26 @@ export const CAPACITY_CLASSES = ["landing", "release", "image", "agent", "audit"
 export type CapacityClass = typeof CAPACITY_CLASSES[number];
 export type CapacityMode = "shadow" | "enforce";
 
+/** Explicit whole-command limits use systemd's binary units and exact kernel page-sized bytes. */
+export function parseCapacityMemoryMax(value: string): number {
+  const match = /^([1-9]\d*)([KMG]?)(?:i?B)?$/i.exec(value);
+  const bytes = match ? Number(match[1]) * 1024 ** (match[2] ? "KMG".indexOf(match[2].toUpperCase()) + 1 : 0) : NaN;
+  if (!Number.isSafeInteger(bytes) || bytes < 4096 || bytes % 4096 !== 0) {
+    throw new Error("--memory-max must be a positive page-aligned byte count or binary K/M/G size");
+  }
+  return bytes;
+}
+
+/** A smaller demand is a caller-selected hard bound, never an estimate inferred from command text or usage. */
+export function agentMemoryCommitment(policy: CapacityPolicy, lane: CapacityClass, memoryMaxBytes?: number): number {
+  if (memoryMaxBytes === undefined) return policy.profiles[lane];
+  if (lane !== "agent" || !Number.isSafeInteger(memoryMaxBytes) || memoryMaxBytes < 4096
+    || memoryMaxBytes % 4096 !== 0 || memoryMaxBytes > policy.profiles.agent) {
+    throw new Error("explicit --memory-max requires the agent lane and a page-aligned bound within its configured profile");
+  }
+  return memoryMaxBytes;
+}
+
 export type CapacityPolicy = {
   mode: CapacityMode;
   /** A bound on declared commitments, not a claim that arbitrary host processes are bounded. */

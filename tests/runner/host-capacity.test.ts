@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
+import { agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
   mode: "enforce", budgetBytes: 48, reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5,
@@ -46,4 +46,26 @@ test("pressure, unavailable observations and wait expiry cannot become permissio
   }
   assert.match(decideCapacity(policy, [job], job.id, reading, 10_000).reason, /wait limit/);
   assert.equal(decideCapacity(policy, [request("huge", "image", 0, 49)], "huge", reading, 1).admitted, false);
+});
+
+
+test("explicit agent bounds parse exact binary page sizes and retain the default for other work", () => {
+  for (const value of ["2G", "2GiB", "2147483648"]) assert.equal(parseCapacityMemoryMax(value), 2 * 1024 ** 3);
+  for (const value of ["off", "0", "1.5G", "-1G", "Infinity", "9007199254740992", "4097", "1T", "2Gextra"]) {
+    assert.throws(() => parseCapacityMemoryMax(value), /memory-max/);
+  }
+  const configured = { ...policy, profiles: { ...policy.profiles, agent: 16 * 1024 ** 3 } };
+  assert.equal(agentMemoryCommitment(configured, "agent"), 16 * 1024 ** 3);
+  assert.equal(agentMemoryCommitment(configured, "agent", 2 * 1024 ** 3), 2 * 1024 ** 3);
+  for (const bytes of [0, NaN, Infinity, 4097, 17 * 1024 ** 3]) assert.throws(() => agentMemoryCommitment(configured, "agent", bytes), /memory-max/);
+  assert.throws(() => agentMemoryCommitment(configured, "release", 4096), /agent lane/);
+});
+
+test("bounded small checks fit remaining growth capacity that cannot admit a default agent", () => {
+  const active = { ...request("active", "release", 0, 40), admittedAt: 0 };
+  const small = request("small", "agent", 1, 2);
+  const large = request("large", "agent", 2, 16);
+  const observed = { ...reading, availableBytes: 24, currentBytes: { active: 32 } };
+  assert.equal(decideCapacity(policy, [active, small, large], small.id, observed, 3).admitted, true);
+  assert.equal(decideCapacity(policy, [active, { ...small, admittedAt: 3 }, large], large.id, observed, 4).admitted, false);
 });

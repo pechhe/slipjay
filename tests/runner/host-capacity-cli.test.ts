@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,5 +60,61 @@ test("invalid policy and identities fail explicitly instead of running unbudgete
     const invalid = run(home, ["poll", JSON.stringify({ id: "a".repeat(32), job: "fixture", lane: "agent", cgroup: "/../outside", owner: {} })]);
     assert.notEqual(invalid.status, 0);
     assert.match(invalid.stderr, /invalid host capacity request/);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+
+test("explicit smaller bounds fail before execution when unconfigured, malformed or outside the agent profile", () => {
+  const home = fixture();
+  try {
+    const command = ["--", "sh", "-c", "echo must-not-run"];
+    const unconfigured = run(home, ["run", "--memory-max", "2G", ...command]);
+    assert.notEqual(unconfigured.status, 0);
+    assert.match(unconfigured.stderr, /requires configured/);
+    assert.equal(unconfigured.stdout, "");
+    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "enforce" } }));
+    for (const args of [["--memory-max", "17G"], ["--memory-max", "off"], ["--memory-max", "4097"], ["--class", "release", "--memory-max", "2G"], ["--memory-max", "2G", "--memory-max", "1G"]]) {
+      const result = run(home, ["run", ...args, ...command]);
+      assert.notEqual(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "");
+      assert.match(result.stderr, /memory-max|usage/);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+
+const systemdUsable = process.platform === "linux" && spawnSync("systemctl", ["--user", "show-environment"], { timeout: 5000, stdio: "ignore" }).status === 0;
+
+test.skipIf(!systemdUsable)("an explicit shadow bound caps the whole command slice and records that exact commitment", () => {
+  const home = fixture();
+  try {
+    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "shadow" } }));
+    const probe = `const fs=require('fs'),p=require('path'); const group=fs.readFileSync('/proc/self/cgroup','utf8').trim().split('\\n').find(l=>l.startsWith('0::')).slice(3); console.log(fs.readFileSync('/sys/fs/cgroup'+p.dirname(group)+'/memory.max','utf8').trim());`;
+    const result = run(home, ["run", "--memory-max", "64M", "--job", "bounded fixture", "--", "bun", "-e", probe]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), String(64 * 1024 ** 2));
+    const status = JSON.parse(run(home, ["status"]).stdout);
+    assert.deepEqual(status.requests, []);
+    const completion = status.history.map((entry: { body: string }) => JSON.parse(entry.body)).find((entry: { kind: string }) => entry.kind === "finished");
+    assert.equal(completion.request.bytes, 64 * 1024 ** 2);
+    assert.equal(completion.request.lane, "agent");
+    assert.equal(completion.evidence.memoryEvents.oom_kill, 0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test("an unverifiable cap refuses to start the command and cleans up its unadmitted request", () => {
+  const home = fixture();
+  try {
+    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "shadow" } }));
+    const bin = join(home, "bin"); mkdirSync(bin);
+    const fake = join(bin, "systemctl");
+    writeFileSync(fake, `#!/bin/sh\ncase "$*" in\n *--property=ControlGroup*) echo /missing-sj242-fixture;;\n *--property=MemoryMax*) echo infinity;;\n *) exit 0;;\nesac\n`); chmodSync(fake, 0o755);
+    const result = spawnSync("bun", [cli, "host-budget", "run", "--memory-max", "64M", "--", "sh", "-c", "echo must-not-run"], {
+      encoding: "utf8", timeout: 15_000, env: { ...process.env, HOME: home, SLIPJAY_HOME: home, SLIPJAY_LEGACY_HOME: join(home, "missing-legacy"), PATH: `${bin}:${process.env.PATH}` },
+    });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /could not be verified/);
+    assert.deepEqual(JSON.parse(run(home, ["status"]).stdout).requests, []);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

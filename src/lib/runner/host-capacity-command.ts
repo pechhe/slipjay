@@ -3,17 +3,23 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
 import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources } from "./host-capacity-local.ts";
 import { openCapacityStore } from "./host-capacity-store.ts";
-import type { CapacityClass, CapacityRequest } from "./host-capacity.ts";
+import { agentMemoryCommitment, type CapacityClass, type CapacityRequest } from "./host-capacity.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 
 /** One transaction per poll; the caller owns its wait and can keep it outside verification deadlines. */
-export function pollHostCapacity(request: Omit<CapacityRequest, "bytes" | "queuedAt" | "admittedAt">, now = Date.now()) {
+export function pollHostCapacity(request: Omit<CapacityRequest, "bytes" | "queuedAt" | "admittedAt">, now = Date.now(), memoryMaxBytes?: number, expectedBytes?: number) {
   const policy = readCapacityPolicy();
-  if (!policy) return { configured: false as const };
+  if (!policy) {
+    if (memoryMaxBytes !== undefined) throw new Error("explicit --memory-max requires configured host capacity");
+    return { configured: false as const };
+  }
+  if (memoryMaxBytes !== undefined && request.owner.kind !== "process") throw new Error("smaller commitments require a capped command owner");
+  const bytes = agentMemoryCommitment(policy, request.lane, memoryMaxBytes);
+  if (expectedBytes !== undefined && bytes !== expectedBytes) throw new Error("host capacity commitment changed while waiting; retry the command");
   recoverHostCapacity();
   const store = openCapacityStore(capacityStorePath());
   try {
-    return { configured: true as const, policy, ...store.poll({ ...request, bytes: policy.profiles[request.lane], queuedAt: now, admittedAt: null }, policy, readCapacityObservation, now) };
+    return { configured: true as const, policy, ...store.poll({ ...request, bytes, queuedAt: now, admittedAt: null }, policy, readCapacityObservation, now) };
   } finally { store.close(); }
 }
 
@@ -54,6 +60,7 @@ export async function runWithHostCapacity(input: {
   lane: CapacityClass;
   job: string;
   command: string[];
+  memoryMaxBytes?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -65,7 +72,11 @@ export async function runWithHostCapacity(input: {
     child.once("error", reject);
     child.once("close", (code) => resolve(code ?? 1));
   });
-  if (!policy) return execute(input.command);
+  if (!policy) {
+    if (input.memoryMaxBytes !== undefined) throw new Error("explicit --memory-max requires configured host capacity");
+    return execute(input.command);
+  }
+  const bytes = agentMemoryCommitment(policy, input.lane, input.memoryMaxBytes);
   if (process.platform !== "linux") throw new Error("configured host capacity requires Linux cgroup accounting");
   recoverHostCapacity();
   const id = randomUUID().replaceAll("-", "");
@@ -76,12 +87,21 @@ export async function runWithHostCapacity(input: {
   const request = { id, job: input.job, lane: input.lane, owner: currentCapacityOwner(), cgroup };
   const started = Date.now();
   let lastNotice = -Infinity;
+  let admittedMode = policy.mode;
   try {
+    // Set and verify the caller's explicit bound before admission. It is also a hard bound in shadow mode;
+    // default shadow commands retain their existing uncapped behavior. Machine holders never use this path.
+    if (input.memoryMaxBytes !== undefined) {
+      systemctl(["set-property", "--runtime", slice, `MemoryMax=${bytes}`, "MemorySwapMax=0"]);
+      if (systemctl(["show", slice, "--property=MemoryMax", "--value"]) !== String(bytes)) {
+        throw new Error("explicit --memory-max could not be verified; refusing under-reserved execution");
+      }
+    }
     for (;;) {
       input.signal?.throwIfAborted();
-      const result = pollHostCapacity(request);
+      const result = pollHostCapacity(request, Date.now(), input.memoryMaxBytes, bytes);
       if (!result.configured) throw new Error("host capacity policy disappeared during admission; retry the command");
-      if (result.outcome === "admitted") break;
+      if (result.outcome === "admitted") { admittedMode = result.mode; break; }
       const waited = Date.now() - started;
       if (waited - lastNotice >= 30_000 || result.outcome === "unavailable") {
         input.onWait?.(`${input.job}: ${result.decision.reason}; waited ${Math.round(waited / 1000)}s; oldest queue ${Math.round(result.decision.oldestWaitMs / 1000)}s`);
@@ -90,9 +110,10 @@ export async function runWithHostCapacity(input: {
       if (result.outcome === "unavailable") return 75;
       await pause(1000, undefined, { signal: input.signal });
     }
-    if (policy.mode === "enforce") systemctl(["set-property", "--runtime", slice, `MemoryMax=${policy.profiles[input.lane]}`, "MemorySwapMax=0"]);
+    if ((policy.mode === "enforce" || admittedMode === "enforce") && input.memoryMaxBytes === undefined) systemctl(["set-property", "--runtime", slice, `MemoryMax=${bytes}`, "MemorySwapMax=0"]);
     return await execute(["systemd-run", "--user", "--scope", "--quiet", "--collect", `--slice=${slice}`, `--unit=slipjay-capacity-${id}.scope`,
-      "--property=TimeoutStopSec=5s", "--", ...input.command], { ...(input.env ?? process.env), SLIPJAY_HOST_CAPACITY_ID: id, [SYSTEMD_SLICE_ENV]: slice });
+      "--property=TimeoutStopSec=5s", "--", ...input.command], { ...(input.env ?? process.env), SLIPJAY_HOST_CAPACITY_ID: id,
+        SLIPJAY_HOST_CAPACITY_BYTES: input.memoryMaxBytes === undefined ? "" : String(bytes), [SYSTEMD_SLICE_ENV]: slice });
   } finally {
     // Stop only the exact unit we allocated, then verify the cgroup before releasing its reservation. A lost SSH or
     // SIGKILL leaves it recorded for the next caller's identity-checked recovery instead of trusting an old PID.
