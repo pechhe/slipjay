@@ -1,3 +1,4 @@
+import { workspaceClaimRefusal, withUnclaimedWorkspace, WorkspaceClaimError } from "./workspace-claims.ts";
 import { existsSync } from "node:fs";
 import { readdir, rm, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
@@ -220,7 +221,7 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
     // race a spare being claimed, and a claim cannot race a tree being removed.
     let result: EvictionResult | null;
     try {
-      result = await withWorkspaceTransaction(`pool:${integrationRoot}`, async (): Promise<EvictionResult | null> => {
+      result = await withWorkspaceTransaction(`pool:${integrationRoot}`, async (): Promise<EvictionResult | null> => withUnclaimedWorkspace(root, "evict generated material", async (check) => {
         // A claim or a resume may have landed while this pass decided, so judge again inside the lock.
         const holders = await workspaceHolders(root, { processes: options.processes ?? null }).catch(() => null);
         if (holders === null || holders.length) return null;
@@ -245,6 +246,7 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
           });
           return null;
         }
+        await check();
         const removed: string[] = [];
         const failed: string[] = [];
         const generated = await generatedPathsIn(root, integrationRoot).catch(() => [] as string[]);
@@ -260,8 +262,11 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
           removedPaths: removed, failedPaths: failed,
           freedBytes: before !== null && after !== null ? Math.max(0, before - after) : null,
         };
-      }, { waitMs: 60_000 });
+      }), { waitMs: 60_000 });
     } catch (error) {
+      if (error instanceof WorkspaceClaimError) {
+        outcome.skipped.push({ name: workspace.name, reason: error.message }); continue;
+      }
       // Only a busy pool is a skip: anything else is a failure the caller must see.
       if ((error as { code?: string } | null | undefined)?.code === "ELOCKED") {
         outcome.skipped.push({ name: workspace.name, reason: "the pool is busy; it will be judged again next pass" });
@@ -279,6 +284,8 @@ async function decide(
   workspace: WorkspaceEntry, root: string, integrationRoot: string, now: number,
   options: { idleMs?: number; processes?: ProcessWorkingDirectory[] | null; plan?: boolean },
 ): Promise<EvictionDecision> {
+  const custody = await workspaceClaimRefusal(root);
+  if (custody) return { evict: false, reason: custody };
   const holders = await workspaceHolders(root, { processes: options.processes ?? null }).catch(() => null);
   const activity = workspace.metadata?.lastActivityAt;
   const lastActivityAt = typeof activity === "string" ? Date.parse(activity) : null;

@@ -1,3 +1,4 @@
+import { workspaceClaimRefusal, withUnclaimedWorkspace } from "./workspace-claims.ts";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -461,6 +462,8 @@ export async function withinWorkspaceStorage(root: string): Promise<boolean> {
 export async function missingCheckoutRefusal(cwd: string, workspace: WorkspaceEntry): Promise<string | null> {
   const context = await workspaceContext(cwd);
   if (!context) return "cannot be checked outside a Jujutsu repository";
+  const custody = await workspaceClaimRefusal(workspace.root);
+  if (custody) return custody;
   // The obligations retirement keeps for a present checkout hold for a missing one too.
   const metadata = workspace.metadata ?? await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) return "has pending runner facts; reconnect from that workspace to deliver them before removal";
@@ -635,6 +638,8 @@ export async function workspaceRegistered(integrationRoot: string, workspaceName
 export async function finishMissingRetirement(integrationRoot: string, workspaceName: string, workspacePath: string): Promise<void> {
   // Callers hold allocate:<repository>; take writer second, as normal release does.
   await withWorkspaceTransaction(`writer:${workspaceName}`, async () => {
+    const custody = await workspaceClaimRefusal(workspacePath);
+    if (custody) throw new Error(custody);
     const registered = await workspaceRegistered(integrationRoot, workspaceName, workspacePath)
       .catch((error: unknown) => { throw new Error(`the repository's workspaces could not be read to finish ${workspaceName}: ${error instanceof Error ? error.message : String(error)}`); });
     if (registered) {
@@ -672,6 +677,8 @@ export async function forgetWorkspace(integrationRoot: string, workspaceName: st
  * judges removal by the same rules.
  */
 export async function removalRefusal(workspace: { name: string; root: string }, metadata: WorkspaceMetadata | null | undefined): Promise<string | null> {
+  const custody = await workspaceClaimRefusal(workspace.root);
+  if (custody) return custody;
   if (!await withinWorkspaceStorage(workspace.root))
     return "Refusing to remove a workspace outside ~/.slipjay/workspaces, ~/.slipway/workspaces and ~/.pi/workspaces";
   if (hasPendingRunnerFacts(metadata ?? null)) return `jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`;
@@ -687,6 +694,13 @@ export async function removalRefusal(workspace: { name: string; root: string }, 
  * to its evidence during the copy is refused too (each throws `WorkingCopyChangedError`).
  */
 export async function retireWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks = {}, options: { expectedCommitId?: string; retainMaterial?: boolean } = {}): Promise<void> {
+  return withUnclaimedWorkspace(workspace.root, "retire checkout", async (check) => {
+    await check();
+    await retireUnclaimedWorkspace(integrationRoot, workspace, { ...hooks, beforeForget: async () => { await check(); await hooks.beforeForget?.(); } }, options);
+  }, { retired: true });
+}
+
+async function retireUnclaimedWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks, options: { expectedCommitId?: string; retainMaterial?: boolean }): Promise<void> {
   const metadata = await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) throw new Error(`jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`);
   await runWorkspaceTeardown(integrationRoot, workspace, { timeoutMs: hooks.teardownTimeoutMs });

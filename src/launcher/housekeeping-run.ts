@@ -5,6 +5,7 @@
 // `--release`, ignoring the landing's processes listed by `--ignore`, and sweeps whatever the
 // interval. It is an executable entry: nothing in src/lib imports it, and
 // workspace-housekeeping.ts spawns it.
+import { withManagedCleanupWorker } from "../lib/workspace/workspace-claim-activation.ts";
 import { workspaceContext } from "../lib/infra/workspace-jj.ts";
 import { readBuildThroughRunner, runnerLocation } from "../lib/runner/runner-client.ts";
 import { runHousekeeping } from "../lib/workspace/workspace-housekeeping.ts";
@@ -15,6 +16,7 @@ const root = args.at(-1);
 const option = (name: string) => { const index = args.indexOf(name); return index >= 0 && index + 1 < args.length - 1 ? args[index + 1] : undefined; };
 const landing = args.includes("--landing");
 try {
+  await withManagedCleanupWorker(async () => {
   if (!root || root.startsWith("--")) throw new Error("housekeeping needs the integration root");
   const released = option("--release");
   const context = released ? await workspaceContext(released) : null;
@@ -33,6 +35,7 @@ try {
     for (const skipped of outcome.result.skipped) if (skipped.landed) console.log(`Kept landed workspace ${skipped.name}: ${skipped.reason}`);
   }
   console.log(new Date().toISOString(), "housekeeping:", JSON.stringify(outcome));
+  });
 } catch (caught) {
   const error = caught as Error | null | undefined;
   console.error(new Date().toISOString(), "housekeeping failed:", error?.stack ?? error);

@@ -1,3 +1,4 @@
+import { workspaceClaimRefusal } from "./workspace-claims.ts";
 import type { WorkspaceEntry, WorkspaceMetadata } from "../infra/workspace-jj.ts";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
@@ -53,6 +54,8 @@ export interface SweepOptions {
   issueClosed?: (repositoryRoot: string, issueNumber: number) => Promise<boolean | null> | boolean | null;
   /** Reads Build for the default `issueClosed` in a Build-tracked repository; without it a Build item's state is unknown. */
   readBuild?: BuildReader;
+  /** Host/test barrier after scan; removal always rechecks authority. */
+  beforeRemove?: (root: string) => Promise<void>;
 }
 
 /**
@@ -98,6 +101,7 @@ export async function sweepDisposableWorkspaces(cwd: string = process.cwd(), opt
         else skip(describeRetention(cleaned));
         continue;
       }
+      await options.beforeRemove?.(workspace.root);
       await removeWorkspace(judge.context.integration.root, workspace.name, { retainMaterial: true, ...decision.issueBound ? { allowIssue: true } : {} });
       removed.push(workspace.name);
     } catch (error) {
@@ -152,6 +156,8 @@ async function sweepJudge(cwd: string, options: SweepOptions, { readOnly }: { re
   };
   const decide = async (workspace: InspectedWorkspace): Promise<SweepDecision> => {
     if (workspace.name === "default") return keep("integration checkout", false);
+    const custody = workspace.root ? await workspaceClaimRefusal(workspace.root) : null;
+    if (custody) return keep(custody);
     // Without its metadata, whether it is a spare, an Issue's or owes the runner facts is unknown.
     if (!await metadataReadable(workspace.name)) return keep("metadata unreadable");
     if (!workspace.root || !existsSync(workspace.root)) {

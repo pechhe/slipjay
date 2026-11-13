@@ -81,3 +81,12 @@ export type { ArtifactChunk, CommandArtifact, CommandEvidence, LandingOutcome, C
 export type { SubmissionHandoff } from "./landing/submission-handoff.ts";
 
 export { importSourceBundle } from "./landing/submission-source-export.ts";
+
+// Supported environment-local managed custody contract (v1).
+export { acquireExistingWorkspaceClaim } from "./workspace/workspace-claim-service.ts";
+export type { ManagedClaimRequest } from "./workspace/workspace-claim-service.ts";
+export { releaseWorkspaceClaim, markWorkspaceClaimRecovery, transferWorkspaceClaim, workspaceClaimStatus, WorkspaceClaimError } from "./workspace/workspace-claims.ts";
+export type { ClaimAcquisition, AcquiredClaim, ClaimMutation, ClaimRecovery, ClaimStatus, ClaimView } from "./workspace/workspace-claims.ts";
+export { claimController } from "./workspace/workspace-claim-identity.ts";
+export type { ClaimController } from "./workspace/workspace-claim-identity.ts";
+export { workspaceClaimCapability, activateWorkspaceClaims, requireWorkspaceClaimActivation, withManagedCleanupWorker } from "./workspace/workspace-claim-activation.ts";

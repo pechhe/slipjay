@@ -1,3 +1,7 @@
+import { acquireWorkspaceClaim, resetWorkspaceClaimGeneration, assertWorkspaceNotRetiring } from "./workspace-claims.ts";
+import type { AcquiredClaim } from "./workspace-claims.ts";
+import { requireWorkspaceClaimActivation } from "./workspace-claim-activation.ts";
+import type { ManagedClaimRequest } from "./workspace-claim-service.ts";
 import type { WorkspaceContext, WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -43,6 +47,7 @@ export type CreatedWorkspace<Readiness = unknown> = WorkspaceContext & {
   readiness: Readiness;
   /** Where this start spent its time (see start-steps.ts). */
   steps: StartSteps;
+  claim?: AcquiredClaim;
 };
 
 /** A start or a resume is use: the checkout's idle clock (see workspace-eviction) starts here. */
@@ -54,7 +59,7 @@ async function touchActivity(name: string): Promise<void> {
 
 /** `base` is the commit a new workspace starts from instead of the integration head (see `resolveStartBase`). */
 /** `attemptId` makes the start durable and recoverable as that allocation attempt (see workspace-attempts). */
-type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; attemptId?: string; hooks?: WorkspaceCreationHooks<Readiness>; steps?: StartSteps };
+type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; attemptId?: string; claim?: ManagedClaimRequest; hooks?: WorkspaceCreationHooks<Readiness>; steps?: StartSteps };
 type RecoveryIdentity = { changeId?: string; commitId?: string };
 type AssignmentOptions = {
   issueNumber?: number;
@@ -365,11 +370,17 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
   if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
   // Before the allocation lock, so concurrent starts never queue behind each other's fetch.
   const { attemptId } = options;
+  if (options.claim) await requireWorkspaceClaimActivation(options.claim.activationId);
   if (attemptId) await beginAttempt(attemptId, context.integration.root, options.issueNumber ?? null);
   const steps: StartSteps = {};
   try {
     if (await mayStartFromIntegrationHead(cwd, context, options)) await timed(steps, "fetch", () => refreshIntegration(context));
-    const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, () => createWorkspaceUnlocked(task, cwd, { ...options, steps }));
+    const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, async () => {
+      const assigned = await createWorkspaceUnlocked(task, cwd, { ...options, steps });
+      if (options.claim) assigned.workspace.claim = await acquireWorkspaceClaim(assigned.context.current.root, assigned.context.integration.root,
+        assigned.context.current.name, options.claim, options.claim.generation);
+      return assigned;
+    });
     if (attemptId) await updateAttempt(attemptId, { status: "preparing" });
     // Concurrent starts that resolve to one checkout (the same Issue, or a bind) prepare it in turn.
     const created = await withWorkspaceTransaction(`prepare:${allocation.context.current.root}`, () => ready(allocation)) as CreatedWorkspace<Readiness>;
@@ -562,6 +573,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
     throw new Error("A start base needs a new workspace: start from the integration checkout and without an Issue");
   }
   if (context.current.name !== "default") {
+    await assertWorkspaceNotRetiring(context.current.root);
     await assertWorkspaceMutationAllowed(context);
     await assignAttempt(options.attemptId, context.current.name, context.current.root, false);
     await touchActivity(context.current.name);
@@ -572,6 +584,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
     if (existing?.root) {
       const resumed = await workspaceContext(existing.root);
       if (!resumed) throw new Error(`Issue #${issueNumber} workspace disappeared during resume`);
+      await assertWorkspaceNotRetiring(resumed.current.root);
       await assertWorkspaceMutationAllowed(resumed);
       await assignAttempt(options.attemptId, resumed.current.name, existing.root, false);
       await touchActivity(resumed.current.name);
@@ -597,6 +610,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
     const baseSha = base ?? await jj(cwd, ["log", "-r", context.integrationBranch, "--no-graph", "-T", "commit_id"]);
     await addWorkspace(hooks, context.integration.root, workspacePath, baseSha, name);
   }
+  await resetWorkspaceClaimGeneration(workspacePath);
   // A fresh or claimed workspace is a new generation even under a reused Issue name
   // and path: never carry an older one's implementation binding or creation proof.
   await rm(metadataPath(name), { force: true });

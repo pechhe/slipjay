@@ -215,11 +215,10 @@ async function releaseOperation(workspacePath: string, options: {
   if (holders.length) return await refused(`in use by a live process: ${describeHolders(holders)}`);
   if ((await workspaceMetadata(workspace.name))?.spare === true) return await refused("it is a pool spare");
 
-  // `allocate:` is the key a start or a resume takes, and `writer:` the one a removal takes:
-  // holding both is what makes "cleanup first, resume waits" true rather than hoped for.
-  return await withWorkspaceTransaction(`allocate:${integrationRoot}`, () =>
-    withWorkspaceTransaction(`writer:${workspace.name}`, async (): Promise<ReleaseResult> => {
-      // Re-read under both locks: a concurrent call with the same id may have finished.
+  // Serialize releases by name; canonical custody fencing below interlocks managed admission.
+  // Do not hold the repository allocation lock across archive or teardown.
+  return await withWorkspaceTransaction(`writer:${workspace.name}`, async (): Promise<ReleaseResult> => {
+      // Re-read under the writer: a concurrent call with the same id may have finished.
       const raced = await readReleaseResult(operationId);
       if (raced && resolve(raced.workspacePath) !== absolute) {
         return { state: "refused", operationId, workspacePath: absolute,
@@ -298,5 +297,5 @@ async function releaseOperation(workspacePath: string, options: {
       }
       return await record({ state: "retired", operationId, workspacePath: absolute, workspaceName: workspace.name,
         archiveId: archive.id, commitId: archive.commitId, at });
-    }, { waitMs: 120_000 }), { waitMs: 120_000 });
+    }, { waitMs: 120_000 });
 }

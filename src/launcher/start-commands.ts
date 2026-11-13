@@ -1,3 +1,5 @@
+import { readClaimInput } from "./claim-commands.ts";
+import type { ManagedClaimRequest } from "../lib/workspace/workspace-claim-service.ts";
 import { recordClientFactsInBackground } from "../lib/runner/runner-client.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
 import { hostname } from "node:os";
@@ -9,7 +11,7 @@ import type { Readable } from "node:stream";
 import { integrationRoot } from "./command-context.ts";
 import { fileURLToPath } from "node:url";
 
-type StartOptions = { integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; base: string | undefined; attemptId: string | undefined; resultFd: number | undefined; task: string };
+type StartOptions = { claimStdin: boolean; integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; base: string | undefined; attemptId: string | undefined; resultFd: number | undefined; task: string };
 
 /**
  * `start` flags, which precede the task: `--integration` allocates from the
@@ -22,11 +24,12 @@ type StartOptions = { integration: boolean; json: boolean; refill: boolean; issu
  * `--json` prints one JSON result object. Null when the arguments are invalid.
  */
 function startOptions(args: string[]): StartOptions | null {
-  const options: StartOptions = { integration: false, json: false, refill: false, issueNumber: undefined, base: undefined, attemptId: undefined, resultFd: undefined, task: "" };
+  const options: StartOptions = { claimStdin: false, integration: false, json: false, refill: false, issueNumber: undefined, base: undefined, attemptId: undefined, resultFd: undefined, task: "" };
   let index = 0;
   for (; index < args.length; index += 1) {
     const flag = args[index];
-    if (flag === "--integration") options.integration = true;
+    if (flag === "--claim-stdin") options.claimStdin = true;
+    else if (flag === "--integration") options.integration = true;
     else if (flag === "--json") options.json = true;
     else if (flag === "--refill") options.refill = true;
     else if (flag === "--attempt") {
@@ -95,7 +98,9 @@ export async function runStart(rest: string[]): Promise<void> {
     // A metric only: a host whose processes cannot be read still starts, from a fresh workspace.
     const spareCount = (await readySpares(root).catch(() => [])).length;
     const task = options.task || `Issue #${options.issueNumber}`;
+    const claim = options.claimStdin ? await readClaimInput() as ManagedClaimRequest : undefined;
     const result = await createWorkspace(task, root, {
+      ...claim ? { claim } : {},
       ...options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {},
       ...options.attemptId ? { attemptId: options.attemptId } : {},
     });
@@ -117,6 +122,7 @@ export async function runStart(rest: string[]): Promise<void> {
     if (options.resultFd === undefined) console.log(result.workspacePath);
     else {
       writeSync(options.resultFd, `${JSON.stringify({
+        ...(result.claim ? { claim: result.claim } : {}),
         workspacePath: result.workspacePath, workspaceName: result.current.name, integrationRoot: result.integration.root,
         issueNumber: options.issueNumber ?? null, created: result.created ?? false, reused: result.reused ?? false, pooled: Boolean(result.pooled),
         ...(options.attemptId ? { attemptId: options.attemptId } : {}),

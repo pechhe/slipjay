@@ -1,3 +1,4 @@
+import { workspaceClaimRefusal, withUnclaimedWorkspace } from "./workspace-claims.ts";
 import { existsSync } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -91,6 +92,8 @@ export async function findOrphanedCheckouts({ now = Date.now() }: { now?: number
 
 async function disposition(orphan: Omit<OrphanedCheckout, "action" | "reason">, holders: Awaited<ReturnType<typeof workspaceHolders>>, now: number): Promise<Pick<OrphanedCheckout, "action" | "reason">> {
   const keep = (reason: string) => ({ action: "keep" as const, reason });
+  const custody = await workspaceClaimRefusal(orphan.root);
+  if (custody) return keep(custody);
   if (!holders) return keep("process working directories unavailable");
   if (holders.length) return keep(`in use by a live process: ${describeHolders(holders)}`);
   if (processAlive((await workspaceMetadata(orphan.name))?.preparingPid)) return keep("a spare is being prepared here");
@@ -119,7 +122,9 @@ export async function retireOrphanedCheckouts(options: { now?: number } = {}): P
         const again = await inspectOrphan(orphan.root, orphan.name, new Map(), undefined, options.now ?? Date.now());
         if (again?.action !== "remove") continue;
         // Not `retireWorkspace`: an orphan has no registration to forget and no policy whose teardown applies.
-        await discardCheckout(orphan.root);
+        try {
+          await withUnclaimedWorkspace(orphan.root, "discard orphan", async (check) => { await check(); await discardCheckout(orphan.root); }, { retired: true });
+        } catch { continue; }
         removed.push(orphan.root);
       }
       return removed;

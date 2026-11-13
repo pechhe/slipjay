@@ -1,3 +1,4 @@
+import { workspaceClaimRefusal } from "./workspace-claims.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
@@ -113,6 +114,8 @@ export async function occupiedPaths(paths: string[]): Promise<Map<string, string
   if (!processes) throw new ProcessesUnreadableError();
   const occupied = new Map<string, string>();
   for (const path of paths) {
+    const custody = await workspaceClaimRefusal(path);
+    if (custody) { occupied.set(path, custody); continue; }
     const holders = await workspaceHolders(path, { processes, ignore: new Set([process.pid]) });
     if (holders?.length) occupied.set(path, describeHolders(holders));
   }

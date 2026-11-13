@@ -1,3 +1,4 @@
+import { withUnclaimedWorkspace } from "./workspace-claims.ts";
 import { timed } from "./start-steps.ts";
 import { readDiskConfig } from "../host-disk/disk-config.ts";
 import { readHostUsage } from "../host-disk/disk-usage.ts";
@@ -202,7 +203,7 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<Provi
       // An interrupted add may have left a half-made checkout under this spare's own name.
       if (!await withinWorkspaceStorage(workspacePath)) throw new Error(`Spare ${name} is outside workspace storage`);
       await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });
-      await discardCheckout(workspacePath);
+      await withUnclaimedWorkspace(workspacePath, "discard partial spare", async () => discardCheckout(workspacePath), { retired: true });
       await jj(root, ["workspace", "add", "--name", name, "--revision", context.integrationBranch, workspacePath]);
     }
     await linkSharedPaths(root, workspacePath);
