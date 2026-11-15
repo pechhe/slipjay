@@ -165,6 +165,11 @@ The managed entry points (CLI, housekeeping, refill, trash) publish version-1
 participation before work and withdraw on completion. The barrier inventories
 supported managed executable entry points, checks exact controller identities
 against participation records, and refuses any unannounced/unknown worker.
+It takes one inventory snapshot, then gives each sampled worker that is neither
+announced nor gone up to 3 seconds to announce with the same identity or exit:
+a participating command is unannounced while it starts and as it exits, so
+without that window any concurrent slipjay command would refuse custody
+operations. An old worker does neither and is refused once the window ends.
 Linux scopes process inventory to the authority HOME; Darwin uses its process
 inventory conservatively. New workers participate in the final authority, so
 allowing them does not rely on their finishing first. An old worker must finish

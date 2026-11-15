@@ -14,6 +14,13 @@ const workersHome = () => join(stateHome(), "managed-cleanup-workers");
 const activationPath = () => join(stateHome(), "custody-activation.json");
 export type CleanupInventory = { complete: boolean; pids: number[] };
 export type CleanupInventoryReader = () => Promise<CleanupInventory>;
+/**
+ * A participating CLI is unannounced while it starts (before its record is written) and as it exits
+ * (after its record is removed), so any concurrent slipjay command would otherwise refuse custody
+ * operations. Each sampled worker gets this long to announce or exit; an old worker does neither.
+ */
+export type DrainSettle = { windowMs: number; pollMs: number };
+const drainSettle: DrainSettle = { windowMs: 3000, pollMs: 25 };
 const isManaged = (args: string[]) => args.slice(0, 3).some((arg) =>
   /\/src\/launcher\/(?:workspace|housekeeping-run|spare-refill|trash-empty)\.ts$/.test(arg)
   || /\/\.bun\/bin\/(?:slipjay|slipway)$/.test(arg));
@@ -74,36 +81,60 @@ function sampledWorkerExited(pid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException | null)?.code === "ESRCH"; }
   return false;
 }
-async function barrier(reader: CleanupInventoryReader) {
-  const inventory = await reader();
-  if (!inventory.complete) throw new WorkspaceClaimError("CLAIM_ACTIVATION_UNKNOWN", "Managed cleanup worker inventory unavailable; drain cannot be established");
+async function announcedControllers(): Promise<ClaimController[]> {
   const announced: ClaimController[] = [];
   try {
     for (const name of await readdir(workersHome())) {
-      const record = JSON.parse(await readFile(join(workersHome(), name), "utf8")) as { version?: number; controller?: ClaimController };
+      // A record removed between listing and reading is a worker finishing, not an unreadable one.
+      const text = await readFile(join(workersHome(), name), "utf8").catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (text === null) continue;
+      const record = JSON.parse(text) as { version?: number; controller?: ClaimController };
       if (record.version === 1 && record.controller) announced.push(record.controller);
     }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new WorkspaceClaimError("CLAIM_ACTIVATION_UNKNOWN", "Managed worker participation records unreadable"); }
-  const old: number[] = [];
-  for (const pid of inventory.pids.filter((pid) => pid !== process.pid)) {
-    const identity = await claimController(pid);
-    if ((!identity || !announced.some((entry) => sameClaimController(entry, identity))) && !sampledWorkerExited(pid)) old.push(pid);
-  }
-  if (old.length) throw new WorkspaceClaimError("CLAIM_ACTIVATION_DRAIN_REQUIRED", `Prior or unknown managed cleanup workers must drain: ${old.join(", ")}`);
+  return announced;
 }
-export async function activateWorkspaceClaims(reader: CleanupInventoryReader = managedCleanupInventory): Promise<{ version: 1; activationId: string }> {
+/** The sampled process announced itself, or provably no longer runs (gone, or its pid now names another process). */
+async function workerSettled(pid: number, identity: ClaimController | null, announced: ClaimController[]): Promise<boolean> {
+  if (identity && announced.some((entry) => sameClaimController(entry, identity))) return true;
+  if (sampledWorkerExited(pid)) return true;
+  if (!identity) return false;
+  const current = await claimController(pid);
+  return current !== null && !sameClaimController(current, identity);
+}
+// One inventory snapshot, as before: workers starting after it are outside this barrier's promise.
+async function barrier(reader: CleanupInventoryReader, settle: DrainSettle) {
+  const inventory = await reader();
+  if (!inventory.complete) throw new WorkspaceClaimError("CLAIM_ACTIVATION_UNKNOWN", "Managed cleanup worker inventory unavailable; drain cannot be established");
+  let pending = await Promise.all(inventory.pids.filter((pid) => pid !== process.pid)
+    .map(async (pid) => ({ pid, identity: await claimController(pid) })));
+  const deadline = Date.now() + settle.windowMs;
+  for (;;) {
+    const announced = await announcedControllers();
+    const settled = await Promise.all(pending.map((worker) => workerSettled(worker.pid, worker.identity, announced)));
+    pending = pending.filter((_, index) => !settled[index]);
+    if (!pending.length) return;
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, settle.pollMs));
+  }
+  throw new WorkspaceClaimError("CLAIM_ACTIVATION_DRAIN_REQUIRED", `Prior or unknown managed cleanup workers must drain: ${pending.map((worker) => worker.pid).join(", ")}`);
+}
+export async function activateWorkspaceClaims(reader: CleanupInventoryReader = managedCleanupInventory, settle: DrainSettle = drainSettle): Promise<{ version: 1; activationId: string }> {
   return withWorkspaceTransaction("custody-activation", async () => {
-    await barrier(reader);
+    await barrier(reader, settle);
     const existing = await readFile(activationPath(), "utf8").then((text) => JSON.parse(text) as { version?: number; activationId?: string }, () => null);
     const result = { version: 1 as const, activationId: existing?.version === 1 && typeof existing.activationId === "string" ? existing.activationId : randomUUID() };
     await writeWorkspaceJson(activationPath(), result);
     return result;
   });
 }
-export async function requireWorkspaceClaimActivation(id: string, reader: CleanupInventoryReader = managedCleanupInventory): Promise<void> {
+export async function requireWorkspaceClaimActivation(id: string, reader: CleanupInventoryReader = managedCleanupInventory, settle: DrainSettle = drainSettle): Promise<void> {
   const activation = await readFile(activationPath(), "utf8").then((text) => JSON.parse(text) as { activationId?: string }, () => null);
   if (!id || activation?.activationId !== id) throw new WorkspaceClaimError("CLAIM_CAPABILITY_REQUIRED", "Ownership activation capability missing or changed");
-  await barrier(reader);
+  await barrier(reader, settle);
 }
 export function workspaceClaimCapability() {
   return { version: 1, capability: "generation-bound-custody", protocol: 1, platform: platform(), supported: ["linux", "darwin"].includes(platform()),

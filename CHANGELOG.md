@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Custody operations no longer refuse because another slipjay command is starting (SJ-240).** The activation
+  drain barrier, which every claim acquire, release, transfer and recover runs, refused
+  `CLAIM_ACTIVATION_DRAIN_REQUIRED` for any same-HOME slipjay process that had not yet written its worker record or had
+  just removed it, which every participating command is while it starts and exits. On a busy Linux host a T3 custody
+  release kept losing that race to concurrent `claims status` calls and the claim never released. The barrier still takes
+  one inventory snapshot, and now gives each sampled worker up to 3 seconds to announce with the same identity or exit
+  before refusing; an old worker that never announces is still refused.
 - **The host disk policy reads the disk its state lives on, so macOS sheds again.** `slipjay disk` and `maintain` measured
   `/`, which on macOS is the sealed system volume holding only the OS: it read 40% while the Data volume holding
   `~/.slipjay`, the workspaces, the ballast and `~/runs` read 96%, so the host stayed `ok` at warn 80 and never shed,

@@ -14,6 +14,8 @@ import { workspaceClaimStatus } from "../../src/lib/workspace/workspace-claims.t
 
 const exec = promisify(execFile);
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
+// No settling: an unannounced live worker refuses at once, as a sampled old worker always would.
+const immediate = { windowMs: 0, pollMs: 1 };
 
 test("activation refuses old and unknown managed workers, then succeeds after their owned process drains", async () => {
   const f = await project();
@@ -28,6 +30,7 @@ test("activation refuses old and unknown managed workers, then succeeds after th
     assert.ok(inventory.complete && inventory.pids.includes(old.pid!));
     assert.ok(!inventory.pids.includes(foreign.pid!), "another authority HOME does not block this activation");
     await assert.rejects(activateWorkspaceClaims(async () => ({ complete: false, pids: [] })), { code: "CLAIM_ACTIVATION_UNKNOWN" });
+    // The default settle window still refuses a worker that never announces.
     await assert.rejects(activateWorkspaceClaims(), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
     let sampledBeforeExit = inventory;
     const ready = await activateWorkspaceClaims(async () => {
@@ -37,9 +40,9 @@ test("activation refuses old and unknown managed workers, then succeeds after th
       return sampledBeforeExit;
     });
     await requireWorkspaceClaimActivation(ready.activationId, async () => sampledBeforeExit);
-    await assert.rejects(requireWorkspaceClaimActivation(ready.activationId, async () => ({ complete: true, pids: [foreign.pid!] })), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+    await assert.rejects(requireWorkspaceClaimActivation(ready.activationId, async () => ({ complete: true, pids: [foreign.pid!] }), immediate), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
     for (const pid of [0, -1, 1.5, Number.NaN]) {
-      await assert.rejects(activateWorkspaceClaims(async () => ({ complete: true, pids: [pid] })), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+      await assert.rejects(activateWorkspaceClaims(async () => ({ complete: true, pids: [pid] }), immediate), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
     }
     const kill = process.kill.bind(process);
     for (const failure of [Object.assign(new Error("Permission denied"), { code: "EPERM" }), Object.assign(new Error("Unknown failure"), { code: "EIO" }), new Error("Unproved process absence"), undefined, null]) {
@@ -48,14 +51,30 @@ test("activation refuses old and unknown managed workers, then succeeds after th
         return kill(pid, signal);
       });
       try {
-        await assert.rejects(activateWorkspaceClaims(async () => sampledBeforeExit), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
-        await assert.rejects(requireWorkspaceClaimActivation(ready.activationId, async () => sampledBeforeExit), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+        await assert.rejects(activateWorkspaceClaims(async () => sampledBeforeExit, immediate), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
+        await assert.rejects(requireWorkspaceClaimActivation(ready.activationId, async () => sampledBeforeExit, immediate), { code: "CLAIM_ACTIVATION_DRAIN_REQUIRED" });
       } finally { probe.mockRestore(); }
     }
     assert.deepEqual(await activateWorkspaceClaims(async () => ({ complete: true, pids: [] })), ready, "activation replay doesn't strand prior consumers");
     await requireWorkspaceClaimActivation(ready.activationId, async () => ({ complete: true, pids: [] }));
     await assert.rejects(requireWorkspaceClaimActivation("old-capability", async () => ({ complete: true, pids: [] })), { code: "CLAIM_CAPABILITY_REQUIRED" });
   } finally { old.kill(); const exited = once(foreign, "exit"); foreign.kill(); await exited; await f.dispose(); }
+});
+
+test("custody operations let a concurrently starting slipjay command announce instead of refusing it", async () => {
+  const f = await project();
+  try {
+    const activation = await activateWorkspaceClaims();
+    for (let round = 0; round < 3; round += 1) {
+      // Sampled the moment it is spawned: a participating CLI that has not yet written its record.
+      const child = spawn("bun", [cli, "claims", "status", f.repo], { cwd: f.repo, stdio: "ignore" });
+      await once(child, "spawn");
+      const exited = once(child, "exit");
+      try {
+        await requireWorkspaceClaimActivation(activation.activationId, async () => ({ complete: true, pids: [child.pid!] }));
+      } finally { await exited; }
+    }
+  } finally { await f.dispose(); }
 });
 
 test("managed allocation claims before preparation/publication, including resume", async () => {
