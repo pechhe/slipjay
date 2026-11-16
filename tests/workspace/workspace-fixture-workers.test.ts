@@ -7,6 +7,8 @@ import { test, vi } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { drainFixtureWorkers } from "../support/fixture-workers.ts";
 import { withTestRunner } from "../support/test-runner.ts";
+import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { recordClientFactsInBackground } from "../../src/lib/runner/runner-client.ts";
 import { spawnDetached } from "../../src/lib/workspace/workspace-background.ts";
 import { slipjayHome, transactionHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { withWorkspaceTransaction, workspaceTransactionLocks } from "../../src/lib/infra/workspace-transaction.ts";
@@ -83,6 +85,24 @@ test("opt-in transaction diagnostics identify the owner and a waiter after ten s
   }
   assert.deepEqual(await workspaceTransactionLocks(), []);
   assert.deepEqual(await readdir(transactionHome()), []);
+});
+
+test("fixture disposal joins the detached client-facts recorder before removing its checkout", async () => {
+  const f = await project({ policy: { spares: 0 } });
+  const workspace = await createWorkspace("client facts recorder", f.repo);
+  // The recorder reads this checkout (`workspaceContext`, then `jj git remote list`) before it posts,
+  // so one left running writes objects into the fixture's git store while the checkout is removed.
+  await recordClientFactsInBackground(workspace.workspacePath, [], { ...process.env, SLIPJAY_RUNNER: "http://127.0.0.1:1", SLIPJAY_RUNNER_TOKEN: "fixture-token" });
+  try {
+    const records = await readdir(process.env.SLIPJAY_BACKGROUND_WORKERS!).catch(() => []);
+    assert.equal(records.length, 1, "the recorder is registered background work");
+    const recorder = JSON.parse(await readFile(join(process.env.SLIPJAY_BACKGROUND_WORKERS!, records[0]!), "utf8")) as { pid: number; command: string[]; cwd: string };
+    assert.ok(recorder.command.some((argument) => argument.endsWith("client-facts.ts")), recorder.command.join(" "));
+    assert.equal(recorder.cwd, workspace.workspacePath);
+    await f.dispose();
+    assert.deepEqual(await readdir(process.env.SLIPJAY_BACKGROUND_WORKERS!), [], "disposal joined the recorder");
+    assert.throws(() => process.kill(recorder.pid, 0), { code: "ESRCH" }, "the joined recorder has exited");
+  } finally { await drainFixtureWorkers(); }
 });
 
 test("runner fixture joins detached API users before closing its service", async () => {

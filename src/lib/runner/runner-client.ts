@@ -7,9 +7,8 @@ import type { SubmissionHandoff } from "../landing/submission-handoff.ts";
 import { BuildRefusal, trackerIsBuild, trackerOf } from "../build/tracker.ts";
 import { buildLandingHandoff, buildSessionFrom } from "../build/build-handoff.ts";
 import type { BuildReadAction } from "../build/tracker.ts";
-import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
-import { open, link, readFile, rm, lstat } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
+import { appendFile, open, link, readFile, rm, lstat } from "node:fs/promises";
 import { SOURCE_BUNDLE_MAX_BYTES } from "../landing/submission-source-export.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
@@ -33,6 +32,7 @@ import { poolRefillLogPath, stateHome } from "../workspace/workspace-paths.ts";
 import { runnerSetting } from "../policy/machine-config.ts";
 import { RUNNER_LOCATION_ENV } from "./runner-env.ts";
 import { startLandedHousekeeping } from "../workspace/workspace-housekeeping.ts";
+import { spawnDetached } from "../workspace/workspace-background.ts";
 import { callerPids } from "../workspace/workspace-holders.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../workspace/workspace-finalization.ts";
@@ -1006,23 +1006,18 @@ export async function recordClientFacts(cwd: string, facts: ClientFact[], env: N
  * start. Facts are best effort and this never rejects: the child's failure, and a failure
  * to launch it, are one line in the background-work log (a log that cannot be opened is
  * reported on stderr). Nothing runs without a runner location.
+ *
+ * The child is background work like any other, so it is spawned through `spawnDetached` and
+ * registered: a fixture joins it before deleting a checkout, rather than racing the `jj` it runs
+ * in that checkout's git store.
  */
 export async function recordClientFactsInBackground(cwd: string, facts: ClientFact[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
   if (!runnerLocation(env)) return;
   try {
-    mkdirSync(stateHome(), { recursive: true, mode: 0o700 });
-    const log = openSync(poolRefillLogPath(), "a", 0o600);
-    try {
-      const child = spawn(process.execPath, [fileURLToPath(new URL("../../launcher/client-facts.ts", import.meta.url)), cwd, JSON.stringify(facts)], {
-        cwd, env, detached: true, stdio: ["ignore", log, log],
-      });
-      const failure = await new Promise<Error | null>((settle) => {
-        child.once("spawn", () => settle(null));
-        child.once("error", (error) => settle(error));
-      });
-      if (failure) writeSync(log, `${new Date().toISOString()} runner client facts not recorded: ${failure.message}\n`);
-      else child.unref();
-    } finally { closeSync(log); }
+    // The facts must reach the runner the caller named, which may not be this machine's.
+    const recorder = await spawnDetached([process.execPath, fileURLToPath(new URL("../../launcher/client-facts.ts", import.meta.url)), cwd, JSON.stringify(facts)], cwd, { env });
+    if (recorder.started) return;
+    await appendFile(recorder.logPath ?? poolRefillLogPath(), `${new Date().toISOString()} runner client facts not recorded: ${recorder.reason}\n`, { mode: 0o600 });
   } catch (error) {
     console.error(`Runner client facts not recorded: ${error instanceof Error ? error.message : String(error)}`);
   }

@@ -36,8 +36,12 @@ export async function startLandingFollower(root: string, options: { command?: st
   return await spawnDetached(command, root, { logPath: landingFollowLogPath() });
 }
 
-/** Spawn `command` detached in `cwd`, appending its output to the background-work log. */
-export async function spawnDetached(command: string[], cwd: string, options: { logPath?: string } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
+/**
+ * Spawn `command` detached in `cwd`, appending its output to the background-work log, and register it as background
+ * work: a fixture (or a host that joins background work) waits for it before deleting a checkout it may still read.
+ * `env` replaces the inherited environment, for work that must record against a caller's runner rather than this host's.
+ */
+export async function spawnDetached(command: string[], cwd: string, options: { logPath?: string; env?: NodeJS.ProcessEnv } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
   await mkdir(stateHome(), { recursive: true, mode: 0o700 });
   const logPath = options.logPath ?? poolRefillLogPath();
   let oversized = false;
@@ -47,6 +51,7 @@ export async function spawnDetached(command: string[], cwd: string, options: { l
     const [executable, ...args] = command;
     const child = spawn(executable!, args, {
       cwd,
+      env: options.env,
       detached: true,
       stdio: ["ignore", log, log],
     });
