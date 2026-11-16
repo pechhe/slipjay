@@ -48,7 +48,7 @@ import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
 import { HostCapacityUnavailable } from "./host-capacity-remote.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, PromotionHold, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -939,10 +939,13 @@ export function createRunnerQueue(input: {
   async function considerAutomaticPromotion(repo: string, after?: string): Promise<void> {
     const newest = log.lastLanded(repo);
     if (!newest) return;
-    const note = (commitId: string, verificationId: string, reason: string): void => {
+    /** Leaves why a promotion was refused, and what it waits on (`hold`), once per reason and hold. */
+    const note = (commitId: string, verificationId: string, reason: string, hold: PromotionHold): void => {
       const line = `Not promoting ${commitId.slice(0, 12)} automatically: ${reason}`;
-      if (!log.events({ operationId: verificationId }).some((stored) => stored.event.type === "progress" && stored.event.line === line)) {
-        append(verificationId, { type: "progress", line });
+      const same = JSON.stringify(hold);
+      const latest = log.events({ operationId: verificationId }).findLast((stored) => stored.event.type === "progress" && stored.event.line.startsWith("Not promoting "))?.event;
+      if (!(latest?.type === "progress" && latest.line === line && JSON.stringify(latest.hold) === same)) {
+        append(verificationId, { type: "progress", line, hold });
         console.error(`[runner] ${repo}: ${line}`);
       }
     };
@@ -959,14 +962,15 @@ export function createRunnerQueue(input: {
       if (!base || base.process !== "development") return;
       const own = standsFor(repo, ended.commitId);
       const ahead = newest.commitId === ended.commitId ? null : standsFor(repo, newest.commitId);
-      const reason = migrationsWithheld(verified) ?? missingPromotion(base) ?? (chosen
+      const decision = migrationsWithheld(verified) ?? missingPromotion(base);
+      const reason = decision ?? (chosen
         ? `a newer pre-verified candidate (${chosen.slice(0, 12)}) is ahead of it`
         : own ? `it ${own}`
         : ahead ? `the newest landing (${newest.commitId.slice(0, 12)}) ${ahead}`
         : null);
       // Nothing was withheld when nothing has been done with the commit: a verification of a commit that never
       // landed here, for one, says nothing.
-      if (reason) note(ended.commitId, ended.id, reason);
+      if (reason) note(ended.commitId, ended.id, reason, decision ? { kind: "decision" } : { kind: "busy" });
     };
     const choice = promotionCandidate(repo);
     // The pre-verification that woke this consideration is answered whether or not it is the candidate.
@@ -979,7 +983,7 @@ export function createRunnerQueue(input: {
     // A newest landing whose verification failed is left behind, and says why.
     const failed = log.verifications(repo, newest.commitId).find((entry) => entry.status === "failed");
     if (failed && !log.releases(repo, failed.commitId).length && (await releasePolicy(repo, failed.commitId))?.process === "development")
-      note(failed.commitId, failed.id, "its pre-verification failed");
+      note(failed.commitId, failed.id, "its pre-verification failed", { kind: "decision" });
     if (!choice) return;
     const { commitId, verification } = choice;
     const verified = verification.result?.type === "verified" ? verification.result : undefined;
@@ -987,36 +991,41 @@ export function createRunnerQueue(input: {
     // Only the chosen candidate promotes: an older one still queued is replaced.
     const next = newOperationId();
     supersedeAutomaticReleases(repo, commitId, next);
-    const withheld = (reason: string): void => note(commitId, verification.id, reason);
+    // What each refusal waits on (T3-700): someone deciding, the next slot, or running work.
+    const withheld = (reason: string): void => note(commitId, verification.id, reason, { kind: "decision" });
+    const busy = (reason: string): void => note(commitId, verification.id, reason, { kind: "busy" });
     // A release or a production deploy already in flight promotes what it holds; this one waits for it to end.
     const open = log.openOperations(repo).find((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"));
-    if (open) return withheld(`a ${open.kind === "release" ? "release" : "production deploy"} (${open.id}) is already open`);
+    if (open) return busy(`a ${open.kind === "release" ? "release" : "production deploy"} (${open.id}) is already open`);
     const base = await releasePolicy(repo, commitId, verified.base);
     if (!base) return withheld("its release base's policy could not be read");
     if (base.process !== "development") return;
-    const migrations = migrationsWithheld(verified);
-    if (migrations) return withheld(migrations);
     // Every decision input is the release base's, never the candidate's.
     const refuses = missingPromotion(base);
     if (refuses) return withheld(refuses);
-    const refusal = base.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
-    if (refusal) return withheld(refusal);
-    // Asked again after the reads above, which let a newer candidate pass and a release or a production deploy begin.
-    const current = promotionCandidate(repo);
-    if (current?.commitId !== commitId) return withheld(current
-      ? `a newer candidate (${current.commitId.slice(0, 12)}) passed while it was decided`
-      : "a release or production deploy now holds it");
-    const opened = log.openOperations(repo).find((entry) => entry.kind === "release");
-    if (opened) return withheld(`a release (${opened.id}) opened while it was decided`);
+    // A scheduled repository waits for its slot before its migrations are judged, so a commit the owner must decide on
+    // reads as the routine wait until a slot refuses it, and the landing agent's own release has until then (T3-700).
     if (base.promotionSchedule) {
       // The newest release that ran, automatic or confirmed by the owner, starts the interval.
       const last = log.releases(repo).find((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
       const due = nextPromotionAt(base.promotionSchedule, last ? Date.parse(last.submittedAt) : undefined, now());
       if (due > now()) {
         waitForSlot(repo, due);
-        return withheld(`waiting for the next scheduled promotion: ${describeSchedule(base.promotionSchedule)}`);
+        return note(commitId, verification.id, `waiting for the next scheduled promotion: ${describeSchedule(base.promotionSchedule)}`,
+          { kind: "slot", at: new Date(due).toISOString() });
       }
     }
+    const migrations = migrationsWithheld(verified);
+    if (migrations) return withheld(migrations);
+    const refusal = base.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
+    if (refusal) return busy(refusal);
+    // Asked again after the reads above, which let a newer candidate pass and a release or a production deploy begin.
+    const current = promotionCandidate(repo);
+    if (current?.commitId !== commitId) return busy(current
+      ? `a newer candidate (${current.commitId.slice(0, 12)}) passed while it was decided`
+      : "a release or production deploy now holds it");
+    const opened = log.openOperations(repo).find((entry) => entry.kind === "release");
+    if (opened) return busy(`a release (${opened.id}) opened while it was decided`);
     const automatic = { setting: "process", value: "development" } as const;
     append(next, { type: "submitted", kind: "release", repo, commitId, migrationsReady: false, submittedBy: `${executor.host}:automatic`, automatic });
     append(next, { type: "progress", line: `Promoting ${commitId.slice(0, 12)} automatically: process is "development" at ${verified.base.slice(0, 12)} on the release branch, and its pre-verification passed` });

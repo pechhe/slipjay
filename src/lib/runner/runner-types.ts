@@ -287,8 +287,12 @@ export type OperationEvent =
   | { type: "stage"; stage: RunnerStage; health?: RunnerHealth;
     /** On a landing's first stage when it was admitted as short: it counts toward `workers + 1`, not toward `workers`. */
     shortLanding?: true }
-  /** One line of landing progress, as the local landing printed it. */
-  | { type: "progress"; line: string }
+  /**
+   * One line of landing progress, as the local landing printed it. A "Not promoting" note carries `hold`, what the
+   * refused promotion waits on (T3-700): `decision` until someone decides, `slot` until the next scheduled promotion at
+   * `at`, `busy` until running work ends. Readers classify by it, never by the line's text.
+   */
+  | { type: "progress"; line: string; hold?: PromotionHold }
   /** An executor began a command; `host` is where it ran. */
   | { type: "run_started"; runId: string; command: string; host: string; timeoutMs?: number; purpose?: RunPurpose; attempt?: number; commandEvidence?: CommandEvidence }
   /** What a gate run's test reports said (see `test-reports.ts`); absent when the command wrote none. */
@@ -854,8 +858,15 @@ export type WatchRelease = {
   /** Image builds are deploys to the environment literally named `images`. */
   images: { commitId: string; status: "built" | "building" | "failed" | "none"; at: string | null; reason: string | null } | null;
   audit: { latest: { status: "green" | "failed" | "inconclusive"; commitId: string | null; finishedAt: string } | null; nextRunAt: string | null } | null;
-  waitingOn: { kind: "up_to_date" | "paused" | "images" | "audit" | "verification" | "deploy" | "approval" | "failed"; detail: string | null };
+  /**
+   * `withheld`: a promotion refused until someone decides (its reason in `detail`). `scheduled`: the routine wait for the
+   * next promotion slot, `at`. `failed`: a release step failed. Readers must accept a kind before a runner sends it.
+   */
+  waitingOn: { kind: "up_to_date" | "paused" | "images" | "audit" | "verification" | "deploy" | "approval" | "withheld" | "scheduled" | "failed"; detail: string | null; at?: string };
 };
+
+/** What a refused automatic promotion waits on; see the `progress` event. */
+export type PromotionHold = { kind: "decision" } | { kind: "slot"; at: string } | { kind: "busy" };
 
 export type QueueSnapshot = {
   version: 1; runner: string; seq: number; observedAt: string;

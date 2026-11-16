@@ -227,3 +227,45 @@ test("images wait precedes audit, and a live candidate outranks an image rebuild
     assert.equal(release().waitingOn.kind, "up_to_date");
   } finally { log.close(); }
 });
+
+test("a refused automatic promotion reports what it waits on from its hold, never from its text (T3-700)", () => {
+  const log = fixture();
+  try {
+    policy(log, true); publish(log);
+    log.append("verify", { type: "submitted", kind: "verification", repo: "a/repo", commitId: "candidate", submittedBy: "runner" });
+    log.append("verify", { type: "verified", base: "old", candidate: "candidate", checks: [], nonAdditiveMigrations: [] });
+    const waitingOn = () => log.snapshot("runner").repositories[0]!.release!.waitingOn;
+    const at = "2026-11-16T18:00:00.000Z";
+    const slot = "Not promoting candidate automatically: waiting for the next scheduled promotion: promotions are batched at 18:00";
+    log.append("verify", { type: "progress", line: slot, hold: { kind: "slot", at } });
+    assert.deepEqual(waitingOn(), { kind: "scheduled", detail: slot, at });
+    const held = "Not promoting candidate automatically: it carries non-additive migrations (0479.sql): the owner decides";
+    log.append("verify", { type: "progress", line: held, hold: { kind: "decision" } });
+    assert.deepEqual(waitingOn(), { kind: "withheld", detail: held });
+    const busy = "Not promoting candidate automatically: a newer candidate (other) passed while it was decided";
+    log.append("verify", { type: "progress", line: busy, hold: { kind: "busy" } });
+    assert.deepEqual(waitingOn(), { kind: "verification", detail: busy });
+    // A note written before holds existed keeps its old reading until the next consideration.
+    const legacy = "Not promoting candidate automatically: it carries non-additive migrations (0479.sql): the owner decides";
+    log.append("verify", { type: "progress", line: legacy });
+    assert.deepEqual(waitingOn(), { kind: "failed", detail: legacy });
+  } finally { log.close(); }
+});
+
+test("a promotion withheld for a decision outranks a refusing audit, which the routine wait does not (T3-700)", () => {
+  const log = fixture();
+  try {
+    policy(log, true); publish(log);
+    // A failed nightly audit with no recorded cause refuses promotion.
+    log.append("audit", { type: "submitted", kind: "audit", repo: "a/repo", commitId: "candidate", slot: new Date().toISOString(), submittedBy: "runner" });
+    log.append("audit", { type: "failed", stage: "verifying", reason: "nightly failed" });
+    log.append("verify", { type: "submitted", kind: "verification", repo: "a/repo", commitId: "candidate", submittedBy: "runner" });
+    log.append("verify", { type: "verified", base: "old", candidate: "candidate", checks: [], nonAdditiveMigrations: ["0479.sql"] });
+    const waitingOn = () => log.snapshot("runner").repositories[0]!.release!.waitingOn;
+    log.append("verify", { type: "progress", line: "Not promoting candidate automatically: waiting for the next scheduled promotion", hold: { kind: "slot", at: "2026-11-16T18:00:00.000Z" } });
+    assert.equal(waitingOn().kind, "audit", "the routine wait reads as the audit that also holds it");
+    const held = "Not promoting candidate automatically: it carries non-additive migrations (0479.sql): the owner decides";
+    log.append("verify", { type: "progress", line: held, hold: { kind: "decision" } });
+    assert.deepEqual(waitingOn(), { kind: "withheld", detail: held });
+  } finally { log.close(); }
+});

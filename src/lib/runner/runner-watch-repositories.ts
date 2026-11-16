@@ -53,10 +53,16 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     const staging = stagingDeploys.find((entry) => entry.commitId === candidate?.commitId);
     const pendingDeploy = log.openOperations(repo).some((entry) => entry.kind === "release" || entry.kind === "deploy");
     const failed = [verification, release, candidateAttempt, staging, candidateImages].find((entry) => entry?.result?.type === "failed");
+    // The newest "Not promoting" note on the candidate's pre-verification, and what it waits on.
+    const noted = verification && log.events({ operationId: verification.id }).findLast(({ event }) => event.type === "progress" && event.line.startsWith("Not promoting "))?.event;
+    const held = noted?.type === "progress" ? noted : undefined;
     let waitingOn: WatchRelease["waitingOn"];
     if (log.paused()) waitingOn = { kind: "paused", detail: "The runner is paused." };
     else if (!candidate || candidate.commitId === production.live?.commitId) waitingOn = { kind: "up_to_date", detail: null };
     else if (imagesPending) waitingOn = { kind: "images", detail: null };
+    // A promotion withheld for someone to decide outranks the audit, unless a release of it is already under way:
+    // it is the hold a person must clear (T3-700).
+    else if (verification?.result?.type === "verified" && held?.hold?.kind === "decision" && !release && !pendingDeploy) waitingOn = { kind: "withheld", detail: held.line };
     else if (refusal) waitingOn = { kind: "audit", detail: refusal };
     else if (verification?.status === "queued" || verification?.status === "running") waitingOn = { kind: "verification", detail: null };
     else if (pendingDeploy) waitingOn = { kind: "deploy", detail: null };
@@ -65,8 +71,11 @@ export function projectWatchRepositories(log: OperationLog, config: Pick<RunnerC
     else if (!policy.stagingSkipped) waitingOn = { kind: "approval", detail: null };
     else {
       // Automatic promotion records safeguards (including unassessed/non-additive migrations) on verification.
-      const reason = verification && log.events({ operationId: verification.id }).findLast(({ event }) => event.type === "progress" && event.line.startsWith("Not promoting "))?.event;
-      waitingOn = { kind: "failed", detail: reason?.type === "progress" ? reason.line : "Automatic promotion has not queued a release." };
+      // A note from a runner before T3-700 carries no hold, and still reads as failed until the next consideration.
+      waitingOn = held?.hold?.kind === "decision" ? { kind: "withheld", detail: held.line }
+        : held?.hold?.kind === "slot" ? { kind: "scheduled", detail: held.line, at: held.hold.at }
+        : held?.hold?.kind === "busy" ? { kind: "verification", detail: held.line }
+        : { kind: "failed", detail: held ? held.line : "Automatic promotion has not queued a release." };
     }
     result.release = {
       integrationBranch: policy.integrationBranch, candidate: candidate ? { commitId: candidate.commitId, landedAt: candidate.at } : null,

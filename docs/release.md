@@ -130,7 +130,13 @@ the runner log says `promoting <commit> automatically`. The safeguards stay: not
 automatically when the candidate has `nonAdditiveMigrations`, when its verification failed or is
 missing, or when the audits refuse a promotion; a failed production health check rolls back as
 [described below](#rollback-and-non-additive-migrations). Such a candidate stays unpromoted, with the reason (`Not promoting <commit> automatically:
-…`) on its pre-verification's log. A candidate with a release, or a production deploy, on record, or
+…`) on its pre-verification's log. That note also records what the promotion waits on, which
+`slipjay watch --json` reports as `release.waitingOn.kind` (T3-700): `withheld` when someone must decide
+(non-additive or unassessed migrations, a release base that does not promote), `scheduled` with the slot's
+time in `waitingOn.at` for the routine wait below, and the step it waits on when running work holds it.
+`failed` means a release step failed. A `withheld` promotion is reported ahead of an audit that also refuses it,
+since it is the hold a person must clear. A reader of `waitingOn` must accept a kind before a runner sends it.
+A candidate with a release, or a production deploy, on record, or
 any release or production deploy in flight, is never released again; a newer verified candidate
 replaces a queued automatic release of an older one, and an automatic release that starts after one
 has passed fails as superseded. Under `standard` and `light` nothing promotes without a human `--confirm`.
@@ -145,7 +151,9 @@ until `until` (a window may cross midnight), and no sooner than `everyMinutes` a
 release, automatic or confirmed; the landings between promotions ship together as the newest
 verified candidate. A candidate it holds says `Not promoting <commit> automatically: waiting for the
 next scheduled promotion: …` on its pre-verification's log, and the runner asks again when the next
-slot opens. The schedule is read, like `process`, from the release base. It never holds an owner:
+slot opens. The slot comes before the safeguards: a candidate with non-additive migrations reads as
+`scheduled` until its slot refuses it and `withheld` after, so the agent that landed it has until then
+to release it. The schedule is read, like `process`, from the release base. It never holds an owner:
 to ship now, `slipjay promote` shows the candidate and `slipjay promote --confirm <commit>` promotes
 it at once, which also restarts the interval. Instead of an interval, `"promotionSchedule": { "at": ["00:00", "12:00", "18:00"], "timeZone": "Europe/London" }`
 promotes at fixed times of the local day: each stays open for an hour, once, so a candidate ready or a check re-run within
