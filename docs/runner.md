@@ -317,7 +317,10 @@ and held state through the existing recovery path.
   the install it replaced back there (`slipjay upgrade --runner --rollback`, which
   restarts the unit), then land the fix. A client upgrade never changes that slot, and
   `upgrade --runner` refuses to restart a unit whose `ExecStart` does not run the runner
-  install: it says so and names `scripts/setup-runner.sh`.
+  install: it says so and names `scripts/setup-runner.sh`. A client left ahead of its
+  runner says so: `slipjay upgrade` prints one line naming the build the runner's health
+  answer reports and the one the client now runs, with `slipjay upgrade --runner` as how to
+  move it, and says nothing when the runner is unreachable or names no build.
 - **A host that already runs the runner.** Its unit runs `~/.bun/bin/slipjay`, so the
   client's adoption of that command would move the runner's code too, and it is refused
   until the unit runs the runner install. Run `slipjay upgrade --runner` (which builds

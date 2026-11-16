@@ -6,10 +6,12 @@ import { chmod, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink,
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeAll, beforeEach, test } from "vite-plus/test";
+import { beforeAll, beforeEach, test, vi } from "vite-plus/test";
 import { jj, project } from "../support/workspace-project.ts";
 import { withWorkspaceTransaction } from "../../src/lib/infra/workspace-transaction.ts";
 import { setConfiguredUpgradeSource } from "../../src/lib/policy/machine-config.ts";
+import { serveRunner } from "../../src/lib/runner/runner-http.ts";
+import { runUpgrade } from "../../src/launcher/upgrade-command.ts";
 import {
   installPath, landingUpgradesThisMachine, pruneInstalls, startClientUpgradeThrottled, upgradeMachine,
 } from "../../src/lib/workspace/workspace-upgrade.ts";
@@ -533,6 +535,51 @@ test("config set upgradeSource records the checkout, and unset turns automatic u
   } finally { await f.dispose(); }
 });
 
+test("an upgrade says when the runner still runs another build, and says nothing when it does not", async () => {
+  const f = await project();
+  const other = "389fc114e3a0e2b6a0e5acf2a1c4e5b2d1b7f0a3";
+  const before = { runner: process.env.SLIPJAY_RUNNER, token: process.env.SLIPJAY_RUNNER_TOKEN };
+  // A runner answering health with `body`, as a host's does, and nothing else.
+  let body: Record<string, unknown> = {};
+  const runner = await serveRunner(async (request) => new URL(request.url).pathname === "/v1/health"
+    ? Response.json({ ok: true, runner: "peach-live", ...body }) : Response.json({ error: "not found" }, { status: 404 }),
+    { host: "127.0.0.1", port: 0 });
+  try {
+    const commit = await landSlipjayTree(f, "9.9.9");
+    await setConfiguredUpgradeSource(f.repo);
+    assert.equal((await upgradeMachine({ install: noInstall })).action, "upgraded");
+    process.env.SLIPJAY_RUNNER = runner.url;
+    process.env.SLIPJAY_RUNNER_TOKEN = "fixture-token";
+    const notice = `runner peach-live runs ${other.slice(0, 12)}, this client runs ${commit.slice(0, 12)}: run slipjay upgrade --runner on its host to move it`;
+
+    body = { revision: other };
+    const behind = await printed(() => runUpgrade([]));
+    assert.equal(behind.code, 0);
+    assert.equal(behind.lines.at(-1), notice, "the client names the runner's build and how to move it");
+    const json = await printed(() => runUpgrade(["--json"]));
+    assert.equal(json.code, 0);
+    assert.deepEqual(JSON.parse(json.lines.join("\n")).runner, { name: "peach-live", revision: other }, "--json carries it instead");
+
+    body = { revision: commit };
+    assert.equal((await printed(() => runUpgrade([]))).lines.some((line) => line.startsWith("runner peach-live")), false, "the same build says nothing");
+    body = {};
+    assert.equal((await printed(() => runUpgrade([]))).lines.some((line) => line.startsWith("runner peach-live")), false, "a runner that names no build says nothing");
+    process.env.SLIPJAY_RUNNER = "http://127.0.0.1:1";
+    const unreachable = await printed(() => runUpgrade([]));
+    assert.equal(unreachable.code, 0, "an unreachable runner changes neither the output's outcome nor its exit status");
+    assert.equal(unreachable.lines.some((line) => line.startsWith("runner ")), false);
+    delete process.env.SLIPJAY_RUNNER;
+    assert.equal((await printed(() => runUpgrade([]))).lines.some((line) => line.startsWith("runner ")), false, "a machine with no runner says nothing");
+  } finally {
+    for (const [name, value] of [["SLIPJAY_RUNNER", before.runner], ["SLIPJAY_RUNNER_TOKEN", before.token]] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+    await runner.close();
+    await f.dispose();
+  }
+});
+
 test("cleanup keeps what the slots and their rollbacks point at and removes older installs", async () => {
   const slot = join(installsHome(), "1".repeat(40));
   const previous = join(installsHome(), "2".repeat(40));
@@ -552,6 +599,13 @@ test("cleanup keeps what the slots and their rollbacks point at and removes olde
   assert.equal(existsSync(old), false);
   assert.equal(existsSync(recent), true, "an install younger than a week is kept");
 });
+
+/** Run a command handler with the lines it prints captured, as a caller reading its output would. */
+async function printed(work: () => Promise<number>): Promise<{ code: number; lines: string[] }> {
+  const lines: string[] = [];
+  const capture = vi.spyOn(console, "log").mockImplementation((line?: unknown) => { lines.push(String(line)); });
+  try { return { code: await work(), lines }; } finally { capture.mockRestore(); }
+}
 
 /** Wait until `key`'s lock is held, by failing to take it without waiting. */
 async function untilHeld(key: string): Promise<void> {

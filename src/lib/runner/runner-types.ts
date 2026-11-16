@@ -612,7 +612,9 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  *                                                 (OWNER_KILL_REASON) follows in its events once it stops;
  *                                                 409 `{ operation, reason }` once it is past KILLABLE_STAGES
  * - POST /v1/runner/pause, /v1/runner/resume     `{ by }` → `{ paused: boolean }`; the running operation finishes
- * - GET  /v1/health                             → `{ ok: true, runner: <name>, queued: number, paused: boolean }`
+ * - GET  /v1/health                             → `{ ok: true, runner: <name>, queued: number, paused: boolean,
+ *                                                 held: HeldIntegrationState[] }`, with `revision: <commit>` when the
+ *                                                 runner runs from an `installs/<commit>` of this machine
  */
 export type RunnerHandler = (request: Request) => Promise<Response>;
 

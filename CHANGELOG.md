@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **A client says when its runner is still on an older SlipJay build.** A client upgrade never moves the runner's slot,
+  so the two drift apart, and on 16 Nov nothing said so: `peach-live` ran `389fc114e3a0` from 14 Nov while `peach-box`
+  had moved 8 commits on to `105ff5bd62f7`, two of which changed runner-side behaviour reported as delivered. The
+  runner's `/v1/health` now names the build answering (`revision`, the commit of the `installs/<commit>` its code was
+  loaded from, resolved when the process started rather than read from the slot link that moves first, and absent when
+  it runs a development checkout), and `slipjay upgrade` prints one line after a client upgrade when that build is not
+  the one the client now runs: `runner peach-live runs 389fc114e3a0, this client runs 105ff5bd62f7: run slipjay upgrade
+  --runner on its host to move it`. It only reports, with a short bound on the ask: a machine with no runner, an
+  unreachable one, or one too old to name its build prints nothing and changes no exit status. `--json` carries
+  `runner: { name, revision }` instead.
 - **The nightly audit asks the host for memory as an audit.** It runs on the release-check place, and the machine
   verifier asked for every attempt there as a release check: nothing ever asked as `audit`, so that class stayed at its
   hand-set 16 GiB with no samples, the audit's peak was learned as a release check's, and it queued with release checks

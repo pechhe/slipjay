@@ -598,6 +598,30 @@ export async function resendReceipts(location: string, operationId: string, env:
   } finally { connection.close(); }
 }
 
+/** A runner answering from a different SlipJay build than the client's: the name that answers and the commit it runs. */
+export type RunnerBuild = { name: string; revision: string };
+
+/** A notice nobody asked for gives up sooner than an operation: a slow runner cannot hold up a command that has finished. */
+const BUILD_NOTICE_TIMEOUT_MS = 5_000;
+
+/**
+ * The runner at `location` when it answers from another install than `revision`, which is the commit this
+ * client now runs; null when it answers from the same one, cannot say which build it is (a runner older
+ * than the field, a development checkout), or cannot be reached. It tells, it never refuses: nothing about
+ * a command's outcome depends on the answer, and a runner only moves by `slipjay upgrade --runner` on its host.
+ */
+export async function runnerBuildNotice(location: string | null, revision: string | null,
+  env: NodeJS.ProcessEnv = process.env): Promise<RunnerBuild | null> {
+  if (!location || !revision) return null;
+  let connection: RunnerConnection | undefined;
+  try {
+    const token = await runnerToken(env);
+    connection = await connectTransport(location, { ...env, SLIPJAY_RUNNER_TOKEN: token }, { timeoutMs: BUILD_NOTICE_TIMEOUT_MS });
+    const running = connection.revision;
+    return running && running !== revision ? { name: connection.name, revision: running } : null;
+  } catch { return null; } finally { connection?.close(); }
+}
+
 /**
  * `session` and `tickets` shape the handoff a Build-tracked landing writes itself when none is supplied
  * (see `build-handoff.ts`): the lead's Build session (else `HQ_BUILD_SESSION_ID`, after `WEAVE_FORGE_SESSION_ID`) and further Tickets it completes.

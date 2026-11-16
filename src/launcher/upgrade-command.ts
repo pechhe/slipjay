@@ -1,3 +1,5 @@
+import { runnerBuildNotice, runnerLocation } from "../lib/runner/runner-client.ts";
+import type { RunnerBuild } from "../lib/runner/runner-client.ts";
 import { upgradeMachine } from "../lib/workspace/workspace-upgrade.ts";
 import type { UpgradeOutcome } from "../lib/workspace/workspace-upgrade.ts";
 
@@ -13,17 +15,30 @@ function describeUpgrade(outcome: UpgradeOutcome): string {
   return outcome.reason ? `${line} (${outcome.reason})` : line;
 }
 
+/** One line naming a runner left behind by the client's installs, which only `--runner` on its host moves. */
+export function describeRunnerBuild(runner: RunnerBuild, clientRevision: string): string {
+  return `runner ${runner.name} runs ${short(runner.revision)}, this client runs ${short(clientRevision)}: run slipjay upgrade --runner on its host to move it`;
+}
+
+/** The outcome `--json` prints: the runner it found behind, when there was one. */
+export const withRunnerBuild = (outcome: UpgradeOutcome, runner: RunnerBuild | null): UpgradeOutcome | (UpgradeOutcome & { runner: RunnerBuild }) =>
+  runner ? { ...outcome, runner } : outcome;
+
 /** `upgrade [--runner] [--rollback] [--json]`: install the integration head into the client or runner slot. */
 export async function runUpgrade(rest: string[]): Promise<number> {
   const flags = new Set(rest);
   const json = flags.delete("--json"), runner = flags.delete("--runner"), rollback = flags.delete("--rollback");
   if (flags.size) throw new Error(UPGRADE_USAGE);
   const outcome = await upgradeMachine({ ...runner ? { slot: "runner" as const } : {}, rollback });
-  if (json) console.log(JSON.stringify(outcome, null, 2));
+  // A client upgrade never moves the runner, so say when the build this machine now runs is ahead of it.
+  // Only the client's own slot: a runner upgrade has just moved the runner's, and reports that itself.
+  const behind = outcome.slot === "client" && outcome.to ? await runnerBuildNotice(runnerLocation(), outcome.to) : null;
+  if (json) console.log(JSON.stringify(withRunnerBuild(outcome, behind), null, 2));
   else {
     // A failure goes to stderr so a caller reading stdout sees only what happened.
     (outcome.action === "failed" ? console.error : console.log)(describeUpgrade(outcome));
     if (outcome.command) console.log(`slipjay → ${outcome.command}`);
+    if (behind && outcome.to) console.log(describeRunnerBuild(behind, outcome.to));
   }
   return outcome.action === "failed" ? 1 : 0;
 }

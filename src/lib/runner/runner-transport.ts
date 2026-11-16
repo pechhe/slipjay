@@ -5,12 +5,21 @@ import { runBoundedProcess } from "../infra/bounded-process.ts";
 import { RUNNER_DEFAULT_PORT } from "./runner-env.ts";
 import type { Operation } from "./runner-types.ts";
 
-export type RunnerConnection = { baseUrl: string; name: string; close(): void };
+export type RunnerConnection = {
+  baseUrl: string; name: string; close(): void;
+  /** The install commit the runner answers with, or null when it does not say (an older runner, a development checkout). */
+  revision: string | null;
+};
 
 /** The caller owns durable evidence; these awaited hooks must handle their recording failures. */
 export type RunnerConnectionLifecycle = {
   forwardFailure?(error: unknown): Promise<void>;
   connected?(connection: RunnerConnection, token: string): Promise<void>;
+  /**
+   * How long the forward and the health answer may take (default 15 s). An operation can wait; a
+   * notice nobody asked for gives up sooner and says nothing.
+   */
+  timeoutMs?: number;
 };
 
 /** The token read from Bitwarden, once per process: one command can reach the runner many times. */
@@ -92,6 +101,7 @@ export async function request(baseUrl: string, token: string, path: string, init
 
 export async function connectRunner(location: string, env: NodeJS.ProcessEnv = process.env, lifecycle: RunnerConnectionLifecycle = {}): Promise<RunnerConnection> {
   const token = await runnerToken(env);
+  const timeoutMs = lifecycle.timeoutMs ?? 15_000;
   const url = new URL(location);
   let baseUrl = location;
   let close = () => {};
@@ -109,7 +119,7 @@ export async function connectRunner(location: string, env: NodeJS.ProcessEnv = p
     let spawnError: Error | undefined;
     ssh.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-65536); });
     ssh.on("error", (error) => { spawnError = error; });
-    const deadline = Date.now() + 15_000;
+    const deadline = Date.now() + timeoutMs;
     try {
       while (!await new Promise<boolean>((resolve) => {
         const socket = createConnection({ host: "127.0.0.1", port });
@@ -127,8 +137,8 @@ export async function connectRunner(location: string, env: NodeJS.ProcessEnv = p
     throw new Error("Runner location must use http://, https:// or ssh://");
   }
   try {
-    const health = await (await request(baseUrl, token, "/v1/health", { signal: AbortSignal.timeout(15_000) })).json() as { runner: string };
-    const connection = { baseUrl, name: health.runner, close };
+    const health = await (await request(baseUrl, token, "/v1/health", { signal: AbortSignal.timeout(timeoutMs) })).json() as { runner: string; revision?: unknown };
+    const connection = { baseUrl, name: health.runner, revision: typeof health.revision === "string" ? health.revision : null, close };
     await lifecycle.connected?.(connection, token);
     return connection;
   } catch (error) { close(); throw error; }

@@ -11,6 +11,7 @@ import { requeueParked } from "../build/build-receipts.ts";
 import type { BuildAdmitter, BuildRoute } from "../build/build-admission.ts";
 import { BUILD_READ_ACTIONS } from "../build/tracker.ts";
 import type { BuildReadAction } from "../build/tracker.ts";
+import { runningInstallRevision } from "./runner-revision.ts";
 import type { BuildCheckAccess } from "../build/build-check-access.ts";
 import type { QueuedLanding, SubmissionConflict } from "../landing/submission-probe.ts";
 
@@ -23,6 +24,8 @@ export function createRunnerHandler(input: {
   log: OperationLog;
   token: string;
   runnerName: string;
+  /** The install commit this process runs, or null for none; absent, the tree its own code was loaded from (see `runner-revision`). */
+  revision?: string | null;
   readLog(operationId: string): Promise<string | null>;
   readSource?(operation: Extract<Operation, { kind: "landing" }>, signal: AbortSignal): Promise<Response>;
   readManifest?(operation: Extract<Operation, { kind: "landing" }>): Promise<unknown>;
@@ -56,6 +59,7 @@ export function createRunnerHandler(input: {
 }): RunnerHandler {
   let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
+  const revision = input.revision === undefined ? runningInstallRevision : input.revision;
   // Every watcher asks for the queue after each event and each heartbeat, so a snapshot is shared rather than built per
   // request. Building one blocks the runner's only thread (0.3 s with a few thousand operations in the ledger, 3 Nov 2026),
   // and a running gate appends several run events a second. So when only such run detail has arrived, the snapshot is
@@ -156,7 +160,9 @@ export function createRunnerHandler(input: {
       return json({ event: input.log.append(id, { type: "client", id: body.id, fact: body.fact }) });
     }
     if (request.method === "GET" && path === `${RUNNER_API}/health`)
-      return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null, held: input.log.held() });
+      return json({ ok: true, runner: input.runnerName, queued: input.log.openOperations().filter((op) => op.status === "queued").length, paused: input.log.paused() !== null, held: input.log.held(),
+        // Which build is answering, so a client can tell a runner left behind by its own installs.
+        ...revision ? { revision } : {} });
     if (request.method === "GET" && path === `${RUNNER_API}/queue`) return queueSnapshot();
     if (request.method === "GET" && path === `${RUNNER_API}/metrics/events`) {
       const raw = url.searchParams.get("since") ?? "0";

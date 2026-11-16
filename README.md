@@ -446,7 +446,10 @@ else is reported, naming `scripts/setup-runner.sh`, and nothing restarts. The re
 finishes any integration in flight first (see [Runner](#runner)). `scripts/setup-runner.sh`
 writes the unit to run the runner slot, so a client upgrade never changes the code the
 runner runs and never restarts it; `~/.slipjay/runner` stays the runner's own state
-(`config.json`, `stop-runner.sh`, the corepack shims).
+(`config.json`, `stop-runner.sh`, the corepack shims). Because that leaves the runner on
+whatever build it was given, `slipjay upgrade` reports one that answers `/v1/health` with
+another build than the client now runs, and names `slipjay upgrade --runner` on its host as
+how to move it.
 
 A host that already runs the runner — its unit still runs `~/.bun/bin/slipjay` — moves
 in this order, because the client's adoption waits for the unit to stop following that
@@ -476,7 +479,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | --- | --- |
 | `status` | Mode, current workspace and its Issue, integration checkout, landing state and this machine's spare count (JSON). |
 | `config [--json]`, `config set\|unset <runner\|upgradeSource\|spares> …` | This machine's runner location, upgrade source and spare limits, each with its source (see [Settings](#settings)). |
-| `upgrade [--runner] [--rollback] [--json]` | Install this machine's integration head into the client slot (`~/.slipjay/current`), or with `--runner` the runner slot, and point the `slipjay` command at it (see [Install](#install)). It fetches `upgradeSource`, builds and verifies the install, and only then swaps the slot, keeping what it replaced as `previous`; `--rollback` swaps back. A machine with no `upgradeSource` is refused, naming how to set it; `--runner` is refused without a `slipjay-runner` unit, and otherwise restarts it. `--json` prints one object (`slot`, `from`, `to`, `action`: `upgraded`, `current`, `rolled-back`, `busy` or `failed`, `reason`, `command`), exiting 1 on `failed`. Two upgrades racing for one commit leave the install the slot ran as the rollback; the other reports `current`. |
+| `upgrade [--runner] [--rollback] [--json]` | Install this machine's integration head into the client slot (`~/.slipjay/current`), or with `--runner` the runner slot, and point the `slipjay` command at it (see [Install](#install)). It fetches `upgradeSource`, builds and verifies the install, and only then swaps the slot, keeping what it replaced as `previous`; `--rollback` swaps back. A machine with no `upgradeSource` is refused, naming how to set it; `--runner` is refused without a `slipjay-runner` unit, and otherwise restarts it. `--json` prints one object (`slot`, `from`, `to`, `action`: `upgraded`, `current`, `rolled-back`, `busy` or `failed`, `reason`, `command`, and `runner`: `{ name, revision }` for a runner a client upgrade found on another build), exiting 1 on `failed`. Two upgrades racing for one commit leave the install the slot ran as the rollback; the other reports `current`. |
 | `policy show [--json]`, `policy set --base <revision> …` | Read the integration branch's policy, or land a change to its settings fields without running the landing checks (see [Settings](#settings)). |
 | `landed <path>` | The landing recorded for the workspace at exactly that path, even after it was removed, as one JSON line (`workspaceName`, `workspacePath`, `artifactCommitId`, and `operationId`, `issueNumber`, `landedAt` when recorded), or `null`. Read-only. |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |
