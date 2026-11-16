@@ -25,6 +25,7 @@ import { holdersOfOpenFiles, openPathsByProcess } from "./disk-holders.ts";
 import type { OpenPaths } from "./disk-holders.ts";
 import type { ProcessWorkingDirectory } from "../workspace/workspace-holders.ts";
 import { machineConfigPath, metadataHome, stateHome } from "../workspace/workspace-paths.ts";
+import { lastKnownTouch } from "../workspace/workspace-idle.ts";
 import { applyHostDisk, realOps } from "./disk-apply.ts";
 import type { ApplyResult, DiskOps } from "./disk-apply.ts";
 import { readDockerVolumes, readLoopImages } from "./disk-readers.ts";
@@ -254,10 +255,8 @@ export async function hostDisk(options: HostDiskOptions = {}): Promise<HostDiskO
         const metadata = await workspaceMetadata(row?.owner ?? basename(path));
         if (!metadata) return "workspace metadata unreadable at retirement";
         if (!metadata.spare) {
-          const stamps = [metadata.lastActivityAt, metadata.updatedAt, metadata.claimedAt, metadata.createdAt, metadata.attachedAt].map((value) => typeof value === "string" ? Date.parse(value) : NaN).filter(Number.isFinite);
-          const recorded = typeof metadata.lastActivityAt === "string" ? Date.parse(metadata.lastActivityAt) : NaN;
-          const activity = Number.isFinite(recorded) ? recorded : Math.max(...stamps);
-          if (!Number.isFinite(activity) || now - activity < plan.workspaceIdleMs) return "workspace resumed or idle clock unreadable at retirement";
+          const activity = lastKnownTouch(metadata);
+          if (activity === null || now - activity < plan.workspaceIdleMs) return "workspace resumed or idle clock unreadable at retirement";
         }
         const result = await releaseWorkspace(path, { operationId: `disk-${randomUUID()}`, now });
         return result.state === "retired" ? null : result.reason;

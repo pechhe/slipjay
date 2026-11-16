@@ -8,6 +8,7 @@ import { metadataHome, stateHome } from "./workspace-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { claimController, sameClaimController } from "./workspace-claim-identity.ts";
 import type { ClaimController } from "./workspace-claim-identity.ts";
+import { lastKnownTouch } from "./workspace-idle.ts";
 
 export class WorkspaceClaimError extends Error {
   readonly code: string;
@@ -136,9 +137,10 @@ async function staleRecovery(path: string, status: ClaimStatus, fresh = false): 
   });
   if (!controllersGone) return { settle: false, note: "" };
   const metadata = await readFile(join(metadataHome(), `${basename(path)}.json`), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>).catch(() => null);
-  // Never use the custody file's timestamp: merely inspecting it is not activity.
-  const activity = typeof metadata?.lastActivityAt === "string" ? Date.parse(metadata.lastActivityAt) : NaN;
-  const lastActivityAt = Number.isFinite(activity) ? activity : null;
+  // Never use the custody file's timestamp: merely inspecting it is not activity. The newest stamp
+  // the workspace metadata carries stands in where no idle clock was ever recorded, so a checkout a
+  // restart left behind ages from when it was last demonstrably touched instead of never settling.
+  const lastActivityAt = lastKnownTouch(metadata);
   const note = (holders: boolean | null) => abandonedCustodyNote({ claims, controllersGone, lastActivityAt, holders, now: Date.now() });
   if (lastActivityAt === null || Date.now() - lastActivityAt < STALE_CUSTODY_IDLE_MS) return { settle: false, note: note(null) };
   if (fresh || !recoveryScan || Date.now() - recoveryScan.at > 30_000) recoveryScan = { at: Date.now(), value: Promise.all([processWorkingDirectories().catch(() => null), openPathsByProcess().catch(() => null)]).then(([working, open]) => ({ working, open })) };

@@ -8,6 +8,8 @@ import { abandonedCustodyNote, acquireWorkspaceClaim, STALE_CUSTODY_IDLE_MS, wit
 import type { ClaimView } from "../../src/lib/workspace/workspace-claims.ts";
 import { recordWorkspaceActivity } from "../../src/lib/workspace/workspace-eviction.ts";
 import { claimController } from "../../src/lib/workspace/workspace-claim-identity.ts";
+import { metadataPath, workspaceMetadata } from "../../src/lib/workspace/workspace-state.ts";
+import { writeWorkspaceJson } from "../../src/lib/infra/workspace-transaction.ts";
 
 async function abandoned(root: string, path: string, name: string) {
   const controller = await claimController();
@@ -16,6 +18,13 @@ async function abandoned(root: string, path: string, name: string) {
 }
 
 const HOUR = 60 * 60_000;
+
+/** Metadata as a harness that never wrote an idle clock leaves it: the stamps it does carry, and nothing else. */
+async function withoutIdleClock(name: string, stamps: Record<string, string>) {
+  const existing = { ...await workspaceMetadata(name) };
+  for (const key of ["lastActivityAt", "updatedAt", "claimedAt", "attachedAt"]) delete existing[key];
+  await writeWorkspaceJson(metadataPath(name), { ...existing, ...stamps });
+}
 
 function claimView(over: Partial<ClaimView> = {}): ClaimView {
   return { claimId: "claim", ownerId: "custody:dead", generation: "generation", state: "recovery-required",
@@ -82,3 +91,35 @@ test("a provider appearing after the read-only scan keeps stale custody at the f
     await f.dispose();
   }
 });
+
+test("custody whose metadata carries an old creation time and no idle clock settles as abandoned", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("recovery-created-at", f.repo);
+    await abandoned(f.repo, w.workspacePath, w.current.name);
+    // Two landed, empty T3 Code workspaces sat like this on 16 Nov: custody recorded, the controllers
+    // gone with the restarted server, and no idle clock ever written, so the hold could never settle.
+    await withoutIdleClock(w.current.name, { createdAt: new Date(Date.now() - STALE_CUSTODY_IDLE_MS - 60_000).toISOString() });
+    const refusal = await workspaceClaimRefusal(w.workspacePath);
+    assert.equal(refusal, null, "the newest stamp the metadata carries is the age the idle rule reads");
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).claims[0]!.state, "recovery-required", "planning must not mutate custody");
+    await withUnclaimedWorkspace(w.workspacePath, "test guarded destructive action", async (check) => { await check(); });
+    const status = await workspaceClaimStatus(w.workspacePath);
+    assert.equal(status.claims[0]!.state, "released");
+    assert.equal(status.claims[0]!.settlementRef, "slipjay:confirmed-controller-gone-idle-24h");
+  } finally { await f.dispose(); }
+});
+
+test("a creation stamp inside the idle window refuses with the wait it leaves, not with missing activity", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("recovery-created-recent", f.repo);
+    await abandoned(f.repo, w.workspacePath, w.current.name);
+    await withoutIdleClock(w.current.name, { createdAt: new Date(Date.now() - 3 * HOUR).toISOString() });
+    const refusal = (await workspaceClaimRefusal(w.workspacePath))!;
+    assert.match(refusal, /idle for 24h/);
+    assert.match(refusal, /2[01]h \d+m left/);
+    assert.doesNotMatch(refusal, /no activity time/, "the checkout's age is known from its creation stamp");
+  } finally { await f.dispose(); }
+});
+

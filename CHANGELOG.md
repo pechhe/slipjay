@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Custody left behind by a restarted controller settles from the checkout's own stamps.** On 16 Nov two landed,
+  empty T3 Code workspaces could never be removed after the server restarted mid-run: `slipjay remove --discard` refused
+  with "no activity time is recorded, so the host cannot confirm the idle that settles it", the hold kept its Forge Issue
+  association, and `slipjay attach-issue` in the replacement workspace was refused, so a Build landing could not start. A
+  claim records no idle clock, and only `lastActivityAt` was read, so the 24-hour rule could never fire. Idle age now comes
+  from one rule (`lastKnownTouch`): the recorded clock where one exists, otherwise the newest of the metadata's
+  `updatedAt`, `claimedAt`, `createdAt` and `attachedAt` — the fallback idle eviction and host-disk retirement already
+  used, now shared with stale custody recovery rather than copied. The threshold, the other conditions (controllers gone,
+  no process holding the checkout, inventories readable) and the rule that the custody file's own timestamp is never
+  activity are unchanged; the "no activity time" note now appears only when none of those stamps exists.
+
 - **A refused removal says when and how its custody settles.** `slipjay remove` on a checkout whose delegated
   runs left recovery-required custody printed the claim ids and "settlement required" with no route, which
   read as permanent: on 16 Nov two landed, empty T3 Code workspaces could not be removed after the T3 server
