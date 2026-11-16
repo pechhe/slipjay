@@ -8,6 +8,7 @@ import { afterEach, beforeEach, test } from "vite-plus/test";
 import { evidenceHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { readDiskConfig } from "../../src/lib/host-disk/disk-config.ts";
 import type { DiskConfig } from "../../src/lib/host-disk/disk-config.ts";
+import { writeDiskHeartbeat } from "../../src/lib/host-disk/disk-heartbeat.ts";
 import { hostDisk } from "../../src/lib/host-disk/host-disk.ts";
 import type { HostDiskOptions } from "../../src/lib/host-disk/host-disk.ts";
 
@@ -22,7 +23,9 @@ beforeEach(async () => {
   base = await mkdtemp(join(tmpdir(), "slipjay-host-disk-"));
   await mkdir(join(base, "scratch"));
   await mkdir(join(base, "runs"));
+  await writeDiskHeartbeat({ at: NOW, floorBytes: 0, level: "ok", failures: 0 });
   config = readDiskConfig({ disk: {
+    floor: { bytes: 0, percent: 0 }, // These cases isolate the legacy percentage policy.
     ballast: { path: join(base, "ballast"), bytes: 4 * MIB },
     runRoot: join(base, "runs"),
     scratchRoots: [{ path: join(base, "scratch"), match: ["*-scratch"], ttlHours: 72 }],
@@ -32,7 +35,7 @@ beforeEach(async () => {
 });
 afterEach(async () => { await rm(base, { recursive: true, force: true }); });
 
-const usage = (percent: number) => async () => ({ percent, totalBytes: 1000 * 1024 ** 3, freeBytes: 0 });
+const usage = (percent: number) => async () => ({ percent, totalBytes: 1000 * 1024 ** 3, freeBytes: (100 - percent) / 100 * 1000 * 1024 ** 3 });
 const age = (path: string, hours: number) => utimes(path, new Date(NOW - hours * HOUR), new Date(NOW - hours * HOUR));
 const pass = (percent: number, options: HostDiskOptions = {}) => hostDisk({
   config, now: NOW, readUsage: usage(percent), integrationRoots: async () => [], ...options,
@@ -238,14 +241,17 @@ test("a plan changes nothing and lists every managed directory", async () => {
   assert.equal(await readdir(evidenceHome()).then((names) => names.length, () => 0), 0, "nothing archived");
 });
 
-test("workspace rows are the existing eviction plan: its own idle time below shed, one hour at shed", async () => {
+test("workspace idle time shortens only below the physical free-space floor",  async () => {
   const row = { path: "/w/a", class: "workspace" as const, sizeBytes: 5, owner: "a", action: "remove" as const, reason: "idle 3h" };
   const idle: number[] = [];
   const host = { workspaceRows: async (idleMs: number) => { idle.push(idleMs); return [row]; } };
   const below = await pass(85, { plan: true, host });
   assert.ok(below.state !== "busy" && below.rows.some((entry) => entry.path === "/w/a") && below.workspaceIdleMs === 24 * HOUR);
   const shed = await pass(90, { plan: true, host });
-  assert.deepEqual(idle, [24 * HOUR, HOUR]);
+  assert.deepEqual(idle, [24 * HOUR, 24 * HOUR]);
+  const pressured = await pass(90, { plan: true, host, config: { ...config, floor: { bytes: 1000 * 1024 ** 3, percent: 0 } } });
+  assert.ok(pressured.state !== "busy" && pressured.workspaceIdleMs === HOUR);
+  assert.deepEqual(idle, [24 * HOUR, 24 * HOUR, HOUR]);
   assert.ok(shed.state !== "busy" && shed.rows.some((entry) => entry.path === "/w/a" && entry.action === "remove"));
   const evicted = await pass(90, { host, integrationRoots: async () => [], ops: { evictWorkspaces: async () => ({ evicted: new Set(["/w/a"]), failed: [] }) } });
   assert.equal(rowFor(evicted, "/w/a").outcome, "removed");

@@ -4,6 +4,7 @@
  * is injected, so a test plans with fakes and the command plans with the real readers. The applier
  * (disk-apply.ts) executes exactly the rows this returns, so `--plan` and a real pass cannot disagree.
  */
+import { belowFloor, freeSpaceFloor } from "./disk-floor.ts";
 import { join } from "node:path";
 import { EVICTION_IDLE_MS } from "../workspace/workspace-eviction.ts";
 import { describeHolders, within } from "../workspace/workspace-holders.ts";
@@ -29,9 +30,13 @@ export type DiskRow = {
   keepsOverBudget?: true;
   /** SJ-235: the integration (primary) checkout: reported, but not part of the workspace budget. */
   integration?: true;
+  spare?: boolean;
+  idleSince?: number;
+  retirable?: boolean;
+  repository?: string;
 };
 
-/** SJ-235: a budgeted class's budget and use. For workspaces, `usedBytes` is what claimed (non-spare, non-integration) checkouts hold. */
+/** SJ-235: a budgeted class's budget and use. For workspaces, `usedBytes` is the directory-size estimate for all non-integration checkouts, including spares (not physical bytes). */
 export type ClassBudget = { budgetBytes: number; usedBytes: number; over: boolean };
 export type ClassBudgets = { workspaces?: ClassBudget; evidence?: ClassBudget };
 
@@ -74,11 +79,15 @@ export type DiskHost = {
 
 export type HostDiskPlan = {
   usagePercent: number;
+  freeBytes?: number;
+  floorBytes?: number;
+  floorPressure?: boolean;
+  maintenance?: boolean;
   level: DiskLevel;
   rows: DiskRow[];
   flags: OverCapFlag[];
   ballast: BallastPlan | null;
-  /** The idle time workspaces are judged at: one hour once the host sheds, else eviction's own default, so `disk --plan` and `evict --plan` agree. */
+  /** One hour only below the df-based floor; otherwise eviction's normal 24-hour window. */
   workspaceIdleMs: number;
   /** One entry per budgeted class (SJ-235). */
   budgets: ClassBudgets;
@@ -120,9 +129,10 @@ async function plannedRegenerable(config: DiskConfig, level: DiskLevel, host: Di
   return rows;
 }
 
-async function plannedScratch(config: DiskConfig, now: number, host: DiskHost): Promise<DiskRow[]> {
+async function plannedScratch(config: DiskConfig, now: number, host: DiskHost, pressure = false): Promise<DiskRow[]> {
   const rows: DiskRow[] = [];
-  for (const root of config.scratchRoots) {
+  for (const configured of config.scratchRoots) {
+    const root = { ...configured, ttlHours: pressure ? Math.max(72, configured.ttlHours) : configured.ttlHours };
     const names = await host.readDir(root.path);
     if (names === null) { rows.push({ path: root.path, class: "scratch", sizeBytes: 0, owner: null, action: "keep", reason: "cannot read the scratch root" }); continue; }
     const matchers = root.match.map(globRegex);
@@ -245,6 +255,7 @@ async function plannedBallast(config: DiskConfig, usage: DiskUsage, level: DiskL
       : { path, bytes, present, sizeBytes, action: "keep", reason: `disk is critical and the ballast is already released` };
   }
   if (present) return { path, bytes, present, sizeBytes, action: "keep", reason: "ballast in place" };
+  if (usage.freeBytes !== undefined && usage.freeBytes - bytes < freeSpaceFloor(config, usage)) return { path, bytes, present, sizeBytes, action: "keep", reason: "recreating ballast would breach the free-space floor" };
   if (usage.percent >= config.thresholds.ballastRecreatePercent) {
     return { path, bytes, present, sizeBytes, action: "keep", reason: `absent; recreated only below ${config.thresholds.ballastRecreatePercent}% (disk at ${usage.percent}%)` };
   }
@@ -258,15 +269,16 @@ async function plannedBallast(config: DiskConfig, usage: DiskUsage, level: DiskL
 /** What the host disk policy would do now, changing nothing. */
 export async function planHostDisk(input: { config: DiskConfig; usage: DiskUsage; now: number; host: DiskHost; plan?: boolean }): Promise<HostDiskPlan> {
   const { config, usage, now, host } = input;
-  const level = diskLevel(usage.percent, config.thresholds);
+  const floorPressure = belowFloor(config, usage);
+  const percentLevel = diskLevel(usage.percent, config.thresholds);
+  const level = floorPressure && !shedding(percentLevel) ? "shed" : percentLevel;
   const evidence = await plannedEvidence(config, now, host);
   // The existing eviction's own plan, unchanged, at eviction's own idle time unless the host is shedding.
-  let workspaceRows = await host.workspaceRows(shedding(level) ? HOUR_MS : EVICTION_IDLE_MS);
-  // Over its budget, the class is planned at the shed idle window whatever the level (SJ-235).
+  // Only physical free-space pressure shortens idleness. du class budgets are report-only.
+  const workspaceRows = await host.workspaceRows(floorPressure ? HOUR_MS : EVICTION_IDLE_MS);
   const workspaceBytes = sumBytes(workspaceRows.filter((row) => !row.integration));
   const workspaceBudget = config.budgets.workspacesBytes;
   const workspacesOver = workspaceBudget !== undefined && workspaceBytes > workspaceBudget;
-  if (workspacesOver && !shedding(level)) workspaceRows = await host.workspaceRows(HOUR_MS);
   const budgets: ClassBudgets = {
     ...workspaceBudget === undefined ? {} : { workspaces: { budgetBytes: workspaceBudget, usedBytes: workspaceBytes, over: workspacesOver } },
     ...evidence.budget ? { evidence: evidence.budget } : {},
@@ -274,14 +286,14 @@ export async function planHostDisk(input: { config: DiskConfig; usage: DiskUsage
   const ballast = await plannedBallast(config, usage, level, host);
   const rows = [
     ...await plannedRegenerable(config, level, host),
-    ...await plannedScratch(config, now, host),
+    ...await plannedScratch(config, now, host, floorPressure),
     ...evidence.rows,
     ...workspaceRows,
   ];
   // The routine timer pass at `ok` must not run docker, losetup or findmnt: the report-only readers run for a plan or past ok.
   const reportOnly = input.plan || level !== "ok" ? await plannedReportOnly(usage, rows, ballast, host) : { rows: [], notes: [] };
   return {
-    usagePercent: usage.percent, level, rows: [...rows, ...reportOnly.rows], flags: evidence.flags, ballast,
-    workspaceIdleMs: shedding(level) || workspacesOver ? HOUR_MS : EVICTION_IDLE_MS, budgets, notes: reportOnly.notes,
+    usagePercent: usage.percent, freeBytes: usage.freeBytes, floorBytes: freeSpaceFloor(config, usage), floorPressure, level, rows: [...rows, ...reportOnly.rows], flags: evidence.flags, ballast,
+    workspaceIdleMs: floorPressure ? HOUR_MS : EVICTION_IDLE_MS, budgets, notes: reportOnly.notes,
   };
 }

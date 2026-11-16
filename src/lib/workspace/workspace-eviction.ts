@@ -1,11 +1,15 @@
 import { workspaceClaimRefusal, withUnclaimedWorkspace, WorkspaceClaimError } from "./workspace-claims.ts";
 import { existsSync } from "node:fs";
+import { mapBounded } from "./bounded-map.ts";
+import { cachedSizeOf } from "../host-disk/size-cache.ts";
+import { stateHome } from "./workspace-paths.ts";
+import { readHostUsage } from "../host-disk/disk-usage.ts";
 import { readdir, rm, stat } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import type { WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { trackedManifests } from "./workspace-dependencies.ts";
-import { workspaceHolders, describeHolders } from "./workspace-holders.ts";
+import { processWorkingDirectories, workspaceHolders, describeHolders } from "./workspace-holders.ts";
 import type { ProcessWorkingDirectory } from "./workspace-holders.ts";
 import { listWorkspaces, metadataPath, workspaceMetadata } from "./workspace-state.ts";
 
@@ -47,6 +51,9 @@ export type EvictionPlan = {
   /** Declared generated output it would shed too, relative to its root. */
   generatedPaths: string[];
   sizeBytes: number | null;
+  spare?: boolean;
+  idleSince?: number;
+  retirable?: boolean;
 };
 
 export type EvictionResult = {
@@ -174,7 +181,8 @@ export async function recordWorkspaceActivity(name: string, at: number = Date.no
 }
 
 async function diskBytes(root: string): Promise<number | null> {
-  const result = await run("du", ["-sk", root], { cwd: root });
+  const result = await run("du", ["-sk", root], { cwd: root, timeoutMs: 2000 }).catch(() => null);
+  if (!result) return null;
   const kilobytes = Number.parseInt(result.stdout, 10);
   return result.code === 0 && Number.isFinite(kilobytes) ? kilobytes * 1024 : null;
 }
@@ -186,25 +194,33 @@ async function diskBytes(root: string): Promise<number | null> {
  */
 export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: {
   idleMs?: number; now?: number; plan?: boolean; processes?: ProcessWorkingDirectory[] | null;
+  sizeOf?: (root: string) => Promise<number | null>;
+  inspectRetirement?: boolean;
+  onlyPaths?: string[];
 } = {}): Promise<{ plans: EvictionPlan[]; outcome: EvictionOutcome }> {
+  const processes = options.processes !== undefined ? options.processes : await processWorkingDirectories();
   const context = await workspaceContext(cwd);
   if (!context) return { plans: [], outcome: { results: [], skipped: [], unretirable: [] } };
   const now = options.now ?? Date.now();
   const integrationRoot = resolve(context.integration.root);
   const workspaces = await listWorkspaces(cwd, { readOnly: Boolean(options.plan) });
+  const sizes = options.sizeOf ?? cachedSizeOf(diskBytes, join(stateHome(), "disk-sizes.json"));
+  // Bound the cold sweep too: 150 timeouts take at most ~26s, not five minutes of serial du.
+  const measured = new Map(await mapBounded(workspaces.filter((workspace) => workspace.root && (!options.onlyPaths || options.onlyPaths.includes(resolve(workspace.root)))), 12,
+    async (workspace) => [resolve(workspace.root), await sizes(resolve(workspace.root))] as const));
   const plans: EvictionPlan[] = [];
   const outcome: EvictionOutcome = { results: [], skipped: [], unretirable: [] };
   for (const workspace of workspaces) {
     const root = workspace.root ? resolve(workspace.root) : "";
+    if (options.onlyPaths && !options.onlyPaths.includes(root)) continue;
     if (!root) { outcome.skipped.push({ name: workspace.name, reason: "no checkout on disk" }); continue; }
-    // A spare is the pool's cached readiness and a dependency seed for other checkouts.
-    if (workspace.metadata?.spare) { outcome.skipped.push({ name: workspace.name, reason: "a pool spare" }); continue; }
-    const decision = await decide(workspace, root, integrationRoot, now, options);
+    // Spares still count in reports and budgets, but dependency eviction leaves their readiness intact.
+    const decision = workspace.metadata?.spare ? { evict: false, reason: "a pool spare" } : await decide(workspace, root, integrationRoot, now, { ...options, processes });
     // A checkout nobody is using that `retire` would refuse is what accumulates: judge it
     // here, read-only, so the pass names it and why instead of only skipping its eviction.
     const idleAndFree = ["idle ", "no dependency trees installed"].some((prefix) => decision.reason.startsWith(prefix))
       && idlePastThreshold(workspace, now, options.idleMs);
-    const retirementRefusal = !idleAndFree ? null
+    const retirementRefusal = !idleAndFree || options.inspectRetirement === false ? null
       : !await withinWorkspaceStorage(root) ? "it is not a workspace SlipJay manages"
       : (await archiveRefusal(root, integrationRoot, { readOnly: true }).catch(() => null))?.refusal ?? null;
     if (retirementRefusal !== null) outcome.unretirable.push({ name: workspace.name, root, reason: retirementRefusal });
@@ -213,7 +229,9 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
     const generatedPaths = decision.evict ? await generatedPathsIn(root, integrationRoot).catch(() => []) : [];
     plans.push({
       name: workspace.name, root, action: decision.evict ? "evict" : "keep", reason: decision.reason,
-      retirementRefusal, dependencyPaths, generatedPaths, sizeBytes: await diskBytes(root),
+      retirementRefusal, dependencyPaths, generatedPaths, sizeBytes: measured.get(root) ?? null,
+      spare: Boolean(workspace.metadata?.spare), idleSince: idleSince(workspace) ?? undefined,
+      retirable: idleAndFree && retirementRefusal === null,
     });
     if (!decision.evict) { outcome.skipped.push({ name: workspace.name, reason: decision.reason }); continue; }
     if (options.plan) continue;
@@ -223,13 +241,14 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
     try {
       result = await withWorkspaceTransaction(`pool:${integrationRoot}`, async (): Promise<EvictionResult | null> => withUnclaimedWorkspace(root, "evict generated material", async (check) => {
         // A claim or a resume may have landed while this pass decided, so judge again inside the lock.
-        const holders = await workspaceHolders(root, { processes: options.processes ?? null }).catch(() => null);
+        const fresh = options.processes !== undefined ? options.processes : await processWorkingDirectories();
+        const holders = fresh === null ? null : await workspaceHolders(root, { processes: fresh }).catch(() => null);
         if (holders === null || holders.length) return null;
         const current = await metadata(workspace.name);
         const recordedAt = (value: unknown) => typeof value === "string" ? Date.parse(value) : null;
         const recorded = recordedAt(current?.lastActivityAt);
         if (recorded && Number.isFinite(recorded) && now - recorded < (options.idleMs ?? EVICTION_IDLE_MS)) return null;
-        const before = await diskBytes(root);
+        const before = await readHostUsage();
         // Invalidate the readiness record first: an interrupted removal must never leave a
         // claim reusing an install that is partly gone.
         await writeMetadata(workspace.name, {
@@ -256,11 +275,11 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
         if (removed.length !== dependencyPaths.length) {
           await writeMetadata(workspace.name, { evictedPaths: removed });
         }
-        const after = await diskBytes(root);
+        const after = await readHostUsage();
         return {
           name: workspace.name, root, evicted: removed.length > 0, reason: decision.reason,
           removedPaths: removed, failedPaths: failed,
-          freedBytes: before !== null && after !== null ? Math.max(0, before - after) : null,
+          freedBytes: before?.freeBytes !== undefined && after?.freeBytes !== undefined ? Math.max(0, after.freeBytes - before.freeBytes) : null,
         };
       }), { waitMs: 60_000 });
     } catch (error) {
@@ -286,7 +305,7 @@ async function decide(
 ): Promise<EvictionDecision> {
   const custody = await workspaceClaimRefusal(root);
   if (custody) return { evict: false, reason: custody };
-  const holders = await workspaceHolders(root, { processes: options.processes ?? null }).catch(() => null);
+  const holders = options.processes === null ? null : await workspaceHolders(root, { processes: options.processes }).catch(() => null);
   const activity = workspace.metadata?.lastActivityAt;
   const lastActivityAt = typeof activity === "string" ? Date.parse(activity) : null;
   const decision = evictionDecision({

@@ -1,8 +1,10 @@
 /**
  * A short-lived cache of directory sizes for the host disk pass (SJ-226). `du` over run directories dominates a
- * pass, and sizes only feed the report and the per-Issue cap flag, never a removal decision, so a size a few
- * minutes old is as good as a fresh one. Unreadable or corrupt cache files are ignored.
+ * pass. Workspace sizes and their budgets are report-only; df available blocks govern pressure. Evidence
+ * sizes additionally feed its explicit archive budget and per-Issue cap flag. Unreadable or corrupt caches
+ * are ignored; a minutes-old estimate is sufficient for these reports and evidence-budget planning.
  */
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -19,6 +21,7 @@ export function cachedSizeOf(
   const now = options.now ?? Date.now;
   const ttlMs = options.ttlMs ?? SIZE_CACHE_TTL_MS;
   let loaded: Promise<Entries> | undefined;
+  let persist: Promise<void> = Promise.resolve();
   const load = (): Promise<Entries> => loaded ??= readFile(file, "utf8").then((text) => {
     const parsed = JSON.parse(text) as unknown;
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Entries : {};
@@ -28,14 +31,18 @@ export function cachedSizeOf(
     const hit = entries[path];
     if (hit && typeof hit.sizeBytes === "number" && typeof hit.at === "number" && now() - hit.at >= 0 && now() - hit.at < ttlMs) return hit.sizeBytes;
     const sizeBytes = await measure(path);
-    if (sizeBytes === null) return null;
+    if (sizeBytes === null) return hit?.sizeBytes ?? null;
     entries[path] = { sizeBytes, at: now() };
     for (const [key, entry] of Object.entries(entries)) if (now() - entry.at >= ttlMs) delete entries[key];
-    try {
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(`${file}.tmp`, JSON.stringify(entries));
-      await rename(`${file}.tmp`, file);
-    } catch { /* a cache that cannot be written only costs the next pass a measurement */ }
+    persist = persist.then(async () => {
+      try {
+        await mkdir(dirname(file), { recursive: true });
+        const temporary = `${file}.${randomUUID()}.tmp`;
+        await writeFile(temporary, JSON.stringify(entries));
+        await rename(temporary, file);
+      } catch { /* a cache that cannot be written only costs the next pass a measurement */ }
+    });
+    await persist;
     return sizeBytes;
   };
 }

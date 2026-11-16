@@ -2,7 +2,9 @@ import { closeSync, fsyncSync, openSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { stateHome } from "./workspace-paths.ts";
+import { holdersOfOpenFiles, openPathsByProcess } from "../host-disk/disk-holders.ts";
+import { processWorkingDirectories, workspaceHolders } from "./workspace-holders.ts";
+import { metadataHome, stateHome } from "./workspace-paths.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 import { claimController, sameClaimController } from "./workspace-claim-identity.ts";
 import type { ClaimController } from "./workspace-claim-identity.ts";
@@ -89,11 +91,41 @@ export async function workspaceClaimStatus(path: string): Promise<ClaimStatus> {
   return { version: 1, path: root, generation: current?.id ?? null, claims: await Promise.all((record?.generations ?? []).flatMap((g) => g.claims).map(view)),
     retirement: current?.retirement ?? null, reason: current?.retirement ? "retirement in progress or interrupted; recovery required" : null };
 }
+export const STALE_CUSTODY_IDLE_MS: number = 24 * 60 * 60_000;
+
+/** Missing identity, permission errors and PID reuse are not proof of a dead controller. */
+export function recoveryCustodyIdle(input: { claims: ClaimView[]; controllersGone: boolean; holdersClear: boolean; lastActivityAt: number | null; now: number }): boolean {
+  const retained = input.claims.filter((claim) => claim.state === "active" || claim.state === "recovery-required");
+  return retained.length > 0 && retained.every((claim) => claim.state === "recovery-required" && claim.controller !== null)
+    && input.controllersGone && input.holdersClear && input.lastActivityAt !== null
+    && input.now - input.lastActivityAt >= STALE_CUSTODY_IDLE_MS;
+}
+let recoveryScan: { at: number; value: Promise<{ working: Awaited<ReturnType<typeof processWorkingDirectories>>; open: Awaited<ReturnType<typeof openPathsByProcess>> }> } | undefined;
+async function staleRecovery(path: string, status: ClaimStatus, fresh = false): Promise<boolean> {
+  if (status.retirement) return false;
+  const claims = status.claims.filter((claim) => claim.state === "active" || claim.state === "recovery-required");
+  if (!claims.length || claims.some((claim) => claim.state !== "recovery-required" || !claim.controller)) return false;
+  const controllersGone = claims.every((claim) => {
+    try { process.kill(claim.controller!.pid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  });
+  if (!controllersGone) return false;
+  const metadata = await readFile(join(metadataHome(), `${basename(path)}.json`), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>).catch(() => null);
+  // Never use the custody file's timestamp: merely inspecting it is not activity.
+  const activity = typeof metadata?.lastActivityAt === "string" ? Date.parse(metadata.lastActivityAt) : NaN;
+  if (!Number.isFinite(activity) || Date.now() - activity < STALE_CUSTODY_IDLE_MS) return false;
+  if (fresh || !recoveryScan || Date.now() - recoveryScan.at > 30_000) recoveryScan = { at: Date.now(), value: Promise.all([processWorkingDirectories().catch(() => null), openPathsByProcess().catch(() => null)]).then(([working, open]) => ({ working, open })) };
+  const { working, open } = await recoveryScan.value;
+  const holders = working === null ? null : await workspaceHolders(path, { processes: working });
+  return recoveryCustodyIdle({ claims, controllersGone, holdersClear: holders !== null && holders.length === 0 && open !== null && holdersOfOpenFiles(path, open).length === 0, lastActivityAt: activity, now: Date.now() });
+}
+
 /** Read-only plans and all destructive paths fail closed on unknown authority. */
 export async function workspaceClaimRefusal(path: string): Promise<string | null> {
   try {
     const status = await workspaceClaimStatus(path);
     const claims = status.claims.filter((c) => c.state === "active" || c.state === "recovery-required");
+    if (await staleRecovery(path, status)) return null;
     return claims.length ? `workspace custody retained: ${claims.map((c) => `${c.ownerId} (${c.state}: ${c.reason})`).join(", ")}` : status.reason;
   } catch { return "workspace custody identity unreadable; recovery required"; }
 }
@@ -197,6 +229,11 @@ export async function withUnclaimedWorkspace<T>(path: string, reason: string, op
   await withClaimWriter(root, async () => {
     const refusal = await workspaceClaimRefusal(root); if (refusal) fail("CLAIM_RETAINED", refusal);
     const record = await load(root) ?? { version: 1 as const, path: root, current: "", generations: [], receipts: {} };
+    if (retained(record).length) {
+      // Re-prove under the canonical writer fence, then record the narrow host-idle settlement.
+      if (!await staleRecovery(root, await workspaceClaimStatus(root), true)) fail("CLAIM_RETAINED", "Recovery custody is no longer confirmed idle");
+      for (const claim of retained(record)) { claim.state = "released"; claim.settlementRef = "slipjay:confirmed-controller-gone-idle-24h"; }
+    }
     if (!record.current) {
       record.current = randomUUID();
       record.generations.push({ id: record.current, fingerprint: await fingerprint(root).catch(() => "missing"), repository: "", workspaceName: "", retired: false, claims: [] });

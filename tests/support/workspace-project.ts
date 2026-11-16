@@ -1,9 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { drainFixtureWorkers } from "./fixture-workers.ts";
+import { machineConfigPath } from "../../src/lib/workspace/workspace-paths.ts";
 import { setFixtureJjSetting } from "./jj-user-config.ts";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
@@ -29,6 +30,13 @@ export const recordCheckout = (verified: string) => `require("node:fs").appendFi
 export async function project(options: { ignore?: string; generatedPaths?: unknown; verify?: (verified: string) => string;
   shallow?: boolean; postIntegration?: Record<string, unknown>; policyPath?: "slipjay.json" | "slipway.json";
   policy?: Record<string, unknown> } = {}) {
+  // A disposable HOME shares the host's physical disk: fixture allocation must not depend on its free space.
+  // Tests of admission explicitly override this after constructing their fixture.
+  const configPath = machineConfigPath();
+  const config = await readFile(configPath, "utf8").then((text) => JSON.parse(text) as Record<string, unknown>).catch(() => ({} as Record<string, unknown>));
+  const disk = config.disk && typeof config.disk === "object" ? config.disk as Record<string, unknown> : {};
+  await mkdir(dirname(configPath), { recursive: true });
+  await writeFile(configPath, JSON.stringify({ ...config, disk: { ...disk, floor: disk.floor ?? { bytes: 0, percent: 0 }, thresholds: disk.thresholds ?? { refillPercent: 100, criticalPercent: 100 } } }));
   process.env.JJ_USER ??= "Fixture";
   process.env.JJ_EMAIL ??= "fixture@example.com";
   const root = await realpath(await mkdtemp(join(tmpdir(), "peach-rollover-")));

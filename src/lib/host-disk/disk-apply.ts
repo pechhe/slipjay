@@ -25,10 +25,14 @@ export type DiskOps = {
   allocate(path: string, bytes: number): Promise<void>;
   archive(directory: string, manifest: { issue: string; owner: string }, now: number): Promise<ArchiveSummary>;
   /** Runs the existing idle-workspace eviction and answers which checkouts it evicted (by root). */
-  evictWorkspaces(idleMs: number): Promise<{ evicted: Set<string>; failed: Array<{ root: string; reason: string }>; freedBytes?: number }>;
+  evictWorkspaces(idleMs: number, onlyPaths?: string[]): Promise<{ evicted: Set<string>; failed: Array<{ root: string; reason: string }>; freedBytes?: number }>;
   /** Whether a process holds the path right now (a fresh look, not the plan's): true also when that cannot be read. */
   held?(path: string): Promise<boolean>;
   readManifest: DiskHost["readManifest"];
+  readUsage?: () => Promise<{ freeBytes?: number } | null>;
+  /** Archive source and retire through the existing fenced release path. null means retired. */
+  retireWorkspace?: (path: string) => Promise<string | null>;
+  retireSpare?: (repository: string, path: string) => Promise<string | null>;
 };
 
 const runCommand = (command: string, args: string[]): Promise<boolean> => new Promise((resolve) => {
@@ -95,6 +99,7 @@ export type ApplyResult = { rows: RowResult[]; ballast: BallastResult | null; fa
 
 /** Execute the plan. Failures never stop the rest; each is a `failed` outcome and counted. */
 export async function applyHostDisk(plan: HostDiskPlan, ops: DiskOps, now: number): Promise<ApplyResult> {
+  if (plan.floorPressure && ops.readUsage) return applyPressure(plan, ops, now);
   let ballast: BallastResult | null = null;
   // The ballast is released first: at critical, headroom is the point.
   if (plan.ballast?.action === "remove") {
@@ -108,9 +113,8 @@ export async function applyHostDisk(plan: HostDiskPlan, ops: DiskOps, now: numbe
   const workspaceRows = plan.rows.filter((row) => row.class === "workspace");
   // On a healthy disk the plan still shows eviction's verdict, but `maintain`'s hourly pass does the evicting: this pass
   // runs every few minutes and must stay cheap.
-  // A workspace class over its budget is evicted whatever the level, but only when a row is evictable (SJ-235).
-  const evictable = workspaceRows.some((row) => row.action === "remove");
-  const deferWorkspaces = (plan.level === "ok" || plan.level === "warn") && !(plan.budgets.workspaces?.over && evictable);
+  // du budgets are report-only: shared/cloned bytes cannot authorize earlier or extra eviction.
+  const deferWorkspaces = !plan.maintenance && (plan.level === "ok" || plan.level === "warn");
   if (workspaceRows.length && !deferWorkspaces) {
     workspaces = await ops.evictWorkspaces(plan.workspaceIdleMs).catch((error: unknown) => ({ evicted: new Set<string>(), failed: [{ root: "", reason: message(error) }] }));
   }
@@ -152,6 +156,73 @@ export async function applyHostDisk(plan: HostDiskPlan, ops: DiskOps, now: numbe
     for (const [index, row] of rows.entries()) if (row.class === "evidence" && row.budgetPrune && row.outcome !== "archived") rows[index] = { ...row, keepsOverBudget: true };
   }
   return { rows, ballast, failures, budgets };
+}
+
+/** Fixed pressure order. Every attempt is followed by df; cloned du sizes never predict reclaimed blocks. */
+async function applyPressure(plan: HostDiskPlan, ops: DiskOps, now: number): Promise<ApplyResult> {
+  const rows = new Map<string, RowResult>(plan.rows.map((row) => [row.path, { ...row, outcome: "kept", detail: row.reason }]));
+  let free = plan.freeBytes ?? 0;
+  const floor = plan.floorBytes ?? 0;
+  let measurable = true;
+  const refresh = async () => {
+    const usage = await ops.readUsage!().catch(() => null);
+    if (usage?.freeBytes === undefined) {
+      measurable = false;
+      plan.notes.push("CRITICAL: cannot re-read available disk blocks; pressure reclamation stopped");
+    } else free = usage.freeBytes;
+  };
+  await refresh();
+  const attempt = async (row: DiskRow, operation: () => Promise<string | null>) => {
+    if (!measurable || free >= floor) return;
+    const before = free;
+    try {
+      const refusal = await operation();
+      await refresh();
+      rows.set(row.path, { ...row, outcome: refusal ? "kept" : "removed", detail: refusal ?? `free space ${before} → ${free} bytes (df delta ${free - before})` });
+    } catch (error) {
+      await refresh();
+      rows.set(row.path, { ...row, outcome: "failed", detail: message(error) });
+    }
+  };
+  const retire = (row: DiskRow) => async () => {
+    if (await ops.held?.(row.path)) return "held by a process or holders unreadable";
+    return ops.retireWorkspace ? ops.retireWorkspace(row.path) : "retirement unavailable";
+  };
+  const workspaces = plan.rows.filter((row) => row.class === "workspace" && !row.integration);
+  // The pool's configured allowance is the only spare policy. Its lock reserves each excess spare.
+  for (const row of workspaces.filter((row) => row.spare)) await attempt(row, async () => {
+    if (await ops.held?.(row.path)) return "held by a process or holders unreadable";
+    return row.repository && ops.retireSpare ? ops.retireSpare(row.repository, row.path) : "spare retirement unavailable";
+  });
+  for (const row of plan.rows.filter((row) => row.class === "scratch" && row.action === "remove")) {
+    await attempt(row, async () => {
+      if (await ops.held?.(row.path)) return "held by a process or holders unreadable";
+      await ops.remove(row.path); return null;
+    });
+  }
+  for (const row of workspaces.filter((row) => !row.spare && row.retirable).sort((a, b) => (a.idleSince ?? Infinity) - (b.idleSince ?? Infinity))) await attempt(row, retire(row));
+  for (const row of workspaces.filter((row) => row.action === "remove" && rows.get(row.path)?.outcome !== "removed")) {
+    await attempt(row, async () => {
+      if (await ops.held?.(row.path)) return "held by a process or holders unreadable";
+      const result = await ops.evictWorkspaces(plan.workspaceIdleMs, [row.path]);
+      return result.evicted.has(row.path) ? null : result.failed[0]?.reason ?? "workspace changed or remains in use";
+    });
+  }
+  // Regenerable caches and expired evidence retain their existing maintenance policy.
+  for (const row of plan.rows.filter((row) => row.class === "regenerable" && row.action === "remove")) await attempt(row, async () => { await ops.remove(row.path); return null; });
+  for (const row of plan.rows.filter((row) => row.action === "archive-and-prune")) rows.set(row.path, await archiveAndPrune(row, ops, now));
+  let ballast: BallastResult | null = plan.ballast ? { ...plan.ballast, outcome: "kept", detail: plan.ballast.reason } : null;
+  if (plan.ballast?.action === "remove") {
+    try { await ops.remove(plan.ballast.path); await refresh(); ballast = { ...plan.ballast, outcome: "released", detail: "critical: ballast released" }; }
+    catch (error) { ballast = { ...plan.ballast, outcome: "failed", detail: message(error) }; }
+  }
+  const results = [...rows.values()];
+  const freedWorkspaceBytes = results.filter((row) => row.class === "workspace" && row.outcome === "removed").reduce((sum, row) => sum + row.sizeBytes, 0);
+  const budgets = budgetsAfter(plan, results, freedWorkspaceBytes);
+  if (budgets.evidence?.over) {
+    for (const [index, row] of results.entries()) if (row.class === "evidence" && row.budgetPrune && row.outcome !== "archived") results[index] = { ...row, keepsOverBudget: true };
+  }
+  return { rows: results, ballast, failures: results.filter((row) => row.outcome === "failed").length + (ballast?.outcome === "failed" ? 1 : 0) + (measurable ? 0 : 1), budgets };
 }
 
 async function archiveAndPrune(row: DiskRow, ops: DiskOps, now: number): Promise<RowResult> {

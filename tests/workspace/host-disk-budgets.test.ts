@@ -7,6 +7,7 @@ import { afterEach, beforeEach, test } from "vite-plus/test";
 import { diskLines } from "../../src/launcher/disk-command.ts";
 import { readDiskConfig } from "../../src/lib/host-disk/disk-config.ts";
 import type { DiskConfig } from "../../src/lib/host-disk/disk-config.ts";
+import { writeDiskHeartbeat } from "../../src/lib/host-disk/disk-heartbeat.ts";
 import { hostDisk } from "../../src/lib/host-disk/host-disk.ts";
 import type { HostDiskOptions } from "../../src/lib/host-disk/host-disk.ts";
 import { parseDockerSize, readDockerVolumes } from "../../src/lib/host-disk/disk-readers.ts";
@@ -18,6 +19,7 @@ const NOW = Date.parse("2026-11-10T12:00:00Z");
 
 let base: string;
 const configWith = (budgets: Record<string, number> | undefined): DiskConfig => readDiskConfig({ disk: {
+  floor: { bytes: 0, percent: 0 }, // Class-budget cases are independent of physical pressure.
   ballast: { path: join(base, "ballast"), bytes: 0 }, runRoot: join(base, "runs"),
   scratchRoots: [], regenerable: [], ...budgets === undefined ? {} : { budgets },
 } });
@@ -25,6 +27,7 @@ beforeEach(async () => {
   await rm(evidenceHome(), { recursive: true, force: true });
   base = await mkdtemp(join(tmpdir(), "slipjay-host-disk-budget-"));
   await mkdir(join(base, "runs"));
+  await writeDiskHeartbeat({ at: NOW, floorBytes: 0, level: "ok", failures: 0 });
 });
 afterEach(async () => { await rm(base, { recursive: true, force: true }); });
 
@@ -53,21 +56,20 @@ test("budgets are optional positive integers, validated", () => {
   }
 });
 
-test("workspaces over budget are evicted at ok and say what claimed checkouts hold; under budget they are left to maintain", async () => {
+test("workspace du budgets report overage without shortening idle time or authorizing eviction",  async () => {
   const row = { path: "/w/a", class: "workspace" as const, sizeBytes: 10 * MIB, owner: "a", action: "remove" as const, reason: "idle 3h" };
   const idle: number[] = [];
   const host = { workspaceRows: async (idleMs: number) => { idle.push(idleMs); return [row]; } };
-  const evictWorkspaces = async () => ({ evicted: new Set(["/w/a"]), failed: [], freedBytes: 2 * MIB });
+  const evictWorkspaces = async () => { assert.fail("du overage must never trigger eviction on a healthy disk"); };
   const over = await pass(configWith({ workspacesBytes: 4 * MIB }), 50, { host, ops: { evictWorkspaces } });
   assert.ok(over.state === "applied");
-  assert.deepEqual(idle, [24 * HOUR, HOUR], "re-planned at the shed window");
-  assert.equal(over.results.find((entry) => entry.path === "/w/a")!.outcome, "removed");
-  // 10 MiB less the 2 MiB freed is still over the 4 MiB budget.
-  assert.deepEqual(over.budgets.workspaces, { budgetBytes: 4 * MIB, usedBytes: 8 * MIB, over: true });
-  assert.match(diskLines(over, false).join("\n"), /^over budget\tworkspaces\t8\.0 MB of 4\.0 MB\tclaimed workspaces hold 8\.0 MB$/m);
+  assert.deepEqual(idle, [24 * HOUR], "du overage leaves the normal idle window intact");
+  assert.equal(over.results.find((entry) => entry.path === "/w/a")!.outcome, "kept");
+  assert.deepEqual(over.budgets.workspaces, { budgetBytes: 4 * MIB, usedBytes: 10 * MIB, over: true });
+  assert.match(diskLines(over, false).join("\n"), /^over budget\tworkspaces\t10\.0 MB of 4\.0 MB\tworkspace size estimates include spares \(not physical bytes\)$/m);
 
   const planned = await pass(configWith({ workspacesBytes: 4 * MIB }), 50, { plan: true, host });
-  assert.ok(planned.state === "planned" && planned.workspaceIdleMs === HOUR && planned.budgets.workspaces?.over === true);
+  assert.ok(planned.state === "planned" && planned.workspaceIdleMs === 24 * HOUR && planned.budgets.workspaces?.over === true);
 
   let called = false;
   const under = await pass(configWith({ workspacesBytes: 20 * MIB }), 50, { host, ops: { evictWorkspaces: async () => { called = true; return evictWorkspaces(); } } });
@@ -212,7 +214,7 @@ test("over budget with nothing evictable evicts nothing and reports the class ov
   assert.ok(stuck.state === "applied");
   assert.equal(called, 0);
   assert.deepEqual(stuck.budgets.workspaces, { budgetBytes: 4 * MIB, usedBytes: 10 * MIB, over: true }, "the 500 MiB primary checkout is not counted");
-  assert.match(diskLines(stuck, false).join("\n"), /^over budget\tworkspaces\t10\.0 MB of 4\.0 MB\tclaimed workspaces hold 10\.0 MB$/m);
+  assert.match(diskLines(stuck, false).join("\n"), /^over budget\tworkspaces\t10\.0 MB of 4\.0 MB\tworkspace size estimates include spares \(not physical bytes\)$/m);
   const roomy = await pass(configWith({ workspacesBytes: 10 * MIB }), 50, { host: { workspaceRows: async () => [kept, primary] } });
   assert.ok(roomy.state === "applied" && roomy.budgets.workspaces?.over === false);
   // Shedding still evicts as before, with or without a budget.

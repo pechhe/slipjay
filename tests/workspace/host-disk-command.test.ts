@@ -37,17 +37,17 @@ test("disk --plan lists the managed directories and changes nothing; disk applie
     assert.equal(plan.status, 0, plan.stderr);
     const planned = JSON.parse(plan.stdout) as { level: string; rows: Array<{ class: string; action: string }> };
     assert.equal(planned.level, "shed");
-    // Open files are read from /proc, so only Linux can judge scratch; elsewhere it is kept, never guessed at.
-    const linux = platform() === "linux";
+    // Linux reads /proc; Darwin now reads cwd, descriptors and mappings with bounded lsof.
+    const readable = platform() === "linux" || platform() === "darwin";
     // The real disk's unexplained-space row is report-only and its size is the host's, so it is left out here.
-    assert.deepEqual(planned.rows.filter((row) => row.class !== "unexplained" && !row.class.endsWith("-volume") && row.class !== "loop-image").map((row) => `${row.class}:${row.action}`).sort(), ["regenerable:remove", linux ? "scratch:remove" : "scratch:keep"]);
+    assert.deepEqual(planned.rows.filter((row) => row.class !== "unexplained" && !row.class.endsWith("-volume") && row.class !== "loop-image").map((row) => `${row.class}:${row.action}`).sort(), ["regenerable:remove", readable ? "scratch:remove" : "scratch:keep"]);
     const text = cliRun(home, ["disk", "--plan"]);
-    assert.match(text.stdout, linux ? /^remove\tscratch\t.*old-scratch\t/m : /^keep\tscratch\t.*old-scratch\t/m);
+    assert.match(text.stdout, readable ? /^remove\tscratch\t.*old-scratch\t/m : /^keep\tscratch\t.*old-scratch\t/m);
     assert.equal(existsSync(join(home, "tmp", "cache")) && existsSync(join(home, "tmp", "old-scratch")), true, "--plan changed nothing");
     const applied = cliRun(home, ["disk"]);
     assert.equal(applied.status, 0, applied.stderr);
     assert.equal(existsSync(join(home, "tmp", "cache")), false);
-    if (linux) {
+    if (readable) {
       assert.match(applied.stdout, /^removed\tscratch\t.*old-scratch\t/m);
       assert.equal(existsSync(join(home, "tmp", "old-scratch")), false);
     } else assert.equal(existsSync(join(home, "tmp", "old-scratch")), true, "scratch that cannot be judged is kept");

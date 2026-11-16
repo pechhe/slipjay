@@ -28,6 +28,10 @@ export type ScratchRoot = { path: string; match: string[]; ttlHours: number };
 
 export type DiskConfig = {
   thresholds: DiskThresholds;
+  /** Reserve the larger of these values on the state filesystem. */
+  floor: { bytes: number; percent: number };
+  /** Admission stops only below this smaller reserve. */
+  hardMinimum: { bytes: number; percent: number };
   /** `bytes: 0` turns the ballast off. */
   ballast: { path: string; bytes: number };
   runRoot: string;
@@ -54,6 +58,8 @@ export function expandHome(path: string): string {
 export function defaultDiskConfig(): DiskConfig {
   return {
     thresholds: { ...DEFAULT_THRESHOLDS },
+    floor: { bytes: 40 * GIB, percent: 10 },
+    hardMinimum: { bytes: 10 * GIB, percent: 2 },
     ballast: { path: join(homedir(), ".slipjay", "disk-ballast"), bytes: 8 * GIB },
     runRoot: join(homedir(), "runs"),
     scratchRoots: [{ path: "/tmp", match: ["*-scratch", "ys-attack-build-*"], ttlHours: 72 }],
@@ -98,8 +104,24 @@ export function readDiskConfig(config: Record<string, unknown> = readMachineConf
   const raw = config.disk;
   if (raw === undefined) return defaults;
   const disk = object(raw, "disk");
-  known(disk, ["thresholds", "ballast", "runRoot", "scratchRoots", "regenerable", "issueCapBytes", "budgets"], "disk");
+  known(disk, ["thresholds", "ballast", "runRoot", "scratchRoots", "regenerable", "issueCapBytes", "budgets", "floor", "hardMinimum"], "disk");
   const result: DiskConfig = { ...defaults };
+  if (disk.floor !== undefined) {
+    const given = object(disk.floor, "floor");
+    known(given, ["bytes", "percent"], "floor");
+    result.floor = {
+      bytes: given.bytes === undefined ? defaults.floor.bytes : number(given.bytes, "floor.bytes", { min: 0, max: 2 ** 50, integer: true }),
+      percent: given.percent === undefined ? defaults.floor.percent : number(given.percent, "floor.percent", { min: 0, max: 99 }),
+    };
+  }
+  if (disk.hardMinimum !== undefined) {
+    const given = object(disk.hardMinimum, "hardMinimum");
+    known(given, ["bytes", "percent"], "hardMinimum");
+    result.hardMinimum = {
+      bytes: given.bytes === undefined ? defaults.hardMinimum.bytes : number(given.bytes, "hardMinimum.bytes", { min: 0, max: 2 ** 50, integer: true }),
+      percent: given.percent === undefined ? defaults.hardMinimum.percent : number(given.percent, "hardMinimum.percent", { min: 0, max: 99 }),
+    };
+  }
   if (disk.thresholds !== undefined) {
     const given = object(disk.thresholds, "thresholds");
     known(given, Object.keys(DEFAULT_THRESHOLDS), "thresholds");

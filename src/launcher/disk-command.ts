@@ -24,12 +24,13 @@ export function diskLines(outcome: Exclude<HostDiskOutcome, { state: "busy" }>, 
     const holding = row.keepsOverBudget && outcome.budgets.evidence?.over ? `; holds evidence over budget (${mb} MB)` : "";
     lines.push(`${all ? row.action : row.outcome}\t${row.class}\t${mb} MB\t${row.owner ?? "-"}\t${row.path}\t${row.detail}${holding}`);
   }
-  if (!quiet) for (const note of outcome.notes) lines.push(`disk\t${note}`);
+  for (const note of outcome.notes) if (!quiet || /WARNING|CRITICAL/.test(note)) lines.push(`disk\t${note}`);
+  if (all || outcome.floorPressure) lines.push(`disk\tfree ${outcome.freeBytes ?? "unknown"} bytes; floor ${outcome.floorBytes ?? "unknown"} bytes`);
   // A class over its budget is one line, after the pass for an applying run: what is still over and, for workspaces, what claimed checkouts hold.
   for (const [name, budget] of Object.entries(outcome.budgets)) {
     if (!budget.over) continue;
     const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-    lines.push(`over budget\t${name}\t${mb(budget.usedBytes)} of ${mb(budget.budgetBytes)}${name === "workspaces" ? `\tclaimed workspaces hold ${mb(budget.usedBytes)}` : ""}`);
+    lines.push(`over budget\t${name}\t${mb(budget.usedBytes)} of ${mb(budget.budgetBytes)}${name === "workspaces" ? `\tworkspace size estimates include spares (not physical bytes)` : ""}`);
   }
   if (outcome.rescueEnvError) lines.push(`rescue\tfailed\t${outcome.rescueEnvError}`);
   if (outcome.ballastResult && (all || outcome.ballastResult.outcome !== "kept")) {

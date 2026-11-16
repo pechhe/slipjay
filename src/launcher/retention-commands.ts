@@ -1,8 +1,8 @@
+import type { EvictionOutcome } from "../lib/slipjay.ts";
 import { readBuildThroughRunner, runnerLocation } from "../lib/runner/runner-client.ts";
 import type { SweepOptions } from "../lib/workspace/workspace-sweep.ts";
 import { callerPids, workspaceHolders } from "../lib/workspace/workspace-holders.ts";
 import { cleanupLandedWorkspace, planDisposableWorkspaces, pruneEmptyWorkspaces, evictIdleWorkspaces, EVICTION_IDLE_MS, archiveWorkspace, latestArchiveFor, listArchives, restoreArchive, releaseWorkspace, readReleaseResult, latestReleaseFor, listReleaseResults, processArchiveRequests, workspaceContext, describeRetention, removeWorkspace, withWorkspaceTransaction } from "../lib/slipjay.ts";
-import type { EvictionOutcome } from "../lib/slipjay.ts";
 import { landingIO } from "../lib/landing/landing-steps.ts";
 import { primaryCheckoutDisposition } from "../lib/landing/landing-candidate.ts";
 import type { PrimaryCheckoutOutcome } from "../lib/landing/landing-candidate.ts";
@@ -192,35 +192,38 @@ export async function runMaintain(rest: string[]): Promise<void> {
   let primaryCheckout: PrimaryCheckoutOutcome | null = null;
   let primaryCheckoutError: string | null = null;
   let integrationBranch: string | null = null;
+  let evictionError: string | null = null;
+  let context: Awaited<ReturnType<typeof workspaceContext>> = null;
+  try { context = await workspaceContext(process.cwd()); }
+  catch (error) { evictionError = error instanceof Error ? error.message : String(error); }
   try {
-    const context = await workspaceContext(process.cwd());
     if (context) {
+      const primaryContext = context;
       integrationBranch = context.integrationBranch;
       primaryCheckout = await withWorkspaceTransaction(
         `integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
-        () => primaryCheckoutDisposition(context, landingIO, { carryEdits: false }),
+        () => primaryCheckoutDisposition(primaryContext, landingIO, { carryEdits: false }),
         { waitMs: 60_000 },
       );
     }
   } catch (error) {
     primaryCheckoutError = error instanceof Error ? error.message : String(error);
   }
-  let eviction: EvictionOutcome | null = null;
-  let evictionError: string | null = null;
-  try {
-    eviction = (await evictIdleWorkspaces(process.cwd())).outcome;
-  } catch (error) {
-    evictionError = error instanceof Error ? error.message : String(error);
-  }
-  // The host disk policy runs after eviction, in this process. Its failure is reported and never stops the pass.
+  // The host pass owns the one sweep and executes pressure reclamation before dependency eviction.
+  // Its failure is reported without disabling the older dependency-only fallback.
   let disk: HostDiskOutcome | null = null;
   let diskError: string | null = null;
+  let eviction: EvictionOutcome | null = null;
   try {
-    disk = await hostDisk({ readBuild: diskReadBuild() });
+    disk = await hostDisk({ readBuild: diskReadBuild(), maintain: true });
+    if (disk.state !== "busy" && evictionError === null) eviction = disk.evictions ?? { results: [], skipped: [], unretirable: [] };
   } catch (error) {
     diskError = error instanceof Error ? error.message : String(error);
+    // A broken host config must not disable the older safe dependency-only maintenance.
+    try { eviction = (await evictIdleWorkspaces(process.cwd())).outcome; }
+    catch (error) { evictionError = error instanceof Error ? error.message : String(error); }
   }
-  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, requests: outcomes, evictions: eviction, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError }, ...evictionError === null ? {} : { evictionError } }, null, 2));
+  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, requests: outcomes, evictions: eviction, ...evictionError === null ? {} : { evictionError }, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError } }, null, 2));
   else {
     if (upgrade) {
       // `upgraded` names what it moved between, `current` the install the slot already had.
@@ -233,14 +236,7 @@ export async function runMaintain(rest: string[]): Promise<void> {
     if (primaryCheckout?.action === "moved") console.log(`moved primary checkout onto ${integrationBranch}`);
     else if (primaryCheckout?.warning) console.error(`left primary checkout\t${primaryCheckout.reason}\t${primaryCheckout.warning}`);
     if (primaryCheckoutError !== null) console.error(`could not move primary checkout: ${primaryCheckoutError}`);
-    if (eviction) {
-      for (const result of eviction.results) console.log(`evicted\t${result.name}\t${result.removedPaths.join(", ")}`);
-      for (const skipped of eviction.skipped) if (!/used within|pool spare|no activity recorded/.test(skipped.reason)) console.error(`kept\t${skipped.name}\t${skipped.reason}`);
-      // A checkout `retire` refuses is one a settled thread's cleanup walked away from: name it
-      // and why, or it stays here for ever with nothing that surfaces it.
-      for (const entry of eviction.unretirable) console.error(`cannot retire\t${entry.name}\t${entry.reason}`);
-      if (!outcomes.length && !eviction.results.length && !eviction.unretirable.length) console.log("Nothing to archive or evict.");
-    }
+    for (const entry of eviction?.unretirable ?? []) console.error(`cannot retire\t${entry.name}\t${entry.reason}`);
   }
   if (!json && disk) {
     if (disk.state === "busy") console.log(`disk\t${disk.reason}`);

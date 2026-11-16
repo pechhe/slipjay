@@ -90,7 +90,8 @@ test("the hourly pass evicts a checkout idle past its documented 24-hour default
 
     const result = spawnSync("bun", [cli, "maintain", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
     assert.equal(result.status, 0, result.stderr);
-    const reported = JSON.parse(result.stdout) as { evictions: { results: Array<{ name: string; removedPaths: string[] }>; unretirable: unknown[] } };
+    const reported = JSON.parse(result.stdout) as { disk: { level: string }; evictions: { results: Array<{ name: string; removedPaths: string[] }>; unretirable: unknown[] } };
+    assert.equal(reported.disk.level, "ok", "fixture maintenance must not depend on the real host's disk pressure");
     assert.deepEqual(reported.evictions.results.map((entry) => entry.name), [name]);
     assert.deepEqual(reported.evictions.unretirable, [], "a checkout retire can take is not named as unretirable");
     assert.deepEqual(reported.evictions.results[0]!.removedPaths, ["node_modules"]);
@@ -126,7 +127,8 @@ test("maintain names idle checkouts that retire would refuse", async () => {
 
     const json = spawnSync("bun", [cli, "maintain", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
     assert.equal(json.status, 0, json.stderr);
-    const reported = JSON.parse(json.stdout) as { evictions: { unretirable: Array<{ name: string; root: string; reason: string }> } };
+    const reported = JSON.parse(json.stdout) as { disk: { level: string }; evictions: { unretirable: Array<{ name: string; root: string; reason: string }> } };
+    assert.equal(reported.disk.level, "ok", "fixture maintenance must not depend on the real host's disk pressure");
     const entry = reported.evictions.unretirable.find((candidate) => candidate.name === name);
     assert.ok(entry, json.stdout);
     assert.equal(entry.root, root);

@@ -14,7 +14,7 @@ test("a refill at or above the refill threshold provisions nothing and logs why"
     const usage = usageAt(93);
     const outcomes: object[] = [];
     let provisioned = 0;
-    await refillPool(f.repo, (outcome) => outcomes.push(outcome), { readUsage: usage.read, provision: async () => { provisioned += 1; return { provisioned: true }; } });
+    await refillPool(f.repo, (outcome) => outcomes.push(outcome), { refillPercent: 93, readUsage: usage.read, provision: async () => { provisioned += 1; return { provisioned: true }; } });
     assert.equal(provisioned, 0);
     assert.deepEqual(outcomes.filter((outcome) => "state" in outcome), [{ provisioned: false, state: "skipped", reason: "disk at 93% (threshold 93%)" }]);
   } finally { await f.dispose(); }
@@ -28,7 +28,7 @@ test("the check runs again before each later spare", async () => {
     const outcomes: Array<Record<string, unknown>> = [];
     let provisioned = 0;
     await refillPool(f.repo, (outcome) => outcomes.push(outcome as Record<string, unknown>), {
-      readUsage: usage.read, provision: async () => { provisioned += 1; return { provisioned: true, name: `s${provisioned}` }; },
+      refillPercent: 93, readUsage: usage.read, provision: async () => { provisioned += 1; return { provisioned: true, name: `s${provisioned}` }; },
     });
     assert.equal(provisioned, 2);
     assert.deepEqual(usage.reads, [50, 60, 94]);

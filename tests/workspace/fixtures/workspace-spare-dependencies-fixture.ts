@@ -70,8 +70,10 @@ export async function spareName(repo: string) {
 /** Set this machine's spare limits (~/.slipjay/config.json) for the duration of `body`. */
 export async function withMachineSpares<T>(spares: Record<string, unknown>, body: () => Promise<T>): Promise<T> {
   await mkdir(dirname(machineConfigPath()), { recursive: true });
-  await writeFile(machineConfigPath(), JSON.stringify({ spares }));
-  try { return await body(); } finally { await rm(machineConfigPath(), { force: true }); }
+  const original = await readFile(machineConfigPath(), "utf8").catch(() => null);
+  await writeFile(machineConfigPath(), JSON.stringify({ ...original ? JSON.parse(original) as object : {}, spares }));
+  try { return await body(); }
+  finally { if (original === null) await rm(machineConfigPath(), { force: true }); else await writeFile(machineConfigPath(), original); }
 }
 
 /** An allowance without its source, for tests about counts. */

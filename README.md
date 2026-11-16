@@ -222,13 +222,15 @@ hourly `maintain` apply it; `slipjay disk --plan` shows what it would do.
 
 | `disk` field | Meaning |
 | --- | --- |
+| `floor` | `{ "bytes": 42949672960, "percent": 10 }`: reserve **40 GiB or 10% of the state filesystem, whichever is larger**. Both values are configurable (zero disables that component). Available bytes come from `df`/statfs, not summed directory sizes. Below the floor spare/pool refill refuses; claims, starts and dependency installs continue with a clear warning naming free space, the floor and reclaimable material, unless below `hardMinimum`. |
+| `hardMinimum` | `{ "bytes": 10737418240, "percent": 2 }`: refuse fresh claims/starts and dependency installs below **10 GiB or 2%, whichever is larger**. Each component is configurable; zero disables it. This hard stop is deliberately lower than the reclaim floor so agents can continue while the pressure pass makes room. |
 | `thresholds` | Percent of the disk SlipJay's state lives on used: `warnPercent` 80, `shedPercent` 88, `refillPercent` 93, `criticalPercent` 96, `ballastRecreatePercent` 85. The level is `ok`, `warn`, `shed`, `refill-stop` or `critical`. Usage is read from `~/.slipjay`'s filesystem, which holds the workspaces, ballast, rescue settings and run evidence with it; on Linux that is normally the root filesystem, while on macOS `/` is the sealed system volume holding only the OS, so reading it there never sees the Data volume everything SlipJay manages sits on. |
 | `ballast` | `{ "path": "~/.slipjay/disk-ballast", "bytes": 8589934592 }`. A file of real allocated blocks (`fallocate`, else zeroes), never sparse. At `critical` it is deleted and reported loudly; while absent and below `ballastRecreatePercent` (and not itself pushing the disk past it) it is recreated. `bytes: 0` turns it off. |
 | `runRoot` | `~/runs`. Each child `<runRoot>/<issue>/` is one Issue's evidence. |
-| `scratchRoots` | `[{ "path": "/tmp", "match": ["*-scratch", "ys-attack-build-*"], "ttlHours": 72 }]`. Direct children whose name matches a glob, whose own modification time is older than `ttlHours` and in which no file changed within `ttlHours` (`find -mmin`; a check that cannot finish keeps it) are removed, unless a live process works in them or has a file under them open or mapped (read from /proc, so only on Linux; elsewhere scratch is kept; a process whose descriptors the kernel hides from this user, such as an sshd child, cannot be listed and is skipped, as `lsof` skips it), the processes cannot be read, the host user does not own them, or they lie outside the root (a symlink out of it): each keeps them, with the reason. |
+| `scratchRoots` | `[{ "path": "/tmp", "match": ["*-scratch", "ys-attack-build-*"], "ttlHours": 72 }]`. Direct children whose name matches a glob, whose own modification time is older than `ttlHours` and in which no file changed within `ttlHours` (`find -mmin`; a check that cannot finish keeps it) are removed, unless a live process works in them or has a file under them open or mapped (Linux reads /proc; macOS uses `lsof -nP -Fpcn` with a five-second timeout; unreadable or truncated inventories keep material; a process whose descriptors the kernel hides from this user, such as an sshd child, cannot be listed and is skipped, as `lsof` skips it), the processes cannot be read, the host user does not own them, or they lie outside the root (a symlink out of it): each keeps them, with the reason. |
 | `regenerable` | `["/tmp/node-compile-cache"]`. Absolute paths deleted whole at `shed` or worse, never otherwise. |
 | `issueCapBytes` | 20 GiB. An evidence directory over it is flagged (`flags`, `over cap`), never deleted for that alone. |
-| `budgets` | `{ "workspacesBytes"?, "evidenceBytes"? }`, each a positive integer; absent means no budget and the behaviour above. Set per host. Over `workspacesBytes` the workspace rows are planned at the one-hour shed window and evicted even at `ok`/`warn` when at least one is evictable (dependency trees only; nothing is retired or deleted; the integration checkout and spares are not counted), and if the class is still over afterwards the outcome says so and gives the bytes held by claimed workspaces. Over `evidenceBytes`, a closed, unpinned, unheld directory with a valid manifest (no `expires` is fine; an unparseable `expires` keeps it) is archived and pruned before its expiry, oldest `created` first, until the class is under budget (a directory smaller than 1% of the budget is left: it cannot bring the class under); the other evidence rows stay, and those that keep the class over budget are marked `keepsOverBudget`. `disk` and `maintain` print one `over budget` line per class still over; `--json` carries `budgets` (`budgetBytes`, `usedBytes`, `over`). |
+| `budgets` | `{ "workspacesBytes"?, "evidenceBytes"? }`, each a positive integer; absent means no budget and the behaviour above. Set per host. `workspacesBytes` is report-only: it neither triggers eviction nor shortens the normal 24-hour idle window. Only df-based pressure below the free-space floor shortens that window to one hour. Only the integration checkout is excluded from totals; spares count. The outcome reports the directory-size estimate including spares, never physical bytes. Over `evidenceBytes`, a closed, unpinned, unheld directory with a valid manifest (no `expires` is fine; an unparseable `expires` keeps it) is archived and pruned before its expiry, oldest `created` first, until the class is under budget (a directory smaller than 1% of the budget is left: it cannot bring the class under); the other evidence rows stay, and those that keep the class over budget are marked `keepsOverBudget`. `disk` and `maintain` print one `over budget` line per class still over; `--json` carries `budgets` (`budgetBytes`, `usedBytes`, `over`). |
 
 Report-only rows (never acted on): each Docker volume with its size and the container using it (one `Docker was not read` line when Docker is absent or fails), each loop-mounted image with the host bytes of its backing file and what its filesystem uses (Linux), and one `unexplained` row for used space no row or ballast explains (omitted when the filesystem totals cannot be read). They are read only for `--plan` or when the host is past `ok` (a healthy routine pass never runs docker or losetup), and print then.
 
@@ -245,13 +247,48 @@ copied to `~/.slipjay/state/evidence/<issue>-<time>/files/` with a `provenance.j
 directory that changes during it keep everything. The result says how many files and bytes were kept and dropped.
 
 The plan lists the existing idle-workspace eviction's verdict for every integration root with a registered workspace, at
-eviction's own idle time (24 hours, so `disk --plan` and `evict --plan` name the same workspaces), and at one hour once the
-host sheds. Only a shedding pass evicts: while the disk is healthy `maintain`'s hourly eviction does it, so the five-minute
+eviction's own idle time (24 hours), and at one hour only when df reports free space below the floor.
+There is only one workspace sweep per plan, including when over budget. Workspace sizes share the persistent
+30-minute cache, with two-second `du` timeouts and twelve bounded readers on a cold sweep. Unmeasurable sizes
+are unknown (or the last cached estimate), never authority to remove source. APFS clones and hardlinks can
+make class totals grossly overstate physical bytes; budgets remain estimates, never free-space measurements. Only a shedding pass evicts: while the disk is healthy `maintain`'s hourly eviction does it, so the five-minute
 pass stays cheap. A
 scratch or evidence removal is judged again for holders at the moment it happens, since a plan can be minutes old. A link or
 file under the run root is listed as not managed. The pool refill reads the usage
 before each spare and stops at `refillPercent` (a reading that cannot be taken does not stop the refill), logging `{ "state": "skipped", "reason": "disk at N% (threshold M%)" }`
-to `pool-refill.log`.
+to `pool-refill.log`. The free-space floor also stops refills (including repairs/refreshes and retirement
+handover spares); custody-held spares count as allocated, so they cannot cause replacement-spare leaks.
+
+Below the floor the pressure pass reclaims in order, re-reading available blocks after **each** attempt and
+stopping when the floor is restored: spares beyond the configured pool allowance (reserved under the pool lock and removed through the pool's existing path); unheld scratch idle at least 72h (or its configured TTL if longer); whole idle workspaces, oldest activity first, through the existing
+source-preserving archive and fenced release; dependency/generated trees last. Archive refusals, pending
+runner facts, unknown or live holders and custody all keep source. Recovery custody has only the narrow
+[confirmed-gone, unheld, 24h-idle exception](docs/workspace-custody.md#confirmed-abandoned-recovery-custody).
+If safe candidates are exhausted it prints CRITICAL rather than deleting protected work. Regenerable cache
+and expired-evidence maintenance retain their own rules. Ballast creation cannot breach the floor.
+
+Every applying pass writes `~/.slipjay/state/disk-heartbeat.json` with its completion, space and failure
+count. `slipjay disk` (including `--plan`) warns about missing or >2h-old heartbeats and reports an unmet
+floor loudly. A timer cannot repair its own disabled scheduler: this alarm makes that failure visible.
+The heartbeat and `disk` JSON include operation-store sizes per integration root (`operationStores`),
+with warnings at 5 GiB or when unreadable. They are cached estimates like other directory sizes.
+**Maintain never abandons JJ operations or automatically runs immediate GC.** Abandon re-parents the
+kept operations too, rewriting their IDs; every other workspace can then point to a missing operation.
+Refreshing them can create recovery commits and change the identity of `@`, even when their files survive.
+
+Operation-history maintenance is therefore manual and coordinated, with every writer stopped first:
+
+1. Inventory every registered workspace and snapshot its files with a normal JJ command in that workspace.
+   Record each workspace's current commit ID and preserve any important identities/bookmarks first.
+2. In the integration checkout, choose the boundary from `jj op log` (for example keep 3,000 recent
+   operations) and run `jj op abandon ..<boundary-operation-id>` **without** `--ignore-working-copy`.
+3. Run `jj workspace update-stale` in **every** other workspace. Expect recovery commits and changed `@`
+   identities; reconcile any claim, candidate or thread that recorded the old commit. Confirm files survived.
+4. Only after every checkout is repaired, run `jj util gc --expire=now` from the integration checkout.
+   A git-gc exit 128 is a maintenance failure to investigate, never a reason to force-delete store files.
+
+Do not run this while live threads use the repository, and do not treat a holder scan as permission to
+rewrite their operation identities. This is intentionally not part of the automatic pressure pass.
 
 A full disk must not leave a service dead. `scripts/disk-rescue.sh` is plain shell (no SlipJay, Node or `jj`): at 88% it
 deletes the regenerable paths and at 96% it also deletes the ballast, always exiting 0. It measures the filesystem holding
@@ -261,6 +298,20 @@ disagree. A unit runs it as
 `ExecStartPre=-` and sets `StartLimitIntervalSec=0`, as `scripts/setup-runner.sh` does for the runner; a host's T3 unit
 does the same from the machine playbook. `scripts/install-disk-guard.sh` installs the rescue as
 `~/.local/bin/slipjay-disk-rescue` and a user timer that runs `slipjay disk` every five minutes.
+
+On macOS, from this checkout with the installed `slipjay` and `bun` on PATH:
+
+```sh
+bash scripts/install-disk-guard-launchd.sh
+launchctl print "gui/$(id -u)/com.pechhe.slipjay-disk"
+launchctl print "gui/$(id -u)/com.pechhe.slipjay-maintain"
+```
+
+This installs/enables a five-minute pressure LaunchAgent and an hourly maintenance LaunchAgent,
+replacing any hand-installed `com.pechhe.slipjay-maintain` definition. It copies the versioned
+`scripts/maintain.sh` to `~/.slipjay/maintain.sh`; that script visits registered integration roots and
+continues after individual failures. Logs live in `~/.slipjay/state/com.pechhe.slipjay-{disk,maintain}.log`.
+Use `--no-load` to write/inspect the plists without changing launchd.
 
 ### Workspace options
 

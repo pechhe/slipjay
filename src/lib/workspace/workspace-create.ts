@@ -23,6 +23,7 @@ import { primaryCheckoutDisposition } from "../landing/landing-candidate.ts";
 import { forgetMissingCheckout, missingCheckoutRefusal } from "./workspace-lifecycle.ts";
 import { startHousekeeping } from "./workspace-housekeeping.ts";
 import { beginAttempt, updateAttempt } from "./workspace-attempts.ts";
+import { assertInstallHeadroom } from "../host-disk/disk-floor.ts";
 import { claimSpare, refreshDependencies } from "./workspace-pool.ts";
 import { timed } from "./start-steps.ts";
 import type { StartSteps } from "./start-steps.ts";
@@ -597,6 +598,7 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   const survivor = Boolean(issueNumber) && exists(join(workspaceHome(), name));
   // Named before the checkout is claimed or added, so an interrupted start can still be traced to it.
   if (!survivor && options.attemptId) await updateAttempt(options.attemptId, { workspaceName: name, owned: true });
+  if (!survivor) await assertInstallHeadroom();
   const spare = survivor ? null : await timed(steps, "claim", () => claimSpare(context, name, base, steps));
   if (spare) name = spare.name;
   const workspacePath = spare?.root ?? join(workspaceHome(), name);

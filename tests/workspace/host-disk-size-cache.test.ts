@@ -27,6 +27,21 @@ test("a size is measured once within the window, across passes, and again after 
   } finally { done(); }
 });
 
+test("150 parallel workspace sizes persist across passes without losing cache entries", async () => {
+  const { file, done } = fixture();
+  try {
+    let measured = 0;
+    const measure = async () => { measured++; return 100; };
+    const paths = Array.from({ length: 150 }, (_, index) => `/workspace/${index}`);
+    const first = cachedSizeOf(measure, file);
+    await Promise.all(paths.map(first));
+    assert.equal(measured, 150);
+    const next = cachedSizeOf(measure, file);
+    assert.deepEqual(await Promise.all(paths.map(next)), paths.map(() => 100));
+    assert.equal(measured, 150);
+  } finally { done(); }
+});
+
 test("an unreadable measurement is not cached, and a corrupt cache file is ignored", async () => {
   const { file, done } = fixture();
   try {

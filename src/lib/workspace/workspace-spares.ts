@@ -1,3 +1,4 @@
+import { assertRefillHeadroom } from "../host-disk/disk-floor.ts";
 import { workspaceClaimRefusal } from "./workspace-claims.ts";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -126,12 +127,12 @@ export async function occupiedPaths(paths: string[]): Promise<Map<string, string
  * The pool's spares (`spareRecords`) apart from those a live process is working in, which are `held`
  * with who holds them. A spare a live refill is preparing is the pool's own work, never held.
  */
-export async function poolSpares(integrationRoot: string): Promise<{ spares: SpareRecord[]; held: { workspaceName: string; holders: string }[] }> {
+export async function poolSpares(integrationRoot: string): Promise<{ spares: SpareRecord[]; held: { workspaceName: string; holders: string; custody: boolean }[] }> {
   const records = await spareRecords(integrationRoot);
   const occupied = await occupiedPaths(records.filter((record) => !processAlive(record.preparingPid)).map((record) => record.workspacePath));
   return {
     spares: records.filter((record) => !occupied.has(record.workspacePath)),
-    held: records.flatMap((record) => occupied.has(record.workspacePath) ? [{ workspaceName: record.workspaceName, holders: occupied.get(record.workspacePath)! }] : []),
+    held: records.flatMap((record) => occupied.has(record.workspacePath) ? [{ workspaceName: record.workspaceName, holders: occupied.get(record.workspacePath)!, custody: occupied.get(record.workspacePath)!.startsWith("workspace custody") }] : []),
   };
 }
 
@@ -151,14 +152,15 @@ export interface SpareHandover { integrationRoot: string; name: string; path: st
  * events in a large repository.
  */
 export async function reserveSpareForHandover(integrationRoot: string, retiringRoot: string): Promise<SpareHandover | null> {
+  if (!await assertRefillHeadroom().then(() => true, () => false)) return null;
   if (!existsSync(join(retiringRoot, "node_modules"))) return null;
   const context = await workspaceContext(integrationRoot);
   if (!context) return null;
   const root = context.integration.root;
   const wanted = (await spareAllowance(context)).spares;
   const name = await withWorkspaceTransaction(`pool:${root}`, async () => {
-    const { spares: records } = await poolSpares(root);
-    if (records.filter(countsTowardPool).length >= wanted || records.some((record) => !countsTowardPool(record))) return null;
+    const { spares: records, held } = await poolSpares(root);
+    if (records.filter(countsTowardPool).length + held.filter((record) => record.custody).length >= wanted || records.some((record) => !countsTowardPool(record))) return null;
     const name = `${await repositoryProjectCode(root)}-spare-${randomUUID().slice(0, 6)}`;
     await mkdir(metadataHome(), { recursive: true, mode: 0o700 });
     await writeWorkspaceJson(metadataPath(name), { version: 1, workspaceName: name, workspacePath: join(workspaceHome(), name), integrationRoot: root,

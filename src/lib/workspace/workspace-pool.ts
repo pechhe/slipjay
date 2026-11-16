@@ -13,6 +13,7 @@ import { repositoryProjectCode, run, STALE_WORKING_COPY, updateStaleWorkingCopy,
 import type { WorkspaceContext, WorkspaceEntry } from "../infra/workspace-jj.ts";
 import { metadataHome, workspaceHome } from "./workspace-paths.ts";
 import { listWorkspaces, metadataPath, renameListedWorkspace, workspaceMetadata } from "./workspace-state.ts";
+import { assertInstallHeadroom, assertRefillHeadroom, floorRefusal } from "../host-disk/disk-floor.ts";
 import { countsTowardPool, occupiedPaths, poolSpares, ProcessesUnreadableError, spareAllowance } from "./workspace-spares.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
 import { installInputFingerprint } from "./install-inputs.ts";
@@ -140,11 +141,13 @@ async function refillDependencies(integrationRoot: string, workspacePath: string
   }, { waitMs: REFILL_WAIT_MS });
 }
 
-const installDependencies = (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; discardTrees?: boolean; steps?: StartSteps }) =>
-  prepareWorkspaceDependencies(workspacePath, {
+const installDependencies = async (integrationRoot: string, workspacePath: string, options: { quiet?: boolean; installInputs?: string | null; discardTrees?: boolean; steps?: StartSteps }) => {
+  await assertInstallHeadroom();
+  return prepareWorkspaceDependencies(workspacePath, {
     quiet: options.quiet, recordInputs: true, installInputs: options.installInputs, discardTrees: options.discardTrees, steps: options.steps,
     seedFrom: dependencySeeds(integrationRoot, workspacePath),
   });
+};
 
 /** How long a start's install waits for another of the same repository on this machine. */
 const INSTALL_WAIT_MS = 30 * 60_000;
@@ -181,11 +184,14 @@ export async function provisionSpare(cwd: string = process.cwd()): Promise<Provi
   const root = context.integration.root;
   const wanted = (await spareAllowance(context)).spares;
   const registration: SpareRegistration = await withWorkspaceTransaction(`pool:${root}`, async (): Promise<SpareRegistration> => {
-    const { spares: records } = await poolSpares(root);
+    const { spares: records, held } = await poolSpares(root);
+    // A held spare remains allocated: custody is not a reason to create a replacement.
+    const custodyHeld = held.filter((record) => record.custody).length;
     // A ready spare, or one a live process is preparing, counts toward the pool.
-    if (records.filter(countsTowardPool).length >= wanted) {
+    if (records.filter(countsTowardPool).length + custodyHeld >= wanted) {
       return { reason: wanted === 0 ? "pool-disabled" : "spare-exists" };
     }
+    await assertRefillHeadroom();
     const abandoned = records.find((record) => !countsTowardPool(record));
     const name = abandoned?.workspaceName ?? `${await repositoryProjectCode(root)}-spare-${randomUUID().slice(0, 6)}`;
     const workspacePath = abandoned?.workspacePath ?? join(workspaceHome(), name);
@@ -304,15 +310,16 @@ function newestFirst(spares: WorkspaceEntry[]): WorkspaceEntry[] {
  * reserved under the pool lock first, so no claim takes it; a spare holds no work. Returns the
  * names removed.
  */
-export async function retireExcessSpares(cwd: string): Promise<string[]> {
+export async function retireExcessSpares(cwd: string, options: { onlyPath?: string } = {}): Promise<string[]> {
   const context = await workspaceContext(cwd);
   if (!context) return [];
   const root = context.integration.root;
-  const { spares: allowed } = await spareAllowance(context);
+  const allowed = (await spareAllowance(context)).spares;
   const excess = await withWorkspaceTransaction(`pool:${root}`, async () => {
-    const { spares: records } = await poolSpares(root);
-    const counted = records.filter(countsTowardPool).length;
-    const retiring = records.filter((record) => record.prepared === true).slice(0, Math.max(0, counted - allowed));
+    const { spares: records, held } = await poolSpares(root);
+    const counted = records.filter(countsTowardPool).length + held.filter((record) => record.custody).length;
+    const retiring = records.filter((record) => record.prepared === true).slice(0, Math.max(0, counted - allowed))
+      .filter((record) => options.onlyPath === undefined || resolve(record.workspacePath) === resolve(options.onlyPath));
     for (const record of retiring) {
       await writeWorkspaceJson(metadataPath(record.workspaceName), { ...await workspaceMetadata(record.workspaceName), prepared: false, preparingPid: process.pid });
     }
@@ -383,12 +390,19 @@ export async function refillPool(root: string, report: (outcome: object) => void
     // Named so a spare-marked checkout a thread is using is visible, not silently left out.
     for (const { workspaceName, holders } of (await poolSpares(integrationRoot)).held) report({ held: workspaceName, holders });
     for (const retired of await retireExcessSpares(root)) report({ retired });
+    const initialUsage = await (options.readUsage ?? readHostUsage)().catch(() => null);
+    const initialRefusal = initialUsage ? floorRefusal(readDiskConfig(), initialUsage) : null;
+    if (initialRefusal) { report({ provisioned: false, state: "skipped", reason: initialRefusal }); return; }
     await repairDamagedSpares(root, report);
     // A full disk gets no new spare: the host disk policy (SJ-226) says where. Read again before every spare.
     const refillPercent = options.refillPercent ?? readDiskConfig().thresholds.refillPercent;
     let stopped = false;
+    let first = true;
     for (;;) {
-      const usage = await (options.readUsage ?? readHostUsage)().catch(() => null);
+      const usage = first ? initialUsage : await (options.readUsage ?? readHostUsage)().catch(() => null);
+      first = false;
+      const refusal = usage ? floorRefusal(readDiskConfig(), usage) : null;
+      if (refusal) { report({ provisioned: false, state: "skipped", reason: refusal }); stopped = true; break; }
       if (usage && usage.percent >= refillPercent) {
         report({ provisioned: false, state: "skipped", reason: `disk at ${usage.percent}% (threshold ${refillPercent}%)` });
         stopped = true;

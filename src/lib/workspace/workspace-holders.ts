@@ -24,8 +24,8 @@ export function within(path: string, root: string): boolean {
 }
 
 /** `{ pid, command, cwd }` for every process on this host, or null when they cannot be read. */
-export async function processWorkingDirectories(): Promise<ProcessWorkingDirectory[] | null> {
-  if (platform() === "linux") {
+export async function processWorkingDirectories(options: { platform?: string; run?: typeof run } = {}): Promise<ProcessWorkingDirectory[] | null> {
+  if ((options.platform ?? platform()) === "linux") {
     const found: ProcessWorkingDirectory[] = [];
     for (const entry of await readdir("/proc").catch(() => [])) {
       if (!/^\d+$/.test(entry)) continue;
@@ -36,9 +36,9 @@ export async function processWorkingDirectories(): Promise<ProcessWorkingDirecto
     }
     return found;
   }
-  const result = await run("lsof", ["-n", "-P", "-w", "-d", "cwd", "-F", "pcRn"]).catch(() => null);
+  const result = await (options.run ?? run)("lsof", ["-n", "-P", "-w", "-d", "cwd", "-F", "pcRn"], { timeoutMs: 5000 }).catch(() => null);
   // lsof exits 1 when some processes could not be inspected; the rest is still valid.
-  if (!result || !result.stdout || result.truncated) return null;
+  if (!result || result.timedOut || !result.stdout || result.truncated) return null;
   const found: ProcessWorkingDirectory[] = [];
   let pid = 0;
   let parent = 0;

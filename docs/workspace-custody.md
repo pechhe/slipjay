@@ -155,9 +155,27 @@ caller-claim settlement and transfer remain available through the protocol above
 Controller matching on Linux uses boot ID plus `/proc` start time and excludes
 zombies. Darwin uses `kern.boottime` and `ps lstart` for diagnostics; its timestamp
 has coarse resolution. Controller matching is **not** release authorization, so
-a collision cannot delete custody. Every unknown or mismatch retains custody
-until credential-authenticated, evidence-backed settlement/transfer. There is no
-TTL and no claim release based only on a server PID or process death.
+a collision cannot delete custody. Unknown identities and mismatches normally retain
+custody until credential-authenticated, evidence-backed settlement/transfer.
+
+### Confirmed abandoned recovery custody
+
+A narrow host-idle exception prevents every T3 restart from permanently retaining
+its old checkouts. It is not a claim TTL and process death alone is insufficient.
+SlipJay may treat retained claims as idle only when **all** are recovery-required,
+each has a recorded controller PID whose probe returns `ESRCH` (not permission
+denied, a live reused PID, or a missing controller identity), both cwd and open-file
+inventories are readable and show no holder beneath the workspace, and its recorded
+`lastActivityAt` is at least 24 hours old. Unknown activity keeps it. A surviving
+provider with a cwd, mapped file or descriptor under the checkout keeps it too.
+
+Read-only planning shares a process inventory for at most 30 seconds. Destruction
+repeats every proof with fresh inventories under the canonical writer lock, records
+`slipjay:confirmed-controller-gone-idle-24h` as the host settlement reference, then
+installs the ordinary retirement fence. A renewed claim or holder refuses removal.
+An interrupted retirement fence is **never** cleared by this rule. All existing
+source-preserving archive/release, pending-delivery and content guards still apply:
+this rule removes only the obsolete custody hold, not any preservation requirement.
 
 ## Managed activation and compatibility
 
