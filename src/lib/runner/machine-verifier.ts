@@ -219,6 +219,7 @@ ${recoverHolder()}`);
       let scratch: string | undefined;
       let socket: string | undefined;
       let acquired = false;
+      let capacityConfigured = false;
       const stopping = new AbortController();
       const commands = new Set<Promise<BoundedProcessResult>>();
       const close = async () => {
@@ -230,6 +231,9 @@ ${recoverHolder()}`);
         try {
           // Tunnel shutdown and remote cleanup are both required before reuse.
           if (socket) await local("ssh", ["-S", socket, "-O", "exit", ...ssh], tmpdir());
+          // While the attempt's slice still holds its final memory peak, let the host ledger read it (SJ-246): its
+          // cgroup is gone by the time a later admission recovers the claim. Only a measurement, so never a failure.
+          if (acquired && capacityConfigured) await control("slipjay host-budget recover >/dev/null").catch(() => undefined);
           if (acquired) await control(`exec 9>${shellWord(`${root}/control.lock`)}\nflock -n 9\n[ "$(cat ${shellWord(`${holder}/id`)})" = ${shellWord(id)} ]\n${clean(id)}`);
           if (acquired) quarantine = "";
         } catch (error) { quarantine = `cleanup unconfirmed: ${String(error)}`; throw fail(quarantine); }
@@ -276,6 +280,7 @@ if [ "$capacity" = '{"configured":false}' ]; then
 ${prepareCheckout}
 fi`, signal))).split("\n");
         const capacityPolicy = decodeCapacityPolicy(acquiredLines[0] ?? "");
+        capacityConfigured = capacityPolicy.configured;
         steps.hostCapacityWait = await admitMachineCapacity({ control, id, job: `${check ? "Release check" : "Landing gate"} ${candidate.slice(0, 12)}`, lane: check ? "release" : "landing",
           owner: { kind: "holder", path: `${holder}/id`, identity: id }, slice, signal, policy: capacityPolicy, onWait: onCapacityWait });
         const heads = (capacityPolicy.configured ? (await step("prepare", () => control(prepareCheckout, signal))).split("\n") : acquiredLines.slice(1))

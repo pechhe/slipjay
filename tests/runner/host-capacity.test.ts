@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { CAPACITY_OOM_SCORE_ADJUST, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
+import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
-  mode: "enforce", budgetBytes: 48, reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5,
+  mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5,
   profiles: { landing: 16, release: 16, image: 16, agent: 4, audit: 16, preview: 4 },
   typical: { landing: 16, release: 16, image: 16, agent: 4, audit: 16, preview: 4 },
 };
@@ -38,8 +38,8 @@ test("small backfill preserves the full earlier commitment instead of starving a
   const small = request("small", "landing", 101, 4);
   const blocked = decideCapacity(sized("release", 24), [active, head, small], small.id, reading, 102);
   assert.equal(blocked.admitted, false);
-  assert.match(blocked.reason, /preserving commitment/);
-  const roomy = decideCapacity({ ...sized("release", 24), budgetBytes: 56 }, [active, head, small], small.id, { ...reading, availableBytes: 64, currentBytes: { active: 24 }, peakBytes: { active: 24 } }, 102);
+  assert.match(blocked.reason, /preserving memory headroom for large/);
+  const roomy = decideCapacity(sized("release", 24), [active, head, small], small.id, { ...reading, availableBytes: 64, currentBytes: { active: 24 }, peakBytes: { active: 24 } }, 102);
   assert.equal(roomy.admitted, true);
 });
 
@@ -49,7 +49,6 @@ test("pressure, unavailable observations and wait expiry cannot become permissio
     assert.equal(decideCapacity(policy, [job], job.id, observed, 1).admitted, false);
   }
   assert.match(decideCapacity(policy, [job], job.id, reading, 10_000).reason, /wait limit/);
-  assert.equal(decideCapacity(policy, [request("huge", "image", 0, 49)], "huge", reading, 1).admitted, false);
 });
 
 
@@ -79,7 +78,7 @@ test("bounded small checks fit remaining growth capacity that cannot admit a def
 // 24 GiB landing, with 42 GiB available, an 8 GiB reserve and a 48 GiB budget.
 const GiB = 1024 ** 3;
 const host: CapacityPolicy = {
-  ...policy, budgetBytes: 48 * GiB, reserveBytes: 8 * GiB, maxWaitMs: 30 * 60_000,
+  ...policy, reserveBytes: 8 * GiB, maxWaitMs: 30 * 60_000,
   profiles: { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 12 * GiB },
   typical: { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 6 * GiB },
 };
@@ -150,10 +149,34 @@ test("a queued request that has stopped asking does not hold the head of the que
     peakBytes: { yardsmith: 6.5 * GiB, weave: 5.2 * GiB, isolated: 4.8 * GiB, release: 13.4 * GiB } };
   const at = (now: number, polledAt: number) => decideCapacity(typed, [...running, { ...quiet, polledAt }, landing], landing.id, observed, now);
   const fresh = at(6 * 60_000, 6 * 60_000 - 1000);
-  assert.match(fresh.reason, /preserving commitment capacity for sentinel/, "a waiter still asking keeps its place");
+  assert.match(fresh.reason, /preserving memory headroom for sentinel/, "a waiter still asking keeps its place");
   const stale = at(17 * 60_000, 0);
   assert.equal(stale.admitted, true);
   assert.equal(stale.head, "landing");
   assert.equal(capacityOrder([...running, quiet, landing], typed.agingMs)[0]?.id, "sentinel", "it keeps its age for when it asks again");
   assert.equal(decideCapacity(typed, [...running, { ...quiet, polledAt: 17 * 60_000 }, landing], "sentinel", observed, 17 * 60_000).admitted, true);
+});
+
+test("a kind of work learns its typical size from the 90th percentile of its latest peaks, never above its ceiling", () => {
+  const peaks = (lane: CapacityRequest["lane"], ...gib: number[]): CapacitySample[] => gib.map((value) => ({ lane, peakBytes: value * GiB }));
+  // 27 YardSmith landing peaks from peach-box's runner logs, 16 Nov.
+  const landings = peaks("landing", 2.8, 3.9, 4.3, 4.8, 5.0, 5.1, 5.4, 5.5, 6.0, 6.1, 6.6, 6.7, 6.7, 7.0, 7.4, 7.5, 8.6, 8.7, 8.7, 9.1, 9.2, 9.4, 10.4, 10.5, 12.4, 16.3, 22.4);
+  const learned = learnTypical(host, [...landings, ...peaks("agent", 3, 4, 5), ...peaks("image", ...Array(20).fill(0))]);
+  assert.deepEqual(learned.landing, { bytes: 12.4 * GiB, source: "learned", samples: 27 });
+  assert.deepEqual(learned.agent, { bytes: host.typical.agent, source: "configured", samples: 3 }, "too few peaks keep the configured size");
+  assert.deepEqual(learned.image, { bytes: host.typical.image, source: "configured", samples: 0 }, "work outside its cgroup measured nothing");
+  assert.equal(learnTypical(host, peaks("preview", ...Array(12).fill(30))).preview.bytes, host.profiles.preview);
+  const shifted = learnTypical(host, [...peaks("release", ...Array(50).fill(14)), ...peaks("release", ...Array(50).fill(2))]);
+  assert.deepEqual(shifted.release, { bytes: 2 * GiB, source: "learned", samples: 50 }, "only the latest 50 count");
+});
+
+test("with no fixed budget, a check starts beside previews and a release check whenever real memory holds it", () => {
+  // peach-box, 16 Nov 10:49 GMT: an agent heavy check waited 14 minutes on "active commitments fill the host budget".
+  const running = [preview("yardsmith"), preview("weave"), preview("isolated"), { ...request("release", "release", 0, 16 * GiB), admittedAt: 0 }];
+  const check = request("check", "agent", 1, 16 * GiB);
+  const observed = { ...peachBox, availableBytes: 39.9 * GiB, currentBytes: { yardsmith: 4.4 * GiB, weave: 4.1 * GiB, isolated: 2.6 * GiB, release: 1.7 * GiB },
+    peakBytes: { yardsmith: 6.5 * GiB, weave: 5.2 * GiB, isolated: 4.8 * GiB, release: 13.4 * GiB } };
+  const learnedAgent = { ...host, typical: { ...host.typical, agent: 6 * GiB } };
+  assert.equal(decideCapacity(learnedAgent, [...running, check], check.id, observed, 2).admitted, true);
+  assert.match(decideCapacity(host, [...running, check], check.id, observed, 2).reason, /waiting for available memory/, "at its 16 GiB ceiling it still needs real room");
 });

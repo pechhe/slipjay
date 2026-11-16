@@ -11,14 +11,15 @@ import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityPol
 import { decideCapacity, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
-  mode: "enforce", budgetBytes: 12, reserveBytes: 8, agingMs: 10, maxWaitMs: 1000, maxMemoryFullAvg10: 5,
+  mode: "enforce", reserveBytes: 8, agingMs: 10, maxWaitMs: 1000, maxMemoryFullAvg10: 5,
   profiles: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
   typical: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
 };
 const request = (id: string): CapacityRequest => ({ id, job: id, lane: "landing", bytes: 4, queuedAt: 0, admittedAt: null, cgroup: "/missing-fixture", owner: { kind: "holder", path: `/fixture/${id}`, identity: id } });
 const observe = (requests: readonly CapacityRequest[]) => ({
   owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
-  reading: { totalBytes: 64, availableBytes: 64, memoryFullAvg10: 0, currentBytes: {}, peakBytes: {} },
+  // 20 available less the 8 reserve holds three 4-byte jobs.
+  reading: { totalBytes: 64, availableBytes: 20, memoryFullAvg10: 0, currentBytes: {}, peakBytes: {} },
 });
 const fixture = () => {
   const root = join(tmpdir(), `host-capacity-${randomUUID()}-scratch`);
@@ -54,7 +55,7 @@ test("unknown ownership retains claims across restart and switching to shadow", 
     const unknown = (requests: readonly CapacityRequest[]) => ({ ...observe(requests), owners: { one: "unknown" as const } });
     assert.equal(store.recover(unknown), 0);
     assert.equal(store.requests().length, 1);
-    const shadow = store.poll(request("two"), { ...policy, mode: "shadow", budgetBytes: 4 }, observe, 2);
+    const shadow = store.poll(request("two"), { ...policy, mode: "shadow", reserveBytes: 16 }, observe, 2);
     assert.equal(shadow.outcome, "admitted");
     assert.equal(shadow.decision.admitted, false, "shadow preserves the would-wait decision");
     assert.equal(store.requests().length, 2);
@@ -70,7 +71,7 @@ test("concurrent processes serialize admission in the shared host ledger", async
   // Race the first open too: journal and schema setup need the same bounded busy handling as admission.
   const source = `import { openCapacityStore } from ${JSON.stringify(module)};
     const store=openCapacityStore(process.argv[1]); const request=JSON.parse(process.argv[2]); const policy=JSON.parse(process.argv[3]);
-    const receipt=store.poll(request, policy, requests=>({owners:Object.fromEntries(requests.map(r=>[r.id,'alive'])),reading:{totalBytes:64,availableBytes:64,memoryFullAvg10:0,currentBytes:{},peakBytes:{}}}),1);
+    const receipt=store.poll(request, policy, requests=>({owners:Object.fromEntries(requests.map(r=>[r.id,'alive'])),reading:{totalBytes:64,availableBytes:20,memoryFullAvg10:0,currentBytes:{},peakBytes:{}}}),1);
     console.log(receipt.outcome);store.close();`;
   try {
     const outcomes = await Promise.all(Array.from({ length: 8 }, (_, index) => new Promise<string>((resolve, reject) => {
@@ -114,6 +115,41 @@ test("malformed host policy cannot silently disable enforcement", () => {
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { image: 0 } } }), /integer/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { gpu: 1 } } }), /unknown/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 4096 }, typical: { preview: 8192 } } }), /exceed/);
+});
+
+test("finished jobs leave their peak in a history that outlives the per-poll decisions, and admission learns from it", () => {
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  try {
+    const roomy = (peaks: Record<string, number> = {}) => (requests: readonly CapacityRequest[]) => ({
+      owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
+      reading: { totalBytes: 64 * 1024 ** 3, availableBytes: 64 * 1024 ** 3, memoryFullAvg10: 0, currentBytes: Object.fromEntries(requests.map((item) => [item.id, 0])), peakBytes: peaks } });
+    const sized = { ...policy, profiles: { ...policy.profiles, agent: 1024 ** 3 }, typical: { ...policy.typical, agent: 1024 ** 3 } };
+    // A command job's peak comes with its completion; a holder's from what the ledger saw while it ran.
+    for (let index = 0; index < 10; index += 1) {
+      const job = { ...request(`command-${index}`), lane: "agent" as const, bytes: 1024 ** 3 };
+      store.poll(job, sized, roomy(), index);
+      assert.equal(store.finish(job.id, job.owner, () => true, { memoryPeakBytes: (100 + index) * 1024 ** 2 }), true);
+    }
+    const holder = request("holder");
+    store.poll(holder, sized, roomy(), 20);
+    store.poll(request("watcher"), sized, roomy({ holder: 300 * 1024 ** 2 }), 21);
+    store.recover((requests) => ({ ...roomy()(requests), owners: { holder: "gone", watcher: "alive" } }));
+    for (let index = 0; index < 1100; index += 1) store.poll(request("watcher"), sized, roomy(), 30 + index);
+    const learned = store.typical(sized);
+    assert.deepEqual(learned.agent, { bytes: 108 * 1024 ** 2, source: "learned", samples: 10 });
+    assert.deepEqual(learned.landing, { bytes: sized.typical.landing, source: "configured", samples: 1 }, "the holder's 300 MiB is one sample");
+    // Jobs that measured nothing, such as Docker builds, never displace the measured peaks.
+    for (let index = 0; index < 60; index += 1) {
+      const job = { ...request(`empty-${index}`), lane: "agent" as const, bytes: 1024 ** 3 };
+      store.poll(job, sized, roomy(), 1200 + index);
+      store.finish(job.id, job.owner, () => true, { memoryPeakBytes: 1024 ** 2 });
+    }
+    assert.deepEqual(store.typical(sized).agent, learned.agent);
+    const next = { ...request("next"), lane: "agent" as const, bytes: 1024 ** 3, queuedAt: 2000 };
+    const tight = (requests: readonly CapacityRequest[]) => ({ ...roomy()(requests), reading: { ...roomy()(requests).reading, availableBytes: 8 + 200 * 1024 ** 2 } });
+    assert.equal(store.poll(next, { ...sized, reserveBytes: 8 }, tight, 2000).outcome, "admitted", "admitted at its learned 108 MiB, not its 1 GiB ceiling");
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("each poll records when its owner last asked, and a later poll keeps the original arrival", () => {

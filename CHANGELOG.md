@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **peach-box learns each kind of work's typical memory and admits on real free memory alone (SJ-246).** After SJ-244
+  only previews and landings had hand-set typical sizes, so release checks, image builds and agent checks still counted
+  at their 16 GiB ceilings, and the fixed 48 GiB commitment budget was a second, stricter cap: an agent heavy check
+  waited 14 minutes with 40 GiB available. The ledger now keeps finished jobs' peaks in their own table (a command's
+  from its cgroup, holder-owned work's as the most it was seen at; a machine attempt has the ledger read its slice just
+  before cleanup), and a kind of work with 10 or more peaks of at least 64 MiB is admitted at the 90th percentile of
+  its latest 50, never above its profile; `hostBudget.typical` is its starting size until then. `budgetBytes` is gone:
+  remove it from a host's config, which now refuses it as unknown. `host-budget status` reports `typical` per class
+  with its source and sample count.
 - **A queued request that stops asking no longer holds landings behind it (SJ-244).** Backfill preserved the head of
   the queue's room even when its owner had polled once and gone quiet: on 16 Nov a sentinel preview that asked once
   held a 12 GiB landing, which fit on its own, for 17 minutes. Each poll now records `polledAt`, and a queued request

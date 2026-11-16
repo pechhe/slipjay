@@ -731,20 +731,30 @@ and record its duration separately from a later authoritative `verifying` stage.
 
 A host opts in with `hostBudget` in its own `~/.slipjay/config.json`. All participants
 must use a SlipJay version supporting `host-budget policy|poll|status|recover|run`.
-Start with `mode: "shadow"`; the default commitment budget is 48 GiB, service reserve
-8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
+Start with `mode: "shadow"`; the default service reserve is 8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
 limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
 16 GiB; preview 4 GiB. A profile is a kind of work's ceiling: its hard memory limit in
 enforce mode and the most one job can count for. An ordinary one-compiler agent check
 may fit a smaller profile; multi-compiler audit commands need their full working set.
 
-`typical` (SJ-244) sets what each kind of work typically needs, per class, no larger
-than its profile; unset, it equals the profile. A job is admitted at its typical size,
-and while it runs it counts as the larger of that and its cgroup's `memory.peak`, never
-more than its profile. Admission needs that size within both the budget and available
-memory less the reserve and the room running jobs may still grow back into their peaks.
-A job missing its `memory.current` or `memory.peak` counts at its whole profile. Set a
-typical size from recorded peaks, not one low sample. Ceilings may then overlap, so the
+A job is admitted at its kind of work's typical size (SJ-244), and while it runs it
+counts as the larger of that and its cgroup's `memory.peak`, never more than its
+profile. Admission needs that size, and the queue head's, within available memory less
+the reserve and the room running jobs may still grow back into; there is no separate
+fixed budget (SJ-246). A job missing its `memory.current` or `memory.peak` counts at its
+whole profile.
+
+The ledger learns typical sizes (SJ-246). It keeps each finished job's peak in its own
+history, apart from the per-poll decisions: a command job's from its cgroup before
+cleanup, holder-owned work's as the most its cgroup was seen at while it ran, and a
+machine attempt has the ledger read its slice just before cleanup. Once a kind of work
+has 10 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
+50, never above its profile. Until then `typical` applies: a per-class starting size no
+larger than the profile, equal to it unless set. A smaller peak measured nothing (a
+Docker build's memory is the daemon's), so image builds keep their starting size.
+`status` reports each kind of work's effective size, its source and its sample count.
+
+Ceilings may overlap, so the
 host's runtime protection is an order, not a reservation: in enforce mode agent and
 audit commands run at `oom_score_adj` 300 and YardSmith previews at 500, so the kernel's
 out-of-memory killer stops restartable work before landings, releases and image builds.
@@ -752,7 +762,7 @@ out-of-memory killer stops restartable work before landings, releases and image 
 Example (merge this property into the host config, preserving other settings):
 
 ```json
-{"hostBudget":{"mode":"shadow","budgetBytes":51539607552,"reserveBytes":8589934592,"profiles":{"preview":12884901888},"typical":{"preview":6442450944}}}
+{"hostBudget":{"mode":"shadow","reserveBytes":8589934592,"profiles":{"preview":12884901888},"typical":{"preview":6442450944}}}
 ```
 
 Machine attempts register their holder identity before checkout preparation and keep
@@ -782,7 +792,7 @@ from machine failure and never sends a denied gate to Boat. Unconfigured hosts r
 legacy immediate-machine-gate and load-average behavior (Decision 7079); shadow
 records would-wait decisions and runs without blocking (Decision 7780).
 
-`status` reports effective policy, owners, current memory/PSI and recent bounded decision
+`status` reports effective policy and typical sizes, owners, current memory/PSI and recent bounded decision
 and completion evidence. Completion includes queue/run time and nullable memory peak,
 CPU, pressure and OOM/reclaim counters captured before command cleanup. Existing machine
 attempt resource events remain the authority for machine completion measurements.

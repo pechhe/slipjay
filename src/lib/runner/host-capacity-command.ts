@@ -29,7 +29,7 @@ export function hostCapacityStatus() {
   const store = openCapacityStore(capacityStorePath());
   try {
     const requests = store.requests();
-    return { configured: true as const, policy, requests, observation: readCapacityObservation(requests), history: store.history() };
+    return { configured: true as const, policy, typical: store.typical(policy), requests, observation: readCapacityObservation(requests), history: store.history() };
   } finally { store.close(); }
 }
 

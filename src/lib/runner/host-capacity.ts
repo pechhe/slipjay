@@ -25,8 +25,6 @@ export function agentMemoryCommitment(policy: CapacityPolicy, lane: CapacityClas
 
 export type CapacityPolicy = {
   mode: CapacityMode;
-  /** A bound on declared commitments, not a claim that arbitrary host processes are bounded. */
-  budgetBytes: number;
   reserveBytes: number;
   agingMs: number;
   maxWaitMs: number;
@@ -34,8 +32,9 @@ export type CapacityPolicy = {
   /** Each kind of work's hard ceiling: its kernel memory limit and the most it can ever count for (SJ-241). */
   profiles: Record<CapacityClass, number>;
   /**
-   * What each kind of work typically needs, from measured peaks (SJ-244). Admission counts running work by the larger
-   * of this and its own measured peak, never more than its ceiling. Equal to the profile unless configured smaller.
+   * What each kind of work typically needs (SJ-244). Admission counts running work by the larger of this and its own
+   * measured peak, never more than its ceiling. The ledger learns it from finished jobs' peaks (SJ-246); this is the
+   * configured size used until a kind of work has enough of them, equal to the profile unless configured smaller.
    */
   typical: Record<CapacityClass, number>;
 };
@@ -61,6 +60,8 @@ export type CapacityRequest = {
   owner: CapacityOwner;
   /** Exact cgroup path on this host; absent until a command starts or for an external daemon. */
   cgroup: string | null;
+  /** The most its cgroup was observed to have used while it ran (SJ-246); its retained peak once it finishes. */
+  peakBytes?: number;
 };
 
 export type CapacityReading = {
@@ -76,6 +77,7 @@ export type CapacityReading = {
 export type CapacityDecision = {
   admitted: boolean;
   reason: string;
+  /** What admitted work counts for: each job's typical size or measured peak, never above its ceiling. */
   activeBytes: number;
   outstandingBytes: number;
   oldestWaitMs: number;
@@ -138,7 +140,6 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
   });
   if (!request) return result(false, "request is not registered");
   if (request.admittedAt !== null) return result(true, "already admitted; commitment retained until verified cleanup");
-  if (request.bytes > policy.budgetBytes) return result(false, "request exceeds the configured host commitment budget");
   if (now - request.queuedAt >= policy.maxWaitMs) return result(false, "capacity unavailable: wait limit reached");
   if (!reading || !Number.isFinite(reading.totalBytes) || !Number.isFinite(reading.availableBytes)
     || reading.totalBytes <= 0 || reading.availableBytes < 0 || reading.availableBytes > reading.totalBytes) {
@@ -148,15 +149,44 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
     return result(false, "host memory pressure reading unavailable");
   }
   if (reading.memoryFullAvg10 > policy.maxMemoryFullAvg10) return result(false, "host memory reclaim pressure is over the configured limit");
-  const freeCommitments = policy.budgetBytes - activeBytes;
   const freeMemory = reading.availableBytes - policy.reserveBytes - outstandingBytes;
   // Backfill is useful only if it leaves the earlier request's admission size available. Reserving just a CPU
   // preference, or letting every small request fit independently, can starve a large compiler forever.
   const need = admissionBytes(policy, request);
   const ahead = head && head.id !== id ? admissionBytes(policy, head) : 0;
-  if (need + ahead > freeCommitments) return result(false, ahead ? `preserving commitment capacity for ${head!.job}` : "active commitments fill the host budget");
   if (need + ahead > freeMemory) return result(false, ahead ? `preserving memory headroom for ${head!.job}` : "waiting for available memory and service headroom");
-  return result(true, ahead ? "admitted with head-of-queue capacity preserved" : "memory and commitment capacity available");
+  return result(true, ahead ? "admitted with head-of-queue capacity preserved" : "memory capacity available");
+}
+
+/** A finished job's measured peak, kept in the ledger's own history (SJ-246). */
+export type CapacitySample = { lane: CapacityClass; peakBytes: number };
+
+/** How many of a kind of work's latest peaks are learned from, and how many it needs before they replace its configured size. */
+export const CAPACITY_SAMPLE_WINDOW = 50;
+export const CAPACITY_SAMPLE_MINIMUM = 10;
+/** A smaller peak measured nothing: work such as a Docker build runs outside the cgroup the ledger reads. */
+export const CAPACITY_SAMPLE_FLOOR_BYTES = 64 * 1024 ** 2;
+
+export type LearnedTypical = Record<CapacityClass, { bytes: number; source: "learned" | "configured"; samples: number }>;
+
+/**
+ * Each kind of work's typical size (SJ-246): the 90th percentile of its latest measured peaks once it has enough of
+ * them, never above its ceiling; until then, the host's configured size. `samples` are oldest first.
+ */
+export function learnTypical(policy: CapacityPolicy, samples: readonly CapacitySample[]): LearnedTypical {
+  return Object.fromEntries(CAPACITY_CLASSES.map((lane) => {
+    const peaks = samples.filter((sample) => sample.lane === lane && Number.isFinite(sample.peakBytes) && sample.peakBytes >= CAPACITY_SAMPLE_FLOOR_BYTES)
+      .slice(-CAPACITY_SAMPLE_WINDOW).map((sample) => sample.peakBytes).toSorted((a, b) => a - b);
+    if (peaks.length < CAPACITY_SAMPLE_MINIMUM) return [lane, { bytes: policy.typical[lane], source: "configured", samples: peaks.length }];
+    const p90 = peaks[Math.ceil(peaks.length * 0.9) - 1]!;
+    return [lane, { bytes: Math.min(policy.profiles[lane], p90), source: "learned", samples: peaks.length }];
+  })) as LearnedTypical;
+}
+
+/** The policy admission uses: its typical sizes replaced by what the ledger has learned. */
+export function withLearnedTypical(policy: CapacityPolicy, samples: readonly CapacitySample[]): CapacityPolicy {
+  const learned = learnTypical(policy, samples);
+  return { ...policy, typical: Object.fromEntries(CAPACITY_CLASSES.map((lane) => [lane, learned[lane].bytes])) as Record<CapacityClass, number> };
 }
 
 /**

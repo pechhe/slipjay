@@ -30,6 +30,7 @@ function stand() {
   let tunnelFailure = false;
   let capacity = false;
   let capacityFailure = false;
+  let observeFailure = false;
   let memoryBefore = "memory - -";
   let memoryAfter = "memory - -";
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
@@ -51,6 +52,7 @@ function stand() {
     if (capacity && script.includes("\nslipjay host-budget poll")) return capacityFailure ? result("", 1, "ledger unreadable")
       : result('{"configured":true,"outcome":"admitted","decision":{"reason":"fixture admitted","oldestWaitMs":0}}');
     if (capacity && script.includes("slipjay-prepare-")) return result(heads.join("\n"));
+    if (script.includes("\nslipjay host-budget recover")) return observeFailure ? result("", 1, "ledger busy") : result();
     // Taking the place recovers a stale holder in the same script (SJ-223); a clean the machine refuses fails it.
     if (script.includes("slipjay-prepare-")) return cleanAllowed ? result(`{"configured":false}\n${heads.join("\n")}`) : result("", 1, "cgroup still populated");
     if (script.includes("docker ps -aq")) return cleanAllowed ? result() : result("", 1, "cgroup still populated");
@@ -78,7 +80,7 @@ function stand() {
     return result();
   };
   const make = (place?: number, check = false) => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run, ...place === undefined ? {} : { place }, ...check ? { check } : {} });
-  return { scripts, bundles, make, capacity: (failed = false) => { capacity = true; capacityFailure = failed; }, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
+  return { scripts, bundles, make, capacity: (failed = false) => { capacity = true; capacityFailure = failed; }, failObserve: () => { observeFailure = true; }, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
 }
 const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv) => m.open({ environment, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 const command = { executable: "bun", args: ["run", "test"], cwd: "/runner/checkout", timeoutMs: 1000, maxOutputBytes: 1024 };
@@ -432,4 +434,21 @@ test("configured machine ledger failure cleans its exact holder without running 
   assert.ok(!s.scripts.some((script) => !script.includes("capacity=$(") && script.includes("slipjay-prepare-")));
   assert.ok(!s.scripts.some((script) => script.includes("slipjay-command-")));
   assert.ok(s.scripts.at(-1)?.includes("docker ps -aq"));
+});
+
+test("a configured attempt has the host ledger read its slice's final peak before cleanup, and a failed reading changes nothing", async () => {
+  for (const failed of [false, true]) {
+    const s = stand(); s.capacity();
+    if (failed) s.failObserve();
+    const machine = s.make(); await machine.recover!([]);
+    await (await open(machine)).close();
+    const observed = s.scripts.findLastIndex((script) => script.includes("\nslipjay host-budget recover"));
+    const cleanup = s.scripts.findLastIndex((script) => script.includes("docker ps -aq"));
+    assert.ok(observed >= 0 && cleanup > observed, "the ledger reads the slice while it still exists");
+    assert.equal(machine.available(), true);
+  }
+  const unconfigured = stand();
+  const machine = unconfigured.make(); await machine.recover!([]);
+  await (await open(machine)).close();
+  assert.ok(!unconfigured.scripts.some((script) => script.includes("\nslipjay host-budget recover")));
 });
