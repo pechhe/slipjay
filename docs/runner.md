@@ -748,8 +748,8 @@ The ledger learns typical sizes (SJ-246). It keeps each finished job's peak in i
 history, apart from the per-poll decisions: a command job's from its cgroup before
 cleanup, holder-owned work's as the most its cgroup was seen at while it ran, and a
 machine attempt has the ledger read its slice just before cleanup. Once a kind of work
-has 10 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
-50, never above its profile. Until then `typical` applies: a per-class starting size no
+has 3 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
+50, never above its profile; with fewer than 10 peaks that is the largest of them. Until then `typical` applies: a per-class starting size no
 larger than the profile, equal to it unless set. A smaller peak measured nothing.
 
 A Docker build's memory is the daemon's, not the job's. A command job names the

@@ -171,7 +171,7 @@ export type CapacitySample = { lane: CapacityClass; peakBytes: number };
 
 /** How many of a kind of work's latest peaks are learned from, and how many it needs before they replace its configured size. */
 export const CAPACITY_SAMPLE_WINDOW = 50;
-export const CAPACITY_SAMPLE_MINIMUM = 10;
+export const CAPACITY_SAMPLE_MINIMUM = 3;
 /** A smaller peak measured nothing: work such as a Docker build runs outside the cgroup the ledger reads. */
 export const CAPACITY_SAMPLE_FLOOR_BYTES = 64 * 1024 ** 2;
 
@@ -179,7 +179,8 @@ export type LearnedTypical = Record<CapacityClass, { bytes: number; source: "lea
 
 /**
  * Each kind of work's typical size (SJ-246): the 90th percentile of its latest measured peaks once it has enough of
- * them, never above its ceiling; until then, the host's configured size. `samples` are oldest first.
+ * them, never above its ceiling; until then, the host's configured size. Under ten peaks that percentile is the largest
+ * of them, so a few runs size a kind of work by its worst one. `samples` are oldest first.
  */
 export function learnTypical(policy: CapacityPolicy, samples: readonly CapacitySample[]): LearnedTypical {
   return Object.fromEntries(CAPACITY_CLASSES.map((lane) => {

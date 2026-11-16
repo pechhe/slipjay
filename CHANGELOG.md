@@ -17,6 +17,9 @@
   its latest 50, never above its profile; `hostBudget.typical` is its starting size until then. `budgetBytes` is gone:
   remove it from a host's config, which now refuses it as unknown. `host-budget status` reports `typical` per class
   with its source and sample count.
+- **A kind of work learns its typical size from 3 measured runs, not 10 (SJ-246).** Waiting for 10 left every kind of
+  work at its hand-set size for hours on a busy host. The 90th percentile of fewer than 10 peaks is the largest of
+  them, so the first runs size a kind of work by its worst one.
 - **A queued request that stops asking no longer holds landings behind it (SJ-244).** Backfill preserved the head of
   the queue's room even when its owner had polled once and gone quiet: on 16 Nov a sentinel preview that asked once
   held a 12 GiB landing, which fit on its own, for 17 minutes. Each poll now records `polledAt`, and a queued request

@@ -161,9 +161,10 @@ test("a kind of work learns its typical size from the 90th percentile of its lat
   const peaks = (lane: CapacityRequest["lane"], ...gib: number[]): CapacitySample[] => gib.map((value) => ({ lane, peakBytes: value * GiB }));
   // 27 YardSmith landing peaks from peach-box's runner logs, 16 Nov.
   const landings = peaks("landing", 2.8, 3.9, 4.3, 4.8, 5.0, 5.1, 5.4, 5.5, 6.0, 6.1, 6.6, 6.7, 6.7, 7.0, 7.4, 7.5, 8.6, 8.7, 8.7, 9.1, 9.2, 9.4, 10.4, 10.5, 12.4, 16.3, 22.4);
-  const learned = learnTypical(host, [...landings, ...peaks("agent", 3, 4, 5), ...peaks("image", ...Array(20).fill(0))]);
+  const learned = learnTypical(host, [...landings, ...peaks("agent", 3, 4), ...peaks("audit", 3, 5, 4), ...peaks("image", ...Array(20).fill(0))]);
   assert.deepEqual(learned.landing, { bytes: 12.4 * GiB, source: "learned", samples: 27 });
-  assert.deepEqual(learned.agent, { bytes: host.typical.agent, source: "configured", samples: 3 }, "too few peaks keep the configured size");
+  assert.deepEqual(learned.agent, { bytes: host.typical.agent, source: "configured", samples: 2 }, "too few peaks keep the configured size");
+  assert.deepEqual(learned.audit, { bytes: 5 * GiB, source: "learned", samples: 3 }, "a few peaks size the work by the largest of them");
   assert.deepEqual(learned.image, { bytes: host.typical.image, source: "configured", samples: 0 }, "work outside its cgroup measured nothing");
   assert.equal(learnTypical(host, peaks("preview", ...Array(12).fill(30))).preview.bytes, host.profiles.preview);
   const shifted = learnTypical(host, [...peaks("release", ...Array(50).fill(14)), ...peaks("release", ...Array(50).fill(2))]);
