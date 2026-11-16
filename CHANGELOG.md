@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **The host ledger records how each job's memory grew, not only its peak.** Every landing is counted at the size of
+  the rare large one for its whole run, and whether that room could be given back once a landing has shown itself
+  small depends on how early the large ones grow, which the ledger did not keep. Each finished job's peak now carries
+  `growth`: the time since admission and the peak, each time the peak was seen 256 MiB higher. Admission is unchanged.
+
 - **A client says when its runner is still on an older SlipJay build.** A client upgrade never moves the runner's slot,
   so the two drift apart, and on 16 Nov nothing said so: `peach-live` ran `389fc114e3a0` from 14 Nov while `peach-box`
   had moved 8 commits on to `105ff5bd62f7`, two of which changed runner-side behaviour reported as delivered. The

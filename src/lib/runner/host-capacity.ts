@@ -63,6 +63,11 @@ export type CapacityRequest = {
   /** The most its cgroup was observed to have used while it ran (SJ-246); its retained peak once it finishes. */
   peakBytes?: number;
   /**
+   * How it grew: `[ms since admission, peak bytes]` each time its peak was seen a step higher. Kept with its finished
+   * peak, so the ledger shows how early large work declares itself; admission does not read it.
+   */
+  growth?: ReadonlyArray<readonly [number, number]>;
+  /**
    * Memory the job uses outside its own cgroup, as its runner last measured it: an image build's BuildKit container,
    * whose memory is Docker's. Readings add it to the job's own, and its runner's samples raise `peakBytes`.
    */
@@ -174,6 +179,8 @@ export const CAPACITY_SAMPLE_WINDOW = 50;
 export const CAPACITY_SAMPLE_MINIMUM = 3;
 /** A smaller peak measured nothing: work such as a Docker build runs outside the cgroup the ledger reads. */
 export const CAPACITY_SAMPLE_FLOOR_BYTES = 64 * 1024 ** 2;
+/** A running job's growth is noted each time its peak is this much higher than the last note: at most ~100 per job. */
+export const CAPACITY_GROWTH_STEP_BYTES = 256 * 1024 ** 2;
 
 export type LearnedTypical = Record<CapacityClass, { bytes: number; source: "learned" | "configured"; samples: number }>;
 

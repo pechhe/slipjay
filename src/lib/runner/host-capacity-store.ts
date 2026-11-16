@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { dirname } from "node:path";
 import { chmodSync, mkdirSync } from "node:fs";
-import { CAPACITY_SAMPLE_FLOOR_BYTES, CAPACITY_SAMPLE_WINDOW, decideCapacity, learnTypical, sameCapacityOwner, withLearnedTypical, type CapacityDecision, type CapacityPolicy, type CapacityReading, type CapacityRequest, type CapacitySample } from "./host-capacity.ts";
+import { CAPACITY_GROWTH_STEP_BYTES, CAPACITY_SAMPLE_FLOOR_BYTES, CAPACITY_SAMPLE_WINDOW, decideCapacity, learnTypical, sameCapacityOwner, withLearnedTypical, type CapacityDecision, type CapacityPolicy, type CapacityReading, type CapacityRequest, type CapacitySample } from "./host-capacity.ts";
 
 export type CapacityObservation = {
   reading: CapacityReading | null;
@@ -33,6 +33,11 @@ export function openCapacityStore(path: string) {
     for (;;) {
       try {
         db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request_id TEXT NOT NULL, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS peaks (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, lane TEXT NOT NULL, job TEXT NOT NULL, peak_bytes INTEGER NOT NULL);");
+        // A ledger from before growth was recorded gains its column; a concurrent opener adding it first is not an error.
+        if (!(db.prepare("PRAGMA table_info(peaks)").all() as Array<{ name: string }>).some(({ name }) => name === "growth")) {
+          try { db.exec("ALTER TABLE peaks ADD COLUMN growth TEXT"); }
+          catch (error) { if (!/duplicate column/i.test(String(error))) throw error; }
+        }
         break;
       } catch (error) {
         const remaining = deadline - Date.now();
@@ -66,16 +71,23 @@ export function openCapacityStore(path: string) {
     const peak = Math.max(request.peakBytes ?? -1, number(reported?.memoryPeakBytes), number(reported?.measuredPeakBytes));
     // Only a real measurement is kept, so work that measured nothing never pushes measured peaks out of the window.
     if (request.admittedAt !== null && peak >= CAPACITY_SAMPLE_FLOOR_BYTES) {
-      db.prepare("INSERT INTO peaks(at,lane,job,peak_bytes) VALUES (?,?,?,?)").run(at, request.lane, request.job, peak);
+      db.prepare("INSERT INTO peaks(at,lane,job,peak_bytes,growth) VALUES (?,?,?,?,?)")
+        .run(at, request.lane, request.job, peak, request.growth ? JSON.stringify(request.growth) : null);
       db.prepare("DELETE FROM peaks WHERE lane=? AND seq NOT IN (SELECT seq FROM peaks WHERE lane=? ORDER BY seq DESC LIMIT ?)").run(request.lane, request.lane, CAPACITY_SAMPLE_WINDOW);
     }
     db.prepare("DELETE FROM requests WHERE id=?").run(request.id);
   };
+  /** A higher peak, and when the job reached it: one growth entry per step, so a job's whole climb stays a short list. */
+  const raised = (item: CapacityRequest, peak: number, now: number): CapacityRequest => {
+    const growth = item.growth ?? [];
+    const stepped = item.admittedAt !== null && peak - (growth.at(-1)?.[1] ?? 0) >= CAPACITY_GROWTH_STEP_BYTES;
+    return { ...item, peakBytes: peak, ...stepped ? { growth: [...growth, [Math.max(0, now - item.admittedAt!), peak] as const] } : {} };
+  };
   /** Keep the most each running job's cgroup has been seen to use, so work whose cgroup is gone by recovery still has a peak. */
-  const notePeaks = (requests: readonly CapacityRequest[], reading: CapacityReading | null) => requests.map((item) => {
+  const notePeaks = (requests: readonly CapacityRequest[], reading: CapacityReading | null, now: number) => requests.map((item) => {
     const peak = reading?.peakBytes[item.id];
     if (item.admittedAt === null || typeof peak !== "number" || !Number.isFinite(peak) || peak <= (item.peakBytes ?? -1)) return item;
-    const updated = { ...item, peakBytes: peak };
+    const updated = raised(item, peak, now);
     save(updated);
     return updated;
   });
@@ -91,7 +103,7 @@ export function openCapacityStore(path: string) {
         const request = all().find((item) => item.id === id);
         if (!request) return;
         if (!sameCapacityOwner(request.owner, owner)) throw new Error("host capacity usage belongs to another owner");
-        save({ ...request, externalBytes, peakBytes: Math.max(request.peakBytes ?? 0, peakBytes) });
+        save({ ...peakBytes > (request.peakBytes ?? 0) ? raised(request, peakBytes, Date.now()) : request, externalBytes });
       });
     },
     finish(id: string, owner: CapacityRequest["owner"], stopped: (request: CapacityRequest) => boolean, evidence: unknown = null): boolean {
@@ -113,7 +125,7 @@ export function openCapacityStore(path: string) {
           throw new Error(`host capacity request ${request.id} belongs to a different owner or commitment`);
         }
         const observed = observe(previous ? existing : [...existing, request]);
-        const noted = notePeaks(existing, observed.reading);
+        const noted = notePeaks(existing, observed.reading, now);
         const registered = { ...noted.find((item) => item.id === request.id) ?? request, polledAt: now };
         const retained: CapacityRequest[] = [];
         for (const item of noted) {
@@ -148,7 +160,7 @@ export function openCapacityStore(path: string) {
         const requests = all();
         const observed = observe(requests);
         let removed = 0;
-        for (const request of notePeaks(requests, observed.reading)) {
+        for (const request of notePeaks(requests, observed.reading, Date.now())) {
           if (observed.owners[request.id] !== "gone") continue;
           complete(request, "recovered");
           removed += 1;

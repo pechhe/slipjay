@@ -755,6 +755,10 @@ has 3 peaks of at least 64 MiB, its typical size is the 90th percentile of its l
 50, never above its profile; with fewer than 10 peaks that is the largest of them. Until then `typical` applies: a per-class starting size no
 larger than the profile, equal to it unless set. A smaller peak measured nothing.
 
+Each kept peak also records how the job grew (`peaks.growth`): `[ms since admission,
+peak bytes]` each time its peak was seen 256 MiB higher than the last note. Admission
+does not read it; it is there to show how early large work declares itself.
+
 A machine attempt asks as the kind of work it is: a gate as `landing`, a batch check as
 `release`, and the nightly audit, which runs on the release-check place, as `audit`
 (named `Audit <commit>` in the ledger). So an audit is sized from audits, and queues

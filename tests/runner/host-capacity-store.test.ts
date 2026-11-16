@@ -152,6 +152,37 @@ test("finished jobs leave their peak in a history that outlives the per-poll dec
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a finished job's peak keeps when it grew, one note per step, and an older ledger gains the record", () => {
+  const root = fixture();
+  const path = join(root, "ledger.sqlite");
+  // A ledger written before growth was recorded.
+  const old = new DatabaseSync(path);
+  old.exec("CREATE TABLE peaks (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, lane TEXT NOT NULL, job TEXT NOT NULL, peak_bytes INTEGER NOT NULL); INSERT INTO peaks(at,lane,job,peak_bytes) VALUES (1,'landing','before',1073741824);");
+  old.close();
+  const store = openCapacityStore(path);
+  try {
+    const GiB = 1024 ** 3;
+    const seen = (peak: number | null) => (requests: readonly CapacityRequest[]) => ({
+      owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
+      reading: { totalBytes: 64 * GiB, availableBytes: 64 * GiB, memoryFullAvg10: 0, currentBytes: { gate: 0 }, peakBytes: (peak === null ? {} : { gate: peak }) as Record<string, number> } });
+    const sized = { ...policy, profiles: { ...policy.profiles, landing: 24 * GiB }, typical: { ...policy.typical, landing: 24 * GiB } };
+    const gate = { ...request("gate"), bytes: 24 * GiB, queuedAt: 1000 };
+    store.poll(gate, sized, seen(null), 1000);
+    store.poll(gate, sized, seen(GiB), 3000);
+    store.poll(gate, sized, seen(GiB + 1024 ** 2), 4000);
+    store.poll(gate, sized, seen(5 * GiB), 61_000);
+    store.finish(gate.id, gate.owner, () => true, { memoryPeakBytes: 5 * GiB });
+    const rows = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.deepEqual(rows.prepare("SELECT job, growth FROM peaks ORDER BY seq").all().map((row) => ({ ...row })), [
+        { job: "before", growth: null },
+        { job: "gate", growth: JSON.stringify([[2000, GiB], [60_000, 5 * GiB]]) },
+      ], "a rise smaller than a step adds no note");
+    } finally { rows.close(); }
+    assert.equal(store.typical(sized).landing.samples, 2, "the earlier peak still counts");
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("an image job's runner adds its BuildKit container's memory to its own, and its peak only rises", () => {
   const root = fixture();
   const store = openCapacityStore(join(root, "ledger.sqlite"));
