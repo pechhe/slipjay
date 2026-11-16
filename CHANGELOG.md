@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **A test file's fixtures come from the temp directory when `/dev/shm` refuses writes.** On 16 Nov no Vitest file ran
+  in a read-only agent shell: `bunx vp test tests/workspace/bounded-map.test.ts` failed in
+  `scripts/vitest-hermetic-env.ts` with `EACCES: permission denied, mkdtemp '/dev/shm/slipjay-test-…'` though the same
+  command passed in an editor shell, because that shell admits writes only to its own temp directory and the checkout's
+  git-ignored trees. The scratch directory a file's fixtures share is now created in `/dev/shm` only where the mount
+  runs scripts and accepts the write, and in the ambient temp directory otherwise (`os.tmpdir()`, which honours
+  `$TMPDIR`), through one helper in `scripts/fixture-scratch.ts`; the RAM-backed path, its speed and its
+  stale-directory sweep are unchanged wherever `/dev/shm` is writable. `scripts/test-landing.ts` and its test keep
+  their replay and gate scratch under the temp directory too, since a fresh checkout has no `.build` directory for the
+  sandbox to allow writes inside.
+
 - **Custody on an adopted checkout settles: its idle clock is read under the workspace's own name.** On 16 Nov
   `slipjay remove --discard ~/.slipjay/workspaces/ys-spare-80bdc6` still refused with "no activity time is recorded",
   though `~/.slipjay/state/workspaces/ys-7724.json` carried `lastActivityAt` from five hours earlier: metadata is keyed

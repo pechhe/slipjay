@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
 import { candidateChanges, landingCommands, planCandidate, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
@@ -173,8 +174,7 @@ test("Vitest's graph selects fixture reader and process callers, and honors quar
 }, 30_000);
 
 test("gate writes opt-in manifest, tolerates missing reports and preserves test failure", () => {
-  mkdirSync(path.join(ROOT, ".build"), { recursive: true });
-  const scratch = mkdtempSync(path.join(ROOT, ".build/landing-test-"));
+  const scratch = mkdtempSync(path.join(tmpdir(), "slipjay-landing-test-"));
   try {
     const bin = path.join(scratch, "bin");
     mkdirSync(bin);

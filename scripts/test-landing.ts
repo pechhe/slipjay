@@ -2,6 +2,7 @@
 // Conservative selection for the exact rebased candidate. Release/nightly stays complete.
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -138,11 +139,11 @@ export function landingCommands(plan: LandingTests, quarantine: Quarantine[], re
 }
 if (import.meta.main) {
   if (process.argv.includes("--replay")) {
-    // Rehydrate immutable JJ trees as disposable graph inputs under this workspace.
+    // Rehydrate immutable JJ trees as disposable graph inputs in the temp directory, which a read-only shell
+    // may write to; a fresh checkout has no .build for the sandbox to allow.
     // They have no VCS metadata, and no historical test body is executed.
     const { createVitest } = await import("vite-plus/test/node");
-    mkdirSync(path.join(ROOT, ".build"), { recursive: true });
-    const scratch = mkdtempSync(path.join(ROOT, ".build/landing-replay-"));
+    const scratch = mkdtempSync(path.join(tmpdir(), "slipjay-landing-replay-"));
     try {
       const commits = jj(["log", "--ignore-working-copy", "--no-graph", "-r", "ancestors(main, 30)", "-T", 'commit_id ++ "\\n"']).trim().split("\n");
       console.log("commit | selected/complete (includes runtime files) | reason");
