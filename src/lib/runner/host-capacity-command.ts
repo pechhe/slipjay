@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
 import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources } from "./host-capacity-local.ts";
 import { openCapacityStore } from "./host-capacity-store.ts";
-import { agentMemoryCommitment, type CapacityClass, type CapacityRequest } from "./host-capacity.ts";
+import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, type CapacityClass, type CapacityRequest } from "./host-capacity.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 
 /** One transaction per poll; the caller owns its wait and can keep it outside verification deadlines. */
@@ -110,9 +110,13 @@ export async function runWithHostCapacity(input: {
       if (result.outcome === "unavailable") return 75;
       await pause(1000, undefined, { signal: input.signal });
     }
-    if ((policy.mode === "enforce" || admittedMode === "enforce") && input.memoryMaxBytes === undefined) systemctl(["set-property", "--runtime", slice, `MemoryMax=${bytes}`, "MemorySwapMax=0"]);
+    const enforced = policy.mode === "enforce" || admittedMode === "enforce";
+    if (enforced && input.memoryMaxBytes === undefined) systemctl(["set-property", "--runtime", slice, `MemoryMax=${bytes}`, "MemorySwapMax=0"]);
+    // Ceilings overlap (SJ-244), so restartable work is first in the kernel's out-of-memory order. A scope cannot carry
+    // OOMScoreAdjust; choom raises it for the command and everything it starts, which needs no privilege.
+    const adjust = enforced ? CAPACITY_OOM_SCORE_ADJUST[input.lane] : 0;
     return await execute(["systemd-run", "--user", "--scope", "--quiet", "--collect", `--slice=${slice}`, `--unit=slipjay-capacity-${id}.scope`,
-      "--property=TimeoutStopSec=5s", "--", ...input.command], { ...(input.env ?? process.env), SLIPJAY_HOST_CAPACITY_ID: id,
+      "--property=TimeoutStopSec=5s", "--", ...adjust ? ["choom", "-n", String(adjust), "--"] : [], ...input.command], { ...(input.env ?? process.env), SLIPJAY_HOST_CAPACITY_ID: id,
         SLIPJAY_HOST_CAPACITY_BYTES: input.memoryMaxBytes === undefined ? "" : String(bytes), [SYSTEMD_SLICE_ENV]: slice });
   } finally {
     // Stop only the exact unit we allocated, then verify the cgroup before releasing its reservation. A lost SSH or

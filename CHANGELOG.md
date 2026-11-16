@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Running work counts by what it uses, not by its ceiling, so landings start beside long-lived previews (SJ-244).**
+  Host capacity held every admitted job at its whole profile for its lifetime, so peach-box's two always-on 12 GiB
+  previews, using about 4.5 GiB each, left a 24 GiB landing 19 GiB of headroom on an idle host: seven landings in a row
+  waited out their 30 minutes without running a check. A new `hostBudget.typical` sets what each kind of work typically
+  needs (unset, it equals the profile, the old behaviour). A running job now counts as the larger of its typical size and
+  its cgroup's `memory.peak`, never more than its profile; a job missing either measurement still counts at its whole
+  profile, and a new job is admitted at its typical size. Profiles stay the jobs' hard kernel limits. Because those
+  limits now overlap, enforce mode runs agent and audit commands at `oom_score_adj` 300 (previews take 500 in
+  YardSmith), so when the host really runs out the kernel stops restartable work first and landings, releases and
+  image builds last.
 - **Custody operations no longer refuse because another slipjay command is starting (SJ-240).** The activation
   drain barrier, which every claim acquire, release, transfer and recover runs, refused
   `CLAIM_ACTIVATION_DRAIN_REQUIRED` for any same-HOME slipjay process that had not yet written its worker record or had

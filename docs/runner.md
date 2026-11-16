@@ -734,15 +734,25 @@ must use a SlipJay version supporting `host-budget policy|poll|status|recover|ru
 Start with `mode: "shadow"`; the default commitment budget is 48 GiB, service reserve
 8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
 limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
-16 GiB; preview 4 GiB. These are conservative configured commitments, not estimates
-of exact usage or proof that external processes cannot grow. Tune them only with
-recorded peaks and concurrent-load evidence. An ordinary one-compiler agent check
+16 GiB; preview 4 GiB. A profile is a kind of work's ceiling: its hard memory limit in
+enforce mode and the most one job can count for. An ordinary one-compiler agent check
 may fit a smaller profile; multi-compiler audit commands need their full working set.
+
+`typical` (SJ-244) sets what each kind of work typically needs, per class, no larger
+than its profile; unset, it equals the profile. A job is admitted at its typical size,
+and while it runs it counts as the larger of that and its cgroup's `memory.peak`, never
+more than its profile. Admission needs that size within both the budget and available
+memory less the reserve and the room running jobs may still grow back into their peaks.
+A job missing its `memory.current` or `memory.peak` counts at its whole profile. Set a
+typical size from recorded peaks, not one low sample. Ceilings may then overlap, so the
+host's runtime protection is an order, not a reservation: in enforce mode agent and
+audit commands run at `oom_score_adj` 300 and YardSmith previews at 500, so the kernel's
+out-of-memory killer stops restartable work before landings, releases and image builds.
 
 Example (merge this property into the host config, preserving other settings):
 
 ```json
-{"hostBudget":{"mode":"shadow","budgetBytes":51539607552,"reserveBytes":8589934592}}
+{"hostBudget":{"mode":"shadow","budgetBytes":51539607552,"reserveBytes":8589934592,"profiles":{"preview":12884901888},"typical":{"preview":6442450944}}}
 ```
 
 Machine attempts register their holder identity before checkout preparation and keep
@@ -763,9 +773,9 @@ reported. Docker/BuildKit memory is external host usage unless actually containe
 the recorded group; it must never be subtracted as if the wrapper measured it.
 
 One private SQLite ledger uses atomic transactions for observed available memory,
-remaining commitments and aged queue decisions. New landings receive a bounded
+the room running jobs may grow back into, and aged queue decisions. New landings receive a bounded
 initial preference; an old background or large request eventually precedes new work.
-Backfill leaves the head request's whole commitment available. Finite waiting requires
+Backfill leaves the head request's admission size available. Finite waiting requires
 finite jobs and admissible demand. Timeouts, unreadable ownership/memory/PSI or overload
 never authorize an unconditional start in enforce mode. Capacity denial is distinct
 from machine failure and never sends a denied gate to Boat. Unconfigured hosts retain

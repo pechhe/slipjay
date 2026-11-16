@@ -8,16 +8,17 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "vite-plus/test";
 import { openCapacityStore } from "../../src/lib/runner/host-capacity-store.ts";
 import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityPolicy } from "../../src/lib/runner/host-capacity-local.ts";
-import type { CapacityPolicy, CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
+import { decideCapacity, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
   mode: "enforce", budgetBytes: 12, reserveBytes: 8, agingMs: 10, maxWaitMs: 1000, maxMemoryFullAvg10: 5,
   profiles: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
+  typical: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
 };
 const request = (id: string): CapacityRequest => ({ id, job: id, lane: "landing", bytes: 4, queuedAt: 0, admittedAt: null, cgroup: "/missing-fixture", owner: { kind: "holder", path: `/fixture/${id}`, identity: id } });
 const observe = (requests: readonly CapacityRequest[]) => ({
   owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
-  reading: { totalBytes: 64, availableBytes: 64, memoryFullAvg10: 0, currentBytes: {} },
+  reading: { totalBytes: 64, availableBytes: 64, memoryFullAvg10: 0, currentBytes: {}, peakBytes: {} },
 });
 const fixture = () => {
   const root = join(tmpdir(), `host-capacity-${randomUUID()}-scratch`);
@@ -69,7 +70,7 @@ test("concurrent processes serialize admission in the shared host ledger", async
   // Race the first open too: journal and schema setup need the same bounded busy handling as admission.
   const source = `import { openCapacityStore } from ${JSON.stringify(module)};
     const store=openCapacityStore(process.argv[1]); const request=JSON.parse(process.argv[2]); const policy=JSON.parse(process.argv[3]);
-    const receipt=store.poll(request, policy, requests=>({owners:Object.fromEntries(requests.map(r=>[r.id,'alive'])),reading:{totalBytes:64,availableBytes:64,memoryFullAvg10:0,currentBytes:{}}}),1);
+    const receipt=store.poll(request, policy, requests=>({owners:Object.fromEntries(requests.map(r=>[r.id,'alive'])),reading:{totalBytes:64,availableBytes:64,memoryFullAvg10:0,currentBytes:{},peakBytes:{}}}),1);
     console.log(receipt.outcome);store.close();`;
   try {
     const outcomes = await Promise.all(Array.from({ length: 8 }, (_, index) => new Promise<string>((resolve, reject) => {
@@ -110,6 +111,30 @@ test("malformed host policy cannot silently disable enforcement", () => {
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", extra: 1 } }), /unknown/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { image: -1 } } }), /integer/);
   assert.equal(readCapacityPolicy({ hostBudget: { mode: "shadow" } })?.mode, "shadow");
+  assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { image: 0 } } }), /integer/);
+  assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { gpu: 1 } } }), /unknown/);
+  assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 4096 }, typical: { preview: 8192 } } }), /exceed/);
+});
+
+test("a host with no typical sizes admits exactly as before: every job counts at its whole profile", () => {
+  const legacy = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 } } })!;
+  assert.deepEqual(legacy.typical, legacy.profiles);
+  const GiB = 1024 ** 3;
+  const preview = (id: string): CapacityRequest => ({ ...request(id), lane: "preview", bytes: 12 * GiB, admittedAt: 0 });
+  const landing: CapacityRequest = { ...request("landing"), bytes: 24 * GiB, queuedAt: 1 };
+  const reading = { totalBytes: 62 * GiB, availableBytes: 42 * GiB, memoryFullAvg10: 0,
+    currentBytes: { a: 4.5 * GiB, b: 4.5 * GiB }, peakBytes: { a: 6 * GiB, b: 5 * GiB } };
+  const decision = decideCapacity(legacy, [preview("a"), preview("b"), landing], landing.id, reading, 2);
+  assert.equal(decision.activeBytes, 24 * GiB, "measured peaks change nothing without typical sizes");
+  assert.equal(decision.outstandingBytes, 15 * GiB);
+  assert.equal(decision.admitted, false);
+});
+
+test("an unconfigured typical size counts each kind of work at its whole ceiling", () => {
+  const configured = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 }, typical: { preview: 6 * 1024 ** 3 } } })!;
+  assert.equal(configured.typical.preview, 6 * 1024 ** 3);
+  assert.equal(configured.profiles.preview, 12 * 1024 ** 3);
+  assert.equal(configured.typical.landing, configured.profiles.landing);
 });
 
 

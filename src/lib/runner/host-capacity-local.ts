@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readMachineConfig } from "../policy/machine-config.ts";
-import { CAPACITY_CLASSES, type CapacityOwner, type CapacityPolicy, type CapacityReading, type CapacityRequest } from "./host-capacity.ts";
+import { CAPACITY_CLASSES, type CapacityClass, type CapacityOwner, type CapacityPolicy, type CapacityReading, type CapacityRequest } from "./host-capacity.ts";
 import type { CapacityObservation } from "./host-capacity-store.ts";
 
 const GiB = 1024 ** 3;
@@ -14,7 +14,7 @@ export function readCapacityPolicy(config: Record<string, unknown> = readMachine
   if (raw === undefined) return null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("hostBudget must be an object");
   const input = raw as Record<string, unknown>;
-  const allowed = ["mode", "budgetBytes", "reserveBytes", "agingMs", "maxWaitMs", "maxMemoryFullAvg10", "profiles"];
+  const allowed = ["mode", "budgetBytes", "reserveBytes", "agingMs", "maxWaitMs", "maxMemoryFullAvg10", "profiles", "typical"];
   for (const key of Object.keys(input)) if (!allowed.includes(key)) throw new Error(`unknown hostBudget setting ${key}`);
   if (input.mode !== "shadow" && input.mode !== "enforce") throw new Error("hostBudget.mode must be shadow or enforce");
   const positive = (value: unknown, fallback: number, name: string, minimum = 1) => {
@@ -22,16 +22,24 @@ export function readCapacityPolicy(config: Record<string, unknown> = readMachine
     if (typeof result !== "number" || !Number.isFinite(result) || result < minimum || !Number.isSafeInteger(result)) throw new Error(`hostBudget.${name} must be an integer >= ${minimum}`);
     return result;
   };
-  const profiles = { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 4 * GiB };
-  if (input.profiles !== undefined) {
-    if (!input.profiles || typeof input.profiles !== "object" || Array.isArray(input.profiles)) throw new Error("hostBudget.profiles must be an object");
-    for (const [key, value] of Object.entries(input.profiles)) {
-      if (!CAPACITY_CLASSES.includes(key as typeof CAPACITY_CLASSES[number])) throw new Error(`unknown hostBudget profile ${key}`);
-      profiles[key as keyof typeof profiles] = positive(value, 0, `profiles.${key}`);
+  const sizes = (name: "profiles" | "typical", into: Record<CapacityClass, number>) => {
+    const raw = input[name];
+    if (raw === undefined) return into;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error(`hostBudget.${name} must be an object`);
+    for (const [key, value] of Object.entries(raw)) {
+      if (!CAPACITY_CLASSES.includes(key as CapacityClass)) throw new Error(`unknown hostBudget ${name === "profiles" ? "profile" : "typical size"} ${key}`);
+      into[key as CapacityClass] = positive(value, 0, `${name}.${key}`);
     }
+    return into;
+  };
+  const profiles = sizes("profiles", { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 4 * GiB });
+  // Unconfigured, a kind of work counts at its whole ceiling, as before SJ-244.
+  const typical = sizes("typical", { ...profiles });
+  for (const lane of CAPACITY_CLASSES) {
+    if (typical[lane] > profiles[lane]) throw new Error(`hostBudget.typical.${lane} must not exceed its profile`);
   }
   const policy: CapacityPolicy = {
-    mode: input.mode, profiles,
+    mode: input.mode, profiles, typical,
     budgetBytes: positive(input.budgetBytes, 48 * GiB, "budgetBytes"),
     reserveBytes: positive(input.reserveBytes, 8 * GiB, "reserveBytes", 0),
     agingMs: positive(input.agingMs, 60_000, "agingMs"),
@@ -101,11 +109,16 @@ export function capacityOwnerState(request: CapacityRequest): "alive" | "gone" |
 export function readCapacityObservation(requests: readonly CapacityRequest[]): CapacityObservation {
   const owners: Record<string, "alive" | "gone" | "unknown"> = {};
   const currentBytes: Record<string, number | null> = {};
+  const peakBytes: Record<string, number | null> = {};
+  const counter = (request: CapacityRequest, name: string) => {
+    const value = request.cgroup ? cgroupFile(request.cgroup, name) : null;
+    const text = value?.state === "read" ? value.text.trim() : null;
+    return text && /^\d+$/.test(text) ? Number(text) : null;
+  };
   for (const request of requests) {
     owners[request.id] = capacityOwnerState(request);
-    const current = request.cgroup ? cgroupFile(request.cgroup, "memory.current") : null;
-    const text = current?.state === "read" ? current.text.trim() : null;
-    currentBytes[request.id] = text && /^\d+$/.test(text) ? Number(text) : null;
+    currentBytes[request.id] = counter(request, "memory.current");
+    peakBytes[request.id] = counter(request, "memory.peak");
   }
   const memory = file("/proc/meminfo");
   const pressure = file("/proc/pressure/memory");
@@ -114,7 +127,7 @@ export function readCapacityObservation(requests: readonly CapacityRequest[]): C
   const full = pressure.state === "read" ? /^full avg10=([\d.]+)/m.exec(pressure.text)?.[1] : undefined;
   const reading: CapacityReading | null = total && available ? {
     totalBytes: Number(total) * 1024, availableBytes: Number(available) * 1024,
-    memoryFullAvg10: full === undefined ? null : Number(full), currentBytes,
+    memoryFullAvg10: full === undefined ? null : Number(full), currentBytes, peakBytes,
   } : null;
   return { owners, reading };
 }
