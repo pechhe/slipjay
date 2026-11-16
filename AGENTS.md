@@ -12,9 +12,11 @@ this repository needs.
   `maintain` upgrade, and the runner only with `slipjay upgrade --runner`; say which of
   the two your change needs when you report it. Try a change in tests, which build their
   own state, never against the live runner or the real `~/.slipjay`.
-- **Tests.** Run one file with `bunx vp test tests/<capability>/<file>.test.ts`. Vitest
-  gives each file a disposable `HOME`, which `bun test` does not: use `bun test` only for
-  the `scripts/*.test.ts` files that `test:runtimes` lists. Leave the whole suite to the
-  landing gate.
+- **Tests.** Run one file with `bunx vp test tests/<capability>/<file>.test.ts`. Before
+  landing, run `bun run test:landing`: it runs the gate's own selection for the working
+  copy, every test file the change can reach (about 200 files and several minutes for a
+  `src/` change, seconds for a doc change). Hand-picked files are not enough. Vitest gives
+  each file a disposable `HOME`, which `bun test` does not: use `bun test` only for the
+  `scripts/*.test.ts` files that `test:runtimes` lists.
 - **Changelog.** A change in behaviour adds an entry under `## Unreleased` in
   `CHANGELOG.md`, in the style there: a bold sentence saying what now happens, then why.
