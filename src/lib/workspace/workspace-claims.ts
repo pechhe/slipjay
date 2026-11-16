@@ -101,23 +101,52 @@ export function recoveryCustodyIdle(input: { claims: ClaimView[]; controllersGon
     && input.now - input.lastActivityAt >= STALE_CUSTODY_IDLE_MS;
 }
 let recoveryScan: { at: number; value: Promise<{ working: Awaited<ReturnType<typeof processWorkingDirectories>>; open: Awaited<ReturnType<typeof openPathsByProcess>> }> } | undefined;
-async function staleRecovery(path: string, status: ClaimStatus, fresh = false): Promise<boolean> {
-  if (status.retirement) return false;
+
+function idleDuration(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/**
+ * What will end a confirmed-abandoned hold, in the words a person removing the checkout needs: the
+ * host settles it once it has been idle for 24 hours, and the owner can settle it now. Empty when the
+ * hold is not one the host-idle rule applies to, so a refusal never promises a route it will not take.
+ * `holders` is true when the checkout is clear of every process, false when one still uses it, and
+ * null when they could not be read.
+ */
+export function abandonedCustodyNote(input: { claims: ClaimView[]; controllersGone: boolean; lastActivityAt: number | null; holders: boolean | null; now: number }): string {
+  const retained = input.claims.filter((claim) => claim.state === "active" || claim.state === "recovery-required");
+  if (!retained.length || !input.controllersGone) return "";
+  if (!retained.every((claim) => claim.state === "recovery-required" && claim.controller !== null)) return "";
+  if (input.lastActivityAt === null) return "; its recorded controllers are gone, but no activity time is recorded, so the host cannot confirm the idle that settles it";
+  const remaining = STALE_CUSTODY_IDLE_MS - (input.now - input.lastActivityAt);
+  if (remaining > 0) return `; its recorded controllers are gone, so the host settles it as abandoned once it has been idle for 24h (${idleDuration(remaining)} left), unless its owner settles it first with slipjay claims release`;
+  if (input.holders === false) return "; its recorded controllers are gone and it is idle past 24h, but a process is still using the checkout";
+  if (input.holders === null) return "; its recorded controllers are gone and it is idle past 24h, but its process inventories could not be read";
+  return "";
+}
+
+async function staleRecovery(path: string, status: ClaimStatus, fresh = false): Promise<{ settle: boolean; note: string }> {
+  if (status.retirement) return { settle: false, note: "" };
   const claims = status.claims.filter((claim) => claim.state === "active" || claim.state === "recovery-required");
-  if (!claims.length || claims.some((claim) => claim.state !== "recovery-required" || !claim.controller)) return false;
+  if (!claims.length || claims.some((claim) => claim.state !== "recovery-required" || !claim.controller)) return { settle: false, note: "" };
   const controllersGone = claims.every((claim) => {
     try { process.kill(claim.controller!.pid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
   });
-  if (!controllersGone) return false;
+  if (!controllersGone) return { settle: false, note: "" };
   const metadata = await readFile(join(metadataHome(), `${basename(path)}.json`), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>).catch(() => null);
   // Never use the custody file's timestamp: merely inspecting it is not activity.
   const activity = typeof metadata?.lastActivityAt === "string" ? Date.parse(metadata.lastActivityAt) : NaN;
-  if (!Number.isFinite(activity) || Date.now() - activity < STALE_CUSTODY_IDLE_MS) return false;
+  const lastActivityAt = Number.isFinite(activity) ? activity : null;
+  const note = (holders: boolean | null) => abandonedCustodyNote({ claims, controllersGone, lastActivityAt, holders, now: Date.now() });
+  if (lastActivityAt === null || Date.now() - lastActivityAt < STALE_CUSTODY_IDLE_MS) return { settle: false, note: note(null) };
   if (fresh || !recoveryScan || Date.now() - recoveryScan.at > 30_000) recoveryScan = { at: Date.now(), value: Promise.all([processWorkingDirectories().catch(() => null), openPathsByProcess().catch(() => null)]).then(([working, open]) => ({ working, open })) };
   const { working, open } = await recoveryScan.value;
   const holders = working === null ? null : await workspaceHolders(path, { processes: working });
-  return recoveryCustodyIdle({ claims, controllersGone, holdersClear: holders !== null && holders.length === 0 && open !== null && holdersOfOpenFiles(path, open).length === 0, lastActivityAt: activity, now: Date.now() });
+  // One proof for both inventories: an unreadable one is neither clear nor held.
+  const holdersClear = holders === null || open === null ? null : holders.length === 0 && holdersOfOpenFiles(path, open).length === 0;
+  return { settle: recoveryCustodyIdle({ claims, controllersGone, holdersClear: holdersClear === true, lastActivityAt, now: Date.now() }), note: note(holdersClear) };
 }
 
 /** Read-only plans and all destructive paths fail closed on unknown authority. */
@@ -125,8 +154,9 @@ export async function workspaceClaimRefusal(path: string): Promise<string | null
   try {
     const status = await workspaceClaimStatus(path);
     const claims = status.claims.filter((c) => c.state === "active" || c.state === "recovery-required");
-    if (await staleRecovery(path, status)) return null;
-    return claims.length ? `workspace custody retained: ${claims.map((c) => `${c.ownerId} (${c.state}: ${c.reason})`).join(", ")}` : status.reason;
+    const recovery = await staleRecovery(path, status);
+    if (recovery.settle) return null;
+    return claims.length ? `workspace custody retained: ${claims.map((c) => `${c.ownerId} (${c.state}: ${c.reason})`).join(", ")}${recovery.note}` : status.reason;
   } catch { return "workspace custody identity unreadable; recovery required"; }
 }
 async function fingerprint(root: string) {
@@ -231,7 +261,7 @@ export async function withUnclaimedWorkspace<T>(path: string, reason: string, op
     const record = await load(root) ?? { version: 1 as const, path: root, current: "", generations: [], receipts: {} };
     if (retained(record).length) {
       // Re-prove under the canonical writer fence, then record the narrow host-idle settlement.
-      if (!await staleRecovery(root, await workspaceClaimStatus(root), true)) fail("CLAIM_RETAINED", "Recovery custody is no longer confirmed idle");
+      if (!(await staleRecovery(root, await workspaceClaimStatus(root), true)).settle) fail("CLAIM_RETAINED", "Recovery custody is no longer confirmed idle");
       for (const claim of retained(record)) { claim.state = "released"; claim.settlementRef = "slipjay:confirmed-controller-gone-idle-24h"; }
     }
     if (!record.current) {

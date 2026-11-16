@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A refused removal says when and how its custody settles.** `slipjay remove` on a checkout whose delegated
+  runs left recovery-required custody printed the claim ids and "settlement required" with no route, which
+  read as permanent: on 16 Nov two landed, empty T3 Code workspaces could not be removed after the T3 server
+  was restarted mid-run, though the host rule that settles such custody fires 24 hours after the checkout's
+  last activity. The refusal now adds what ends the hold: the host settles it as abandoned once it has been
+  idle for 24h, with the wait still left; its owner settles it sooner with `slipjay claims release`; a process
+  still using the checkout keeps it; or its process inventories could not be read. When custody settles is
+  unchanged.
+
 - **The host ledger records how each job's memory grew, not only its peak.** Every landing is counted at the size of
   the rare large one for its whole run, and whether that room could be given back once a landing has shown itself
   small depends on how early the large ones grow, which the ledger did not keep. Each finished job's peak now carries

@@ -4,7 +4,8 @@ import { test } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { holdWorkspace } from "../support/workspace-holder.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
-import { acquireWorkspaceClaim, STALE_CUSTODY_IDLE_MS, withUnclaimedWorkspace, workspaceClaimRefusal, workspaceClaimStatus } from "../../src/lib/workspace/workspace-claims.ts";
+import { abandonedCustodyNote, acquireWorkspaceClaim, STALE_CUSTODY_IDLE_MS, withUnclaimedWorkspace, workspaceClaimRefusal, workspaceClaimStatus } from "../../src/lib/workspace/workspace-claims.ts";
+import type { ClaimView } from "../../src/lib/workspace/workspace-claims.ts";
 import { recordWorkspaceActivity } from "../../src/lib/workspace/workspace-eviction.ts";
 import { claimController } from "../../src/lib/workspace/workspace-claim-identity.ts";
 
@@ -13,6 +14,41 @@ async function abandoned(root: string, path: string, name: string) {
   assert.ok(controller);
   await acquireWorkspaceClaim(path, root, name, { requestId: "dead:acquire", ownerId: "dead", credential: "x".repeat(32), obligationRef: "dead:obligation", controller: { ...controller, pid: 2147483647 } });
 }
+
+const HOUR = 60 * 60_000;
+
+function claimView(over: Partial<ClaimView> = {}): ClaimView {
+  return { claimId: "claim", ownerId: "custody:dead", generation: "generation", state: "recovery-required",
+    reason: "controller identity unavailable or changed; settlement required", obligationRef: "t3:epoch", settlementRef: null,
+    controller: { platform: "linux", pid: 2147483647, boot: "boot", start: "start" }, ...over };
+}
+
+test("a hold whose recorded controllers are gone names the wait that ends it", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("recovery-wait", f.repo);
+    await abandoned(f.repo, w.workspacePath, w.current.name);
+    await recordWorkspaceActivity(w.current.name, Date.now() - 3 * HOUR);
+    const refusal = (await workspaceClaimRefusal(w.workspacePath))!;
+    assert.match(refusal, /custody retained/);
+    assert.match(refusal, /idle for 24h/, "the refusal names the host rule that settles it");
+    assert.match(refusal, /2[01]h \d+m left/, "the refusal says how long the wait still is");
+    assert.match(refusal, /claims release/, "the refusal names the owner's own settlement route");
+  } finally { await f.dispose(); }
+});
+
+test("an abandoned note is only for custody that is actually abandoned", () => {
+  const now = Date.now();
+  const idle = { claims: [claimView()], controllersGone: true, lastActivityAt: now - 3 * HOUR, holders: null, now };
+  assert.equal(abandonedCustodyNote({ ...idle, controllersGone: false }), "", "a live controller is not abandoned");
+  assert.equal(abandonedCustodyNote({ ...idle, claims: [claimView({ state: "active" })] }), "", "an active claim is refused by its own state");
+  assert.equal(abandonedCustodyNote({ ...idle, claims: [claimView({ controller: null })] }), "", "a missing identity proves nothing");
+  assert.equal(abandonedCustodyNote({ ...idle, claims: [claimView({ state: "released" })] }), "", "an ended claim holds nothing");
+  assert.match(abandonedCustodyNote({ ...idle, lastActivityAt: null }), /no activity time/);
+  assert.match(abandonedCustodyNote({ ...idle, lastActivityAt: now - 25 * HOUR, holders: false }), /process is still using/);
+  assert.match(abandonedCustodyNote({ ...idle, lastActivityAt: now - 25 * HOUR, holders: null }), /could not be read/);
+  assert.equal(abandonedCustodyNote({ ...idle, lastActivityAt: now - 25 * HOUR, holders: true }), "", "nothing is left to explain");
+});
 
 test("confirmed-gone, 24h-idle custody settles only at the destructive fence", async () => {
   const f = await project();
