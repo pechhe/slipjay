@@ -28,21 +28,26 @@ export async function runHostBudget(args: string[]): Promise<number> {
     return 0;
   }
   if (args[0] === "run") {
+    // `run --help` prints this line and every option it accepts: callers probe it for an option before passing it.
+    const runUsage = "usage: slipjay host-budget run [--class agent|image|landing|release|audit|preview] [--job name] [--memory-max bytes|size] [--measure-container name]... -- command [args]";
+    if (args[1] === "--help") { console.log(runUsage); return 0; }
     let lane: CapacityClass = "agent", name = "Heavy command";
     let memoryMaxBytes: number | undefined;
+    const measureContainers: string[] = [];
     let index = 1;
     for (; index < args.length && args[index] !== "--"; index += 2) {
       if (args[index] === "--class" && CAPACITY_CLASSES.includes(args[index + 1] as CapacityClass)) lane = args[index + 1] as CapacityClass;
       else if (args[index] === "--job" && args[index + 1]) name = args[index + 1]!;
       else if (args[index] === "--memory-max" && args[index + 1] && memoryMaxBytes === undefined) memoryMaxBytes = parseCapacityMemoryMax(args[index + 1]!);
-      else throw new Error("usage: slipjay host-budget run [--class agent|image|landing|release|audit|preview] [--job name] [--memory-max bytes|size] -- command [args]");
+      else if (args[index] === "--measure-container" && /^[\w][\w.-]*$/.test(args[index + 1] ?? "")) measureContainers.push(args[index + 1]!);
+      else throw new Error(runUsage);
     }
     const command = args.slice(index + 1);
     if (args[index] !== "--" || !command.length) throw new Error("host-budget run requires -- followed by a command");
     const stopping = new AbortController();
     const stop = () => stopping.abort();
     for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(signal, stop);
-    try { return await runWithHostCapacity({ lane, job: name, command, memoryMaxBytes, signal: stopping.signal, onWait: (line) => console.error(line) }); }
+    try { return await runWithHostCapacity({ lane, job: name, command, memoryMaxBytes, measureContainers, signal: stopping.signal, onWait: (line) => console.error(line) }); }
     catch (error) { if (stopping.signal.aborted) return 130; throw error; }
     finally { for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.removeListener(signal, stop); }
   }

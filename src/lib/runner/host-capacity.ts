@@ -62,6 +62,11 @@ export type CapacityRequest = {
   cgroup: string | null;
   /** The most its cgroup was observed to have used while it ran (SJ-246); its retained peak once it finishes. */
   peakBytes?: number;
+  /**
+   * Memory the job uses outside its own cgroup, as its runner last measured it: an image build's BuildKit container,
+   * whose memory is Docker's. Readings add it to the job's own, and its runner's samples raise `peakBytes`.
+   */
+  externalBytes?: number;
 };
 
 export type CapacityReading = {
@@ -70,7 +75,10 @@ export type CapacityReading = {
   memoryFullAvg10: number | null;
   /** Unknown usage reserves the whole commitment; it is never silently read as a measured zero. */
   currentBytes: Readonly<Record<string, number | null>>;
-  /** The cgroup's `memory.peak`: the most the job has used so far. Unknown counts the job at its whole ceiling. */
+  /**
+   * The most the job has used so far: its cgroup's `memory.peak`, or more if its runner saw it hold more together with
+   * the containers it measures. Unknown counts the job at its whole ceiling.
+   */
   peakBytes: Readonly<Record<string, number | null>>;
 };
 

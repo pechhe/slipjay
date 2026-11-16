@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -115,8 +117,11 @@ export function readCapacityObservation(requests: readonly CapacityRequest[]): C
   };
   for (const request of requests) {
     owners[request.id] = capacityOwnerState(request);
-    currentBytes[request.id] = counter(request, "memory.current");
-    peakBytes[request.id] = counter(request, "memory.peak");
+    const current = counter(request, "memory.current");
+    const peak = counter(request, "memory.peak");
+    // Memory outside the job's cgroup that its runner measured counts as the job's own.
+    currentBytes[request.id] = current === null ? null : current + (request.externalBytes ?? 0);
+    peakBytes[request.id] = peak === null ? null : Math.max(peak, request.peakBytes ?? 0);
   }
   const memory = file("/proc/meminfo");
   const pressure = file("/proc/pressure/memory");
@@ -130,6 +135,32 @@ export function readCapacityObservation(requests: readonly CapacityRequest[]): C
   return { owners, reading };
 }
 
+
+/**
+ * From a cgroup's `memory.stat`, the memory the kernel cannot reclaim: anonymous and kernel memory, less the file cache
+ * and reclaimable slab (dentries and inodes from unpacking layers) that it reclaims alike.
+ */
+export function residentBytes(stat: string): number | null {
+  const value = (name: string) => { const match = new RegExp(`^${name} (\\d+)$`, "m").exec(stat); return match ? Number(match[1]) : null; };
+  const anon = value("anon"), kernel = value("kernel"), reclaimable = value("slab_reclaimable");
+  return anon === null || kernel === null || reclaimable === null ? null : anon + kernel - reclaimable;
+}
+
+/**
+ * A running Docker container's resident memory (SJ-246 follow-up): BuildKit runs an image build in its own long-lived
+ * container, so the build's memory is not in the job's cgroup. File cache is left out: the container's own limit bounds
+ * it and the kernel reclaims it, so counting it would count every build at that limit. Unknown is null.
+ */
+export async function readContainerResidentBytes(name: string): Promise<number | null> {
+  // Asynchronous, so a hung Docker daemon never holds up the job's own result.
+  const pid = await promisify(execFile)("docker", ["inspect", "--format", "{{.State.Pid}}", name], { encoding: "utf8", timeout: 10_000 })
+    .then(({ stdout }) => stdout.trim(), () => "");
+  if (!/^[1-9]\d*$/.test(pid)) return null;
+  const membership = file(`/proc/${pid}/cgroup`);
+  const cgroup = membership.state === "read" ? /^0::(\/.*)$/m.exec(membership.text)?.[1] : undefined;
+  const stat = cgroup ? cgroupFile(cgroup, "memory.stat") : null;
+  return stat?.state === "read" ? residentBytes(stat.text) : null;
+}
 
 /** Capture before stopping a slice: collected cgroups cannot supply retrospective counters. Missing stays unknown. */
 export function readCapacityResources(cgroup: string | null) {

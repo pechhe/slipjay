@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **An image build's memory counts, so image builds learn their typical size too.** BuildKit runs a build in its own
+  Docker container, so an image job's cgroup measured almost nothing and image builds stayed counted at their 16 GiB
+  starting size (one using 0.6 GiB of its own kept a second waiting on 16 Nov). `host-budget run --measure-container
+  <name>` names containers whose memory is the job's own: every 5 seconds the runner adds their anonymous and kernel
+  memory (not file cache or reclaimable slab) to the job's reading and raises its peak, so the finished build leaves a real peak to learn
+  from.
 - **peach-box learns each kind of work's typical memory and admits on real free memory alone (SJ-246).** After SJ-244
   only previews and landings had hand-set typical sizes, so release checks, image builds and agent checks still counted
   at their 16 GiB ceilings, and the fixed 48 GiB commitment budget was a second, stricter cap: an agent heavy check

@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "vite-plus/test";
 import { openCapacityStore } from "../../src/lib/runner/host-capacity-store.ts";
-import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityPolicy } from "../../src/lib/runner/host-capacity-local.ts";
+import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityObservation, readCapacityPolicy, residentBytes } from "../../src/lib/runner/host-capacity-local.ts";
 import { decideCapacity, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
@@ -150,6 +150,32 @@ test("finished jobs leave their peak in a history that outlives the per-poll dec
     const tight = (requests: readonly CapacityRequest[]) => ({ ...roomy()(requests), reading: { ...roomy()(requests).reading, availableBytes: 8 + 200 * 1024 ** 2 } });
     assert.equal(store.poll(next, { ...sized, reserveBytes: 8 }, tight, 2000).outcome, "admitted", "admitted at its learned 108 MiB, not its 1 GiB ceiling");
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an image job's runner adds its BuildKit container's memory to its own, and its peak only rises", () => {
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  try {
+    // This test process's own cgroup stands in for the job's: its counters are real.
+    const own = /^0::(\/.*)$/m.exec(readFileSync("/proc/self/cgroup", "utf8"))?.[1] ?? null;
+    const job = { ...request("image"), lane: "image" as const, cgroup: own };
+    store.poll(job, policy, observe, 1);
+    store.noteUsage(job.id, job.owner, 3 * 1024 ** 3, 5 * 1024 ** 3);
+    store.noteUsage(job.id, job.owner, 1024 ** 3, 2 * 1024 ** 3);
+    const [noted] = store.requests();
+    assert.deepEqual([noted!.externalBytes, noted!.peakBytes], [1024 ** 3, 5 * 1024 ** 3], "the latest outside use, the highest peak");
+    assert.throws(() => store.noteUsage(job.id, { kind: "holder", path: "/other", identity: "other" }, 0, 0), /another owner/);
+    const reading = readCapacityObservation(store.requests()).reading;
+    assert.ok(reading!.currentBytes[job.id]! > 1024 ** 3, "the container's memory counts as the job's");
+    assert.ok(reading!.peakBytes[job.id]! >= 5 * 1024 ** 3);
+    assert.equal(store.finish(job.id, job.owner, () => true, { memoryPeakBytes: 100 * 1024 ** 2, measuredPeakBytes: 6 * 1024 ** 3 }), true);
+    assert.equal(store.typical(policy).image.samples, 1, "a measured image build is a sample");
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resident memory is anonymous and kernel memory, not file cache, and unknown without both", () => {
+  assert.equal(residentBytes("anon 100\nfile 9000\nkernel 20\nslab 15\nslab_reclaimable 12\n"), 108);
+  assert.equal(residentBytes("anon 100\nfile 9000\n"), null);
 });
 
 test("each poll records when its owner last asked, and a later poll keeps the original arrival", () => {

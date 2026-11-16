@@ -750,8 +750,19 @@ cleanup, holder-owned work's as the most its cgroup was seen at while it ran, an
 machine attempt has the ledger read its slice just before cleanup. Once a kind of work
 has 10 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
 50, never above its profile. Until then `typical` applies: a per-class starting size no
-larger than the profile, equal to it unless set. A smaller peak measured nothing (a
-Docker build's memory is the daemon's), so image builds keep their starting size.
+larger than the profile, equal to it unless set. A smaller peak measured nothing.
+
+A Docker build's memory is the daemon's, not the job's. A command job names the
+containers whose memory is its own with `--measure-container <name>` (repeatable), such
+as an image build's BuildKit container. While the job runs, its runner measures them
+every 5 seconds: their anonymous and kernel memory, less file cache and reclaimable
+slab, which the container's own limit bounds and the kernel reclaims. Readings add the
+latest measurement to the job's own use, and the most the job and its containers held
+together becomes its peak, kept in its completion evidence as `measuredPeakBytes`
+beside its own cgroup's `memoryPeakBytes`. `host-budget run --help` prints a usage line
+naming every option `run` accepts, so a caller can probe for `--measure-container`
+before passing it. A named container must be that job's alone
+while it runs: two jobs naming one container would each count all of it.
 `status` reports each kind of work's effective size, its source and its sample count.
 
 Ceilings may overlap, so the
@@ -771,6 +782,7 @@ slice and labelled Docker cleanup. Cooperative jobs use:
 
 ```sh
 slipjay host-budget run --class agent --job 'bounded check' -- bun run check:changed
+slipjay host-budget run --class image --job 'images' --measure-container buildx_buildkit_builder0 -- ./build-images
 slipjay host-budget status
 slipjay host-budget recover
 ```
@@ -780,7 +792,8 @@ MemoryMax to the selected profile and disables swap; shadow adds no new memory c
 Nested cooperative commands inherit `SLIPJAY_SYSTEMD_SLICE` and the claim id. Machine
 attempts retain their existing lane bounds; their configured commitment is separately
 reported. Docker/BuildKit memory is external host usage unless actually contained in
-the recorded group; it must never be subtracted as if the wrapper measured it.
+the recorded group or in a container the job names with `--measure-container`; it must
+never be subtracted as if the wrapper measured it.
 
 One private SQLite ledger uses atomic transactions for observed available memory,
 the room running jobs may grow back into, and aged queue decisions. New landings receive a bounded

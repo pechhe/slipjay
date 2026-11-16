@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
-import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources } from "./host-capacity-local.ts";
+import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources, readContainerResidentBytes } from "./host-capacity-local.ts";
 import { openCapacityStore } from "./host-capacity-store.ts";
 import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, type CapacityClass, type CapacityRequest } from "./host-capacity.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
@@ -61,6 +61,10 @@ export async function runWithHostCapacity(input: {
   job: string;
   command: string[];
   memoryMaxBytes?: number;
+  /** Docker containers whose resident memory is the job's own, such as the BuildKit container an image build runs in. */
+  measureContainers?: readonly string[];
+  /** How often those containers are measured while the job runs. */
+  measureEveryMs?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
@@ -88,6 +92,19 @@ export async function runWithHostCapacity(input: {
   const started = Date.now();
   let lastNotice = -Infinity;
   let admittedMode = policy.mode;
+  // The most the job and the containers it measures were seen to hold together, while it ran.
+  let measuredPeak = 0;
+  const measure = async () => {
+    const external = await Promise.all(input.measureContainers!.map(readContainerResidentBytes));
+    const own = readCapacityObservation([{ ...request, bytes: 0, queuedAt: 0, admittedAt: 0 }]).reading?.currentBytes[id];
+    if (external.some((bytes) => bytes === null) || typeof own !== "number") return;
+    const externalBytes = external.reduce((sum, bytes) => sum! + bytes!, 0)!;
+    measuredPeak = Math.max(measuredPeak, own + externalBytes);
+    const store = openCapacityStore(capacityStorePath());
+    try { store.noteUsage(id, request.owner, externalBytes, measuredPeak); } finally { store.close(); }
+  };
+  let measuring: ReturnType<typeof setInterval> | undefined;
+  let sample: Promise<void> | undefined;
   try {
     // Set and verify the caller's explicit bound before admission. It is also a hard bound in shadow mode;
     // default shadow commands retain their existing uncapped behavior. Machine holders never use this path.
@@ -115,17 +132,25 @@ export async function runWithHostCapacity(input: {
     // Ceilings overlap (SJ-244), so restartable work is first in the kernel's out-of-memory order. A scope cannot carry
     // OOMScoreAdjust; choom raises it for the command and everything it starts, which needs no privilege.
     const adjust = enforced ? CAPACITY_OOM_SCORE_ADJUST[input.lane] : 0;
+    // A measurement is evidence, never a reason to stop the job.
+    if (input.measureContainers?.length) measuring = setInterval(() => {
+      if (!sample) sample = measure().catch(() => undefined).finally(() => { sample = undefined; });
+    }, input.measureEveryMs ?? 5000);
     return await execute(["systemd-run", "--user", "--scope", "--quiet", "--collect", `--slice=${slice}`, `--unit=slipjay-capacity-${id}.scope`,
       "--property=TimeoutStopSec=5s", "--", ...adjust ? ["choom", "-n", String(adjust), "--"] : [], ...input.command], { ...(input.env ?? process.env), SLIPJAY_HOST_CAPACITY_ID: id,
         SLIPJAY_HOST_CAPACITY_BYTES: input.memoryMaxBytes === undefined ? "" : String(bytes), [SYSTEMD_SLICE_ENV]: slice });
   } finally {
     // Stop only the exact unit we allocated, then verify the cgroup before releasing its reservation. A lost SSH or
     // SIGKILL leaves it recorded for the next caller's identity-checked recovery instead of trusting an old PID.
+    if (measuring) clearInterval(measuring);
+    await sample;
     const resources = readCapacityResources(cgroup);
+    // The job's own cgroup peak stays as read; the most it held with its measured containers is kept beside it.
+    const evidence = measuredPeak ? { ...resources, measuredPeakBytes: measuredPeak } : resources;
     systemctl(["stop", slice]);
     const store = openCapacityStore(capacityStorePath());
     try {
-      if (!store.finish(id, request.owner, (recorded) => capacityGroupEmpty(recorded.cgroup) === true, resources)) {
+      if (!store.finish(id, request.owner, (recorded) => capacityGroupEmpty(recorded.cgroup) === true, evidence)) {
         throw new Error(`host capacity cleanup is unconfirmed for ${slice}; commitment retained`);
       }
       systemctl(["revert", slice]);

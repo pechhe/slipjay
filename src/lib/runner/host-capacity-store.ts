@@ -61,8 +61,9 @@ export function openCapacityStore(path: string) {
   const complete = (request: CapacityRequest, kind: "finished" | "recovered", evidence: unknown = null, at = Date.now()) => {
     record(request.id, { kind, request, queueMs: (request.admittedAt ?? at) - request.queuedAt,
       runMs: request.admittedAt === null ? null : at - request.admittedAt, evidence }, at);
-    const measured = (evidence as { memoryPeakBytes?: unknown } | null)?.memoryPeakBytes;
-    const peak = Math.max(request.peakBytes ?? -1, typeof measured === "number" && Number.isFinite(measured) ? measured : -1);
+    const reported = evidence as { memoryPeakBytes?: unknown; measuredPeakBytes?: unknown } | null;
+    const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : -1;
+    const peak = Math.max(request.peakBytes ?? -1, number(reported?.memoryPeakBytes), number(reported?.measuredPeakBytes));
     // Only a real measurement is kept, so work that measured nothing never pushes measured peaks out of the window.
     if (request.admittedAt !== null && peak >= CAPACITY_SAMPLE_FLOOR_BYTES) {
       db.prepare("INSERT INTO peaks(at,lane,job,peak_bytes) VALUES (?,?,?,?)").run(at, request.lane, request.job, peak);
@@ -84,6 +85,15 @@ export function openCapacityStore(path: string) {
     /** Each kind of work's effective typical size, where it came from and how many peaks it rests on. */
     typical: (policy: CapacityPolicy) => learnTypical(policy, samples()),
     history: () => db.prepare("SELECT at, request_id AS requestId, body FROM decisions ORDER BY seq DESC LIMIT 100").all(),
+    /** A running job's runner reports memory it uses outside its cgroup; its peak only ever rises. */
+    noteUsage(id: string, owner: CapacityRequest["owner"], externalBytes: number, peakBytes: number): void {
+      transaction(() => {
+        const request = all().find((item) => item.id === id);
+        if (!request) return;
+        if (!sameCapacityOwner(request.owner, owner)) throw new Error("host capacity usage belongs to another owner");
+        save({ ...request, externalBytes, peakBytes: Math.max(request.peakBytes ?? 0, peakBytes) });
+      });
+    },
     finish(id: string, owner: CapacityRequest["owner"], stopped: (request: CapacityRequest) => boolean, evidence: unknown = null): boolean {
       return transaction(() => {
         const request = all().find((item) => item.id === id);

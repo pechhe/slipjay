@@ -22,6 +22,12 @@ test("unconfigured command wrappers preserve the command's exit status", () => {
     const result = run(home, ["run", "--job", "fixture", "--", "sh", "-c", "exit 7"]);
     assert.equal(result.status, 7, result.stderr);
     assert.deepEqual(JSON.parse(run(home, ["policy"]).stdout), { configured: false });
+    const measured = run(home, ["run", "--class", "image", "--measure-container", "buildx_buildkit_fixture0", "--", "sh", "-c", "exit 7"]);
+    assert.equal(measured.status, 7, measured.stderr);
+    assert.match(run(home, ["run", "--measure-container", "-x", "--", "true"]).stderr, /--measure-container name/, "a container name is not an option");
+    const help = run(home, ["run", "--help"]);
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /--measure-container name/, "callers probe run --help for the option");
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
