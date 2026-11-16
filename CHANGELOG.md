@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The nightly audit asks the host for memory as an audit.** It runs on the release-check place, and the machine
+  verifier asked for every attempt there as a release check: nothing ever asked as `audit`, so that class stayed at its
+  hand-set 16 GiB with no samples, the audit's peak was learned as a release check's, and it queued with release checks
+  instead of behind them. The audit now asks as `audit` and shows in the ledger as `Audit <commit>`.
 - **An image build's memory counts, so image builds learn their typical size too.** BuildKit runs a build in its own
   Docker container, so an image job's cgroup measured almost nothing and image builds stayed counted at their 16 GiB
   starting size (one using 0.6 GiB of its own kept a second waiting on 16 Nov). `host-budget run --measure-container

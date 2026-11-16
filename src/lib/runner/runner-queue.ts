@@ -2250,7 +2250,7 @@ export function createRunnerQueue(input: {
       try {
         if (held) {
           const started = Date.now();
-          gate = { attempt: await held.place.open({ repo: operation.repo, slot: 0, screening: false, checkout, base: head, candidate: head, integrationBranch: branch, environment: await buildCheckEnvironment(), signal: controller.signal }),
+          gate = { attempt: await held.place.open({ repo: operation.repo, slot: 0, screening: false, checkout, base: head, candidate: head, integrationBranch: branch, environment: await buildCheckEnvironment(), signal: controller.signal, audit: true }),
             started, placement: `machine:${held.machine}` };
           append(operation.id, { type: "remote_verification", phase: "ready", machine: gate.attempt.machine, placement: gate.placement, slot: 0, candidate: head, tree: gate.attempt.tree, setupMs: Date.now() - started, usage: null });
           setStage("installing");

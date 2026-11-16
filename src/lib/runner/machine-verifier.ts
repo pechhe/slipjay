@@ -193,7 +193,7 @@ ${recoverHolder()}`);
     available: () => !busy && !quarantine,
     reason: () => busy ? "machine place busy" : quarantine,
     recover,
-    async open({ checkout, candidate, base, integrationBranch, environment, signal, onCapacityWait }): Promise<RemoteAttempt> {
+    async open({ checkout, candidate, base, integrationBranch, environment, signal, audit, onCapacityWait }): Promise<RemoteAttempt> {
       // Opening waits for the last attempt's cleanup still running: a batch check opens the place again at its next commit
       // the moment the last run ends, and without the wait every diagnosis step after a run found the place busy.
       if (closing) await closing;
@@ -281,7 +281,7 @@ ${prepareCheckout}
 fi`, signal))).split("\n");
         const capacityPolicy = decodeCapacityPolicy(acquiredLines[0] ?? "");
         capacityConfigured = capacityPolicy.configured;
-        steps.hostCapacityWait = await admitMachineCapacity({ control, id, job: `${check ? "Release check" : "Landing gate"} ${candidate.slice(0, 12)}`, lane: check ? "release" : "landing",
+        steps.hostCapacityWait = await admitMachineCapacity({ control, id, job: `${audit ? "Audit" : check ? "Release check" : "Landing gate"} ${candidate.slice(0, 12)}`, lane: audit ? "audit" : check ? "release" : "landing",
           owner: { kind: "holder", path: `${holder}/id`, identity: id }, slice, signal, policy: capacityPolicy, onWait: onCapacityWait });
         const heads = (capacityPolicy.configured ? (await step("prepare", () => control(prepareCheckout, signal))).split("\n") : acquiredLines.slice(1))
           .filter((head) => /^[0-9a-f]{40}$/.test(head));

@@ -752,6 +752,11 @@ has 3 peaks of at least 64 MiB, its typical size is the 90th percentile of its l
 50, never above its profile; with fewer than 10 peaks that is the largest of them. Until then `typical` applies: a per-class starting size no
 larger than the profile, equal to it unless set. A smaller peak measured nothing.
 
+A machine attempt asks as the kind of work it is: a gate as `landing`, a batch check as
+`release`, and the nightly audit, which runs on the release-check place, as `audit`
+(named `Audit <commit>` in the ledger). So an audit is sized from audits, and queues
+behind landings and release checks.
+
 A Docker build's memory is the daemon's, not the job's. A command job names the
 containers whose memory is its own with `--measure-container <name>` (repeatable), such
 as an image build's BuildKit container. While the job runs, its runner measures them

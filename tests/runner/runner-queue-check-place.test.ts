@@ -10,12 +10,13 @@ const events = <T extends OperationEvent["type"]>(f: Awaited<ReturnType<typeof f
   f.log.events({ operationId: id }).map((row) => row.event).filter((event): event is Extract<OperationEvent, { type: T }> => event.type === type);
 
 /** A machine's release-check place that runs each command here, in the runner's own checkout, and counts its opens. */
-function checkPlace(state: { up: boolean; opened: number; closed: number }): MachineVerification {
+function checkPlace(state: { up: boolean; opened: number; closed: number; audits?: boolean[] }): MachineVerification {
   return {
     available: () => state.up,
     reason: () => state.up ? "" : "peach-box unreachable",
-    async open() {
+    async open(input) {
       state.opened += 1;
+      state.audits?.push(input.audit === true);
       return { executor: { host: "peach-box", run: runBoundedProcess }, machine: { verifier: "machine", id: "peach-box/check", name: "peach-box", size: "machine", image: "fixed SSH machine" },
         tree: "tree", usage: null, async finish() { return { tree: "tree", trackedChanges: 0, usage: null }; }, async close() { state.closed += 1; } };
     },
@@ -126,7 +127,7 @@ test("with the release-check place down, a batch check says so and runs on the b
 }, 120_000);
 
 test("the nightly audit runs on the release-check place its head's batch machine names, not on the runner host", async () => {
-  const state = { up: true, opened: 0, closed: 0 };
+  const state = { up: true, opened: 0, closed: 0, audits: [] as boolean[] };
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
     { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "peach-box" }, failingAudit: true,
       machineCheckVerifications: { "peach-box": checkPlace(state) }, releaseGates: () => ['console.log("release checks pass")'] });
@@ -139,6 +140,8 @@ test("the nightly audit runs on the release-check place its head's batch machine
     f.queue.wake();
     await until(() => f.log.operation(audit)?.result ?? undefined);
     assert.equal(state.opened, opened + 1, "the audit opened one attempt on the place");
+    assert.ok(state.audits.slice(0, opened).includes(false), "the release check opened the place as a check");
+    assert.equal(state.audits.at(-1), true, "the audit opens it as an audit, so the host counts it as one");
     assert.equal(state.closed, state.opened);
     assert.deepEqual(events(f, audit, "remote_verification").filter((event) => event.phase === "ready").map((event) => event.placement), ["machine:peach-box"]);
     assert.ok(events(f, audit, "run_finished").length >= 1, "its commands ran there");

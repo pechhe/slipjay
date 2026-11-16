@@ -656,6 +656,8 @@ export interface RemoteVerification {
   open(input: { repo: string; slot: number; pool?: string; screening?: boolean; retrying?: boolean; checkout: string; base: string; candidate: string; integrationBranch: string;
     /** Runner-provided services a fixed place must connect before any gate command starts. */
     environment?: NodeJS.ProcessEnv; signal: AbortSignal;
+    /** The nightly audit, which shares the release-check place: it asks the host for memory as an audit, not as a release check. */
+    audit?: boolean;
     /** Admission progress before verification commands, separate from their timeouts. */
     onCapacityWait?: (line: string, waitedMs: number, finished: boolean) => void }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */

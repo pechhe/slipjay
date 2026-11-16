@@ -82,7 +82,7 @@ function stand() {
   const make = (place?: number, check = false) => machineVerification("peach-box", { ssh: "peach-box", root: "/gate-root", account: "ubuntu" }, { run, ...place === undefined ? {} : { place }, ...check ? { check } : {} });
   return { scripts, bundles, make, capacity: (failed = false) => { capacity = true; capacityFailure = failed; }, failObserve: () => { observeFailure = true; }, corrupt: (failReset = false) => { fetchFailures = 1; reinitialiseFailure = failReset; }, refuseTunnel: () => { tunnelFailure = true; }, hold: () => { held = true; }, clean: (value: boolean) => { cleanAllowed = value; }, reachable: (value: boolean) => { reachable = value; }, setup: (value: boolean) => { setup = value; }, drift: () => { drift = true; }, lose: () => { lost = true; }, killClient: () => { clientKilled = true; }, policy: (value: string) => { basePolicy = value; }, cancelled: () => cancelled, report: (value: string) => { archive = value; }, memory: (before: string, after: string) => { memoryBefore = `memory ${before}`; memoryAfter = `memory ${after}`; } };
 }
-const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv) => m.open({ environment, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
+const open = (m: ReturnType<typeof machineVerification>, environment?: NodeJS.ProcessEnv, audit = false) => m.open({ environment, ...audit ? { audit } : {}, repo: "pechhe/yardsmith", slot: 0, screening: true, checkout: "/runner/checkout", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 const command = { executable: "bun", args: ["run", "test"], cwd: "/runner/checkout", timeoutMs: 1000, maxOutputBytes: 1024 };
 
 test("a gate works in the candidate itself, while a release check or audit works in an empty child of the commit it verifies", async () => {
@@ -408,6 +408,21 @@ test("the runner shares one SSH connection per machine and account; without its 
   }
 });
 
+
+test("a gate, a release check and the nightly audit each ask the host for memory as their own kind of work", async () => {
+  const asked = async (check: boolean, audit: boolean) => {
+    const s = stand(); s.capacity();
+    const machine = s.make(undefined, check); await machine.recover!([]);
+    await (await open(machine, undefined, audit)).close();
+    const poll = s.scripts.find((script) => script.includes("\nslipjay host-budget poll"))!;
+    const request = JSON.parse(/host-budget poll '(.*)'/.exec(poll)![1]!) as { job: string; lane: string };
+    return [request.lane, request.job];
+  };
+  assert.deepEqual(await asked(false, false), ["landing", "Landing gate cccccccccccc"]);
+  assert.deepEqual(await asked(true, false), ["release", "Release check cccccccccccc"]);
+  // The audit runs on the release-check place, and was counted and sized as a release check until it said what it is.
+  assert.deepEqual(await asked(true, true), ["audit", "Audit cccccccccccc"]);
+});
 
 test("configured machine admission precedes preparation and its holder survives until exact cleanup or restart recovery", async () => {
   const s = stand(); s.capacity();
