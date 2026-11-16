@@ -138,3 +138,22 @@ test("restartable work is first to give way when overlapping ceilings meet", () 
   assert.equal(CAPACITY_OOM_SCORE_ADJUST.landing, 0);
   assert.equal(CAPACITY_OOM_SCORE_ADJUST.release, 0);
 });
+
+test("a queued request that has stopped asking does not hold the head of the queue", () => {
+  // peach-box, 16 Nov 10:40 GMT: a sentinel preview polled once and went quiet for 17 minutes while a 12 GiB landing,
+  // which fit on its own, preserved the preview's 6 GiB behind it.
+  const quiet = { ...request("sentinel", "preview", 0, 12 * GiB), polledAt: 0 };
+  const landing = request("landing", "landing", 5 * 60_000, 24 * GiB);
+  const typed = { ...host, typical: { ...host.typical, landing: 12 * GiB } };
+  const running = [preview("yardsmith"), preview("weave"), preview("isolated"), { ...request("release", "release", 0, 16 * GiB), admittedAt: 0 }];
+  const observed = { ...peachBox, availableBytes: 44 * GiB, currentBytes: { yardsmith: 4.2 * GiB, weave: 4.1 * GiB, isolated: 2.5 * GiB, release: 1.7 * GiB },
+    peakBytes: { yardsmith: 6.5 * GiB, weave: 5.2 * GiB, isolated: 4.8 * GiB, release: 13.4 * GiB } };
+  const at = (now: number, polledAt: number) => decideCapacity(typed, [...running, { ...quiet, polledAt }, landing], landing.id, observed, now);
+  const fresh = at(6 * 60_000, 6 * 60_000 - 1000);
+  assert.match(fresh.reason, /preserving commitment capacity for sentinel/, "a waiter still asking keeps its place");
+  const stale = at(17 * 60_000, 0);
+  assert.equal(stale.admitted, true);
+  assert.equal(stale.head, "landing");
+  assert.equal(capacityOrder([...running, quiet, landing], typed.agingMs)[0]?.id, "sentinel", "it keeps its age for when it asks again");
+  assert.equal(decideCapacity(typed, [...running, { ...quiet, polledAt: 17 * 60_000 }, landing], "sentinel", observed, 17 * 60_000).admitted, true);
+});

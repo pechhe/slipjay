@@ -55,6 +55,8 @@ export type CapacityRequest = {
   lane: CapacityClass;
   bytes: number;
   queuedAt: number;
+  /** The last time its owner asked for admission; absent means its arrival. Ages nothing, only marks it waiting. */
+  polledAt?: number;
   admittedAt: number | null;
   owner: CapacityOwner;
   /** Exact cgroup path on this host; absent until a command starts or for an external daemon. */
@@ -108,12 +110,19 @@ export function countedBytes(policy: CapacityPolicy, request: CapacityRequest, r
   return Math.min(request.bytes, Math.max(admissionBytes(policy, request), peak, current));
 }
 
+/**
+ * A queued request whose owner has not asked for two minutes is not waiting now (SJ-244): a preview polls once per
+ * start attempt, and one that went quiet held the head of the queue, and every landing behind it, until its wait limit.
+ * It keeps its age, so it is at the head again the next time it asks.
+ */
+export const CAPACITY_WAITER_FRESH_MS = 120_000;
+
 /** Pure decisions make concurrent-arrival, pressure and starvation cases reproducible without loading the host. */
 export function decideCapacity(policy: CapacityPolicy, requests: readonly CapacityRequest[], id: string, reading: CapacityReading | null, now: number): CapacityDecision {
   const request = requests.find((item) => item.id === id);
   const active = requests.filter((item) => item.admittedAt !== null);
   const queue = capacityOrder(requests, policy.agingMs);
-  const head = queue[0];
+  const head = queue.find((item) => item.id === id || now - (item.polledAt ?? item.queuedAt) < CAPACITY_WAITER_FRESH_MS);
   const counted = active.map((item) => ({ item, bytes: countedBytes(policy, item, reading) }));
   const activeBytes = counted.reduce((sum, { bytes }) => sum + bytes, 0);
   // Room each running job may still grow into before it exceeds what it is counted for; already in use is already

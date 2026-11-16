@@ -775,7 +775,7 @@ the recorded group; it must never be subtracted as if the wrapper measured it.
 One private SQLite ledger uses atomic transactions for observed available memory,
 the room running jobs may grow back into, and aged queue decisions. New landings receive a bounded
 initial preference; an old background or large request eventually precedes new work.
-Backfill leaves the head request's admission size available. Finite waiting requires
+Backfill leaves the head request's admission size available. Only a request still asking holds the head: one whose owner has not polled for two minutes keeps its age and its place, but later work may start until it asks again (SJ-244). Finite waiting requires
 finite jobs and admissible demand. Timeouts, unreadable ownership/memory/PSI or overload
 never authorize an unconditional start in enforce mode. Capacity denial is distinct
 from machine failure and never sends a denied gate to Boat. Unconfigured hosts retain

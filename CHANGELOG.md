@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **A queued request that stops asking no longer holds landings behind it (SJ-244).** Backfill preserved the head of
+  the queue's room even when its owner had polled once and gone quiet: on 16 Nov a sentinel preview that asked once
+  held a 12 GiB landing, which fit on its own, for 17 minutes. Each poll now records `polledAt`, and a queued request
+  that has not asked for two minutes keeps its age but does not hold the head until it asks again.
 - **Running work counts by what it uses, not by its ceiling, so landings start beside long-lived previews (SJ-244).**
   Host capacity held every admitted job at its whole profile for its lifetime, so peach-box's two always-on 12 GiB
   previews, using about 4.5 GiB each, left a 24 GiB landing 19 GiB of headroom on an idle host: seven landings in a row

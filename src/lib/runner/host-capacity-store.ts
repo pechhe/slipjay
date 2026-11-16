@@ -83,15 +83,15 @@ export function openCapacityStore(path: string) {
           || previous.cgroup !== request.cgroup || !sameCapacityOwner(previous.owner, request.owner))) {
           throw new Error(`host capacity request ${request.id} belongs to a different owner or commitment`);
         }
-        const registered = previous ?? request;
+        const registered = { ...previous ?? request, polledAt: now };
         const observed = observe(previous ? existing : [...existing, registered]);
         const retained: CapacityRequest[] = [];
         for (const item of existing) {
           if (observed.owners[item.id] === "gone") complete(item, "recovered", null, now);
-          else retained.push(item);
+          else if (item.id !== registered.id) retained.push(item);
         }
         if (observed.owners[request.id] === "gone") throw new Error("host capacity owner ended before admission");
-        if (!retained.some((item) => item.id === registered.id)) retained.push(registered);
+        retained.push(registered);
         const decision = decideCapacity(policy, retained, registered.id, observed.reading, now);
         if (observed.owners[request.id] !== "alive" && registered.admittedAt === null) {
           decision.admitted = false;

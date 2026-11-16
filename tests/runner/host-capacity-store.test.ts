@@ -116,6 +116,19 @@ test("malformed host policy cannot silently disable enforcement", () => {
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 4096 }, typical: { preview: 8192 } } }), /exceed/);
 });
 
+test("each poll records when its owner last asked, and a later poll keeps the original arrival", () => {
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  try {
+    const waiting = request("waiting");
+    assert.equal(store.poll(waiting, policy, observe, 5).request.polledAt, 5);
+    const again = store.poll({ ...waiting, queuedAt: 40 }, policy, observe, 40).request;
+    assert.equal(again.queuedAt, 0);
+    assert.equal(again.polledAt, 40);
+    assert.equal(store.requests()[0]?.polledAt, 40);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("a host with no typical sizes admits exactly as before: every job counts at its whole profile", () => {
   const legacy = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 } } })!;
   assert.deepEqual(legacy.typical, legacy.profiles);
