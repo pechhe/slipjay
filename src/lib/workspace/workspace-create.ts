@@ -28,6 +28,8 @@ import { claimSpare, refreshDependencies } from "./workspace-pool.ts";
 import { timed } from "./start-steps.ts";
 import type { StartSteps } from "./start-steps.ts";
 import { linkSharedPaths } from "./workspace-shared-paths.ts";
+import { setWorkspaceIssueTrailer } from "./workspace-issue-trailers.ts";
+import { isUndescribed } from "../build/issue-references.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
 
 /** Host seams for assigning a workspace; each defaults to plain JJ or package-manager installation. */
@@ -406,7 +408,10 @@ async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext
   await writeWorkspaceTaskMetadata(context, task);
   // Repository-wide, so every workspace's trunk() (and the briefs pinned from it) names this repository's integration.
   await ensureRepoConfig(context.current.root, integrationTrunkConfig(context.integrationBranch, context.configuration.remote ?? "origin"));
-  if (issueNumber && attach) await attachWorkspaceIssue(context.current.root, issueNumber);
+  if (issueNumber) {
+    if (attach) await attachWorkspaceIssue(context.current.root, issueNumber);
+    else await setWorkspaceIssueTrailer(context, issueNumber);
+  }
   await timed(steps, "describe", () => describeAssignedWorkspace(context, task, issueNumber));
   if (context.current.name !== "default") await linkSharedPaths(context.integration.root, context.current.root);
   return { hooks, context, issueNumber, prepared, installInputs, steps, workspace: { ...context, context, pooled: false, ...result, workspacePath } };
@@ -422,7 +427,7 @@ async function describeAssignedWorkspace(context: WorkspaceContext, task: string
   if (context.current.name === "default" || !task?.trim()) return;
   try {
     const facts = await revisionFacts(context.current.root, "@");
-    if (facts.empty && !facts.description.trim()) {
+    if (facts.empty && isUndescribed(facts.description)) {
       const generated = wipDescription(task, issueNumber);
       await jj(context.current.root, ["describe", "-r", "@", "-m", generated]);
       // Only this exact text is a placeholder; a description a person writes, `wip:` or not, is theirs.
@@ -574,6 +579,8 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
     throw new Error("A start base needs a new workspace: start from the integration checkout and without an Issue");
   }
   if (context.current.name !== "default") {
+    if (issueNumber && (await workspaceMetadata(context.current.name))?.spare === true)
+      throw new Error(`An unclaimed pool spare cannot take an Issue; start the Issue's own workspace with \`slipjay start --integration --issue ${issueNumber}\``);
     await assertWorkspaceNotRetiring(context.current.root);
     await assertWorkspaceMutationAllowed(context);
     await assignAttempt(options.attemptId, context.current.name, context.current.root, false);

@@ -10,6 +10,7 @@
  * refused until the work is described, abandoned or landed.
  */
 import { existsSync } from "node:fs";
+import { isUndescribed } from "../build/issue-references.ts";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -306,7 +307,7 @@ async function undescribedWork(cwd: string, target: string, integrated: string):
     const names = copies!.trim().split(/\s+/).filter((name) => name.endsWith("@")).map((name) => name.slice(0, -1));
     const generated = (await Promise.all(names.map(async (name) => (await workspaceMetadata(name))?.generatedDescription))).filter(Boolean);
     const placeholder = description.trim() !== "" && generated.includes(description.trim());
-    if (description.trim() && !placeholder) continue;
+    if (!isUndescribed(description) && !placeholder) continue;
     return `Workspace ${names.join(", ") || "here"} has a working-copy commit with changes that are not integrated and ${placeholder ? "only the generated `wip:` description" : "no description"}, and this command would leave them behind as an orphan. ${ORPHAN_REMEDY}`;
   }
   return null;

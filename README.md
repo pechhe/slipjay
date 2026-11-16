@@ -324,6 +324,24 @@ Optional `slipjay.json` fields for local workspace behaviour, the workspace pool
 | `tracker` | `"github"` (default) or `"forge"` (a repository still declaring `"build"` keeps working until that value is removed): where the repository's work items live. With either of the two, the numbers `start --issue` and `attach-issue` record are HQ Forge numbers: a landing names its item in a `Forge: #N` trailer (instead of `Issue: owner/repo#N`), a landing with no description takes the item's title from Forge, `prune --empty` and the landing sweep treat a workspace whose item is closed (landed, accepted, dropped, achieved, superseded or imported_closed, or any `legacy` item) as delivered, and `land` writes the landing's Forge handoff itself (see `land`). Forge is read only through the runner (see [Forge reads](#forge-reads)); when it cannot be read, the title falls back to the task, a workspace is kept, and promotion says it could not check. |
 | `sharedPaths` | Array of repository-relative directories (at most 20; literal paths, no globs, none inside another, none in `.jj`/`.git`). Each workspace gets a symlink at that path to the same path in the primary (integration) checkout, which is created when missing. The link is made when a workspace is started, resumed or claimed and when a spare is provisioned. An existing real directory is replaced only when empty; with content it is left alone with a warning. Cleanup ignores a link into the primary checkout, so git-ignored output such as `artifacts/` no longer keeps a landed workspace. List the path in `.gitignore`, or jj snapshots the link as source (slipjay warns). |
 
+In Forge-tracked repositories (`tracker: "forge"` or the older `"build"`),
+`start --issue N` and `attach-issue N` set jj's `templates.commit_trailers` for that
+workspace only: `jj describe -m` and `jj commit -m` add `Forge: #N` or legacy `Build: #N`.
+The template composes the existing user, repository or workspace trailer template
+with the item trailer, so Signed-off-by and Change-Id trailers keep working; jj
+avoids duplicates. Other workspaces and the integration checkout are unchanged.
+The setting lives with the checkout: retiring it discards its jj config identity,
+so a new checkout at the same name and path has no item trailer.
+An unclaimed pool spare refuses an item; use `slipjay start --integration --issue N`
+to start the item's own workspace instead.
+The editor is pre-filled with the trailer, but deliberately deleting it is allowed;
+`land` restores a missing trailer and reports both the given and submitted commit ids.
+If jj cannot write workspace config, allocation and attachment still succeed and
+`land` supplies the trailer as before.
+GitHub-tracked repositories are unchanged: no workspace trailer setting is written,
+and `land` adds `Issue: owner/repo#N` using the remote's repository only when the
+description does not already refer to the Issue.
+
 When a new workspace has no spare to claim, or a spare is provisioned, and it has
 no `node_modules`, slipjay first clones the `node_modules` trees of a prepared
 spare (or of the primary checkout) whose install-input fingerprint is identical,

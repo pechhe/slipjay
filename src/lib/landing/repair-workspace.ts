@@ -6,7 +6,7 @@
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { commitIssue, githubRepository } from "../build/issue-references.ts";
+import { commitIssue, githubRepository, isUndescribed } from "../build/issue-references.ts";
 import { publicationRemote } from "./landing-steps.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { downloadSubmissionSource, manageRepairClaim, readBuildThroughRunner, readLandingHandoff, readLandingOutcome, readRepairState, RunnerRequestRefused } from "../runner/runner-client.ts";
@@ -227,7 +227,7 @@ export async function repairFailedLanding(cwd: string, operationId: string, opti
   const at = await revisionFacts(workspacePath, "@");
   if (at.changeId !== outcome.changeId) {
     const generated = (await workspaceMetadata(workspaceName))?.generatedDescription;
-    const placeholder = at.empty && (!at.description.trim() || at.description.trim() === String(generated ?? "").trim());
+    const placeholder = at.empty && (isUndescribed(at.description) || at.description.trim() === String(generated ?? "").trim());
     if (!placeholder) throw new Error(`jj:${workspaceName} is editing other work; set it to the repaired change with: jj edit ${source}`);
     await jj(workspacePath, ["edit", source]);
     if (at.description.trim()) await jj(workspacePath, ["abandon", at.commitId]);

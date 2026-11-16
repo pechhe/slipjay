@@ -44,7 +44,7 @@ import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { finishLanding } from "./landing-candidate.ts";
 import { finalizePostIntegration } from "../release/post-integration-finalization.ts";
-import { githubRepository, withIssueTrailer } from "../build/issue-references.ts";
+import { githubRepository, isUndescribed, withIssueTrailer } from "../build/issue-references.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
 import { jj, jjGitExecutable, revisionExists, revisionFacts, run, workspaceContext } from "../infra/workspace-jj.ts";
 import { trackerOf, workItemTitle } from "../build/tracker.ts";
@@ -156,7 +156,7 @@ async function prepareCandidateDependencies(cwd: string, context: CandidateConte
 }
 
 /** `readBuild` reads a Build-tracked workspace's item title for a missing description. */
-async function ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader): Promise<LandingRevision> {
+async function ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader, onProgress: (line: string) => void = console.log): Promise<LandingRevision> {
   const metadata = await workspaceMetadata(context.current.name);
   const issueNumber = typeof metadata?.issueNumber === "number" ? metadata.issueNumber : null;
   // The exact text `start` generated is no description: it is replaced, never published.
@@ -174,7 +174,7 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   const placeholder = Boolean(generated) && subject.trim() === generated;
   const body = placeholder ? bodyLines.join("\n").trim() : "";
   let description = placeholder ? "" : fullDescription;
-  if (!description) {
+  if (isUndescribed(description)) {
     const issueDescription = issueNumber
       ? await workItemTitle(context.integration.root, trackerOf(context.configuration), issueNumber, readBuild)
       : null;
@@ -189,7 +189,9 @@ async function ensureLandingDescription(cwd: string, context: CandidateContext, 
   const described = withIssueTrailer(description, issueNumber, githubRepository(remotes, context.configuration.remote), trackerOf(context.configuration));
   if (described === fullDescription && fullDescription) return target;
   await jj(cwd, ["describe", "-r", target.changeId, "-m", described]);
-  return revisionFacts(cwd, target.changeId);
+  const submitted = await revisionFacts(cwd, target.changeId);
+  onProgress(`[description] given ${target.commitId}; submitting ${submitted.commitId} after updating the description`);
+  return submitted;
 }
 
 /** The remote this landing publishes to, or null when the repository declares none. */

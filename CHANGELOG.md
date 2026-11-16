@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **A Forge item's trailer is already on the commit a reviewer judges.** In Forge-tracked repositories (`forge`
+  or the older `build`), starting or attaching an item configures jj's commit trailers for that workspace only,
+  composing existing trailers rather than replacing them. Describing or committing with `-m` now writes the
+  Forge or Build item trailer before review, so landing need not change
+  the reviewed commit's identity to add it. The setting lives with the checkout, so a new checkout at the same name
+  has no old trailer. An unclaimed pool spare refuses an item rather than handing its trailer to a later task.
+  Older jj or a failed config write still falls back to landing, which names both commit ids whenever it updates a description.
+  GitHub-tracked repositories are unchanged: landing still adds their remote-specific Issue trailer only when needed.
+
 - **A test file's fixtures come from the temp directory when `/dev/shm` refuses writes.** On 16 Nov no Vitest file ran
   in a read-only agent shell: `bunx vp test tests/workspace/bounded-map.test.ts` failed in
   `scripts/vitest-hermetic-env.ts` with `EACCES: permission denied, mkdtemp '/dev/shm/slipjay-test-…'` though the same

@@ -42,6 +42,11 @@ export function referencesIssue(description: string | null | undefined, issueNum
   return new RegExp(`(?<![\\w&])#${issueNumber}(?!\\d)|[\\w.-]+/[\\w.-]+#${issueNumber}(?!\\d)`).test(description ?? "");
 }
 
+/** Blank text and item trailers alone do not describe the work. */
+export function isUndescribed(description: string): boolean {
+  return description.split(/\r?\n/).every((line) => !line.trim() || /^(?:(?:Build|Forge): #\d+|Issue: (?:[\w.-]+\/[\w.-]+)?#\d+)\s*$/.test(line));
+}
+
 /**
  * `description` plus a git trailer naming its work item, unless it has none or already names it:
  * `Issue: owner/repo#N` for a GitHub Issue, or `Build: #N` for a Build item. A Build item is named only

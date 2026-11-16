@@ -86,6 +86,17 @@ test("landing refuses a stack whose lower commit still has the generated placeho
   }
 }, 120_000);
 
+test("the guard refuses to orphan work whose description contains only its item trailer", async () => {
+  const f = await project();
+  try {
+    const workspace = await createWorkspace("Trailer only", f.repo, { issueNumber: 57 });
+    await writeFile(join(workspace.workspacePath, "work.txt"), "work\n");
+    jj(workspace.workspacePath, ["--config", 'templates.commit_trailers=\'""\'', "describe", "-m", "Issue: #57"]);
+    assert.equal(description(workspace.workspacePath), "Issue: #57");
+    assert.match(reason(await guard(workspace.workspacePath, "jj new main")), /no description/);
+  } finally { await f.dispose(); }
+}, 120_000);
+
 test("the guard also refuses to forget another workspace that holds undescribed work", async () => {
   const f = await project();
   try {

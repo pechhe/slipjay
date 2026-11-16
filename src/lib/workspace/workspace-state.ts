@@ -10,6 +10,7 @@ import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace
 import { dropForgottenWorkspaceName } from "./workspace-store-names.ts";
 import { mapBounded } from "./bounded-map.ts";
 import { partialCheckout } from "./workspace-partial-checkout.ts";
+import { setWorkspaceIssueTrailer } from "./workspace-issue-trailers.ts";
 import type { PartialCheckout } from "./workspace-partial-checkout.ts";
 
 export type LandingState = Record<string, unknown> & {
@@ -299,9 +300,10 @@ async function attachWorkspaceIssueUnlocked(cwd: string, issueNumber: number): P
   const context = await workspaceContext(cwd);
   if (!context || context.current.name === "default")
     throw new Error("Attach Issues only to isolated JJ workspaces");
+  const prior = await workspaceMetadata(context.current.name);
+  if (prior?.spare === true) throw new Error(`An unclaimed pool spare cannot take an Issue; start the Issue's own workspace with \`slipjay start --integration --issue ${issueNumber}\``);
   await assertWorkspaceMutationAllowed(context);
   await assertIssueAvailable(cwd, issueNumber, context.current.name);
-  const prior = await workspaceMetadata(context.current.name);
   if (prior?.issueNumber && prior.issueNumber !== issueNumber) throw new Error("This workspace already belongs to another Issue; preserve its identity");
   await mkdir(metadataHome(), { recursive: true, mode: 0o700 });
   const metadata = {
@@ -316,6 +318,7 @@ async function attachWorkspaceIssueUnlocked(cwd: string, issueNumber: number): P
   await writeFile(metadataPath(context.current.name), JSON.stringify(metadata, null, 2), {
     mode: 0o600,
   });
+  await setWorkspaceIssueTrailer(context, issueNumber);
   return metadata;
 }
 

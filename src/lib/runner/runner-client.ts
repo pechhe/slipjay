@@ -673,7 +673,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
   await fetchIntegration(cwd, remote, context.integrationBranch);
   const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
-  const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env)) : preview;
+  const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env), onLine) : preview;
   const buildTracked = trackerIsBuild(trackerOf(context.configuration));
   if ((options.session !== undefined || options.tickets?.length) && (options.handoff || !buildTracked))
     throw new Error(options.handoff ? "--session and --ticket shape the handoff land writes; with --handoff, put them in that file" : "--session and --ticket apply only in a Build-tracked repository");

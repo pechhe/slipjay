@@ -40,7 +40,7 @@ export type CandidateOptions = {
 /** Host operations used by the shared candidate transition. */
 export type LandingIO = {
   landingPreview(cwd: string): Promise<{ context: CandidateContext; target: LandingRevision }>;
-  ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader): Promise<LandingRevision>;
+  ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader, onProgress?: (line: string) => void): Promise<LandingRevision>;
   assertStackConflictFree(cwd: string, branch: string, changeId: string): Promise<unknown>;
   jj(cwd: string, args: string[]): Promise<string>;
   revisionFacts(cwd: string, revision: string): Promise<LandingRevision>;
@@ -96,7 +96,7 @@ export async function prepareLandingCandidate(cwd: string, options: CandidateOpt
   const { adapter } = options;
   const preview = await landingPreview(cwd);
   const { context } = preview;
-  const target = await ensureLandingDescription(cwd, context, preview.target);
+  const target = await ensureLandingDescription(cwd, context, preview.target, undefined, options.onProgress);
   const migration = await migrationCandidate(cwd, context, io, options);
   try {
     options.onStage?.("rebasing");
