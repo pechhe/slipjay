@@ -2445,6 +2445,9 @@ export function createRunnerQueue(input: {
             return result;
           } finally { controller.signal.removeEventListener("abort", onAbort); }
         };
+        /** Whether a started build is still running: one that has ended answers before the next turn of the event loop. */
+        const stillBuilding = async (building: Build | null) => building !== null
+          && await Promise.race([building.done.then(() => false, () => false), new Promise<true>((resolve) => { setImmediate(() => resolve(true)); })]);
         let open: { commit: string; gate?: GateAttempt } | undefined;
         let budgetTaken = false;
         const releaseMachine = async () => {
@@ -2545,6 +2548,15 @@ export function createRunnerQueue(input: {
           const suites: Record<string, SuiteState> = {};
           for (const event of events) if (event.type === "test_report" && ran.has(event.runId) && event.status === "recorded")
             for (const entry of event.outcomes ?? []) if (suites[entry.suite] !== "failed") suites[entry.suite] = entry.outcome;
+          // A build can run for minutes after the checks end. The check machine is freed before waiting on it, so its memory
+          // claim cannot keep out the build it waits for (peach-box, 16 Nov 2026: an idle check held 16 GiB while its build
+          // queued for memory). A build that has already ended keeps the machine, which a rerun of this commit reuses.
+          if (await stillBuilding(building)) {
+            try { await releaseMachine(); } catch (error) {
+              if (error instanceof GateDrift) throw error;
+              return { status: "infrastructure", reason: `the check machine at ${commit.slice(0, 12)} could not be released: ${message(error).slice(0, 1000)}`, ...setupMs === undefined ? {} : { setupMs } };
+            }
+          }
           const build = buildOutcome(await awaitBuild(building));
           Object.assign(suites, build.suites);
           const setup = setupMs === undefined ? {} : { setupMs };

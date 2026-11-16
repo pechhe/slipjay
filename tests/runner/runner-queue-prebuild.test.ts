@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
@@ -234,6 +234,35 @@ test("the build runs beside the release checks, not before them", async () => {
     assert.equal(f.log.operation(check.id)?.result?.type, "verified");
     const lines = readFileSync(order, "utf8").trim().split("\n");
     assert.ok(lines.indexOf("checks ran") < lines.indexOf("build finished"), `the checks ran while the build was still going: ${lines.join(", ")}`);
+  } finally { await f.dispose(); }
+}, 120_000);
+
+test("a check whose build is still running frees its machine before it waits for the build", async () => {
+  const s = stand();
+  const order: string[] = [];
+  const directory = mkdtempSync(join(tmpdir(), "prebuild-release-"));
+  const [closed, done] = [join(directory, "closed"), join(directory, "done")];
+  // The check machine holds its memory claim until it is closed, so closing it must not wait for the build.
+  const machine: RemoteVerification = { ...s.boat, async open(input) {
+    const attempt = await s.boat.open(input);
+    return { ...attempt, async close() { order.push(existsSync(done) ? "closed after the build" : "closed during the build"); writeFileSync(closed, ""); } };
+  } };
+  // The build ends once the machine is closed, however slow the host; one that is never closed first ends after 20 s,
+  // inside the build's own 30 s limit.
+  const build = `const fs = require("node:fs"); const started = Date.now(); const timer = setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(closed)}) && Date.now() - started < 20000) return;
+    clearInterval(timer); fs.writeFileSync(${JSON.stringify(done)}, ""); }, 50)`;
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images", prebuild: `${s.prebuild}; ${build}` }, false,
+    { process: "development", promotionSchedule: schedule(30), batchVerification: { machine: "release-check" }, batchRemote: machine,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } }, releaseGates: () => ['console.log("release checks pass")'] });
+  try {
+    await f.land(f.submit(await f.candidate("one.txt")));
+    await settle(f);
+    const check = f.log.verifications(REPO)[0]!;
+    await until(() => f.log.operation(check.id)?.result ?? undefined);
+    await f.queue.idle();
+    assert.equal(f.log.operation(check.id)?.result?.type, "verified");
+    assert.deepEqual(order, ["closed during the build"]);
   } finally { await f.dispose(); }
 }, 120_000);
 

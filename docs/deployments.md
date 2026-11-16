@@ -86,7 +86,9 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   pre-verified candidate, else the newest landing). A build of a commit already running is shared, not started twice,
   and a finished one is asked again, which the command answers at once when its images are still there. It keeps going
   after a check that stops early, so the deploy must tolerate it still running: the command takes its own lock, and
-  running it twice must be safe. It never runs on boat, so a check never starts a VM to build.
+  running it twice must be safe. It never runs on boat, so a check never starts a VM to build. A check whose checks end
+  while its build is still running frees its check machine before it waits for the build, so the machine's memory claim
+  never holds back the build it is waiting for.
 - **Build machine.** An environment may name a `machine` pool (`"machine": "images"`). Its
   deploy then has the repository's build machine leased to it (a production redeploy of the
   commit production serves leases none, so it runs while boat is down). A fixed machine in the

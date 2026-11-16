@@ -20,6 +20,10 @@
 - **A kind of work learns its typical size from 3 measured runs, not 10 (SJ-246).** Waiting for 10 left every kind of
   work at its hand-set size for hours on a busy host. The 90th percentile of fewer than 10 peaks is the largest of
   them, so the first runs size a kind of work by its worst one.
+- **A release check no longer holds its machine while it waits for its image build.** The check kept its check machine,
+  and so its host-budget memory claim, until the build beside it ended. On a full host that claim (16 GiB, idle) kept
+  the build it was waiting for queued for memory. The machine is now freed as soon as the checks end when the build is
+  still running; a rerun of the same commit opens it again.
 - **A queued request that stops asking no longer holds landings behind it (SJ-244).** Backfill preserved the head of
   the queue's room even when its owner had polled once and gone quiet: on 16 Nov a sentinel preview that asked once
   held a 12 GiB landing, which fit on its own, for 17 minutes. Each poll now records `polledAt`, and a queued request
