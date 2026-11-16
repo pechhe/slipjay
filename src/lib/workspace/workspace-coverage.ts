@@ -158,6 +158,23 @@ const sameEntry = (here: Entry | null | undefined, there: Entry | null | undefin
   here !== undefined && there !== undefined
   && (here === null || there === null ? here === there : here.executable === there.executable && here.content.equals(there.content));
 
+/** Published sources this process has already reported as unresolvable, so one run says so once. */
+const unresolvedSaid = new Set<string>();
+
+/**
+ * Say once per revision that a landed record names a commit this repository does not hold: a
+ * delivery recorded on a runner publishes into that machine's repository. The record is skipped
+ * rather than read as hope or as proof, and every checkout it cannot vouch for stays judged by the
+ * records this repository does hold.
+ */
+function noteUnresolvedSources(sources: string[]): void {
+  for (const source of sources) {
+    if (unresolvedSaid.has(source)) continue;
+    unresolvedSaid.add(source);
+    console.error(`skipped a landed record whose published revision ${source} is not in this repository`);
+  }
+}
+
 /**
  * Only repository-scoped published archives prove delivery; helpers in a handoff never do.
  * `covered` includes exact adoption evidence; `source-covered` alone grants no Issue exemption.
@@ -179,10 +196,17 @@ export async function workspaceCoverage(context: WorkspaceContext, workspaceName
   if (sources.size) {
     // A published source proves its complete ancestry, including review/verify
     // workspaces based on it. Helper branches still require exact adoption coverage.
+    // A landing recorded on a runner published a commit only that machine has, which this
+    // repository cannot resolve, and one such revision fails the whole query: every checkout
+    // here, including ones the other records prove, then reads as unlanded. `present()` keeps
+    // the query alive instead, and the unresolved source proves nothing, as it should.
+    const published = [...sources].map((source) => `present(${source})`).join(" | ");
     const inherited = await jj(cwd, ["--ignore-working-copy", "log", "-r",
-      `(${unintegrated}) & ::(${[...sources].join(" | ")})`,
+      `((${unintegrated}) | (${published})) & ::(${published})`,
       "--no-graph", "-T", 'commit_id ++ "\\n"']);
-    for (const commit of inherited.split("\n").filter(Boolean)) covered.add(commit);
+    const resolved = new Set(inherited.split("\n").filter(Boolean));
+    for (const commit of resolved) covered.add(commit);
+    noteUnresolvedSources([...sources].filter((source) => !resolved.has(source)));
   }
   if (revisions.every((commit) => covered.has(commit))) return revisions.some((commit) => adopted.has(commit)) ? "covered" : "source-covered";
   // A landing that ran on a runner wrote its archive there, so this machine has none; its own record is
