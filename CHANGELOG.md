@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Custody on an adopted checkout settles: its idle clock is read under the workspace's own name.** On 16 Nov
+  `slipjay remove --discard ~/.slipjay/workspaces/ys-spare-80bdc6` still refused with "no activity time is recorded",
+  though `~/.slipjay/state/workspaces/ys-7724.json` carried `lastActivityAt` from five hours earlier: metadata is keyed
+  by the workspace's name, an allocated spare adopted for an Issue keeps `…-spare-…` as its directory, and recovery
+  custody looked for the record under the directory's name, found nothing, and so could never age. Custody now reads the
+  record under the workspace name its own generation recorded, with the directory's name as the fallback for a workspace
+  renamed since the claim. The threshold, the other settlement conditions, and the rule that the custody file's own
+  timestamp is never activity are unchanged; a checkout with neither record still refuses and says its age is unrecorded.
+
 - **Custody left behind by a restarted controller settles from the checkout's own stamps.** On 16 Nov two landed,
   empty T3 Code workspaces could never be removed after the server restarted mid-run: `slipjay remove --discard` refused
   with "no activity time is recorded, so the host cannot confirm the idle that settles it", the hold kept its Forge Issue

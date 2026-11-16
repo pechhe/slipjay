@@ -42,7 +42,7 @@ type Generation = {
   retirement?: { id: string; reason: string };
 };
 type RecordState = { version: 1; path: string; current: string; generations: Generation[]; receipts: Record<string, { digest: string; result: unknown }> };
-export type ClaimStatus = { version: 1; path: string; generation: string | null; claims: ClaimView[]; retirement: Generation["retirement"] | null; reason: string | null };
+export type ClaimStatus = { version: 1; path: string; generation: string | null; workspaceName: string | null; claims: ClaimView[]; retirement: Generation["retirement"] | null; reason: string | null };
 const validId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}$/.test(value);
 function validateAcquisition(input: ClaimAcquisition) {
   if (!validId(input.requestId) || !validId(input.ownerId) || !validId(input.obligationRef)
@@ -89,7 +89,7 @@ export async function workspaceClaimStatus(path: string): Promise<ClaimStatus> {
   const root = await canonicalClaimPath(path);
   const record = await load(root);
   const current = record?.generations.find((g) => g.id === record.current);
-  return { version: 1, path: root, generation: current?.id ?? null, claims: await Promise.all((record?.generations ?? []).flatMap((g) => g.claims).map(view)),
+  return { version: 1, path: root, generation: current?.id ?? null, workspaceName: current?.workspaceName || null, claims: await Promise.all((record?.generations ?? []).flatMap((g) => g.claims).map(view)),
     retirement: current?.retirement ?? null, reason: current?.retirement ? "retirement in progress or interrupted; recovery required" : null };
 }
 export const STALE_CUSTODY_IDLE_MS: number = 24 * 60 * 60_000;
@@ -127,6 +127,22 @@ export function abandonedCustodyNote(input: { claims: ClaimView[]; controllersGo
   return "";
 }
 
+/**
+ * The metadata record of the checkout custody holds. Records are keyed by the workspace's name, which is
+ * the directory's name only for a checkout JJ never renamed: an allocated spare adopted for an Issue keeps
+ * `…-spare-…` as its directory while its record takes the Issue's name. Custody records the name of the
+ * workspace it holds, so that record is read first, with the directory's own name as the fallback for a
+ * workspace renamed since the claim. `null` means neither record exists.
+ */
+async function recordedMetadata(path: string, workspaceName: string | null): Promise<Record<string, unknown> | null> {
+  const names = [...new Set([workspaceName, basename(path)].filter((name): name is string => Boolean(name)))];
+  for (const name of names) {
+    const metadata = await readFile(join(metadataHome(), `${name}.json`), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>).catch(() => null);
+    if (metadata) return metadata;
+  }
+  return null;
+}
+
 async function staleRecovery(path: string, status: ClaimStatus, fresh = false): Promise<{ settle: boolean; note: string }> {
   if (status.retirement) return { settle: false, note: "" };
   const claims = status.claims.filter((claim) => claim.state === "active" || claim.state === "recovery-required");
@@ -136,7 +152,7 @@ async function staleRecovery(path: string, status: ClaimStatus, fresh = false): 
     catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
   });
   if (!controllersGone) return { settle: false, note: "" };
-  const metadata = await readFile(join(metadataHome(), `${basename(path)}.json`), "utf8").then((text) => JSON.parse(text) as Record<string, unknown>).catch(() => null);
+  const metadata = await recordedMetadata(path, status.workspaceName);
   // Never use the custody file's timestamp: merely inspecting it is not activity. The newest stamp
   // the workspace metadata carries stands in where no idle clock was ever recorded, so a checkout a
   // restart left behind ages from when it was last demonstrably touched instead of never settling.

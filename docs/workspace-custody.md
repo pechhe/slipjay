@@ -102,7 +102,7 @@ retains explicit recovery-required state even when the controller is alive. This
 operation cannot release custody. A credential-authenticated transfer to a new
 custodian or evidence-backed settlement is required to end that state.
 
-`claims status <path>` returns `{ok:true,version:1,path,generation,claims,
+`claims status <path>` returns `{ok:true,version:1,path,generation,workspaceName,claims,
 retirement,reason}`. Each claim shows only `claimId`, public `ownerId`, generation,
 `active|recovery-required|released|transferred`, diagnostic reason, controller
 identity, obligation and settlement references. It never exposes credential
@@ -165,8 +165,13 @@ its old checkouts. It is not a claim TTL and process death alone is insufficient
 SlipJay may treat retained claims as idle only when **all** are recovery-required,
 each has a recorded controller PID whose probe returns `ESRCH` (not permission
 denied, a live reused PID, or a missing controller identity), both cwd and open-file
-inventories are readable and show no holder beneath the workspace, and its recorded
-`lastActivityAt` is at least 24 hours old. Unknown activity keeps it. A surviving
+inventories are readable and show no holder beneath the workspace, and the checkout
+was last touched at least 24 hours ago. That age comes from the workspace's metadata
+record, read under the name its custody generation recorded: an allocated spare adopted
+for an Issue keeps `…-spare-…` as its directory and its record takes the Issue's name.
+Where the harness recorded no idle clock, the newest stamp the record carries
+(`updatedAt`, `claimedAt`, `createdAt`, `attachedAt`) stands in; with no record at all
+the age is unknown. Unknown activity keeps it. A surviving
 provider with a cwd, mapped file or descriptor under the checkout keeps it too.
 
 Read-only planning shares a process inventory for at most 30 seconds. Destruction

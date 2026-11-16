@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { rm } from "node:fs/promises";
 import { test } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { holdWorkspace } from "../support/workspace-holder.ts";
@@ -18,6 +19,16 @@ async function abandoned(root: string, path: string, name: string) {
 }
 
 const HOUR = 60 * 60_000;
+
+/**
+ * The metadata of an adopted checkout: kept under the workspace's name, which the Issue gave it, while the
+ * directory keeps the spare's own name. Adoption moves the record rather than writing a second one.
+ */
+async function adoptMetadata(from: string, to: string, stamps: Record<string, unknown>) {
+  const metadata = { ...await workspaceMetadata(from) };
+  await writeWorkspaceJson(metadataPath(to), { ...metadata, workspaceName: to, ...stamps });
+  await rm(metadataPath(from));
+}
 
 /** Metadata as a harness that never wrote an idle clock leaves it: the stamps it does carry, and nothing else. */
 async function withoutIdleClock(name: string, stamps: Record<string, string>) {
@@ -107,6 +118,37 @@ test("custody whose metadata carries an old creation time and no idle clock sett
     const status = await workspaceClaimStatus(w.workspacePath);
     assert.equal(status.claims[0]!.state, "released");
     assert.equal(status.claims[0]!.settlementRef, "slipjay:confirmed-controller-gone-idle-24h");
+  } finally { await f.dispose(); }
+});
+
+test("custody on an adopted spare reads the metadata under the workspace's own name", async () => {
+  const f = await project();
+  try {
+    // An allocated spare is adopted for an Issue: the directory keeps `…-spare-…` and the record, the
+    // workspace and the custody generation take the Issue's name, so the record is not named after the
+    // directory at all. On 16 Nov this checkout could never be removed: custody's idle clock was looked
+    // for under the directory's name, found nothing, and the hold never aged.
+    const w = await createWorkspace("recovery-adopted", f.repo);
+    const adopted = "recovery-adopted-7724";
+    await adoptMetadata(w.current.name, adopted, { lastActivityAt: new Date(Date.now() - STALE_CUSTODY_IDLE_MS - 60_000).toISOString() });
+    await abandoned(f.repo, w.workspacePath, adopted);
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).workspaceName, adopted, "custody names the workspace it holds");
+    assert.equal(await workspaceClaimRefusal(w.workspacePath), null, "the idle clock is the one its own record carries");
+    await withUnclaimedWorkspace(w.workspacePath, "test guarded destructive action", async (check) => { await check(); });
+    const status = await workspaceClaimStatus(w.workspacePath);
+    assert.equal(status.claims[0]!.state, "released");
+    assert.equal(status.claims[0]!.settlementRef, "slipjay:confirmed-controller-gone-idle-24h");
+  } finally { await f.dispose(); }
+});
+
+test("custody on a checkout with no metadata record at all refuses with the missing time", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("recovery-unrecorded", f.repo);
+    await abandoned(f.repo, w.workspacePath, w.current.name);
+    await rm(metadataPath(w.current.name));
+    assert.match((await workspaceClaimRefusal(w.workspacePath))!, /no activity time/,
+      "nothing recorded the checkout's age, so the refusal names it instead of settling on a guess");
   } finally { await f.dispose(); }
 });
 
