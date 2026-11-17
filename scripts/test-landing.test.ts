@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
-import { candidateChanges, landingCommands, planCandidate, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
+import { candidateChanges, landingCommands, launcherProcessTests, planCandidate, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const CANDIDATE = "a".repeat(40);
@@ -39,6 +39,26 @@ test("runtime fixture selection includes its reader; source includes every proce
   const source = selectLandingTests(["src/lib/runner/runner-log.ts"], []);
   assert.equal(source.kind, "related");
   if (source.kind === "related") for (const file of PROCESS_TESTS) assert.ok(source.files.includes(file));
+});
+
+test("a launcher change selects every test that runs a launcher, found through its helpers too", () => {
+  // SJ-262's candidate changed only what src/launcher/workspace.ts prints, and dispatcher.test.ts, which runs it, went unselected.
+  const launcher = selectLandingTests(["src/launcher/workspace.ts"], []);
+  assert.equal(launcher.kind, "related");
+  if (launcher.kind === "related") assert.ok(launcher.files.includes("tests/integration/dispatcher.test.ts"));
+  const library = selectLandingTests(["src/lib/runner/runner-log.ts"], []);
+  if (library.kind === "related") assert.ok(!library.files.includes("tests/integration/dispatcher.test.ts"), "a library change keeps the curated list");
+
+  const root = mkdtempSync(path.join(tmpdir(), "launcher-callers-"));
+  try {
+    const write = (file: string, text: string) => { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), text); };
+    write("tests/direct.test.ts", 'const cli = new URL("../src/launcher/workspace.ts", import.meta.url);');
+    write("tests/support/run.ts", 'export const cli = "../../src/launcher/workspace.ts";');
+    write("tests/support/case.ts", 'export { cli } from "./run.ts";');
+    write("tests/helped.test.ts", 'import { cli } from "./support/case.ts";');
+    write("tests/library.test.ts", 'import { log } from "../src/lib/runner/runner-log.ts";');
+    assert.deepEqual(launcherProcessTests(root), ["tests/direct.test.ts", "tests/helped.test.ts"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("untraceable changes fail closed; docs select no Vitest suites", () => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // Conservative selection for the exact rebased candidate. Release/nightly stays complete.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,30 @@ export const PROCESS_TESTS = [
   "workspace/workspace-retention-plan-landing", // `remove`'s exit status and stderr for a kept workspace
   "workspace/workspace-spare-dependencies-allocation", // a detached, niced refill process group
 ].map((name) => `tests/${name}.test.ts`);
+// No test imports a launcher's dispatch (src/launcher/workspace.ts) and few import the handlers, so a launcher change
+// reaches its tests only through the processes they start. Those tests are found by the launcher path they name, in
+// their own source or in a tests/ helper they import, so a new one is selected without being listed.
+const LAUNCHER_PATH = /\bsrc\/launcher\/[\w.-]+\.ts\b/;
+const IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*)["'](\.{1,2}\/[^"']+)["']/g;
+export function launcherProcessTests(root: string = ROOT): string[] {
+  const walk = (dir: string): string[] => readdirSync(path.join(root, dir), { withFileTypes: true })
+    .flatMap((entry) => entry.isDirectory() ? walk(`${dir}/${entry.name}`) : CODE.test(entry.name) ? [`${dir}/${entry.name}`] : []);
+  const sources = new Map(walk("tests").map((file) => [file, readFileSync(path.join(root, file), "utf8")]));
+  const names = new Map<string, boolean>();
+  const reaches = (file: string, seen: Set<string>): boolean => {
+    if (names.has(file)) return names.get(file)!;
+    if (seen.has(file)) return false;
+    seen.add(file);
+    const text = sources.get(file) ?? "";
+    const found = LAUNCHER_PATH.test(text) || [...text.matchAll(IMPORT)].some(([, spec]) => {
+      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), spec!));
+      return sources.has(target) && !TEST_FILE.test(target) && reaches(target, seen);
+    });
+    names.set(file, found);
+    return found;
+  };
+  return [...sources.keys()].filter((file) => TEST_FILE.test(file) && reaches(file, new Set())).sort();
+}
 // package.json is the single inventory for both complete and landing runtime runs.
 export function runtimeTestFiles(command: string): string[] {
   const [executable, subcommand, ...files] = command.trim().split(/\s+/);
@@ -66,6 +90,10 @@ export function selectLandingTests(changed: string[], deleted: string[]): Landin
   if (changed.some((file) => file.startsWith("src/"))) {
     PROCESS_TESTS.forEach((test) => files.add(test));
     reasons.push("src/** changed: source CLI/subprocess callers");
+  }
+  if (changed.some((file) => file.startsWith("src/launcher/"))) {
+    launcherProcessTests().forEach((test) => files.add(test));
+    reasons.push("src/launcher/** changed: every test that runs a launcher");
   }
   return files.size ? { kind: "related", files: [...files].sort(), reasons } : { kind: "none" };
 }
