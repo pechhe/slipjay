@@ -18,5 +18,6 @@ this repository needs.
   `src/` change, seconds for a doc change). Hand-picked files are not enough. Vitest gives
   each file a disposable `HOME`, which `bun test` does not: use `bun test` only for the
   `scripts/*.test.ts` files that `test:runtimes` lists.
-- **Changelog.** A change in behaviour adds an entry under `## Unreleased` in
-  `CHANGELOG.md`, in the style there: a bold sentence saying what now happens, then why.
+- **Commit messages.** A change's commit message is its only record: the subject says
+  what now happens, the body why. Add no `CHANGELOG.md` entry and do not bump the
+  `package.json` version; `slipjay changes` reads the history.

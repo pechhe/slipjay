@@ -42,10 +42,35 @@ export function referencesIssue(description: string | null | undefined, issueNum
   return new RegExp(`(?<![\\w&])#${issueNumber}(?!\\d)|[\\w.-]+/[\\w.-]+#${issueNumber}(?!\\d)`).test(description ?? "");
 }
 
+/** One item trailer line: `Build: #N`, `Forge: #N` or `Issue: [owner/repo]#N`. */
+const ITEM_TRAILER = /^(?:(Build|Forge): #(\d+)|Issue: ([\w.-]+\/[\w.-]+)?#(\d+))\s*$/;
+
 /** Blank text and item trailers alone do not describe the work. */
 export function isUndescribed(description: string): boolean {
-  return description.split(/\r?\n/).every((line) => !line.trim() || /^(?:(?:Build|Forge): #\d+|Issue: (?:[\w.-]+\/[\w.-]+)?#\d+)\s*$/.test(line));
+  return description.split(/\r?\n/).every((line) => !line.trim() || trailerItem(line));
 }
+
+/** The work item a commit message's trailer names. */
+export interface CommitItem { tracker: Tracker; number: number; repository: string | null }
+
+/** The item one line names when it is an item trailer, else null: the one reader of item trailers. */
+function trailerItem(line: string): CommitItem | null {
+  const match = ITEM_TRAILER.exec(line);
+  if (!match) return null;
+  return match[1] ? { tracker: match[1] === "Forge" ? "forge" : "build", number: Number(match[2]), repository: null }
+    : { tracker: "github", number: Number(match[4]), repository: match[3] ?? null };
+}
+
+/** Every item trailer in `message`, in order. */
+const itemTrailers = (message: string | null | undefined): CommitItem[] =>
+  (message ?? "").split(/\r?\n/).map(trailerItem).filter((item): item is CommitItem => item !== null);
+
+/** The item a message's first item trailer names, or null; a `#N` outside a trailer names nothing. */
+export const commitItem = (message: string | null | undefined): CommitItem | null => itemTrailers(message)[0] ?? null;
+
+/** `message` without its item trailer lines, trimmed. */
+export const withoutItemTrailers = (message: string): string =>
+  message.split(/\r?\n/).filter((line) => !trailerItem(line)).join("\n").trim();
 
 /**
  * `description` plus a git trailer naming its work item, unless it has none or already names it:
@@ -65,8 +90,7 @@ export function withIssueTrailer(description: string, issueNumber: number | null
 
 /** The Build item a description's `Build: #N` trailer names, or null. */
 export function buildTrailerItem(description: string | null | undefined): number | null {
-  const match = /^(?:Build|Forge): #(\d+)\s*$/m.exec(description ?? "");
-  return match ? Number(match[1]) : null;
+  return itemTrailers(description).find((item) => item.tracker !== "github")?.number ?? null;
 }
 
 /**
@@ -76,8 +100,7 @@ export function buildTrailerItem(description: string | null | undefined): number
  */
 export function commitIssue(description: string | null | undefined, repository: string | null, tracker: Tracker = "github"): number | null {
   if (trackerIsBuild(tracker)) return buildTrailerItem(description);
-  for (const match of (description ?? "").matchAll(/^Issue: ([\w.-]+\/[\w.-]+)?#(\d+)\s*$/gm)) {
-    if (!match[1] || match[1] === repository) return Number(match[2]);
-  }
+  const issue = itemTrailers(description).find((item) => item.tracker === "github" && (!item.repository || item.repository === repository));
+  if (issue) return issue.number;
   return originatingIssue(null, description);
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { runClaims } from "./claim-commands.ts";
 import { withManagedCleanupWorker } from "../lib/workspace/workspace-claim-activation.ts";
-import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { cutoverPending, workspaceContext } from "../lib/slipjay.ts";
 import { legacyStateHome } from "../lib/workspace/workspace-paths.ts";
 import { runStatus, runLanded, runMode, runList, runPool, runAttachIssue, runAttachProject, runAdopt } from "./workspace-commands.ts";
@@ -15,7 +15,8 @@ import { runCutover } from "./cutover-command.ts";
 import { runMetrics, runRecordPreview, runWatch, runCancel } from "./observation-commands.ts";
 import { runRunner } from "./runner-command.ts";
 import { runGuard } from "./hook-command.ts";
-import { runUpgrade } from "./upgrade-command.ts";
+import { runChanges, runUpgrade } from "./upgrade-command.ts";
+import { describeInstall } from "../lib/workspace/workspace-upgrade.ts";
 import { runHostBudget } from "./host-budget-command.ts";
 
 const handlers: Record<string, (args: string[]) => Promise<number | void>> = {
@@ -53,6 +54,7 @@ const handlers: Record<string, (args: string[]) => Promise<number | void>> = {
   "deploys": runDeploys,
   "config": runConfig,
   "upgrade": runUpgrade,
+  "changes": runChanges,
   "policy": runPolicy,
   "cutover": runCutover,
   "metrics": runMetrics,
@@ -73,7 +75,7 @@ try {
       + "Run `slipjay cutover` once while nothing is landing (`slipjay cutover --check` reports what holds it), then retry.");
     process.exitCode = 1;
   } else if (command === "--version") {
-    console.log(JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version);
+    console.log(describeInstall(fileURLToPath(new URL("../..", import.meta.url))));
   } else if (command === "status" && cutoverPending()) {
     const context = await workspaceContext();
     console.log(JSON.stringify({
@@ -85,7 +87,7 @@ try {
     const code = command === "cutover" ? await invoke() : await withManagedCleanupWorker(invoke);
     if (code !== undefined) process.exitCode = code;
   } else {
-    console.error("Usage: slipjay <--version|status|claims <capability|activate|controller|acquire|release|transfer|recover|status>|host-budget wait|config|upgrade [--runner] [--rollback] [--json]|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|attach-project|start [--claim-stdin]|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|disk [--plan] [--json]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|restore --latest --path <p>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id> | retire-result --path <path>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume|release <owner/repo>>>");
+    console.error("Usage: slipjay <--version|status|claims <capability|activate|controller|acquire|release|transfer|recover|status>|host-budget wait|config|upgrade [--runner] [--rollback] [--json]|changes [--since <revision|YYYY-MM-DD>] [--json]|policy <show|set>|mode|list|pool [refill]|prune --empty|prune [--empty] --plan [--json]|attach-issue|attach-project|start [--claim-stdin]|attempt <show|release> <id>|repair <failed-operation> [--json]|preview|land|promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]|deploy <environment>|deploys [--environment <name>] [--json]|reset|audit [status|cause <landing...|--flake|--infrastructure|--unresolved>]|metrics [--since <ISO date>] [--repo <owner/name>] [--json]|record-preview <port>|watch --json|cancel <id>|adopt <path> [--json]|cleanup [path]|evict [--plan] [--json] [--idle-hours <n>]|disk [--plan] [--json]|archive [path]|restore <archive-id> [--name <n>] [--path <p>]|restore --latest --path <p>|archives|maintain [--json]|retire <path> --operation <id>|retire-result <operation-id> | retire-result --path <path>|retirements|remove [--discard] <path>|cutover [--check]|runner <serve|log <operation>|outcome <operation>|handoff <operation>|source <operation> <bundle-file>|repair-claim <operation>|repair-release <operation>|repair-revoke <operation>|artifact <operation> <run>|kill [<operation>]|pause|resume|release <owner/repo>>>");
     process.exitCode = 2;
   }
 } catch (error) {

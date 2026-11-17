@@ -228,9 +228,9 @@ test("prune --plan --json prints the plan, and prune refuses unknown flags", asy
   }
 });
 
-test("--version prints the installed release", async () => {
-  const pkg = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
-  assert.equal((await slipjay(homedir(), ["--version"])).stdout.trim(), pkg.version);
+test("--version from a checkout says it runs a source tree", async () => {
+  const root = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
+  assert.equal((await slipjay(homedir(), ["--version"])).stdout.trim(), `source tree ${root}`);
 });
 
 test("remove deletes an untouched workspace by path and keeps one with unlanded work", async () => {

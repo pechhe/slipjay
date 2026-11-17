@@ -11,9 +11,10 @@ import { jj, project } from "../support/workspace-project.ts";
 import { withWorkspaceTransaction } from "../../src/lib/infra/workspace-transaction.ts";
 import { setConfiguredUpgradeSource } from "../../src/lib/policy/machine-config.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
-import { runUpgrade } from "../../src/launcher/upgrade-command.ts";
+import { runChanges, runUpgrade } from "../../src/launcher/upgrade-command.ts";
+import { listChanges } from "../../src/lib/workspace/workspace-changes.ts";
 import {
-  installPath, landingUpgradesThisMachine, pruneInstalls, startClientUpgradeThrottled, upgradeMachine,
+  describeInstall, installPath, landingUpgradesThisMachine, pruneInstalls, startClientUpgradeThrottled, upgradeMachine,
 } from "../../src/lib/workspace/workspace-upgrade.ts";
 import {
   commandLinkPath, currentSlotPath, currentSlotPreviousPath, installsHome, runnerSlotPath, runnerSlotPreviousPath,
@@ -98,7 +99,7 @@ async function until(condition: () => boolean, what: string, timeoutMs = 30_000)
  * that answers `--version` and, unless `broken`, `status --json`. `git archive` of it is an install a
  * fixture can build in a moment.
  */
-async function landSlipjayTree(f: Awaited<ReturnType<typeof project>>, version: string, { broken = false } = {}): Promise<string> {
+async function landSlipjayTree(f: Awaited<ReturnType<typeof project>>, version: string, { broken = false, message = `slipjay tree ${version}` } = {}): Promise<string> {
   await writeFile(join(f.repo, "package.json"), JSON.stringify({ name: "@pechhe/slipjay", version, private: true }, null, 2));
   await mkdir(join(f.repo, "src/launcher"), { recursive: true });
   await writeFile(join(f.repo, "src/launcher/workspace.ts"), `#!/usr/bin/env bun
@@ -108,7 +109,7 @@ if (command === "--version") console.log(JSON.parse(readFileSync(new URL("../../
 else if (command === "status") ${broken ? "process.exit(1);" : 'console.log("{}");'}
 else process.exit(2);
 `);
-  jj(f.repo, ["commit", "-m", `slipjay tree ${version}`]);
+  jj(f.repo, ["commit", "-m", message]);
   const commit = jj(f.repo, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);
   jj(f.repo, ["bookmark", "set", "main", "-r", commit]);
   jj(f.repo, ["git", "push", "--remote", "origin", "--bookmark", "main"]);
@@ -303,6 +304,82 @@ test("rollback refuses an install that has no launcher, leaving the working slot
     assert.match(back.reason ?? "", /has no launcher/);
     assert.equal(await readlink(currentSlotPath()), installPath(second), "a slot never moves onto a tree that cannot start");
     assert.equal(await readlink(currentSlotPreviousPath()), installPath(first));
+  } finally { await f.dispose(); }
+});
+
+test("an upgrade lists the commits it brought in, and a rollback the commits it took away", async () => {
+  const f = await project();
+  try {
+    const first = await landSlipjayTree(f, "9.9.9");
+    await setConfiguredUpgradeSource(f.repo);
+    await upgradeMachine({ install: noInstall });
+    const second = await landSlipjayTree(f, "9.9.10", { message: "Landing names both commit ids\n\nBecause a reviewer judged the first.\n\nForge: #8003" });
+    const third = await landSlipjayTree(f, "9.9.11", { message: "A spare refuses an item" });
+
+    const forward = await printed(() => runUpgrade([]));
+    assert.equal(forward.code, 0);
+    assert.deepEqual(forward.lines.slice(1, 4), [
+      "brought in 2 commits:",
+      `  ${third.slice(0, 12)} ${committedOn(f.repo, third)} A spare refuses an item`,
+      `  ${second.slice(0, 12)} ${committedOn(f.repo, second)} Landing names both commit ids (Forge #8003)`,
+    ]);
+
+    const back = JSON.parse((await printed(() => runUpgrade(["--rollback", "--json"]))).lines.join("\n"));
+    assert.equal(back.action, "rolled-back");
+    assert.deepEqual(back.changes.map((change: { commit: string }) => change.commit), [third, second], "a rollback names what it took away");
+    assert.deepEqual(back.changes[1].item, { tracker: "forge", number: 8003, repository: null });
+    assert.equal(back.changes[1].body, "Because a reviewer judged the first.", "the body loses its item trailer");
+    assert.equal(back.to, first);
+
+    // History that cannot be read never undoes an upgrade that already moved the slot.
+    await rm(join(f.repo, ".git"), { recursive: true, force: true });
+    const blind = await printed(() => runUpgrade(["--rollback"]));
+    assert.equal(blind.code, 0);
+    assert.equal(await readlink(currentSlotPath()), installPath(third));
+    assert.match(blind.lines[1] ?? "", /^what changed could not be listed: /);
+  } finally { await f.dispose(); }
+});
+
+test("changes lists the integration branch after a revision or date, marking what the client does not run yet", async () => {
+  const f = await project();
+  try {
+    await setConfiguredUpgradeSource(f.repo);
+    await assert.rejects(listChanges(), /no client install to start from/);
+    const first = await landSlipjayTree(f, "9.9.9");
+    await upgradeMachine({ install: noInstall });
+    const second = await landSlipjayTree(f, "9.9.10", { message: "Second\n\nWhy it matters.\nIssue: owner/repo#12" });
+    const third = await landSlipjayTree(f, "9.9.11", { message: "Third" });
+
+    // Not yet installed: from the client's install, both newer commits, neither run here.
+    const pending = await listChanges();
+    assert.deepEqual(pending.map(({ commit, installed }) => [commit, installed]), [[third, false], [second, false]]);
+    assert.deepEqual(pending[1]!.item, { tracker: "github", number: 12, repository: "owner/repo" });
+    assert.equal(pending[1]!.body, "Why it matters.");
+
+    // After an upgrade, the default starts from the install it replaced, and everything listed is installed.
+    await upgradeMachine({ install: noInstall });
+    assert.deepEqual((await listChanges()).map(({ commit, installed }) => [commit, installed]), [[third, true], [second, true]]);
+    assert.deepEqual((await listChanges({ since: second.slice(0, 12) })).map(({ commit }) => commit), [third]);
+    assert.ok((await listChanges({ since: committedOn(f.repo, first) })).some(({ commit }) => commit === first), "a date includes that day's commits");
+    await assert.rejects(listChanges({ since: "no-such-revision" }), /no-such-revision is not a commit/);
+
+    const text = await printed(() => runChanges(["--since", second]));
+    assert.deepEqual(text.lines, [`${third.slice(0, 12)} ${committedOn(f.repo, third)} Third`]);
+    await assert.rejects(runChanges(["--since"]), /Usage: slipjay changes/);
+  } finally { await f.dispose(); }
+});
+
+test("--version names the commit an install was built from and its date, and says what any other tree is", async () => {
+  const f = await project();
+  try {
+    const commit = await landSlipjayTree(f, "9.9.9");
+    await setConfiguredUpgradeSource(f.repo);
+    await upgradeMachine({ install: noInstall });
+    assert.match(describeInstall(installPath(commit)), new RegExp(`^${commit.slice(0, 12)} \\d{4}-\\d{2}-\\d{2}$`));
+    // An install built before the record existed is still named by its directory.
+    await rm(join(installPath(commit), ".slipjay-install.json"));
+    assert.equal(describeInstall(`${installPath(commit)}/`), commit.slice(0, 12));
+    assert.equal(describeInstall(f.repo), `source tree ${f.repo}`);
   } finally { await f.dispose(); }
 });
 
@@ -606,6 +683,10 @@ async function printed(work: () => Promise<number>): Promise<{ code: number; lin
   const capture = vi.spyOn(console, "log").mockImplementation((line?: unknown) => { lines.push(String(line)); });
   try { return { code: await work(), lines }; } finally { capture.mockRestore(); }
 }
+
+/** The date part of a commit's own committer date, which is what `changes` prints, whatever the local timezone. */
+const committedOn = (repo: string, commit: string): string =>
+  execFileSync("git", ["log", "-1", "--format=%cI", commit], { cwd: repo, encoding: "utf8" }).trim().slice(0, 10);
 
 /** Wait until `key`'s lock is held, by failing to take it without waiting. */
 async function untilHeld(key: string): Promise<void> {

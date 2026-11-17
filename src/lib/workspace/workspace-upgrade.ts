@@ -9,7 +9,7 @@
  * Install.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readlink, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
@@ -49,6 +49,9 @@ export const NO_UPGRADE_SOURCE = "No upgrade source on this machine: name the in
 
 /** The launcher inside an install: the CLI entry, and what the slots and the `slipjay` command run. */
 const LAUNCHER = "src/launcher/workspace.ts";
+/** What an install was built from, written into its root when it is built (see `describeInstall`). */
+const INSTALL_RECORD = ".slipjay-install.json";
+interface InstallRecord { commit: string; committedAt: string | null }
 /** Installs no slot refers to are kept this long, so a rollback or a hand-made install survives a while. */
 const INSTALL_RETENTION_MS = 7 * 24 * 60 * 60_000;
 /** Reading the source, archiving it and unpacking it: an unreachable remote or a stuck git fails the attempt. */
@@ -94,13 +97,30 @@ const slotPaths = (slot: UpgradeSlot) => slot === "runner"
 /** Where a commit's install lives. */
 export const installPath = (commit: string): string => join(installsHome(), commit);
 
+/**
+ * One line naming the code a tree runs, for `--version`: the commit its install was built from and
+ * that commit's date. An install built before the record existed is named by its directory; any other
+ * tree (a checkout, a packed package) says it is a source tree. Never empty: the upgrade's verification needs a line.
+ */
+export function describeInstall(tree: string): string {
+  const root = tree.replace(/(.)\/+$/, "$1");
+  try {
+    const record = JSON.parse(readFileSync(join(root, INSTALL_RECORD), "utf8")) as Partial<InstallRecord>;
+    if (typeof record.commit === "string" && record.commit) {
+      return typeof record.committedAt === "string" && record.committedAt ? `${short(record.commit)} ${record.committedAt.slice(0, 10)}` : short(record.commit);
+    }
+  } catch { /* no record: an older install or a checkout */ }
+  const name = basename(root);
+  return INSTALL_NAME.test(name) ? short(name) : `source tree ${root}`;
+}
+
 /** A symlink's target, or null when nothing is linked there. */
 async function linkTarget(path: string): Promise<string | null> {
   try { return await readlink(path); } catch { return null; }
 }
 
 /** The commit a slot points at, or null when the slot is unset. */
-async function linkedCommit(path: string): Promise<string | null> {
+export async function linkedCommit(path: string): Promise<string | null> {
   const target = await linkTarget(path);
   return target ? basename(target) : null;
 }
@@ -167,21 +187,21 @@ export function upgradeSource(): string {
 }
 
 /**
- * The commit an upgrade installs: the source's integration branch as its remote publishes it, so a
- * machine installs what landed rather than what its checkout happens to have. The fetch is what makes
- * the remote-tracking revision current; without a declared remote the local branch is the head.
+ * The source's integration branch as its remote publishes it, so a machine installs what landed rather
+ * than what its checkout happens to have. With `fetch` the remote-tracking revision is made current
+ * first (an upgrade); without, it is read as last fetched (`changes`). With no declared remote the
+ * local branch is the head.
  */
-async function integrationHead(source: string): Promise<string> {
+export async function integrationBranchHead(source: string, { fetch }: { fetch: boolean }): Promise<string> {
   const context = await workspaceContext(source);
   if (!context) throw new Error(`upgradeSource ${source} is not a JJ checkout: set it to this machine's integration checkout`);
   const remote = publicationRemote(context);
-  if (remote) {
+  if (remote && fetch) {
     const fetched = await fetchIntegration(source, remote, context.integrationBranch, { timeoutMs: SOURCE_TIMEOUT_MS });
     if (fetched.code !== 0) throw new Error(`could not fetch ${context.integrationBranch} from ${remote} in ${source}: ${lastLine(fetched)}`);
-    const tracked = await revisionFacts(source, `${context.integrationBranch}@${remote}`).catch(() => null);
-    if (tracked) return tracked.commitId;
   }
-  return (await revisionFacts(source, context.integrationBranch)).commitId;
+  const tracked = remote ? await revisionFacts(source, `${context.integrationBranch}@${remote}`).catch(() => null) : null;
+  return tracked?.commitId ?? (await revisionFacts(source, context.integrationBranch)).commitId;
 }
 
 /**
@@ -208,6 +228,9 @@ async function buildInstall(source: string, commit: string, install: DependencyI
         const extracted = await runWorkspaceCommand("tar", ["--extract", "--file", archive, "--directory", building], { timeoutMs: SOURCE_TIMEOUT_MS });
         if (extracted.code !== 0) throw new Error(`unpacking ${short(commit)} failed: ${lastLine(extracted)}`);
         await chmod(join(building, LAUNCHER), 0o755);
+        const dated = await runWorkspaceCommand("git", ["log", "-1", "--format=%cI", commit], { cwd: source, timeoutMs: SOURCE_TIMEOUT_MS });
+        const record: InstallRecord = { commit, committedAt: dated.code === 0 && dated.stdout.trim() ? dated.stdout.trim() : null };
+        await writeFile(join(building, INSTALL_RECORD), `${JSON.stringify(record)}\n`);
         await install(building);
         try { await rename(building, target); built = true; }
         catch (error) {
@@ -322,7 +345,7 @@ async function upgradeSlot(slot: UpgradeSlot, options: UpgradeOptions): Promise<
   const source = upgradeSource();
   const from = await linkedCommit(slotPaths(slot).slot);
   let commit: string;
-  try { commit = await integrationHead(source); }
+  try { commit = await integrationBranchHead(source, { fetch: true }); }
   catch (error) { return { action: "failed", from, to: null, reason: message(error) }; }
   if (from === commit && existsSync(join(installPath(commit), LAUNCHER))) return { action: "current", from, to: commit, reason: null };
   let built = false;

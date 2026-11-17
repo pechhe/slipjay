@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+From 17 Nov 2026 a change's commit message is its record: run `slipjay changes`
+(see [What changed](README.md#what-changed)). The entries below were written by hand
+before then.
+
+## Unreleased at 17 Nov 2026
 
 - **A Forge item's trailer is already on the commit a reviewer judges.** In Forge-tracked repositories (`forge`
   or the older `build`), starting or attaching an item configures jj's commit trailers for that workspace only,

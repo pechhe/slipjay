@@ -7,7 +7,7 @@ its only runtime.
 SlipJay was extracted from `pechhe/peach-pi` at `37a32367` as `peach-workspace`,
 became Slipway in v1.0.0, and is renamed to SlipJay in v2.0.0. It uses the
 `slipjay` CLI, `slipjay.json` config, `SLIPJAY_*` environment names, and state
-under `~/.slipjay`. See [CHANGELOG.md](CHANGELOG.md) and [State and cutover](#state-and-cutover).
+under `~/.slipjay`. See [What changed](#what-changed) and [State and cutover](#state-and-cutover).
 
 ## Read by task
 
@@ -471,7 +471,10 @@ Only then does anything point at the new code: a build or verification that fail
 leaves the slot, and the `slipjay` command, where they were, and says why. An
 `upgrade --json` reports `slot`, `from`, `to`, `action` (`upgraded`, `current`,
 `rolled-back`, `busy` or `failed`), `reason` and the `command` the `slipjay` command
-now runs. `busy` is the hourly pass finding another upgrade already building that
+now runs. An upgrade or rollback that moved the slot also lists the commits between the
+two installs (see [What changed](#what-changed)): in text under its outcome line, and in
+`--json` as `changes`, or `changesUnavailable` with the reason when the history could not
+be read, which never fails the upgrade. `busy` is the hourly pass finding another upgrade already building that
 commit: it does not wait for it, and the rest of the pass runs.
 
 The first upgrade also adopts the machine: `~/.bun/bin/slipjay` becomes a link to
@@ -498,6 +501,26 @@ Each runs detached, so none delays the command that started it, and each logs to
 (`current.previous`), and leaves the one it left as the previous in its turn, so the
 same command again undoes itself. Two installs are kept for the slots; older ones are
 removed after 7 days.
+
+### What changed
+
+A change's commit message is its record: its subject says what now happens, its body
+why, and an item trailer (`Forge: #N`, `Build: #N` or `Issue: owner/repo#N`) names the
+work it served. SlipJay keeps no changelog besides; [CHANGELOG.md](CHANGELOG.md) holds the
+entries written by hand until 17 Nov 2026.
+
+`slipjay changes [--since <revision|YYYY-MM-DD>] [--json]` reads them from the
+`upgradeSource` checkout's integration branch as last fetched (it fetches nothing),
+newest first: short commit id, date, subject and item, marked `[not installed]` where
+this machine's client does not run the commit yet. Without `--since` it starts from the
+install the client's last upgrade replaced. `--json` gives each as `commit`, `date`,
+`subject`, `body` (without its item trailers), `item` (`tracker`, `number`,
+`repository`) and `installed` (null when the checkout does not hold the client's
+install).
+
+`slipjay --version` prints the commit the running install was built from and its date,
+which each install records when it is built; an older install prints its commit, and a
+checkout or packed package prints `source tree <path>`.
 
 ### The runner host
 
@@ -549,6 +572,7 @@ imports (`start --integration --issue <n> --json`, `remove <path>`):
 | `status` | Mode, current workspace and its Issue, integration checkout, landing state and this machine's spare count (JSON). |
 | `config [--json]`, `config set\|unset <runner\|upgradeSource\|spares> …` | This machine's runner location, upgrade source and spare limits, each with its source (see [Settings](#settings)). |
 | `upgrade [--runner] [--rollback] [--json]` | Install this machine's integration head into the client slot (`~/.slipjay/current`), or with `--runner` the runner slot, and point the `slipjay` command at it (see [Install](#install)). It fetches `upgradeSource`, builds and verifies the install, and only then swaps the slot, keeping what it replaced as `previous`; `--rollback` swaps back. A machine with no `upgradeSource` is refused, naming how to set it; `--runner` is refused without a `slipjay-runner` unit, and otherwise restarts it. `--json` prints one object (`slot`, `from`, `to`, `action`: `upgraded`, `current`, `rolled-back`, `busy` or `failed`, `reason`, `command`, and `runner`: `{ name, revision }` for a runner a client upgrade found on another build), exiting 1 on `failed`. Two upgrades racing for one commit leave the install the slot ran as the rollback; the other reports `current`. |
+| `changes [--since <revision\|YYYY-MM-DD>] [--json]` | The integration branch's commits after a revision or date, from their messages, marking those this machine's client does not run yet (see [What changed](#what-changed)). |
 | `policy show [--json]`, `policy set --base <revision> …` | Read the integration branch's policy, or land a change to its settings fields without running the landing checks (see [Settings](#settings)). |
 | `landed <path>` | The landing recorded for the workspace at exactly that path, even after it was removed, as one JSON line (`workspaceName`, `workspacePath`, `artifactCommitId`, and `operationId`, `issueNumber`, `landedAt` when recorded), or `null`. Read-only. |
 | `mode [isolated\|direct]` | Read or write the checkout mode. |

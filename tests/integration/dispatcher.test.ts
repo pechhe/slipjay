@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 import { installPackage } from "../support/installed-package.ts";
 
 const cli = fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url));
-const version = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")).version;
+const checkoutRoot = fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, "");
 
 function run(binary: string, args: string[], cwd = homedir()) {
   return spawnSync("bun", [binary, ...args], { cwd, env: process.env, encoding: "utf8", timeout: 30_000 });
@@ -17,10 +16,10 @@ test("checkout and installed dispatch preserve version, usage, invalid commands 
   assert.notEqual(homedir(), userInfo().homedir, "CLI checks require a disposable HOME");
   const installed = await installPackage();
   try {
-    for (const binary of [cli, installed.bin]) {
+    for (const [binary, root] of [[cli, checkoutRoot], [installed.bin, installed.packageRoot]] as const) {
       const reported = run(binary, ["--version"]);
       assert.equal(reported.status, 0, reported.stderr);
-      assert.equal(reported.stdout, `${version}\n`);
+      assert.equal(reported.stdout, `source tree ${root}\n`, "neither tree is an install");
       assert.equal(reported.stderr, "");
       for (const args of [[], ["unknown-command"], ["constructor"], ["toString"], ["--help"]]) {
         const invalid = run(binary, args);
@@ -35,7 +34,7 @@ test("checkout and installed dispatch preserve version, usage, invalid commands 
         ["retirements", ["extra"]], ["cleanup", ["--unknown"]], ["remove", []],
         ["repair", []], ["land", ["--unknown"]], ["promote", ["--unknown"]],
         ["deploy", []], ["reset", ["extra"]], ["deploys", ["--unknown"]],
-        ["config", ["--unknown"]], ["upgrade", ["--unknown"]], ["policy", []], ["cutover", ["--unknown"]],
+        ["config", ["--unknown"]], ["upgrade", ["--unknown"]], ["changes", ["--since"]], ["policy", []], ["cutover", ["--unknown"]],
         ["metrics", ["--unknown"]], ["record-preview", []], ["watch", []], ["cancel", []], ["runner", []],
       ] as const) {
         const invalid = run(binary, [command, ...args]);
