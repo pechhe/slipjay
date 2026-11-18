@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { TEST_SLICE } from "../support/executor.ts";
+import { TEST_SLICE, TEST_SCOPE_MAX_SECONDS } from "../support/executor.ts";
 import { alive, fixture, hanging, test, until } from "./fixtures/runner-queue-fixture.ts";
 import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
 import { holdGate, queueFixture, verified } from "./fixtures/short-landings.ts";
@@ -161,7 +161,7 @@ test("a runner killed while a short landing runs beside two long ones ends each 
       import { runBoundedProcess } from ${JSON.stringify(new URL("../../src/lib/infra/bounded-process.ts", import.meta.url).href)};
       import { openOperationLog } from ${JSON.stringify(new URL("../../src/lib/runner/runner-log.ts", import.meta.url).href)};
       import { shortRepositories } from ${JSON.stringify(new URL("../../src/lib/runner/pipeline-metrics.ts", import.meta.url).href)};
-      const local = localExecutor({ home: ${JSON.stringify(f.home)}, slice: ${JSON.stringify(TEST_SLICE)} });
+      const local = localExecutor({ home: ${JSON.stringify(f.home)}, slice: ${JSON.stringify(TEST_SLICE)}, maxRuntimeSeconds: ${TEST_SCOPE_MAX_SECONDS} });
       const executor = { ...local, combinedLimits: true, run: local.combinedLimits ? local.run : runBoundedProcess };
       const config = ${JSON.stringify(config)};
       const log = openOperationLog(${JSON.stringify(f.logPath)}, runnerLogOptions(config, executor), { shortRepositories });

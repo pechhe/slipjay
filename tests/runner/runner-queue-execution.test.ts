@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { COMMAND_ARTIFACT_PAGE_BYTES, OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import { openOperationLog, newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
-import { runContainment } from "../../src/lib/runner/local-executor.ts";
+import { localExecutor, runContainment } from "../../src/lib/runner/local-executor.ts";
 import { runnerWorkers } from "../../src/lib/runner/runner-queue.ts";
 import { TEST_SLICE, testExecutor } from "../support/executor.ts";
 import { gateFailureOutput, gate, command, test, fixture, until, alive, cgroupOf, hanging, started, systemdTest } from "./fixtures/runner-queue-fixture.ts";
@@ -352,6 +352,18 @@ systemdTest("each run's processes, nested scopes included, stay within the runne
     await until(() => recorded.some(alive) ? undefined : true, 10_000);
   } finally { controller.abort(); await rm(home, { recursive: true, force: true }); }
 }, 120_000);
+
+systemdTest("a test command left running by a killed test run is stopped by systemd at its scope's runtime limit", async () => {
+  const home = await mkdtemp(join(tmpdir(), "runner-runtime-"));
+  try {
+    // No abort and a long timeout: nothing in this process stops the command, as after a test run is killed.
+    const executor = localExecutor({ home, slice: TEST_SLICE, maxRuntimeSeconds: 2 });
+    const started = Date.now();
+    const result = await executor.run({ executable: "node", args: ["-e", "setInterval(()=>{},1000)"], cwd: home, timeoutMs: 60_000, maxOutputBytes: 65_536 });
+    assert.notEqual(result.exitCode, 0);
+    assert.ok(Date.now() - started < 20_000, `systemd stopped the command at its limit, after ${Date.now() - started} ms`);
+  } finally { await rm(home, { recursive: true, force: true }); }
+}, 60_000);
 
 systemdTest("the owner's slice is stopped once its last run ends, and a run starting during that stop is unaffected", async () => {
   const home = await mkdtemp(join(tmpdir(), "runner-owner-"));

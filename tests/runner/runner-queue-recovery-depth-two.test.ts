@@ -4,7 +4,7 @@ import { rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import { importSubmissionSource, retainSubmissionSource } from "../../src/lib/landing/submission-source.ts";
-import { TEST_SLICE } from "../support/executor.ts";
+import { TEST_SLICE, TEST_SCOPE_MAX_SECONDS } from "../support/executor.ts";
 import { test, jj, fixture, until, exactPrefixGate } from "./fixtures/runner-queue-fixture.ts";
 
 test("depth-two restart uses exact publication intent when integration was not yet recorded", async () => {
@@ -118,7 +118,7 @@ test("depth-two actual runner process loss retains durable attempts and recovers
       import { localExecutor } from ${JSON.stringify(new URL("../../src/lib/runner/local-executor.ts", import.meta.url).href)};
       import { openOperationLog } from ${JSON.stringify(new URL("../../src/lib/runner/runner-log.ts", import.meta.url).href)};
       import { existsSync } from 'node:fs'; import { join } from 'node:path';
-      const local = localExecutor({ slice: ${JSON.stringify(TEST_SLICE)} });
+      const local = localExecutor({ slice: ${JSON.stringify(TEST_SLICE)}, maxRuntimeSeconds: ${TEST_SCOPE_MAX_SECONDS} });
       const executor = { host: local.host, combinedLimits: true, run: (request) => {
         // The worker loses its process while awaiting its external executor: no child gate is orphaned by this fixture.
         if (existsSync(join(request.cwd, 'a.txt')) && !existsSync(join(request.cwd, 'b.txt')))

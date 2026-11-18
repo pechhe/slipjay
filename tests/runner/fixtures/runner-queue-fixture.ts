@@ -10,6 +10,7 @@ import { newOperationId, openOperationLog } from "../../../src/lib/runner/runner
 import { createRunnerQueue, runnerLogOptions } from "../../../src/lib/runner/runner-queue.ts";
 import { classifyEvent } from "../../../src/lib/runner/failure-classification.ts";
 import { landingOutcome } from "../../../src/lib/landing/landing-outcome.ts";
+import { TEST_SCOPE_MAX_SECONDS } from "../../support/executor.ts";
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
 import { directExecutor, testExecutor } from "../../support/executor.ts";
 import { systemdTest as gateSystemdTest } from "./systemd-gate.ts";
@@ -24,7 +25,7 @@ export const gateFailureOutput = "boom\nFAIL tests/fixture.test.ts > fixture > r
 export const gate = `const fs=require("node:fs");if (fs.existsSync("fail")) { process.stderr.write(${JSON.stringify(gateFailureOutput)}); process.exit(3); }`
   + 'if (fs.existsSync("hang")) { const spawn=(detached)=>require("node:child_process").spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{detached,stdio:"ignore"});'
   + 'const child=spawn(false), tool=spawn(true), slice=process.env.SLIPJAY_SYSTEMD_SLICE;'
-  + 'const scoped=slice?require("node:child_process").spawn("systemd-run",["--user","--scope","--quiet","--collect","--slice="+slice,"--",process.execPath,"-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}):null;'
+  + `const scoped=slice?require("node:child_process").spawn("systemd-run",["--user","--scope","--quiet","--collect","--slice="+slice,"--property=RuntimeMaxSec=${TEST_SCOPE_MAX_SECONDS}","--",process.execPath,"-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}):null;`
   + 'const record=()=>fs.writeFileSync(fs.readFileSync("hang","utf8").trim(),JSON.stringify([process.pid,child.pid,tool.pid,...scoped?[scoped.pid]:[]]));'
   + 'setTimeout(record,scoped?500:0); setInterval(()=>{},1000); }';
 export const command = `node -e ${gate}`;

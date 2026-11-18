@@ -9,8 +9,15 @@ import type { Executor } from "../../src/lib/runner/runner-types.ts";
  */
 export const TEST_SLICE = "slipjaytest.slice";
 
-/** The runner's local executor, under TEST_SLICE. */
-export const testExecutor = (options: Omit<LocalExecutorOptions, "slice"> = {}) => localExecutor({ ...options, slice: TEST_SLICE });
+/**
+ * The longest a test's command scope lives: five times the test timeout, so a test run killed mid-test (which never
+ * reaches its own cleanup) leaves no command running for more than ten minutes.
+ */
+export const TEST_SCOPE_MAX_SECONDS = 600;
+
+/** The runner's local executor, under TEST_SLICE, its scopes stopped by systemd after TEST_SCOPE_MAX_SECONDS. */
+export const testExecutor = (options: Omit<LocalExecutorOptions, "slice" | "maxRuntimeSeconds"> = {}) =>
+  localExecutor({ ...options, slice: TEST_SLICE, maxRuntimeSeconds: TEST_SCOPE_MAX_SECONDS });
 
 /**
  * An executor that runs each command directly in its own process group, standing in for an

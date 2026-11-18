@@ -18,6 +18,11 @@ export type LocalExecutorOptions = {
   home?: string;
   /** The systemd slice whose `limits` bound every run (RUNNER_SLICE); tests use a disposable one. */
   slice?: string;
+  /**
+   * The longest a run's scope may live before systemd stops it, whoever started it. Unset for the runner, whose
+   * `recover` stops what an earlier process left; tests set it, because a test run killed mid-test never cleans up.
+   */
+  maxRuntimeSeconds?: number;
 };
 
 /**
@@ -45,7 +50,7 @@ export type LocalExecutorOptions = {
  * Either way, a run whose processes cannot be shown stopped makes every later run
  * fail until they are, so nothing reuses a checkout they may still hold.
  */
-export function localExecutor({ host = hostname(), env = process.env, limits = {}, home, slice: budget = RUNNER_SLICE }: LocalExecutorOptions = {}): Executor {
+export function localExecutor({ host = hostname(), env = process.env, limits = {}, home, slice: budget = RUNNER_SLICE, maxRuntimeSeconds }: LocalExecutorOptions = {}): Executor {
   const runtimeDir = process.platform === "linux" ? env.XDG_RUNTIME_DIR : undefined;
   const { settled, contained } = runContainment();
   if (!runtimeDir) return groupExecutor(host, home, { settled, contained });
@@ -107,7 +112,8 @@ export function localExecutor({ host = hostname(), env = process.env, limits = {
         request.abortSignal?.addEventListener("abort", stop, { once: true });
         return await contained(runSlice, () => runBoundedProcess({
           ...request, executable: "systemd-run",
-          args: ["--user", "--scope", "--quiet", "--collect", `--slice=${runSlice}`, `--unit=slipjay-run-${id}.scope`, "--", request.executable, ...request.args],
+          args: ["--user", "--scope", "--quiet", "--collect", `--slice=${runSlice}`, `--unit=slipjay-run-${id}.scope`,
+            ...maxRuntimeSeconds === undefined ? [] : [`--property=RuntimeMaxSec=${maxRuntimeSeconds}`], "--", request.executable, ...request.args],
           env: { ...request.env ?? sanitizedProcessEnv(), XDG_RUNTIME_DIR: runtimeDir, [SYSTEMD_SLICE_ENV]: runSlice },
         }).finally(() => request.abortSignal?.removeEventListener("abort", stop)), () => quiesce(runSlice));
       } finally {
