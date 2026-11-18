@@ -124,3 +124,40 @@ test("an unverifiable cap refuses to start the command and cleans up its unadmit
     assert.deepEqual(JSON.parse(run(home, ["status"]).stdout).requests, []);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
+
+test.skipIf(!systemdUsable)("a holder's admission starts a sampler that records its unreclaimable memory and ends with it", async () => {
+  const home = fixture();
+  const slice = `slipjaytest-sampler${randomUUID().replaceAll("-", "").slice(0, 12)}.slice`;
+  const systemctl = (...args: string[]) => spawnSync("systemctl", ["--user", ...args], { encoding: "utf8", timeout: 15_000 });
+  try {
+    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "shadow" } }));
+    assert.equal(systemctl("start", slice).status, 0);
+    const cgroup = systemctl("show", slice, "--property=ControlGroup", "--value").stdout.trim();
+    const holder = join(home, "holder");
+    writeFileSync(holder, "fixture");
+    const id = randomUUID().replaceAll("-", "");
+    const request = { id, job: "fixture gate", lane: "landing", cgroup, owner: { kind: "holder", path: holder, identity: "fixture" } };
+    const admitted = run(home, ["poll", JSON.stringify(request)]);
+    assert.equal(JSON.parse(admitted.stdout).outcome, "admitted", admitted.stderr);
+    const sampler = `slipjay-capacity-sample-${id}.service`;
+    assert.equal(systemctl("is-active", sampler).stdout.trim(), "active");
+    // The slice holds nothing yet: its first sample is a measured zero, not an unknown.
+    const sampled = async () => {
+      for (const started = Date.now(); Date.now() - started < 10_000; await new Promise((resolve) => setTimeout(resolve, 200))) {
+        const [noted] = JSON.parse(run(home, ["status"]).stdout).requests;
+        if (typeof noted?.residentPeakBytes === "number") return noted.residentPeakBytes;
+      }
+      return undefined;
+    };
+    assert.equal(await sampled(), 0);
+    rmSync(holder);
+    systemctl("stop", slice);
+    for (const started = Date.now(); Date.now() - started < 15_000 && systemctl("is-active", sampler).stdout.trim() === "active";) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.notEqual(systemctl("is-active", sampler).stdout.trim(), "active", "the sampler ends once the job's owner has");
+  } finally {
+    systemctl("stop", slice);
+    rmSync(home, { recursive: true, force: true });
+  }
+}, 40_000);

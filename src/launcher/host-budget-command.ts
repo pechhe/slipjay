@@ -1,6 +1,6 @@
 import { awaitHostBudget, hostShell, type HostBudgetClass } from "../lib/runner/host-budget.ts";
 import { CAPACITY_CLASSES, parseCapacityMemoryMax, type CapacityClass, type CapacityRequest } from "../lib/runner/host-capacity.ts";
-import { hostCapacityStatus, pollHostCapacity, recoverHostCapacity, runWithHostCapacity } from "../lib/runner/host-capacity-command.ts";
+import { hostCapacityStatus, pollHostCapacity, recoverHostCapacity, runWithHostCapacity, sampleHostCapacity } from "../lib/runner/host-capacity-command.ts";
 import { readCapacityPolicy } from "../lib/runner/host-capacity-local.ts";
 
 export async function runHostBudget(args: string[]): Promise<number> {
@@ -12,6 +12,16 @@ export async function runHostBudget(args: string[]): Promise<number> {
   if (args[0] === "status" || args[0] === "recover") {
     if (args.length !== 1) throw new Error("usage: slipjay host-budget status|recover");
     console.log(JSON.stringify(args[0] === "status" ? hostCapacityStatus() : recoverHostCapacity()));
+    return 0;
+  }
+  if (args[0] === "sample") {
+    if (args.length !== 2 || !/^[a-f0-9]{32}$/.test(args[1]!)) throw new Error("usage: slipjay host-budget sample <request id>");
+    const stopping = new AbortController();
+    const stop = () => stopping.abort();
+    for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.once(signal, stop);
+    try { await sampleHostCapacity(args[1]!, undefined, stopping.signal); }
+    catch (error) { if (!stopping.signal.aborted) throw error; }
+    finally { for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.removeListener(signal, stop); }
     return 0;
   }
   if (args[0] === "poll") {

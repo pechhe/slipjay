@@ -129,7 +129,7 @@ test("finished jobs leave their peak in a history that outlives the per-poll dec
     for (let index = 0; index < 10; index += 1) {
       const job = { ...request(`command-${index}`), lane: "agent" as const, bytes: 1024 ** 3 };
       store.poll(job, sized, roomy(), index);
-      assert.equal(store.finish(job.id, job.owner, () => true, { memoryPeakBytes: (100 + index) * 1024 ** 2 }), true);
+      assert.equal(store.finish(job.id, job.owner, () => true, { memoryPeakBytes: 20 * 1024 ** 3, memoryResidentBytes: (100 + index) * 1024 ** 2 }), true);
     }
     const holder = request("holder");
     store.poll(holder, sized, roomy(), 20);
@@ -137,13 +137,13 @@ test("finished jobs leave their peak in a history that outlives the per-poll dec
     store.recover((requests) => ({ ...roomy()(requests), owners: { holder: "gone", watcher: "alive" } }));
     for (let index = 0; index < 1100; index += 1) store.poll(request("watcher"), sized, roomy(), 30 + index);
     const learned = store.typical(sized);
-    assert.deepEqual(learned.agent, { bytes: 108 * 1024 ** 2, source: "learned", samples: 10 });
+    assert.deepEqual(learned.agent, { bytes: 108 * 1024 ** 2, source: "learned", samples: 10 }, "memory.peak, file cache included, sizes nothing");
     assert.deepEqual(learned.landing, { bytes: sized.typical.landing, source: "configured", samples: 1 }, "the holder's 300 MiB is one sample");
     // Jobs that measured nothing, such as Docker builds, never displace the measured peaks.
     for (let index = 0; index < 60; index += 1) {
       const job = { ...request(`empty-${index}`), lane: "agent" as const, bytes: 1024 ** 3 };
       store.poll(job, sized, roomy(), 1200 + index);
-      store.finish(job.id, job.owner, () => true, { memoryPeakBytes: 1024 ** 2 });
+      store.finish(job.id, job.owner, () => true, { memoryResidentBytes: 1024 ** 2 });
     }
     assert.deepEqual(store.typical(sized).agent, learned.agent);
     const next = { ...request("next"), lane: "agent" as const, bytes: 1024 ** 3, queuedAt: 2000 };
@@ -171,15 +171,15 @@ test("a finished job's peak keeps when it grew, one note per step, and an older 
     store.poll(gate, sized, seen(GiB), 3000);
     store.poll(gate, sized, seen(GiB + 1024 ** 2), 4000);
     store.poll(gate, sized, seen(5 * GiB), 61_000);
-    store.finish(gate.id, gate.owner, () => true, { memoryPeakBytes: 5 * GiB });
+    store.finish(gate.id, gate.owner, () => true, { memoryPeakBytes: 30 * GiB });
     const rows = new DatabaseSync(path, { readOnly: true });
     try {
-      assert.deepEqual(rows.prepare("SELECT job, growth FROM peaks ORDER BY seq").all().map((row) => ({ ...row })), [
-        { job: "before", growth: null },
-        { job: "gate", growth: JSON.stringify([[2000, GiB], [60_000, 5 * GiB]]) },
+      assert.deepEqual(rows.prepare("SELECT job, peak_bytes AS peak, growth, measure FROM peaks ORDER BY seq").all().map((row) => ({ ...row })), [
+        { job: "before", peak: GiB, growth: null, measure: null },
+        { job: "gate", peak: 5 * GiB, growth: JSON.stringify([[2000, GiB], [60_000, 5 * GiB]]), measure: "resident" },
       ], "a rise smaller than a step adds no note");
     } finally { rows.close(); }
-    assert.equal(store.typical(sized).landing.samples, 2, "the earlier peak still counts");
+    assert.equal(store.typical(sized).landing.samples, 1, "a memory.peak from before SJ-267 stays as history but sizes nothing");
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -194,7 +194,7 @@ test("an image job's runner adds its BuildKit container's memory to its own, and
     store.noteUsage(job.id, job.owner, 3 * 1024 ** 3, 5 * 1024 ** 3);
     store.noteUsage(job.id, job.owner, 1024 ** 3, 2 * 1024 ** 3);
     const [noted] = store.requests();
-    assert.deepEqual([noted!.externalBytes, noted!.peakBytes], [1024 ** 3, 5 * 1024 ** 3], "the latest outside use, the highest peak");
+    assert.deepEqual([noted!.externalBytes, noted!.residentPeakBytes], [1024 ** 3, 5 * 1024 ** 3], "the latest outside use, the highest peak");
     assert.throws(() => store.noteUsage(job.id, { kind: "holder", path: "/other", identity: "other" }, 0, 0), /another owner/);
     const reading = readCapacityObservation(store.requests()).reading;
     assert.ok(reading!.currentBytes[job.id]! > 1024 ** 3, "the container's memory counts as the job's");
@@ -281,4 +281,41 @@ test("an unavailable initialization lock fails within its bound and leaves the l
     assert.deepEqual(recovered.requests(), []);
     recovered.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a job admitted before SJ-267 drops its memory.peak and starts its peak again from unreclaimable memory", () => {
+  const root = fixture();
+  const path = join(root, "ledger.sqlite");
+  const store = openCapacityStore(path);
+  try {
+    const GiB = 1024 ** 3;
+    const preview = { ...request("preview"), lane: "preview" as const, admittedAt: 0 };
+    const raw = new DatabaseSync(path);
+    raw.prepare("INSERT INTO requests(id,body) VALUES (?,?)").run(preview.id, JSON.stringify({ ...preview, peakBytes: 9 * GiB, growth: [[1000, 9 * GiB]] }));
+    raw.close();
+    const [legacy] = store.requests();
+    assert.equal("peakBytes" in legacy!, false);
+    assert.equal(legacy!.growth, undefined);
+    const seen = (current: number) => (requests: readonly CapacityRequest[]) => ({
+      owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
+      reading: { totalBytes: 64 * GiB, availableBytes: 64 * GiB, memoryFullAvg10: 0, currentBytes: { preview: current }, peakBytes: { preview: current } } });
+    assert.equal(store.sample(preview.id, seen(3 * GiB), 2000), true);
+    assert.equal(store.sample(preview.id, seen(2 * GiB), 7000), true);
+    assert.equal(store.requests()[0]!.residentPeakBytes, 3 * GiB, "a sample keeps only a new peak");
+    assert.equal(store.finish(preview.id, preview.owner, () => true, { memoryPeakBytes: 9 * GiB, memoryResidentBytes: GiB }), true);
+    assert.equal(store.sample(preview.id, seen(GiB)), false, "a sampler stops once its job has left the ledger");
+    const rows = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.deepEqual(rows.prepare("SELECT peak_bytes AS peak, measure FROM peaks").all().map((row) => ({ ...row })), [{ peak: 3 * GiB, measure: "resident" }]);
+    } finally { rows.close(); }
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a sampler stops when its job's owner has ended", () => {
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  try {
+    store.poll(request("gate"), policy, observe, 1);
+    assert.equal(store.sample("gate", (requests) => ({ ...observe(requests), owners: { gate: "gone" } })), false);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

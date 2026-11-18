@@ -29,7 +29,10 @@ export type CapacityPolicy = {
   agingMs: number;
   maxWaitMs: number;
   maxMemoryFullAvg10: number;
-  /** Each kind of work's hard ceiling: its kernel memory limit and the most it can ever count for (SJ-241). */
+  /**
+   * Each kind of work's ceiling: the most one job can ever count for, and a command job's kernel memory limit (SJ-241).
+   * A machine attempt keeps its machine's own limit, shared by its gate places, so it can use more than it counts for.
+   */
   profiles: Record<CapacityClass, number>;
   /**
    * What each kind of work typically needs (SJ-244). Admission counts running work by the larger of this and its own
@@ -60,16 +63,20 @@ export type CapacityRequest = {
   owner: CapacityOwner;
   /** Exact cgroup path on this host; absent until a command starts or for an external daemon. */
   cgroup: string | null;
-  /** The most its cgroup was observed to have used while it ran (SJ-246); its retained peak once it finishes. */
-  peakBytes?: number;
   /**
-   * How it grew: `[ms since admission, peak bytes]` each time its peak was seen a step higher. Kept with its finished
-   * peak, so the ledger shows how early large work declares itself; admission does not read it.
+   * The most unreclaimable memory it was seen to hold while it ran (SJ-246, SJ-267): anonymous and kernel memory, never
+   * file cache, read from its cgroup's `memory.stat` while it runs. Its retained peak once it finishes. A ledger request
+   * from before SJ-267 carried a `peakBytes` from `memory.peak` instead, which the store drops.
+   */
+  residentPeakBytes?: number;
+  /**
+   * How it grew: `[ms since admission, resident peak bytes]` each time its peak was seen a step higher. Kept with its
+   * finished peak, so the ledger shows how early large work declares itself; admission does not read it.
    */
   growth?: ReadonlyArray<readonly [number, number]>;
   /**
    * Memory the job uses outside its own cgroup, as its runner last measured it: an image build's BuildKit container,
-   * whose memory is Docker's. Readings add it to the job's own, and its runner's samples raise `peakBytes`.
+   * whose memory is Docker's. Readings add it to the job's own, and its runner's samples raise `residentPeakBytes`.
    */
   externalBytes?: number;
 };
@@ -78,11 +85,15 @@ export type CapacityReading = {
   totalBytes: number;
   availableBytes: number;
   memoryFullAvg10: number | null;
-  /** Unknown usage reserves the whole commitment; it is never silently read as a measured zero. */
+  /**
+   * The unreclaimable memory each job holds now (SJ-267): its cgroup's anonymous and kernel memory, not the file cache
+   * the kernel gives back under pressure, plus what its runner measured outside its cgroup. Unknown usage reserves the
+   * whole commitment; it is never silently read as a measured zero.
+   */
   currentBytes: Readonly<Record<string, number | null>>;
   /**
-   * The most the job has used so far: its cgroup's `memory.peak`, or more if its runner saw it hold more together with
-   * the containers it measures. Unknown counts the job at its whole ceiling.
+   * The most unreclaimable memory the job has been seen to hold: the larger of its current reading and its recorded
+   * `residentPeakBytes`. Unknown counts the job at its whole ceiling.
    */
   peakBytes: Readonly<Record<string, number | null>>;
 };
@@ -99,11 +110,25 @@ export type CapacityDecision = {
 
 const priority: Record<CapacityClass, number> = { landing: 0, release: 1, image: 1, agent: 1, audit: 2, preview: 2 };
 
-/** Arrival plus a bounded initial preference: old background work eventually precedes every newer landing. */
+/**
+ * Arrival plus a bounded initial preference: old background work eventually precedes newer landings. A preview is
+ * the exception (SJ-267): it is a server that never finishes, so one admitted ahead of a landing holds its memory for
+ * hours. A queued landing therefore goes ahead of every queued preview, whatever either's age: it moves to just before
+ * the first preview in the aged order, which also takes it ahead of any other work aged in between, for as long as that
+ * preview is queued, even one that has stopped asking. Everything else keeps its aged order, previews still ahead of
+ * newer background work.
+ */
 export function capacityOrder(requests: readonly CapacityRequest[], agingMs: number): CapacityRequest[] {
-  return requests.filter((request) => request.admittedAt === null).toSorted((a, b) =>
+  const aged = requests.filter((request) => request.admittedAt === null).toSorted((a, b) =>
     (a.queuedAt + priority[a.lane] * agingMs) - (b.queuedAt + priority[b.lane] * agingMs)
     || a.queuedAt - b.queuedAt || a.id.localeCompare(b.id));
+  const order: CapacityRequest[] = [];
+  for (const request of aged) {
+    const preview = request.lane === "landing" ? order.findIndex((item) => item.lane === "preview") : -1;
+    if (preview < 0) order.push(request);
+    else order.splice(preview, 0, request);
+  }
+  return order;
 }
 
 const measured = (value: number | null | undefined): value is number => value !== undefined && value !== null && Number.isFinite(value) && value >= 0;
@@ -114,8 +139,8 @@ export function admissionBytes(policy: CapacityPolicy, request: CapacityRequest)
 }
 
 /**
- * What a running job counts for (SJ-244): the larger of its kind's typical need and the most it has actually used,
- * never more than its ceiling. Ceilings overlap, so a burst past what was counted is met by the host's runtime order
+ * What a running job counts for (SJ-244): the larger of its kind's typical need and the most unreclaimable memory it has
+ * held (SJ-267), never more than its ceiling. Ceilings overlap, so a burst past what was counted is met by the host's runtime order
  * of who gives way first, not by holding every ceiling free. Without both measurements it counts at its ceiling.
  */
 export function countedBytes(policy: CapacityPolicy, request: CapacityRequest, reading: CapacityReading | null): number {
@@ -171,7 +196,7 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
   return result(true, ahead ? "admitted with head-of-queue capacity preserved" : "memory capacity available");
 }
 
-/** A finished job's measured peak, kept in the ledger's own history (SJ-246). */
+/** A finished job's measured peak of unreclaimable memory, kept in the ledger's own history (SJ-246, SJ-267). */
 export type CapacitySample = { lane: CapacityClass; peakBytes: number };
 
 /** How many of a kind of work's latest peaks are learned from, and how many it needs before they replace its configured size. */

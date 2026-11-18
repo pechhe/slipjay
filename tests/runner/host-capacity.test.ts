@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
+import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
   mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5,
@@ -140,8 +140,9 @@ test("restartable work is first to give way when overlapping ceilings meet", () 
 
 test("a queued request that has stopped asking does not hold the head of the queue", () => {
   // peach-box, 16 Nov 10:40 GMT: a sentinel preview polled once and went quiet for 17 minutes while a 12 GiB landing,
-  // which fit on its own, preserved the preview's 6 GiB behind it.
-  const quiet = { ...request("sentinel", "preview", 0, 12 * GiB), polledAt: 0 };
+  // which fit on its own, preserved the preview's 6 GiB behind it. A landing now goes ahead of any preview (SJ-267), so
+  // an image build that went quiet stands in for it.
+  const quiet = { ...request("sentinel", "image", 0, 12 * GiB), polledAt: 0 };
   const landing = request("landing", "landing", 5 * 60_000, 24 * GiB);
   const typed = { ...host, typical: { ...host.typical, landing: 12 * GiB } };
   const running = [preview("yardsmith"), preview("weave"), preview("isolated"), { ...request("release", "release", 0, 16 * GiB), admittedAt: 0 }];
@@ -180,4 +181,71 @@ test("with no fixed budget, a check starts beside previews and a release check w
   const learnedAgent = { ...host, typical: { ...host.typical, agent: 6 * GiB } };
   assert.equal(decideCapacity(learnedAgent, [...running, check], check.id, observed, 2).admitted, true);
   assert.match(decideCapacity(host, [...running, check], check.id, observed, 2).reason, /waiting for available memory/, "at its 16 GiB ceiling it still needs real room");
+});
+
+// SJ-267: peach-box, 18 Nov 2026. Three previews admitted (each using about 4.5 GiB with a 5.6 GiB peak) and 41.7 GiB
+// available; a landing queued at 04:30:41 waited its whole 30 minutes and failed.
+const incident: CapacityPolicy = {
+  ...policy, reserveBytes: 8 * GiB, agingMs: 60_000, maxWaitMs: 30 * 60_000,
+  profiles: { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 12 * GiB },
+  typical: { landing: 12 * GiB, release: 16 * GiB, image: 8 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 6 * GiB },
+};
+const minute = 60_000;
+const previews = ["c57368b0", "3b4115f1", "80deb156"].map((id) => ({ ...request(id, "preview", 0, 12 * GiB), admittedAt: 0 }));
+const incidentReading = (usedGiB: number, peakGiB: number): CapacityReading => ({
+  totalBytes: 62.4 * GiB, availableBytes: 41.7 * GiB, memoryFullAvg10: 0,
+  currentBytes: Object.fromEntries(previews.map(({ id }) => [id, usedGiB * GiB])), peakBytes: Object.fromEntries(previews.map(({ id }) => [id, peakGiB * GiB])),
+});
+
+test("a landing queued beside three running previews is admitted within its wait limit", () => {
+  const landing = { ...request("landing", "landing", 30 * minute, 24 * GiB), polledAt: 31 * minute };
+  // Before: typical sizes learned from memory.peak (landing at its 24 GiB ceiling, previews 7.75 GiB) left 24 GiB free.
+  const inflated = { ...incident, typical: { ...incident.typical, landing: 24 * GiB, preview: 7.75 * GiB } };
+  const before = decideCapacity(inflated, [...previews, landing], landing.id, incidentReading(4.5, 5.6), 52 * minute);
+  assert.equal(before.admitted, false);
+  // After: legacy peaks size nothing, so the configured typical sizes apply, and the previews count by the memory they
+  // cannot give back. The landing is admitted at its first poll.
+  const after = decideCapacity(withLearnedTypical(incident, []), [...previews, landing], landing.id, incidentReading(4.5, 5.6), 31 * minute);
+  assert.equal(after.admitted, true, after.reason);
+  // Even sized at its whole ceiling, as a landing with learned 24 GiB peaks would be, it fits.
+  const ceiling = decideCapacity({ ...incident, typical: { ...incident.typical, landing: 24 * GiB } }, [...previews, landing], landing.id, incidentReading(4.5, 5.6), 31 * minute);
+  assert.equal(ceiling.admitted, true, ceiling.reason);
+});
+
+test("a preview queued before a landing is not admitted ahead of it while the landing waits", () => {
+  // The two combined previews queued 18 minutes before the landing; by age alone they were ahead of it.
+  const yardsmith = { ...request("3b4115f1", "preview", 12 * minute, 12 * GiB), polledAt: 36 * minute };
+  const weave = { ...request("80deb156", "preview", 13 * minute, 12 * GiB), polledAt: 36 * minute };
+  const landing = { ...request("landing", "landing", 30 * minute, 24 * GiB), polledAt: 36 * minute };
+  assert.deepEqual(capacityOrder([yardsmith, weave, landing], incident.agingMs).map(({ id }) => id), ["landing", "3b4115f1", "80deb156"]);
+  // Past the reserve and the running preview's 1.5 GiB of room to grow, 12.5 GiB is free: room for the 12 GiB landing
+  // or a 6 GiB preview, not both.
+  const tight: CapacityReading = { totalBytes: 62.4 * GiB, availableBytes: 22 * GiB, memoryFullAvg10: 0, currentBytes: {}, peakBytes: {} };
+  const queued = [previews[0]!, yardsmith, weave, landing];
+  const observed = { ...tight, currentBytes: { c57368b0: 4.5 * GiB }, peakBytes: { c57368b0: 5.6 * GiB } };
+  const held = decideCapacity(incident, queued, yardsmith.id, observed, 36 * minute);
+  assert.equal(held.admitted, false);
+  assert.match(held.reason, /preserving memory headroom for landing/);
+  assert.equal(decideCapacity(incident, queued, landing.id, observed, 36 * minute).admitted, true);
+});
+
+test("landings go ahead of previews only: previews still age ahead of other background work", () => {
+  const preview = request("preview", "preview", 0);
+  const image = request("image", "image", 5 * minute);
+  const landing = request("landing", "landing", 10 * minute);
+  const release = request("release", "release", 0);
+  assert.deepEqual(capacityOrder([image, preview], incident.agingMs).map(({ id }) => id), ["preview", "image"], "an older preview still precedes newer work");
+  assert.deepEqual(capacityOrder([landing, image, preview, release], incident.agingMs).map(({ id }) => id), ["release", "landing", "preview", "image"],
+    "the landing moves to just before the first preview, ahead of work aged in between; older non-preview work keeps its place");
+  const later = request("later", "landing", 20 * minute);
+  assert.deepEqual(capacityOrder([later, preview, landing], incident.agingMs).map(({ id }) => id), ["landing", "later", "preview"], "landings keep their own order");
+});
+
+test("a job holding large file cache but little anonymous memory counts by what it cannot give back", () => {
+  // A landing gate whose memory.peak reached 31.8 GB, nearly all of it checkout and install cache.
+  const gate = { ...request("gate", "landing", 0, 24 * GiB), admittedAt: 0 };
+  const decision = decideCapacity(incident, [gate], gate.id, { ...incidentReading(0, 0), currentBytes: { gate: 2 * GiB }, peakBytes: { gate: 5 * GiB } }, 1);
+  assert.equal(decision.activeBytes, 12 * GiB, "its typical size, not its ceiling");
+  assert.deepEqual(learnTypical(incident, [{ lane: "landing", peakBytes: 5 * GiB }, { lane: "landing", peakBytes: 7 * GiB }, { lane: "landing", peakBytes: 6 * GiB }]).landing,
+    { bytes: 7 * GiB, source: "learned", samples: 3 });
 });

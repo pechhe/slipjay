@@ -733,24 +733,42 @@ and record its duration separately from a later authoritative `verifying` stage.
 ## Completion-aware host capacity (SJ-241)
 
 A host opts in with `hostBudget` in its own `~/.slipjay/config.json`. All participants
-must use a SlipJay version supporting `host-budget policy|poll|status|recover|run`.
+must use a SlipJay version supporting `host-budget policy|poll|status|recover|run|sample`.
 Start with `mode: "shadow"`; the default service reserve is 8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
 limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
-16 GiB; preview 4 GiB. A profile is a kind of work's ceiling: its hard memory limit in
-enforce mode and the most one job can count for. An ordinary one-compiler agent check
+16 GiB; preview 4 GiB. A profile is a kind of work's ceiling: the most one job can count
+for, and a command job's hard memory limit in enforce mode. A machine attempt (a landing
+gate, batch check or audit) keeps its machine's own limit instead (see below), so its
+`memory.peak` can pass its profile. An ordinary one-compiler agent check
 may fit a smaller profile; multi-compiler audit commands need their full working set.
 
 A job is admitted at its kind of work's typical size (SJ-244), and while it runs it
-counts as the larger of that and its cgroup's `memory.peak`, never more than its
-profile. Admission needs that size, and the queue head's, within available memory less
+counts as the larger of that and the most unreclaimable memory it has held, never more
+than its profile. Admission needs that size, and the queue head's, within available memory less
 the reserve and the room running jobs may still grow back into; there is no separate
-fixed budget (SJ-246). A job missing its `memory.current` or `memory.peak` counts at its
-whole profile.
+fixed budget (SJ-246).
 
-The ledger learns typical sizes (SJ-246). It keeps each finished job's peak in its own
-history, apart from the per-poll decisions: a command job's from its cgroup before
-cleanup, holder-owned work's as the most its cgroup was seen at while it ran, and a
-machine attempt has the ledger read its slice just before cleanup. Once a kind of work
+Unreclaimable memory (SJ-267) is the job's cgroup's anonymous and kernel memory less
+reclaimable slab, from `memory.stat`: not `memory.current` or `memory.peak`, which count
+the file cache a checkout, install or build leaves, which the kernel gives back and
+`MemAvailable` already counts as available. On 18 Nov 2026 YardSmith landing gates'
+`memory.peak` reached 26–32 GB, so the ledger learned landings at their whole 24 GiB
+profile and kept them out beside three previews. The kernel keeps no peak of this
+reading, so each running job is sampled every 5 seconds: a command job by its own
+runner, and holder-owned work (a machine attempt, or a YardSmith preview, which polls as a
+holder) by a `host-budget sample` user unit (`slipjay-capacity-sample-<id>`, about 35 MiB)
+its admission starts, outside its slice, which lives as long as the job and ends once it
+leaves the ledger or its owner ends. Every
+poll also samples every running job. A burst shorter than the interval can be missed.
+A job whose `memory.stat` cannot be read counts at its whole profile.
+
+The ledger learns typical sizes (SJ-246). It keeps each finished job's peak of
+unreclaimable memory in its own history, apart from the per-poll decisions: the most its
+samples saw, and a command job's reading of its cgroup before cleanup; a machine attempt
+has the ledger read its slice just before cleanup. Peaks from before SJ-267 were
+`memory.peak` readings: they stay in the history (`peaks.measure` empty) but size nothing,
+and new ones are marked `resident`, so a kind of work uses its configured `typical` until
+it has new peaks enough. A job admitted before the upgrade starts its peak again. Once a kind of work
 has 3 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
 50, never above its profile; with fewer than 10 peaks that is the largest of them. Until then `typical` applies: a per-class starting size no
 larger than the profile, equal to it unless set. A smaller peak measured nothing.
@@ -763,6 +781,15 @@ A machine attempt asks as the kind of work it is: a gate as `landing`, a batch c
 `release`, and the nightly audit, which runs on the release-check place, as `audit`
 (named `Audit <commit>` in the ledger). So an audit is sized from audits, and queues
 behind landings and release checks.
+
+A queued landing goes ahead of every queued preview, whatever either's age (SJ-267). A
+preview is a server that never finishes, so one admitted ahead of a landing holds its
+memory for hours: on 18 Nov 2026 two previews queued 18 minutes before a landing aged
+ahead of it, were admitted, and the landing waited its full 30 minutes. The landing moves
+to just before the first preview in the aged order, which can take it ahead of other work
+aged in between; everything else keeps its aged order, previews still ahead of newer
+background work. Admission never stops a preview already admitted: the runtime order
+below is what makes a preview give way under real pressure.
 
 A Docker build's memory is the daemon's, not the job's. A command job names the
 containers whose memory is its own with `--measure-container <name>` (repeatable), such
@@ -802,14 +829,18 @@ slipjay host-budget recover
 Command jobs run in an exact per-job slice under `app.slice`. Enforce mode sets its
 MemoryMax to the selected profile and disables swap; shadow adds no new memory cap.
 Nested cooperative commands inherit `SLIPJAY_SYSTEMD_SLICE` and the claim id. Machine
-attempts retain their existing lane bounds; their configured commitment is separately
+attempts retain their existing lane bounds: each attempt's slice has no limit of its own,
+and the machine's `slipjay-attempt.slice` bounds every gate place together (on peach-box,
+MemoryHigh 36 GiB and MemoryMax 40 GiB). Their configured commitment is separately
 reported. Docker/BuildKit memory is external host usage unless actually contained in
 the recorded group or in a container the job names with `--measure-container`; it must
 never be subtracted as if the wrapper measured it.
 
 One private SQLite ledger uses atomic transactions for observed available memory,
 the room running jobs may grow back into, and aged queue decisions. New landings receive a bounded
-initial preference; an old background or large request eventually precedes new work.
+initial preference; an old background or large request eventually precedes newer work, except
+that every queued landing goes ahead of every queued preview and so of whatever is aged behind
+that preview (SJ-267, above).
 Backfill leaves the head request's admission size available. Only a request still asking holds the head: one whose owner has not polled for two minutes keeps its age and its place, but later work may start until it asks again (SJ-244). Finite waiting requires
 finite jobs and admissible demand. Timeouts, unreadable ownership/memory/PSI or overload
 never authorize an unconditional start in enforce mode. Capacity denial is distinct

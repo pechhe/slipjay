@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources, readContainerResidentBytes } from "./host-capacity-local.ts";
 import { openCapacityStore } from "./host-capacity-store.ts";
 import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, type CapacityClass, type CapacityRequest } from "./host-capacity.ts";
@@ -18,8 +20,34 @@ export function pollHostCapacity(request: Omit<CapacityRequest, "bytes" | "queue
   if (expectedBytes !== undefined && bytes !== expectedBytes) throw new Error("host capacity commitment changed while waiting; retry the command");
   recoverHostCapacity();
   const store = openCapacityStore(capacityStorePath());
+  let receipt: ReturnType<typeof store.poll>;
   try {
-    return { configured: true as const, policy, ...store.poll({ ...request, bytes, queuedAt: now, admittedAt: null }, policy, readCapacityObservation, now) };
+    receipt = store.poll({ ...request, bytes, queuedAt: now, admittedAt: null }, policy, readCapacityObservation, now);
+  } finally { store.close(); }
+  if (receipt.request.admittedAt === now && receipt.request.owner.kind === "holder") startCapacitySampler(receipt.request);
+  return { configured: true as const, policy, ...receipt };
+}
+
+/** How often a running job's unreclaimable memory is read for its peak (SJ-267). */
+export const CAPACITY_SAMPLE_EVERY_MS = 5000;
+
+/**
+ * Holder-owned work, a machine attempt, has no SlipJay process on this host while it runs, so its admission starts one
+ * to sample it (SJ-267): a user unit outside the job's slice, so it never counts itself, that ends when the job leaves
+ * the ledger. A command job samples itself from its own runner. A sampler that cannot start loses only measurements.
+ */
+function startCapacitySampler(request: CapacityRequest) {
+  if (capacityGroupEmpty(request.cgroup) === null) return;
+  spawnSync("systemd-run", ["--user", "--quiet", "--collect", `--unit=slipjay-capacity-sample-${request.id}`, "--nice=10",
+    `--setenv=HOME=${homedir()}`, "--", process.execPath, fileURLToPath(new URL("../../launcher/workspace.ts", import.meta.url)),
+    "host-budget", "sample", request.id], { stdio: "ignore", timeout: 15_000 });
+}
+
+/** The sampler's loop: one sample every few seconds until the job has left the ledger or its owner ended. */
+export async function sampleHostCapacity(id: string, everyMs = CAPACITY_SAMPLE_EVERY_MS, signal?: AbortSignal) {
+  const store = openCapacityStore(capacityStorePath());
+  try {
+    while (store.sample(id, readCapacityObservation)) await pause(everyMs, undefined, { signal });
   } finally { store.close(); }
 }
 
@@ -63,7 +91,7 @@ export async function runWithHostCapacity(input: {
   memoryMaxBytes?: number;
   /** Docker containers whose resident memory is the job's own, such as the BuildKit container an image build runs in. */
   measureContainers?: readonly string[];
-  /** How often those containers are measured while the job runs. */
+  /** How often the job, and those containers, are measured while it runs. */
   measureEveryMs?: number;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
@@ -95,10 +123,10 @@ export async function runWithHostCapacity(input: {
   // The most the job and the containers it measures were seen to hold together, while it ran.
   let measuredPeak = 0;
   const measure = async () => {
-    const external = await Promise.all(input.measureContainers!.map(readContainerResidentBytes));
+    const external = await Promise.all((input.measureContainers ?? []).map(readContainerResidentBytes));
     const own = readCapacityObservation([{ ...request, bytes: 0, queuedAt: 0, admittedAt: 0 }]).reading?.currentBytes[id];
     if (external.some((bytes) => bytes === null) || typeof own !== "number") return;
-    const externalBytes = external.reduce((sum, bytes) => sum! + bytes!, 0)!;
+    const externalBytes = external.reduce<number>((sum, bytes) => sum + bytes!, 0);
     measuredPeak = Math.max(measuredPeak, own + externalBytes);
     const store = openCapacityStore(capacityStorePath());
     try { store.noteUsage(id, request.owner, externalBytes, measuredPeak); } finally { store.close(); }
@@ -132,10 +160,11 @@ export async function runWithHostCapacity(input: {
     // Ceilings overlap (SJ-244), so restartable work is first in the kernel's out-of-memory order. A scope cannot carry
     // OOMScoreAdjust; choom raises it for the command and everything it starts, which needs no privilege.
     const adjust = enforced ? CAPACITY_OOM_SCORE_ADJUST[input.lane] : 0;
-    // A measurement is evidence, never a reason to stop the job.
-    if (input.measureContainers?.length) measuring = setInterval(() => {
+    // Unreclaimable memory has no kernel peak, so the job's own is sampled with any containers it names (SJ-267). A
+    // measurement is evidence, never a reason to stop the job.
+    measuring = setInterval(() => {
       if (!sample) sample = measure().catch(() => undefined).finally(() => { sample = undefined; });
-    }, input.measureEveryMs ?? 5000);
+    }, input.measureEveryMs ?? CAPACITY_SAMPLE_EVERY_MS);
     return await execute(["systemd-run", "--user", "--scope", "--quiet", "--collect", `--slice=${slice}`, `--unit=slipjay-capacity-${id}.scope`,
       "--property=TimeoutStopSec=5s", "--", ...adjust ? ["choom", "-n", String(adjust), "--"] : [], ...input.command], { ...(input.env ?? process.env), SLIPJAY_HOST_CAPACITY_ID: id,
         SLIPJAY_HOST_CAPACITY_BYTES: input.memoryMaxBytes === undefined ? "" : String(bytes), [SYSTEMD_SLICE_ENV]: slice });

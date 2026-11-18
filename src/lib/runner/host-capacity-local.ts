@@ -110,18 +110,16 @@ export function readCapacityObservation(requests: readonly CapacityRequest[]): C
   const owners: Record<string, "alive" | "gone" | "unknown"> = {};
   const currentBytes: Record<string, number | null> = {};
   const peakBytes: Record<string, number | null> = {};
-  const counter = (request: CapacityRequest, name: string) => {
-    const value = request.cgroup ? cgroupFile(request.cgroup, name) : null;
-    const text = value?.state === "read" ? value.text.trim() : null;
-    return text && /^\d+$/.test(text) ? Number(text) : null;
-  };
   for (const request of requests) {
     owners[request.id] = capacityOwnerState(request);
-    const current = counter(request, "memory.current");
-    const peak = counter(request, "memory.peak");
+    // What the job cannot give back (SJ-267), not `memory.current` or `memory.peak`: both count the file cache a
+    // checkout or install leaves, which the kernel reclaims and MemAvailable already counts as available.
+    const stat = request.cgroup ? cgroupFile(request.cgroup, "memory.stat") : null;
+    const resident = stat?.state === "read" ? residentBytes(stat.text) : null;
     // Memory outside the job's cgroup that its runner measured counts as the job's own.
-    currentBytes[request.id] = current === null ? null : current + (request.externalBytes ?? 0);
-    peakBytes[request.id] = peak === null ? null : Math.max(peak, request.peakBytes ?? 0);
+    const current = resident === null ? null : resident + (request.externalBytes ?? 0);
+    currentBytes[request.id] = current;
+    peakBytes[request.id] = current === null ? null : Math.max(current, request.residentPeakBytes ?? 0);
   }
   const memory = file("/proc/meminfo");
   const pressure = file("/proc/pressure/memory");
@@ -177,7 +175,10 @@ export function readCapacityResources(cgroup: string | null) {
     })) : null;
   };
   const pressure = read("memory.pressure");
+  const stat = read("memory.stat");
+  // `memoryPeakBytes` stays as the kernel's evidence; only `memoryResidentBytes` (SJ-267) sizes later work.
   return { memoryCurrentBytes: numeric("memory.current"), memoryPeakBytes: numeric("memory.peak"),
+    memoryResidentBytes: stat?.state === "read" ? residentBytes(stat.text) : null,
     memoryEvents: counters("memory.events"), cpu: counters("cpu.stat"),
     memoryPressure: pressure?.state === "read" ? pressure.text.trim() : null };
 }
