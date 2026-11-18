@@ -769,8 +769,8 @@ has the ledger read its slice just before cleanup. Peaks from before SJ-267 were
 `memory.peak` readings: they stay in the history (`peaks.measure` empty) but size nothing,
 and new ones are marked `resident`, so a kind of work uses its configured `typical` until
 it has new peaks enough. A job admitted before the upgrade starts its peak again. Once a kind of work
-has 3 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
-50, never above its profile; with fewer than 10 peaks that is the largest of them. Until then `typical` applies: a per-class starting size no
+has 10 peaks of at least 64 MiB, its typical size is the 90th percentile of its latest
+50, never above its profile, so one unusual run never sizes it alone. Until then `typical` applies: a per-class starting size no
 larger than the profile, equal to it unless set. A smaller peak measured nothing.
 
 Each kept peak also records how the job grew (`peaks.growth`): `[ms since admission,

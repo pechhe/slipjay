@@ -248,9 +248,13 @@ export function formatCapacityWaits(waits: CapacityWaits, hours: number): string
   return lines.join("\n");
 }
 
-/** How many of a kind of work's latest peaks are learned from, and how many it needs before they replace its configured size. */
+/**
+ * How many of a kind of work's latest peaks are learned from, and how many it needs before they replace its configured
+ * size. Ten, so their 90th percentile is never the single largest: on 18 Nov one 26.7 GiB landing among five sized every
+ * landing at the 24 GiB ceiling and kept the next one waiting its full 30 minutes beside three previews.
+ */
 export const CAPACITY_SAMPLE_WINDOW = 50;
-export const CAPACITY_SAMPLE_MINIMUM = 3;
+export const CAPACITY_SAMPLE_MINIMUM = 10;
 /** A smaller peak measured nothing: work such as a Docker build runs outside the cgroup the ledger reads. */
 export const CAPACITY_SAMPLE_FLOOR_BYTES = 64 * 1024 ** 2;
 /** A running job's growth is noted each time its peak is this much higher than the last note: at most ~100 per job. */
@@ -260,8 +264,8 @@ export type LearnedTypical = Record<CapacityClass, { bytes: number; source: "lea
 
 /**
  * Each kind of work's typical size (SJ-246): the 90th percentile of its latest measured peaks once it has enough of
- * them, never above its ceiling; until then, the host's configured size. Under ten peaks that percentile is the largest
- * of them, so a few runs size a kind of work by its worst one. `samples` are oldest first.
+ * them (CAPACITY_SAMPLE_MINIMUM), never above its ceiling; until then, the host's configured size, so one unusual run
+ * never sizes a kind of work by itself. `samples` are oldest first.
  */
 export function learnTypical(policy: CapacityPolicy, samples: readonly CapacitySample[]): LearnedTypical {
   return Object.fromEntries(CAPACITY_CLASSES.map((lane) => {

@@ -162,10 +162,12 @@ test("a kind of work learns its typical size from the 90th percentile of its lat
   const peaks = (lane: CapacityRequest["lane"], ...gib: number[]): CapacitySample[] => gib.map((value) => ({ lane, peakBytes: value * GiB }));
   // 27 YardSmith landing peaks from peach-box's runner logs, 16 Nov.
   const landings = peaks("landing", 2.8, 3.9, 4.3, 4.8, 5.0, 5.1, 5.4, 5.5, 6.0, 6.1, 6.6, 6.7, 6.7, 7.0, 7.4, 7.5, 8.6, 8.7, 8.7, 9.1, 9.2, 9.4, 10.4, 10.5, 12.4, 16.3, 22.4);
-  const learned = learnTypical(host, [...landings, ...peaks("agent", 3, 4), ...peaks("audit", 3, 5, 4), ...peaks("image", ...Array(20).fill(0))]);
+  const learned = learnTypical(host, [...landings, ...peaks("agent", 3, 4), ...peaks("audit", 3, 5, 4, 3, 3, 3, 3, 3, 3, 30), ...peaks("image", ...Array(20).fill(0))]);
   assert.deepEqual(learned.landing, { bytes: 12.4 * GiB, source: "learned", samples: 27 });
   assert.deepEqual(learned.agent, { bytes: host.typical.agent, source: "configured", samples: 2 }, "too few peaks keep the configured size");
-  assert.deepEqual(learned.audit, { bytes: 5 * GiB, source: "learned", samples: 3 }, "a few peaks size the work by the largest of them");
+  assert.deepEqual(learned.audit, { bytes: 5 * GiB, source: "learned", samples: 10 }, "ten peaks size the work, and the single largest of them does not");
+  assert.deepEqual(learnTypical(host, peaks("landing", 10, 12, 12, 1, 26.7)).landing, { bytes: host.typical.landing, source: "configured", samples: 5 },
+    "a few peaks, one of them unusual (18 Nov), keep the configured size");
   assert.deepEqual(learned.image, { bytes: host.typical.image, source: "configured", samples: 0 }, "work outside its cgroup measured nothing");
   assert.equal(learnTypical(host, peaks("preview", ...Array(12).fill(30))).preview.bytes, host.profiles.preview);
   const shifted = learnTypical(host, [...peaks("release", ...Array(50).fill(14)), ...peaks("release", ...Array(50).fill(2))]);
@@ -246,6 +248,6 @@ test("a job holding large file cache but little anonymous memory counts by what 
   const gate = { ...request("gate", "landing", 0, 24 * GiB), admittedAt: 0 };
   const decision = decideCapacity(incident, [gate], gate.id, { ...incidentReading(0, 0), currentBytes: { gate: 2 * GiB }, peakBytes: { gate: 5 * GiB } }, 1);
   assert.equal(decision.activeBytes, 12 * GiB, "its typical size, not its ceiling");
-  assert.deepEqual(learnTypical(incident, [{ lane: "landing", peakBytes: 5 * GiB }, { lane: "landing", peakBytes: 7 * GiB }, { lane: "landing", peakBytes: 6 * GiB }]).landing,
-    { bytes: 7 * GiB, source: "learned", samples: 3 });
+  assert.deepEqual(learnTypical(incident, [5, 7, 6, 5, 6, 7, 5, 6, 7, 6].map((gib) => ({ lane: "landing" as const, peakBytes: gib * GiB }))).landing,
+    { bytes: 7 * GiB, source: "learned", samples: 10 });
 });
