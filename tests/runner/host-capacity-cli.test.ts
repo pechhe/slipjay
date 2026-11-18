@@ -95,7 +95,7 @@ test("the waits report answers from the ledger without waiting for room, and a m
     // A host that never used the ledger reports no waits rather than an error, and the report writes nothing.
     const empty = run(home, ["waits", "--json"]);
     assert.equal(empty.status, 0, empty.stderr);
-    assert.deepEqual(JSON.parse(empty.stdout), { value: 0, evidence: {} });
+    assert.deepEqual(JSON.parse(empty.stdout), { value: 0, evidence: "Waits ending in the last 24h: none", lanes: {} });
     assert.equal(existsSync(join(home, ".slipjay", "host-budget.sqlite")), false);
     assert.match(run(home, ["waits"]).stdout, /none/);
     writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "shadow" } }));
@@ -107,9 +107,12 @@ test("the waits report answers from the ledger without waiting for room, and a m
     assert.equal(text.status, 0, text.stderr);
     assert.match(text.stdout, /landing: 1 ended, p50 0s, p90 0s, max 0s, 0 at the wait limit/);
     const report = JSON.parse(run(home, ["waits", "--json", "--hours", "12"]).stdout);
-    assert.deepEqual(report.evidence, { landing: { count: 1, p50: 0, p90: 0, max: 0, waitLimit: 0 } });
+    assert.deepEqual(report.lanes, { landing: { count: 1, p50: 0, p90: 0, max: 0, waitLimit: 0 } });
+    // A Champion metric takes `evidence` as text: it is the report a person reads.
+    assert.match(report.evidence, /^Waits ending in the last 12h: 1 ended\nlanding: 1 ended, p50 0s/);
     assert.equal(report.value, 0, "the number a metric reads is the largest p90, zero when nothing waited for room");
-    assert.deepEqual(JSON.parse(run(home, ["waits", "--json", "--hours", "168"]).stdout), report, "a week is the longest window the ledger keeps");
+    const week = JSON.parse(run(home, ["waits", "--json", "--hours", "168"]).stdout);
+    assert.deepEqual([week.value, week.lanes], [report.value, report.lanes], "a week is the longest window the ledger keeps");
     for (const args of [["--hours", "0"], ["--hours", "169"], ["--hours"], ["--since", "1"], ["--json", "--json"]]) {
       const refused = run(home, ["waits", ...args]);
       assert.equal(refused.status, 2, args.join(" "));

@@ -209,7 +209,7 @@ export type CapacityWait = { lane: CapacityClass; job: string; queuedAt: number;
 export type CapacityWaitSummary = { count: number; p50: number; p90: number; max: number; waitLimit: number };
 
 /** A window's waits: `value` is the number a Champion metric reads, the largest p90 across kinds of work. */
-export type CapacityWaits = { value: number; evidence: Record<string, CapacityWaitSummary> };
+export type CapacityWaits = { value: number; lanes: Record<string, CapacityWaitSummary> };
 
 /** How long waits are kept: long enough to answer what waited yesterday, short enough to stay small. */
 export const CAPACITY_WAIT_RETENTION_MS = 7 * 24 * 3_600_000;
@@ -219,12 +219,12 @@ const waitSeconds = (ms: number) => Math.round(Math.max(0, ms) / 100) / 10;
 
 /**
  * Each kind of work's waits over a window: how many ended, the median, the 90th percentile and the longest in
- * seconds, and how many hit the wait limit. Kinds with no waits are left out, so `evidence` names only work that waited.
+ * seconds, and how many hit the wait limit. Kinds with no waits are left out, so `lanes` names only work that waited.
  */
 export function summariseCapacityWaits(waits: readonly CapacityWait[]): CapacityWaits {
   const lanes = [...new Set(waits.map((wait) => wait.lane))]
     .sort((a, b) => CAPACITY_CLASSES.indexOf(a) - CAPACITY_CLASSES.indexOf(b) || a.localeCompare(b));
-  const evidence = Object.fromEntries(lanes.map((lane): [string, CapacityWaitSummary] => {
+  const summaries = Object.fromEntries(lanes.map((lane): [string, CapacityWaitSummary] => {
     const mine = waits.filter((wait) => wait.lane === lane);
     const seconds = mine.map((wait) => waitSeconds(wait.endedAt - wait.queuedAt)).toSorted((a, b) => a - b);
     return [lane, {
@@ -232,12 +232,12 @@ export function summariseCapacityWaits(waits: readonly CapacityWait[]): Capacity
       max: seconds.at(-1)!, waitLimit: mine.filter((wait) => wait.outcome === "wait-limit").length,
     }];
   }));
-  return { value: Math.max(0, ...Object.values(evidence).map((summary) => summary.p90)), evidence };
+  return { value: Math.max(0, ...Object.values(summaries).map((summary) => summary.p90)), lanes: summaries };
 }
 
 /** What the waits report says to a person: one line per kind of work that waited, and the number a metric reads. */
 export function formatCapacityWaits(waits: CapacityWaits, hours: number): string {
-  const lanes = Object.entries(waits.evidence);
+  const lanes = Object.entries(waits.lanes);
   if (!lanes.length) return `Waits ending in the last ${hours}h: none`;
   const lines = [`Waits ending in the last ${hours}h: ${lanes.reduce((sum, [, summary]) => sum + summary.count, 0)} ended`];
   for (const [lane, summary] of lanes) {

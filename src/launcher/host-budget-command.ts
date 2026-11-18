@@ -26,7 +26,9 @@ export async function runHostBudget(args: string[]): Promise<number> {
       } else { console.error(usage); return 2; }
     }
     const waits = hostCapacityWaits(hours ?? CAPACITY_WAIT_DEFAULT_HOURS);
-    console.log(json ? JSON.stringify(waits) : formatCapacityWaits(waits, hours ?? CAPACITY_WAIT_DEFAULT_HOURS));
+    const text = formatCapacityWaits(waits, hours ?? CAPACITY_WAIT_DEFAULT_HOURS);
+    // A Champion metric reads `value` and shows `evidence` as text, so the report itself is the evidence.
+    console.log(json ? JSON.stringify({ value: waits.value, evidence: text, lanes: waits.lanes }) : text);
     return 0;
   }
   if (args[0] === "sample") {

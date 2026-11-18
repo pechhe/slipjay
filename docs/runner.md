@@ -824,8 +824,9 @@ it polls after that, and a request that waited nothing records a zero-second wai
 than seven days go with the next wait written. `slipjay host-budget waits [--hours <n>] [--json]`
 answers how long work waits for room: one line per kind of work with how many waits ended in the
 window (24 hours unless `--hours` says otherwise), p50, p90 and the longest in seconds, and how
-many hit the wait limit. `--json` adds `value`, the largest p90 across kinds of work in the
-window and zero when nothing waited, which a Champion metric reads without a shell in well under
+many hit the wait limit. `--json` prints `value`, the largest p90 across kinds of work in the
+window and zero when nothing waited, with that report as `evidence` text and the figures per
+kind of work as `lanes`, which a Champion metric reads without a shell in well under
 30 seconds; it reads the ledger read-only, so it never waits for admission or spans a
 transaction, and an unconfigured or never-used host reports nothing rather than an error.
 

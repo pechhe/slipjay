@@ -56,7 +56,7 @@ test("a request admitted after waiting and one that ran out of time each leave o
     const waits = summariseCapacityWaits(store.waits(0));
     assert.deepEqual(waits, {
       value: 10,
-      evidence: {
+      lanes: {
         image: { count: 3, p50: 0, p90: 0, max: 0, waitLimit: 0 },
         landing: { count: 1, p50: 6, p90: 6, max: 6, waitLimit: 0 },
         agent: { count: 1, p50: 10, p90: 10, max: 10, waitLimit: 1 },
@@ -143,8 +143,8 @@ test("a read-only waits report creates no ledger and copes with one written befo
 });
 
 test("the summary reports no waits as an empty report with a zero value", () => {
-  assert.deepEqual(summariseCapacityWaits([]), { value: 0, evidence: {} });
+  assert.deepEqual(summariseCapacityWaits([]), { value: 0, lanes: {} });
   assert.match(formatCapacityWaits(summariseCapacityWaits([]), 24), /none/);
   const ten = summariseCapacityWaits(Array.from({ length: 10 }, (_, index) => ({ lane: "agent" as const, job: `job-${index}`, queuedAt: 0, endedAt: (index + 1) * 1000, outcome: "admitted" as const })));
-  assert.deepEqual(ten.evidence.agent, { count: 10, p50: 5, p90: 9, max: 10, waitLimit: 0 }, "the ninth wait is the 90th percentile of ten");
+  assert.deepEqual(ten.lanes.agent, { count: 10, p50: 5, p90: 9, max: 10, waitLimit: 0 }, "the ninth wait is the 90th percentile of ten");
 });
