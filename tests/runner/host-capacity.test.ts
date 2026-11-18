@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
+import { readCapacityPolicy } from "../../src/lib/runner/host-capacity-local.ts";
 import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
-  mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5,
+  mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5, takeRoomAfterMs: 5 * 60_000,
   profiles: { landing: 16, release: 16, image: 16, agent: 4, audit: 16, preview: 4 },
   typical: { landing: 16, release: 16, image: 16, agent: 4, audit: 16, preview: 4 },
 };
@@ -44,7 +45,8 @@ test("small backfill preserves the full earlier commitment instead of starving a
 });
 
 test("pressure, unavailable observations and wait expiry cannot become permission to start", () => {
-  const job = request("job", "landing");
+  // An agent check waits on the forecast at its wait limit too: only landings and release checks take room.
+  const job = request("job", "agent");
   for (const observed of [null, { ...reading, memoryFullAvg10: null }, { ...reading, memoryFullAvg10: 6 }, { ...reading, availableBytes: NaN }]) {
     assert.equal(decideCapacity(policy, [job], job.id, observed, 1).admitted, false);
   }
@@ -202,8 +204,9 @@ const incidentReading = (usedGiB: number, peakGiB: number): CapacityReading => (
 test("a landing queued beside three running previews is admitted within its wait limit", () => {
   const landing = { ...request("landing", "landing", 30 * minute, 24 * GiB), polledAt: 31 * minute };
   // Before: typical sizes learned from memory.peak (landing at its 24 GiB ceiling, previews 7.75 GiB) left 24 GiB free.
+  // Its first poll is still inside the five minutes in which real memory alone does not decide.
   const inflated = { ...incident, typical: { ...incident.typical, landing: 24 * GiB, preview: 7.75 * GiB } };
-  const before = decideCapacity(inflated, [...previews, landing], landing.id, incidentReading(4.5, 5.6), 52 * minute);
+  const before = decideCapacity(inflated, [...previews, landing], landing.id, incidentReading(4.5, 5.6), 31 * minute);
   assert.equal(before.admitted, false);
   // After: legacy peaks size nothing, so the configured typical sizes apply, and the previews count by the memory they
   // cannot give back. The landing is admitted at its first poll.
@@ -250,4 +253,87 @@ test("a job holding large file cache but little anonymous memory counts by what 
   assert.equal(decision.activeBytes, 12 * GiB, "its typical size, not its ceiling");
   assert.deepEqual(learnTypical(incident, [5, 7, 6, 5, 6, 7, 5, 6, 7, 6].map((gib) => ({ lane: "landing" as const, peakBytes: gib * GiB }))).landing,
     { bytes: 7 * GiB, source: "learned", samples: 10 });
+});
+
+// the same 18 Nov incident, where a landing waited its full 30 minutes beside a host with no memory pressure at
+// all. 41.7 GiB available less the 8 GiB reserve holds a landing's 24 GiB need, but the room three running previews might
+// still grow into (8 GiB each) only leaves 10 GiB of it, so the forecast alone kept the landing out.
+const taking: CapacityPolicy = { ...incident, typical: { ...incident.profiles }, takeRoomAfterMs: 5 * minute };
+/** Previews holding 4 GiB each, counted at their 12 GiB typical size: 24 GiB of growth room no one is using. */
+const growing: CapacityReading = {
+  ...incidentReading(0, 0), availableBytes: 41.7 * GiB,
+  currentBytes: Object.fromEntries(previews.map(({ id }) => [id, 4 * GiB])),
+  peakBytes: Object.fromEntries(previews.map(({ id }) => [id, 11.5 * GiB])),
+};
+const queued = (lane: CapacityRequest["lane"], waitedMs: number): CapacityRequest => ({
+  ...request("gate", lane, 30 * minute, incident.profiles[lane]), polledAt: 30 * minute + waitedMs,
+});
+const waiting = (request: CapacityRequest, reading: CapacityReading = growing, waitedMs = 5 * minute) =>
+  decideCapacity(taking, [...previews, request], request.id, reading, 30 * minute + waitedMs);
+
+test("a landing waiting under five minutes still waits for the growth room running previews may need", () => {
+  const decision = waiting(queued("landing", 4 * minute + 59_000), growing, 4 * minute + 59_000);
+  assert.equal(decision.admitted, false, decision.reason);
+  assert.match(decision.reason, /preserving memory headroom|waiting for available memory/);
+  assert.equal(decision.outstandingBytes, 24 * GiB, "the forecast that holds it out");
+});
+
+test("a landing that has waited five minutes takes room the host really has, whatever others may grow into", () => {
+  const decision = waiting(queued("landing", 5 * minute));
+  assert.equal(decision.admitted, true, decision.reason);
+  assert.match(decision.reason, /admitted after 5 min: real memory holds it; others' growth room not reserved/);
+  assert.equal(decision.outstandingBytes, 24 * GiB, "the growth room is still reported, just not reserved");
+});
+
+test("a release check that has waited five minutes takes room on the same terms", () => {
+  const run = queued("release", 5 * minute);
+  assert.equal(waiting(run, growing, 4 * minute + 59_000).admitted, false, "a release check under five minutes still waits");
+  const taken = waiting(run);
+  assert.equal(taken.admitted, true, taken.reason);
+  assert.match(taken.reason, /real memory holds it/);
+});
+
+test("previews, agents, images and audits keep waiting for the growth room however long they have waited", () => {
+  for (const lane of ["preview", "agent", "image", "audit"] as const) {
+    const decision = waiting(queued(lane, 20 * minute), growing, 20 * minute);
+    assert.equal(decision.admitted, false, `${lane}: ${decision.reason}`);
+    assert.doesNotMatch(decision.reason, /real memory holds it/);
+  }
+});
+
+test("a landing real memory cannot hold still waits, and fails at the wait limit", () => {
+  // 30 GiB available less the 8 GiB reserve is below the landing's 24 GiB need.
+  const short: CapacityReading = { ...growing, availableBytes: 30 * GiB };
+  const held = waiting(queued("landing", 5 * minute), short);
+  assert.equal(held.admitted, false);
+  const expired = waiting(queued("landing", 30 * minute), short, 30 * minute);
+  assert.equal(expired.admitted, false);
+  assert.match(expired.reason, /wait limit reached/);
+  // Pressure over the limit means a genuinely overloaded host, however long it waited.
+  const pressured: CapacityReading = { ...growing, memoryFullAvg10: 6 };
+  assert.equal(waiting(queued("landing", 5 * minute), pressured).admitted, false);
+  const pressuredExpiry = waiting(queued("landing", 30 * minute), pressured, 30 * minute);
+  assert.equal(pressuredExpiry.admitted, false);
+  assert.match(pressuredExpiry.reason, /wait limit reached/);
+});
+
+test("an unreadable reading keeps its own answer past the take-room threshold and the wait limit", () => {
+  for (const observed of [null, { ...growing, memoryFullAvg10: null }, { ...growing, availableBytes: NaN }]) {
+    const decision = waiting(queued("landing", 30 * minute), observed as CapacityReading, 30 * minute);
+    assert.equal(decision.admitted, false);
+    assert.doesNotMatch(decision.reason, /real memory holds it|wait limit/);
+  }
+});
+
+test("the take-room threshold is read from hostBudget and defaults to five minutes", () => {
+  assert.equal(readCapacityPolicy({ hostBudget: { mode: "shadow" } })?.takeRoomAfterMs, 5 * 60_000);
+  assert.equal(readCapacityPolicy({ hostBudget: { mode: "shadow", takeRoomAfterMs: 90_000 } })?.takeRoomAfterMs, 90_000);
+  for (const value of [0, -1, 1.5, "300000"]) {
+    assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "shadow", takeRoomAfterMs: value } }), /takeRoomAfterMs/);
+  }
+  // A host configured to wait longer for the forecast keeps landings waiting that long.
+  const patient: CapacityPolicy = { ...taking, takeRoomAfterMs: 10 * minute };
+  const landing = queued("landing", 5 * minute);
+  assert.equal(decideCapacity(patient, [...previews, landing], landing.id, growing, 35 * minute).admitted, false);
+  assert.equal(decideCapacity(patient, [...previews, landing], landing.id, growing, 40 * minute).admitted, true);
 });

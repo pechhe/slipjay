@@ -9,7 +9,7 @@ import { openCapacityStore, readCapacityWaits } from "../../src/lib/runner/host-
 import { CAPACITY_WAIT_RETENTION_MS, formatCapacityWaits, summariseCapacityWaits, type CapacityClass, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
-  mode: "enforce", reserveBytes: 6, agingMs: 10, maxWaitMs: 10_000, maxMemoryFullAvg10: 5,
+  mode: "enforce", reserveBytes: 6, agingMs: 10, maxWaitMs: 10_000, maxMemoryFullAvg10: 5, takeRoomAfterMs: 5 * 60_000,
   profiles: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
   typical: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
 };
@@ -111,7 +111,8 @@ test("waits older than a week go with the next one written", () => {
   const store = openCapacityStore(path);
   try {
     fill(store, 1000);
-    assert.equal(store.poll(request("stale", "landing", 1000), policy, observe, 11_000).outcome, "unavailable");
+    // An image build keeps waiting on the forecast at its wait limit; a landing would take the room it has.
+    assert.equal(store.poll(request("stale", "image", 1000), policy, observe, 11_000).outcome, "unavailable");
     assert.deepEqual(store.waits(0).map((wait) => wait.job), ["a", "b", "c", "stale"]);
     // Seven days and a millisecond later the write that ends another wait removes the first.
     const later = 11_000 + CAPACITY_WAIT_RETENTION_MS + 1;

@@ -734,8 +734,8 @@ and record its duration separately from a later authoritative `verifying` stage.
 
 A host opts in with `hostBudget` in its own `~/.slipjay/config.json`. All participants
 must use a SlipJay version supporting `host-budget policy|poll|status|recover|run|sample|waits`.
-Start with `mode: "shadow"`; the default service reserve is 8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
-limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
+Start with `mode: "shadow"`; the default service reserve is 8 GiB, aging interval 60 seconds, maximum wait 30 minutes, landing take-room threshold
+`takeRoomAfterMs` 5 minutes and memory-full PSI avg10 limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
 16 GiB; preview 4 GiB. A profile is a kind of work's ceiling: the most one job can count
 for, and a command job's hard memory limit in enforce mode. A machine attempt (a landing
 gate, batch check or audit) keeps its machine's own limit instead (see below), so its
@@ -747,6 +747,16 @@ counts as the larger of that and the most unreclaimable memory it has held, neve
 than its profile. Admission needs that size, and the queue head's, within available memory less
 the reserve and the room running jobs may still grow back into; there is no separate
 fixed budget (SJ-246).
+
+A landing or release check does not wait on that forecast for long (`takeRoomAfterMs`,
+five minutes unless configured). Once it has waited that long it needs only its own admission
+size within available memory less the reserve, with memory-full PSI within the limit, and takes
+room the host really has whatever other jobs might still grow into. On 18 Nov 2026 a landing
+waited its full 30 minutes beside 46 GB available and no memory pressure, because three
+previews' growth room filled the gap. The wait limit therefore fails a landing or release check
+only when the host is genuinely short: real memory below that size, or pressure over the limit.
+Every other kind of work keeps waiting on the forecast, and the runtime order below is what
+meets a burst past a commitment.
 
 Unreclaimable memory (SJ-267) is the job's cgroup's anonymous and kernel memory less
 reclaimable slab, from `memory.stat`: not `memory.current` or `memory.peak`, which count

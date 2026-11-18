@@ -30,6 +30,12 @@ export type CapacityPolicy = {
   maxWaitMs: number;
   maxMemoryFullAvg10: number;
   /**
+   * How long a landing or release check waits before it takes room on what the host really has. It then needs
+   * its own admission size within available memory less the reserve, ignoring what running jobs may still grow into:
+   * that room is a forecast, and the kernel's out-of-memory order is what protects the host from a burst.
+   */
+  takeRoomAfterMs: number;
+  /**
    * Each kind of work's ceiling: the most one job can ever count for, and a command job's kernel memory limit (SJ-241).
    * A machine attempt keeps its machine's own limit, shared by its gate places, so it can use more than it counts for.
    */
@@ -138,6 +144,9 @@ export function admissionBytes(policy: CapacityPolicy, request: CapacityRequest)
   return Math.min(request.bytes, policy.typical[request.lane]);
 }
 
+/** The kinds of work whose arrival is a commit's own progress: late, they take room on real memory. */
+const TAKE_ROOM_CLASSES: ReadonlyArray<CapacityClass> = ["landing", "release"];
+
 /**
  * What a running job counts for (SJ-244): the larger of its kind's typical need and the most unreclaimable memory it has
  * held (SJ-267), never more than its ceiling. Ceilings overlap, so a burst past what was counted is met by the host's runtime order
@@ -178,7 +187,6 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
   });
   if (!request) return result(false, "request is not registered");
   if (request.admittedAt !== null) return result(true, "already admitted; commitment retained until verified cleanup");
-  if (now - request.queuedAt >= policy.maxWaitMs) return result(false, "capacity unavailable: wait limit reached");
   if (!reading || !Number.isFinite(reading.totalBytes) || !Number.isFinite(reading.availableBytes)
     || reading.totalBytes <= 0 || reading.availableBytes < 0 || reading.availableBytes > reading.totalBytes) {
     return result(false, "host memory reading unavailable");
@@ -186,11 +194,24 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
   if (reading.memoryFullAvg10 === null || !Number.isFinite(reading.memoryFullAvg10) || reading.memoryFullAvg10 < 0) {
     return result(false, "host memory pressure reading unavailable");
   }
-  if (reading.memoryFullAvg10 > policy.maxMemoryFullAvg10) return result(false, "host memory reclaim pressure is over the configured limit");
+  const need = admissionBytes(policy, request);
+  const waitedMs = Math.max(0, now - request.queuedAt);
+  const pressureOverLimit = reading.memoryFullAvg10 > policy.maxMemoryFullAvg10;
+  const realRoom = !pressureOverLimit && reading.availableBytes - policy.reserveBytes >= need;
+  // A landing or release check has waited long enough to take room on real memory alone. Room running jobs may
+  // still grow into is a forecast, not held memory: on 18 Nov three previews' growth room kept a landing out of 46 GB
+  // the host really had. The kernel's order of who gives way first meets an overlapping burst.
+  if (TAKE_ROOM_CLASSES.includes(request.lane) && realRoom
+    && (waitedMs >= policy.takeRoomAfterMs || waitedMs >= policy.maxWaitMs)) {
+    const waited = waitedMs >= 60_000 ? `${Math.floor(waitedMs / 60_000)} min` : `${Math.floor(waitedMs / 1000)} s`;
+    return result(true, `admitted after ${waited}: real memory holds it; others' growth room not reserved`);
+  }
+  // Out of time, and for a landing or release check that means the host is genuinely short: no room, or over pressure.
+  if (waitedMs >= policy.maxWaitMs) return result(false, "capacity unavailable: wait limit reached");
+  if (pressureOverLimit) return result(false, "host memory reclaim pressure is over the configured limit");
   const freeMemory = reading.availableBytes - policy.reserveBytes - outstandingBytes;
   // Backfill is useful only if it leaves the earlier request's admission size available. Reserving just a CPU
   // preference, or letting every small request fit independently, can starve a large compiler forever.
-  const need = admissionBytes(policy, request);
   const ahead = head && head.id !== id ? admissionBytes(policy, head) : 0;
   if (need + ahead > freeMemory) return result(false, ahead ? `preserving memory headroom for ${head!.job}` : "waiting for available memory and service headroom");
   return result(true, ahead ? "admitted with head-of-queue capacity preserved" : "memory capacity available");

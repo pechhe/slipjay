@@ -16,7 +16,7 @@ export function readCapacityPolicy(config: Record<string, unknown> = readMachine
   if (raw === undefined) return null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("hostBudget must be an object");
   const input = raw as Record<string, unknown>;
-  const allowed = ["mode", "reserveBytes", "agingMs", "maxWaitMs", "maxMemoryFullAvg10", "profiles", "typical"];
+  const allowed = ["mode", "reserveBytes", "agingMs", "maxWaitMs", "maxMemoryFullAvg10", "takeRoomAfterMs", "profiles", "typical"];
   for (const key of Object.keys(input)) if (!allowed.includes(key)) throw new Error(`unknown hostBudget setting ${key}`);
   if (input.mode !== "shadow" && input.mode !== "enforce") throw new Error("hostBudget.mode must be shadow or enforce");
   const positive = (value: unknown, fallback: number, name: string, minimum = 1) => {
@@ -46,6 +46,8 @@ export function readCapacityPolicy(config: Record<string, unknown> = readMachine
     agingMs: positive(input.agingMs, 60_000, "agingMs"),
     maxWaitMs: positive(input.maxWaitMs, 30 * 60_000, "maxWaitMs"),
     maxMemoryFullAvg10: positive(input.maxMemoryFullAvg10, 5, "maxMemoryFullAvg10", 0),
+    // Five minutes, so a landing waits only briefly for a forecast before it takes room the host really has.
+    takeRoomAfterMs: positive(input.takeRoomAfterMs, 5 * 60_000, "takeRoomAfterMs"),
   };
   return policy;
 }

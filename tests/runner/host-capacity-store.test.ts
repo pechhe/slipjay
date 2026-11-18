@@ -8,14 +8,14 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "vite-plus/test";
 import { openCapacityStore } from "../../src/lib/runner/host-capacity-store.ts";
 import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityObservation, readCapacityPolicy, residentBytes } from "../../src/lib/runner/host-capacity-local.ts";
-import { decideCapacity, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
+import { decideCapacity, type CapacityClass, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
-  mode: "enforce", reserveBytes: 8, agingMs: 10, maxWaitMs: 1000, maxMemoryFullAvg10: 5,
+  mode: "enforce", reserveBytes: 8, agingMs: 10, maxWaitMs: 1000, maxMemoryFullAvg10: 5, takeRoomAfterMs: 300_000,
   profiles: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
   typical: { landing: 4, release: 4, image: 4, agent: 4, audit: 4, preview: 4 },
 };
-const request = (id: string): CapacityRequest => ({ id, job: id, lane: "landing", bytes: 4, queuedAt: 0, admittedAt: null, cgroup: "/missing-fixture", owner: { kind: "holder", path: `/fixture/${id}`, identity: id } });
+const request = (id: string, lane: CapacityClass = "landing"): CapacityRequest => ({ id, job: id, lane, bytes: 4, queuedAt: 0, admittedAt: null, cgroup: "/missing-fixture", owner: { kind: "holder", path: `/fixture/${id}`, identity: id } });
 const observe = (requests: readonly CapacityRequest[]) => ({
   owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
   // 20 available less the 8 reserve holds three 4-byte jobs.
@@ -32,15 +32,15 @@ test("separate callers cannot both spend the final commitment, and replays prese
   const first = openCapacityStore(join(root, "ledger.sqlite"));
   const second = openCapacityStore(join(root, "ledger.sqlite"));
   try {
-    assert.equal(first.poll(request("one"), policy, observe, 1).outcome, "admitted");
-    assert.equal(second.poll(request("two"), policy, observe, 2).outcome, "admitted");
-    assert.equal(first.poll(request("three"), policy, observe, 3).outcome, "admitted");
-    assert.equal(second.poll(request("four"), policy, observe, 4).outcome, "waiting");
-    const replay = second.poll({ ...request("four"), queuedAt: 500 }, policy, observe, 5);
+    assert.equal(first.poll(request("one", "image"), policy, observe, 1).outcome, "admitted");
+    assert.equal(second.poll(request("two", "image"), policy, observe, 2).outcome, "admitted");
+    assert.equal(first.poll(request("three", "image"), policy, observe, 3).outcome, "admitted");
+    assert.equal(second.poll(request("four", "image"), policy, observe, 4).outcome, "waiting");
+    const replay = second.poll({ ...request("four", "image"), queuedAt: 500 }, policy, observe, 5);
     assert.equal(replay.request.queuedAt, 0);
-    assert.equal(second.poll({ ...request("four"), owner: { identity: "four", path: "/fixture/four", kind: "holder" } }, policy, observe, 6).request.queuedAt, 0);
-    assert.equal(second.poll(request("four"), policy, observe, 1000).outcome, "unavailable");
-    assert.throws(() => first.poll({ ...request("one"), bytes: 5 }, policy, observe, 2), /different owner or commitment/);
+    assert.equal(second.poll({ ...request("four", "image"), owner: { identity: "four", path: "/fixture/four", kind: "holder" } }, policy, observe, 6).request.queuedAt, 0);
+    assert.equal(second.poll(request("four", "image"), policy, observe, 1000).outcome, "unavailable");
+    assert.throws(() => first.poll({ ...request("one", "image"), bytes: 5 }, policy, observe, 2), /different owner or commitment/);
     assert.equal(first.requests().filter((item) => item.admittedAt !== null).length, 3);
   } finally { first.close(); second.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -49,13 +49,13 @@ test("unknown ownership retains claims across restart and switching to shadow", 
   const root = fixture();
   let store = openCapacityStore(join(root, "ledger.sqlite"));
   try {
-    store.poll(request("one"), policy, observe, 1);
+    store.poll(request("one", "image"), policy, observe, 1);
     store.close();
     store = openCapacityStore(join(root, "ledger.sqlite"));
     const unknown = (requests: readonly CapacityRequest[]) => ({ ...observe(requests), owners: { one: "unknown" as const } });
     assert.equal(store.recover(unknown), 0);
     assert.equal(store.requests().length, 1);
-    const shadow = store.poll(request("two"), { ...policy, mode: "shadow", reserveBytes: 16 }, observe, 2);
+    const shadow = store.poll(request("two", "image"), { ...policy, mode: "shadow", reserveBytes: 16 }, observe, 2);
     assert.equal(shadow.outcome, "admitted");
     assert.equal(shadow.decision.admitted, false, "shadow preserves the would-wait decision");
     assert.equal(store.requests().length, 2);
@@ -112,9 +112,37 @@ test("malformed host policy cannot silently disable enforcement", () => {
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", extra: 1 } }), /unknown/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { image: -1 } } }), /integer/);
   assert.equal(readCapacityPolicy({ hostBudget: { mode: "shadow" } })?.mode, "shadow");
+  assert.equal(readCapacityPolicy({ hostBudget: { mode: "shadow" } })?.takeRoomAfterMs, 5 * 60_000, "landings take room after five minutes unless the host says otherwise");
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { image: 0 } } }), /integer/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { gpu: 1 } } }), /unknown/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 4096 }, typical: { preview: 8192 } } }), /exceed/);
+});
+
+test("a landing takes room on real memory through the ledger once it has waited the take-room threshold", () => {
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  const GiB = 1024 ** 3;
+  const sized: CapacityPolicy = {
+    ...policy, reserveBytes: 8 * GiB, maxWaitMs: 30 * 60_000, takeRoomAfterMs: 5 * 60_000,
+    profiles: { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 12 * GiB },
+    typical: { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 12 * GiB },
+  };
+  // Three previews count 12 GiB each while holding 4: 24 GiB of growth room fills the gap between 41.7 GiB available
+  // and the landing's 24 GiB need, exactly as on 18 Nov.
+  const observeWith = (requests: readonly CapacityRequest[]) => ({ owners: Object.fromEntries(requests.map((item) => [item.id, "alive" as const])),
+    reading: { totalBytes: 62.4 * GiB, availableBytes: 41.7 * GiB, memoryFullAvg10: 0,
+      currentBytes: Object.fromEntries(requests.filter((item) => item.lane === "preview").map((item) => [item.id, 4 * GiB])),
+      peakBytes: Object.fromEntries(requests.filter((item) => item.lane === "preview").map((item) => [item.id, 11.5 * GiB])) } });
+  try {
+    for (const id of ["a", "b", "c"]) assert.equal(store.poll({ ...request(id), lane: "preview", bytes: 12 * GiB }, sized, observeWith, 0).outcome, "admitted");
+    const gate = { ...request("gate"), bytes: 24 * GiB, queuedAt: 60_000 };
+    assert.equal(store.poll(gate, sized, observeWith, 60_000 + 5 * 60_000 - 1000).outcome, "waiting");
+    const admitted = store.poll(gate, sized, observeWith, 60_000 + 5 * 60_000);
+    assert.equal(admitted.outcome, "admitted");
+    assert.match(admitted.decision.reason, /real memory holds it; others' growth room not reserved/);
+    assert.deepEqual(store.waits(0).filter((wait) => wait.job === "gate"),
+      [{ lane: "landing", job: "gate", queuedAt: 60_000, endedAt: 60_000 + 5 * 60_000, outcome: "admitted" }], "the ledger keeps the wait it ended");
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("finished jobs leave their peak in a history that outlives the per-poll decisions, and admission learns from it", () => {
