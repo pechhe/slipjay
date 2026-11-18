@@ -85,7 +85,15 @@ export type CapacityRequest = {
    * whose memory is Docker's. Readings add it to the job's own, and its runner's samples raise `residentPeakBytes`.
    */
   externalBytes?: number;
+  /**
+   * Set when a landing stopped this preview to make room (SJ-275): which landing, when, and the unreclaimable memory the
+   * preview held. From then on it counts for nothing, and it leaves the ledger once its cgroup is empty.
+   */
+  yieldedFor?: CapacityYield;
 };
+
+/** Why a preview was stopped: the landing that needed its room (SJ-275). */
+export type CapacityYield = { landingId: string; landingJob: string; at: number; residentBytes: number };
 
 export type CapacityReading = {
   totalBytes: number;
@@ -153,6 +161,8 @@ const TAKE_ROOM_CLASSES: ReadonlyArray<CapacityClass> = ["landing", "release"];
  * of who gives way first, not by holding every ceiling free. Without both measurements it counts at its ceiling.
  */
 export function countedBytes(policy: CapacityPolicy, request: CapacityRequest, reading: CapacityReading | null, now: number): number {
+  // A preview a landing stopped gives its room back; what it still holds while it stops is already out of MemAvailable.
+  if (request.yieldedFor) return 0;
   const current = reading?.currentBytes[request.id];
   const peak = reading?.peakBytes[request.id];
   if (!measured(current) || !measured(peak)) return request.bytes;
@@ -226,6 +236,49 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
   const ahead = head && head.id !== id ? admissionBytes(policy, head) : 0;
   if (need + ahead > freeMemory) return result(false, ahead ? `preserving memory headroom for ${head!.job}` : "waiting for available memory and service headroom");
   return result(true, ahead ? "admitted with head-of-queue capacity preserved" : "memory capacity available");
+}
+
+/** How readily a preview gives way when it declares nothing: after isolated previews (0), beside combined ones. */
+export const CAPACITY_GIVE_WAY_DEFAULT = 1;
+
+/**
+ * The previews a landing at the head of the queue stops to make room (SJ-275, SJ-267's option (c)): none unless
+ * stopping them would let it in, and then as few as do, in the order each declared it gives way (lower first), the one
+ * holding most first within an order. Only a landing stops anything; it frees what each preview holds unreclaimably now,
+ * and the landing is admitted on a later reading that shows that memory back, never on this forecast.
+ */
+export function planLandingRoom(policy: CapacityPolicy, requests: readonly CapacityRequest[], id: string, reading: CapacityReading | null,
+  now: number, giveWay: Readonly<Record<string, number>> = {}): CapacityRequest[] {
+  const request = requests.find((item) => item.id === id);
+  if (!request || request.lane !== "landing" || request.admittedAt !== null || policy.mode !== "enforce") return [];
+  if (!reading || !Number.isFinite(reading.availableBytes) || now - request.queuedAt >= policy.maxWaitMs) return [];
+  const queue = capacityOrder(requests, policy.agingMs);
+  const head = queue.find((item) => item.id === id || now - (item.polledAt ?? item.queuedAt) < CAPACITY_WAITER_FRESH_MS);
+  if (head?.id !== id) return [];
+  const active = requests.filter((item) => item.admittedAt !== null && !item.yieldedFor);
+  const growth = (item: CapacityRequest) => {
+    const current = reading.currentBytes[item.id];
+    return Math.max(0, countedBytes(policy, item, reading, now) - (measured(current) ? current : 0));
+  };
+  const need = admissionBytes(policy, request);
+  // Previews already stopped that are still exiting will give their memory back: a poll a second after the stops must not
+  // stop more on room that is merely on its way.
+  const leaving = requests.filter((item) => item.admittedAt !== null && item.yieldedFor)
+    .reduce((sum, item) => sum + (measured(reading.currentBytes[item.id]) ? reading.currentBytes[item.id]! : 0), 0);
+  const fits = (stopped: readonly CapacityRequest[]) => need <= reading.availableBytes - policy.reserveBytes + leaving
+    + stopped.reduce((sum, item) => sum + reading.currentBytes[item.id]!, 0)
+    - active.filter((item) => !stopped.includes(item)).reduce((sum, item) => sum + growth(item), 0);
+  if (fits([])) return [];
+  // A preview whose memory cannot be read is never stopped on a guess of what it would free.
+  const candidates = active.filter((item) => item.lane === "preview" && item.cgroup && measured(reading.currentBytes[item.id]))
+    .toSorted((a, b) => (giveWay[a.id] ?? CAPACITY_GIVE_WAY_DEFAULT) - (giveWay[b.id] ?? CAPACITY_GIVE_WAY_DEFAULT)
+      || reading.currentBytes[b.id]! - reading.currentBytes[a.id]! || a.id.localeCompare(b.id));
+  const stopped: CapacityRequest[] = [];
+  for (const candidate of candidates) {
+    stopped.push(candidate);
+    if (fits(stopped)) return stopped;
+  }
+  return [];
 }
 
 /** A finished job's measured peak of unreclaimable memory, kept in the ledger's own history (SJ-246, SJ-267). */

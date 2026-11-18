@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { readCapacityPolicy } from "../../src/lib/runner/host-capacity-local.ts";
-import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, countedBytes, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
+import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, countedBytes, decideCapacity, planLandingRoom, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
   mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5, takeRoomAfterMs: 5 * 60_000,
@@ -356,4 +356,93 @@ test("a preview that has served ten minutes counts by what it holds, so other wo
   // Only previews: a landing gate holding the same counts by its kind's size.
   const gate = { ...request("c57368b0", "landing", 0, 24 * GiB), admittedAt: 0 };
   assert.equal(countedBytes(learned, gate, reading, 40 * minute), 12 * GiB);
+});
+
+// SJ-275: peach-box, 18 Nov 2026 about 23:00 GMT. Two landings waited out their 30 minutes beside three admitted
+// previews (combined Weave 6.6 GiB, combined YardSmith 5.6 GiB, an isolated preview 3.4 GiB) with 24 GiB available.
+const tonight: CapacityPolicy = { ...incident, typical: { ...incident.typical, landing: 24 * GiB } };
+const stopped = [
+  { ...request("weave", "preview", 0, 12 * GiB), admittedAt: 0, cgroup: "/user.slice/user-1001.slice/user@1001.service/preview.slice/preview-gen.slice/preview-gen-weave.slice" },
+  { ...request("yardsmith", "preview", 0, 12 * GiB), admittedAt: 0, cgroup: "/user.slice/user-1001.slice/user@1001.service/preview.slice/preview-gen.slice/preview-gen-yardsmith.slice" },
+  { ...request("isolated", "preview", 0, 12 * GiB), admittedAt: 0, cgroup: "/user.slice/user-1001.slice/user@1001.service/preview.slice/preview-gen.slice/preview-gen-isolated.slice" },
+];
+const held = { weave: 6.6 * GiB, yardsmith: 5.6 * GiB, isolated: 3.4 * GiB };
+const tonightReading = (availableGiB: number, holding: Record<string, number> = held): CapacityReading => ({
+  totalBytes: 62.8 * GiB, availableBytes: availableGiB * GiB, memoryFullAvg10: 0, currentBytes: holding, peakBytes: holding,
+});
+const shortLanding = { ...request("gate", "landing", 60 * minute, 24 * GiB), polledAt: 61 * minute };
+/** Isolated previews give way first (0), then the combined ones (1), as YardSmith declares them. */
+const declared = { isolated: 0, weave: 1, yardsmith: 1 };
+
+test("a landing the host cannot hold stops as few previews as make room, in the order they give way", () => {
+  const all = [...stopped, shortLanding];
+  assert.equal(decideCapacity(tonight, all, shortLanding.id, tonightReading(24), 61 * minute).admitted, false);
+  // 24 GiB available less the 8 GiB reserve and the settled previews' 3 GiB of margin is 13 GiB, 11 GiB short. The
+  // isolated preview frees 3.4 GiB and its margin (17.4 GiB); the combined Weave's 6.6 GiB and margin make it 25 GiB.
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(24), 61 * minute, declared).map(({ id }) => id),
+    ["isolated", "weave"]);
+  // Shorter still, all three go; with 34 GiB available the isolated preview alone is enough.
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(20), 61 * minute, declared).map(({ id }) => id),
+    ["isolated", "weave", "yardsmith"]);
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(34), 61 * minute, declared).map(({ id }) => id),
+    ["isolated"]);
+  // Undeclared, previews give way alike, the one holding most first.
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(34), 61 * minute).map(({ id }) => id),
+    ["weave"]);
+});
+
+test("a stopped preview's claim counts for nothing, and the landing is admitted only once the memory is back", () => {
+  const at = 61 * minute;
+  const yielded = (ids: string[]) => stopped.map((item) => ids.includes(item.id)
+    ? { ...item, yieldedFor: { landingId: shortLanding.id, landingJob: shortLanding.job, at, residentBytes: held[item.id as keyof typeof held] } } : item);
+  const all = [...yielded(["isolated", "weave", "yardsmith"]), shortLanding];
+  for (const item of all.filter((entry) => entry.yieldedFor)) assert.equal(countedBytes(tonight, item, tonightReading(24), at), 0);
+  // The same poll's reading still shows the memory in use: no credit for memory not yet returned.
+  assert.equal(decideCapacity(tonight, all, shortLanding.id, tonightReading(24), at).admitted, false);
+  // A second later the kernel has it back.
+  const back = decideCapacity(tonight, all, shortLanding.id, tonightReading(39.6, {}), at + 1000);
+  assert.equal(back.admitted, true, back.reason);
+  // Nothing more is stopped meanwhile: stopped previews are no longer candidates.
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(24), at, declared), []);
+});
+
+test("a poll while stopped previews are still exiting counts their memory as coming back, and stops no more", () => {
+  const at = 61 * minute;
+  const marked = (ids: string[]) => stopped.map((item) => ids.includes(item.id)
+    ? { ...item, yieldedFor: { landingId: shortLanding.id, landingJob: shortLanding.job, at, residentBytes: held[item.id as keyof typeof held] } } : item);
+  // The first poll stopped the isolated preview and the combined Weave. A second later the isolated one has gone and
+  // the Weave is still exiting with its 6.6 GiB: the combined YardSmith stays.
+  const all = [...marked(["isolated", "weave"]), shortLanding];
+  const exiting = tonightReading(27.4, { weave: 6.6 * GiB, yardsmith: 5.6 * GiB });
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, exiting, at + 1000, declared), []);
+  // Likewise when the first poll stopped only the isolated preview and it is still exiting.
+  const one = [...marked(["isolated"]), shortLanding];
+  assert.deepEqual(planLandingRoom(tonight, one, shortLanding.id, tonightReading(34), at + 1000, declared), []);
+  // Memory a stopped preview no longer reports is not counted twice: what it freed is already available.
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(27, { yardsmith: 5.6 * GiB }), at + 1000, declared).map(({ id }) => id),
+    ["yardsmith"]);
+});
+
+test("a landing that fits, or that every preview stopped would still not fit, stops nothing", () => {
+  const all = [...stopped, shortLanding];
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(40), 61 * minute, declared), []);
+  // Memory held outside the budget: even all three previews leave it short.
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, tonightReading(14), 61 * minute, declared), []);
+  // A preview whose memory cannot be read is never stopped on a guess (and still counts at its whole ceiling).
+  const unread = { ...held, weave: undefined } as unknown as Record<string, number>;
+  assert.deepEqual(planLandingRoom(tonight, all, shortLanding.id, { ...tonightReading(40), currentBytes: unread }, 61 * minute, declared).map(({ id }) => id),
+    ["isolated", "yardsmith"]);
+});
+
+test("only a landing at the head of the queue stops previews; other work and shadow mode never do", () => {
+  for (const lane of ["release", "image", "agent", "audit", "preview"] as const) {
+    const other = { ...request("other", lane, 60 * minute, 24 * GiB), polledAt: 61 * minute };
+    assert.deepEqual(planLandingRoom(sized(lane, 24 * GiB, tonight), [...stopped, other], other.id, tonightReading(24), 61 * minute, declared), [], lane);
+  }
+  assert.deepEqual(planLandingRoom({ ...tonight, mode: "shadow" }, [...stopped, shortLanding], shortLanding.id, tonightReading(24), 61 * minute, declared), []);
+  // A second landing behind the first waits its turn; the first is the one that makes room.
+  const second = { ...request("second", "landing", 61 * minute, 24 * GiB), polledAt: 61 * minute };
+  assert.deepEqual(planLandingRoom(tonight, [...stopped, shortLanding, second], second.id, tonightReading(24), 61 * minute, declared), []);
+  // Out of time it stops nothing: the wait limit has already decided.
+  assert.deepEqual(planLandingRoom(tonight, [...stopped, shortLanding], shortLanding.id, tonightReading(24), 91 * minute, declared), []);
 });

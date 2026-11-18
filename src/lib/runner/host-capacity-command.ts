@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources, readContainerResidentBytes } from "./host-capacity-local.ts";
 import { openCapacityStore, readCapacityWaits } from "./host-capacity-store.ts";
-import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, summariseCapacityWaits, type CapacityClass, type CapacityRequest, type CapacityWaits } from "./host-capacity.ts";
+import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, CAPACITY_WAIT_RETENTION_MS, summariseCapacityWaits, type CapacityClass, type CapacityRequest, type CapacityWaits } from "./host-capacity.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 
 /** One transaction per poll; the caller owns its wait and can keep it outside verification deadlines. */
@@ -25,7 +26,27 @@ export function pollHostCapacity(request: Omit<CapacityRequest, "bytes" | "queue
     receipt = store.poll({ ...request, bytes, queuedAt: now, admittedAt: null }, policy, readCapacityObservation, now);
   } finally { store.close(); }
   if (receipt.request.admittedAt === now && receipt.request.owner.kind === "holder") startCapacitySampler(receipt.request);
+  for (const preview of receipt.yields ?? []) stopYieldedPreview(preview);
   return { configured: true as const, policy, ...receipt };
+}
+
+/** A preview's unit is the last part of the cgroup it registered: a slice, scope or service of this user's manager. */
+const YIELD_UNIT = /^[\w@.-]+\.(slice|scope|service)$/;
+
+/**
+ * Stop a preview a landing needs the room of (SJ-275), outside the ledger's transaction so a slow stop never holds
+ * admission. Its owner is told why first, in `<holder>.yielded` beside its holder, so the end it records names the
+ * landing. Not waited on: the landing's next poll sees the memory back, and repeats the stop while the group is populated.
+ */
+export function stopYieldedPreview(preview: CapacityRequest, stop: (unit: string) => unknown = (unit) => systemctl(["stop", "--no-block", unit])) {
+  const unit = preview.cgroup?.split("/").at(-1) ?? "";
+  if (!preview.yieldedFor || !preview.cgroup?.includes("/user@") || !YIELD_UNIT.test(unit)) return;
+  if (preview.owner.kind === "holder") {
+    try {
+      writeFileSync(`${preview.owner.path}.yielded`, `${JSON.stringify({ requestId: preview.id, ...preview.yieldedFor })}\n`, { mode: 0o600 });
+    } catch { /* The stop matters more than its explanation; the ledger keeps the record either way. */ }
+  }
+  try { stop(unit); } catch { /* Retried by the landing's next poll while the group stays populated. */ }
 }
 
 /** How often a running job's unreclaimable memory is read for its peak (SJ-267). */
@@ -57,7 +78,8 @@ export function hostCapacityStatus() {
   const store = openCapacityStore(capacityStorePath());
   try {
     const requests = store.requests();
-    return { configured: true as const, policy, typical: store.typical(policy), requests, observation: readCapacityObservation(requests), history: store.history() };
+    return { configured: true as const, policy, typical: store.typical(policy), requests, observation: readCapacityObservation(requests), history: store.history(),
+      yields: store.yields(Date.now() - CAPACITY_WAIT_RETENTION_MS) };
   } finally { store.close(); }
 }
 

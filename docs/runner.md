@@ -801,8 +801,28 @@ memory for hours: on 18 Nov 2026 two previews queued 18 minutes before a landing
 ahead of it, were admitted, and the landing waited its full 30 minutes. The landing moves
 to just before the first preview in the aged order, which can take it ahead of other work
 aged in between; everything else keeps its aged order, previews still ahead of newer
-background work. Admission never stops a preview already admitted: the runtime order
-below is what makes a preview give way under real pressure.
+background work.
+
+A landing at the head of the queue that the host cannot hold stops previews to make its
+room (SJ-275). On 18 Nov 2026 two landings still waited out their 30 minutes, with the
+ordering above in place, beside three previews holding 17 GiB of 24 GiB available. Only a
+landing does this: release checks, image builds, agent checks and audits wait as before. It
+stops nothing when it fits already, or when stopping every preview would still leave it
+short (memory held outside the budget, say). Otherwise it stops as few as make room,
+judged by the unreclaimable memory each holds now. The order is the digit each preview's
+owner keeps in `<holder>.give-way`, lower first (YardSmith: previews for an agent's own
+check 0, the combined previews 1, a preview held for review 2; undeclared counts as 1), then the one
+holding most. In the same poll the stopped previews' claims stop counting, and the stops
+are kept in the ledger's `yields` table for a week (`slipjay host-budget status` lists
+them). After that poll, SlipJay writes `<holder>.yielded` (the landing, its job, the time
+and the memory) so the preview's owner can say why it ended: the stop kills whatever runs
+in the preview's group, so the owner records the end from outside it. It then stops the preview's
+own unit, the last part of the cgroup it registered, without waiting on it. The landing
+is admitted by a later poll whose reading shows the memory back, never on the forecast,
+and without waiting for `takeRoomAfterMs`. Each poll repeats the stop while a stopped
+preview's group is still populated, and a stopped preview leaves the ledger once its group
+is empty. Its owner restarts it: YardSmith's combined supervisor does so by itself, and its
+new request queues behind the landing.
 
 A Docker build's memory is the daemon's, not the job's. A command job names the
 containers whose memory is its own with `--measure-container <name>` (repeatable), such

@@ -1,18 +1,28 @@
 import { DatabaseSync } from "node:sqlite";
 import { dirname } from "node:path";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
-import { CAPACITY_GROWTH_STEP_BYTES, CAPACITY_SAMPLE_FLOOR_BYTES, CAPACITY_SAMPLE_WINDOW, CAPACITY_WAIT_RETENTION_MS, decideCapacity, learnTypical, sameCapacityOwner, withLearnedTypical, type CapacityDecision, type CapacityPolicy, type CapacityReading, type CapacityRequest, type CapacitySample, type CapacityWait, type CapacityWaitOutcome } from "./host-capacity.ts";
+import { CAPACITY_GROWTH_STEP_BYTES, CAPACITY_SAMPLE_FLOOR_BYTES, CAPACITY_SAMPLE_WINDOW, CAPACITY_WAIT_RETENTION_MS, decideCapacity, learnTypical, planLandingRoom, sameCapacityOwner, withLearnedTypical, type CapacityDecision, type CapacityPolicy, type CapacityReading, type CapacityRequest, type CapacitySample, type CapacityWait, type CapacityWaitOutcome } from "./host-capacity.ts";
 
 export type CapacityObservation = {
   reading: CapacityReading | null;
   owners: Readonly<Record<string, "alive" | "gone" | "unknown">>;
+  /** How readily each preview gives way to a landing, where it declared it (SJ-275). */
+  giveWay?: Readonly<Record<string, number>>;
 };
+
+/** A preview a landing stopped to make room, kept a week beside the waits (SJ-275). */
+export type CapacityYieldRecord = { requestId: string; job: string; landingId: string; landingJob: string; residentBytes: number; at: number };
 
 export type CapacityReceipt = {
   outcome: "admitted" | "waiting" | "unavailable";
   mode: CapacityPolicy["mode"];
   decision: CapacityDecision;
   request: CapacityRequest;
+  /**
+   * Previews this landing has stopped, or still needs stopped, to make its room (SJ-275): the caller stops each one's
+   * unit. Repeated on every poll until its group is empty, so a stop that did not take is retried.
+   */
+  yields?: CapacityRequest[];
 };
 
 /** Waits ended at or after `since`, oldest first: one row per request, kept a week. */
@@ -58,7 +68,7 @@ export function openCapacityStore(path: string) {
     const pause = new Int32Array(new SharedArrayBuffer(4));
     for (;;) {
       try {
-        db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request_id TEXT NOT NULL, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS peaks (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, lane TEXT NOT NULL, job TEXT NOT NULL, peak_bytes INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS waits (request_id TEXT PRIMARY KEY, lane TEXT NOT NULL, job TEXT NOT NULL, queued_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, outcome TEXT NOT NULL); CREATE INDEX IF NOT EXISTS waits_ended_at ON waits(ended_at);");
+        db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request_id TEXT NOT NULL, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS peaks (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, lane TEXT NOT NULL, job TEXT NOT NULL, peak_bytes INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS waits (request_id TEXT PRIMARY KEY, lane TEXT NOT NULL, job TEXT NOT NULL, queued_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, outcome TEXT NOT NULL); CREATE INDEX IF NOT EXISTS waits_ended_at ON waits(ended_at); CREATE TABLE IF NOT EXISTS yields (request_id TEXT PRIMARY KEY, job TEXT NOT NULL, landing_id TEXT NOT NULL, landing_job TEXT NOT NULL, resident_bytes INTEGER NOT NULL, at INTEGER NOT NULL);");
         // A ledger from before growth, or the measure of its peaks, was recorded gains the column; a concurrent opener
         // adding it first is not an error.
         const columns = (db.prepare("PRAGMA table_info(peaks)").all() as Array<{ name: string }>).map(({ name }) => name);
@@ -148,6 +158,8 @@ export function openCapacityStore(path: string) {
     /** Each kind of work's effective typical size, where it came from and how many peaks it rests on. */
     typical: (policy: CapacityPolicy) => learnTypical(policy, samples()),
     history: () => db.prepare("SELECT at, request_id AS requestId, body FROM decisions ORDER BY seq DESC LIMIT 100").all(),
+    /** Previews stopped for a landing since `since`, oldest first (SJ-275). */
+    yields: (since: number) => (db.prepare("SELECT request_id AS requestId, job, landing_id AS landingId, landing_job AS landingJob, resident_bytes AS residentBytes, at FROM yields WHERE at >= ? ORDER BY at, request_id").all(since) as CapacityYieldRecord[]).map((row) => ({ ...row })),
     waits: (since: number) => waitsSince(db, since),
     /** A running job's runner reports memory it uses outside its cgroup; its peak only ever rises. */
     noteUsage(id: string, owner: CapacityRequest["owner"], externalBytes: number, peakBytes: number): void {
@@ -199,10 +211,26 @@ export function openCapacityStore(path: string) {
         }
         if (observed.owners[request.id] === "gone") throw new Error("host capacity owner ended before admission");
         retained.push(registered);
-        const decision = decideCapacity(withLearnedTypical(policy, samples()), retained, registered.id, observed.reading, now);
+        const learned = withLearnedTypical(policy, samples());
+        const decision = decideCapacity(learned, retained, registered.id, observed.reading, now);
         if (observed.owners[request.id] !== "alive" && registered.admittedAt === null) {
           decision.admitted = false;
           decision.reason = "request ownership cannot be established";
+        }
+        // A landing that cannot fit stops just enough previews to (SJ-275). Their claims stop counting now; the landing is
+        // admitted by a later poll whose reading shows the memory back.
+        if (!decision.admitted && observed.owners[request.id] === "alive") {
+          const stopping = planLandingRoom(learned, retained, registered.id, observed.reading, now, observed.giveWay);
+          for (const item of stopping) {
+            const yieldedFor = { landingId: registered.id, landingJob: registered.job, at: now, residentBytes: observed.reading!.currentBytes[item.id]! };
+            const index = retained.indexOf(item);
+            retained[index] = { ...item, yieldedFor };
+            save(retained[index]!);
+            db.prepare("INSERT OR IGNORE INTO yields(request_id,job,landing_id,landing_job,resident_bytes,at) VALUES (?,?,?,?,?,?)")
+              .run(item.id, item.job, registered.id, registered.job, yieldedFor.residentBytes, now);
+          }
+          db.prepare("DELETE FROM yields WHERE at < ?").run(now - CAPACITY_WAIT_RETENTION_MS);
+          if (stopping.length) decision.reason = `stopping ${stopping.map((item) => item.job).join(", ")} to make room`;
         }
         const expired = registered.admittedAt === null && now - registered.queuedAt >= policy.maxWaitMs;
         // Shadow decisions never block execution, but they retain real owners/commitments and an explicit would-wait
@@ -210,8 +238,10 @@ export function openCapacityStore(path: string) {
         const admitted = registered.admittedAt !== null || decision.admitted || policy.mode === "shadow";
         const updated = admitted && registered.admittedAt === null ? { ...registered, admittedAt: now } : registered;
         save(updated);
+        const yields = retained.filter((item) => item.yieldedFor?.landingId === registered.id);
         const receipt: CapacityReceipt = {
           outcome: admitted ? "admitted" : expired ? "unavailable" : "waiting", mode: policy.mode, decision, request: updated,
+          ...yields.length ? { yields } : {},
         };
         record(registered.id, receipt, now);
         // The wait's end is written with the decision that ended it: admitted now, or out of time and not running. A poll

@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "vite-plus/test";
 import { openCapacityStore } from "../../src/lib/runner/host-capacity-store.ts";
+import { stopYieldedPreview } from "../../src/lib/runner/host-capacity-command.ts";
 import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityObservation, readCapacityPolicy, residentBytes } from "../../src/lib/runner/host-capacity-local.ts";
 import { decideCapacity, type CapacityClass, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
@@ -346,4 +347,76 @@ test("a sampler stops when its job's owner has ended", () => {
     store.poll(request("gate"), policy, observe, 1);
     assert.equal(store.sample("gate", (requests) => ({ ...observe(requests), owners: { gate: "gone" } })), false);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a landing that cannot fit stops previews in the ledger, records why, and is admitted once their memory is back", () => {
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  // Two previews of 4 bytes each, a landing of 8: with 14 available less the 8 reserve, the landing needs both gone.
+  const sizes: CapacityPolicy = { ...policy, maxWaitMs: 60_000, profiles: { ...policy.profiles, landing: 8 }, typical: { ...policy.typical, landing: 8 } };
+  const preview = (id: string): CapacityRequest => ({ ...request(id, "preview"), cgroup: `/user.slice/user-1001.slice/user@1001.service/preview.slice/preview-gen-${id}.slice` });
+  let available = 14;
+  let emptied = new Set<string>();
+  const host = (requests: readonly CapacityRequest[]) => ({
+    owners: Object.fromEntries(requests.map((item) => [item.id, item.yieldedFor && emptied.has(item.id) ? "gone" as const : "alive" as const])),
+    reading: { totalBytes: 64, availableBytes: available, memoryFullAvg10: 0,
+      currentBytes: Object.fromEntries(requests.filter((item) => !emptied.has(item.id)).map((item) => [item.id, item.lane === "preview" ? 3 : 0])),
+      peakBytes: Object.fromEntries(requests.filter((item) => !emptied.has(item.id)).map((item) => [item.id, item.lane === "preview" ? 3 : 0])) },
+    giveWay: { isolated: 0, combined: 1 },
+  });
+  try {
+    for (const id of ["combined", "isolated"]) assert.equal(store.poll(preview(id), sizes, host, 1).outcome, "admitted");
+    const landing = { ...request("gate"), job: "Landing gate 564f6cc45168", queuedAt: 10 * 60_000 };
+    available = 6;
+    const first = store.poll(landing, sizes, host, 10 * 60_000);
+    assert.equal(first.outcome, "waiting", "never admitted on memory not yet returned");
+    assert.deepEqual(first.yields?.map(({ id }) => id).sort(), ["combined", "isolated"]);
+    assert.match(first.decision.reason, /stopping .* to make room/);
+    // Their claims count for nothing at once, so the stop is never repeated as a new plan.
+    assert.equal(store.requests().filter((item) => item.yieldedFor?.landingId === "gate").length, 2);
+    const yields = store.yields(0);
+    assert.deepEqual(yields.map(({ requestId, landingJob, residentBytes }) => ({ requestId, landingJob, residentBytes })).sort((a, b) => a.requestId.localeCompare(b.requestId)), [
+      { requestId: "combined", landingJob: "Landing gate 564f6cc45168", residentBytes: 3 },
+      { requestId: "isolated", landingJob: "Landing gate 564f6cc45168", residentBytes: 3 },
+    ]);
+    // A stop that has not taken yet is handed back to the caller again on the next poll.
+    const retry = store.poll(landing, sizes, host, 10 * 60_000 + 1000);
+    assert.equal(retry.outcome, "waiting");
+    assert.equal(retry.yields?.length, 2);
+    // The groups empty and the memory comes back: the stopped previews leave the ledger and the landing is admitted.
+    emptied = new Set(["combined", "isolated"]);
+    available = 18;
+    const admitted = store.poll(landing, sizes, host, 10 * 60_000 + 2000);
+    assert.equal(admitted.outcome, "admitted", admitted.decision.reason);
+    assert.equal(admitted.yields, undefined);
+    assert.deepEqual(store.requests().map(({ id }) => id), ["gate"]);
+    assert.equal(store.yields(0).length, 2, "the record outlives the requests");
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a preview declares how readily it gives way beside its holder, and a stopped one is told which landing stopped it", () => {
+  const root = fixture();
+  try {
+    const holder = join(root, "preview.owner");
+    writeFileSync(holder, "preview");
+    const preview: CapacityRequest = { ...request("preview", "preview"), owner: { kind: "holder", path: holder, identity: "preview" },
+      cgroup: "/user.slice/user-1001.slice/user@1001.service/preview.slice/preview-gen.slice/preview-gen-preview.slice" };
+    assert.equal(readCapacityObservation([preview]).giveWay?.preview, undefined, "undeclared");
+    writeFileSync(`${holder}.give-way`, "0\n");
+    assert.equal(readCapacityObservation([preview]).giveWay?.preview, 0);
+    writeFileSync(`${holder}.give-way`, "high");
+    assert.equal(readCapacityObservation([preview]).giveWay?.preview, undefined, "anything but one digit declares nothing");
+    // Its holder stays for its own controller's cleanup, so it leaves the ledger by its group alone.
+    const yieldedFor = { landingId: "gate", landingJob: "Landing gate 564f6cc45168", at: 1_795_043_000_000, residentBytes: 3 };
+    assert.equal(capacityOwnerState(preview), "alive", "an unyielded preview follows its holder");
+    assert.equal(capacityOwnerState({ ...preview, yieldedFor }), "gone");
+    const stops: string[] = [];
+    stopYieldedPreview({ ...preview, yieldedFor }, (unit) => stops.push(unit));
+    assert.deepEqual(stops, ["preview-gen-preview.slice"]);
+    assert.deepEqual(JSON.parse(readFileSync(`${holder}.yielded`, "utf8")), { requestId: "preview", ...yieldedFor });
+    // Only a unit of this user's manager, and only a preview a landing chose.
+    stopYieldedPreview({ ...preview, yieldedFor, cgroup: "/system.slice/ssh.service" }, (unit) => stops.push(unit));
+    stopYieldedPreview(preview, (unit) => stops.push(unit));
+    assert.deepEqual(stops, ["preview-gen-preview.slice"]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

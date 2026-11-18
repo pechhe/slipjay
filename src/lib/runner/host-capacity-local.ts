@@ -100,6 +100,11 @@ export function capacityGroupEmpty(cgroup: string | null): boolean | null {
 }
 
 export function capacityOwnerState(request: CapacityRequest): "alive" | "gone" | "unknown" {
+  // A preview a landing stopped (SJ-275) leaves once its group is empty: its holder stays for its own controller's cleanup.
+  if (request.yieldedFor) {
+    const empty = capacityGroupEmpty(request.cgroup);
+    return empty === true ? "gone" : empty === false ? "alive" : "unknown";
+  }
   const owner = capacityControllerState(request);
   if (owner !== "gone") return owner;
   // Holder deletion is the machine verifier's cleanup certificate, after labelled Docker cleanup as well as cgroups.
@@ -112,8 +117,11 @@ export function readCapacityObservation(requests: readonly CapacityRequest[]): C
   const owners: Record<string, "alive" | "gone" | "unknown"> = {};
   const currentBytes: Record<string, number | null> = {};
   const peakBytes: Record<string, number | null> = {};
+  const giveWay: Record<string, number> = {};
   for (const request of requests) {
     owners[request.id] = capacityOwnerState(request);
+    const declared = request.lane === "preview" ? capacityGiveWay(request) : null;
+    if (declared !== null) giveWay[request.id] = declared;
     // What the job cannot give back (SJ-267), not `memory.current` or `memory.peak`: both count the file cache a
     // checkout or install leaves, which the kernel reclaims and MemAvailable already counts as available.
     const stat = request.cgroup ? cgroupFile(request.cgroup, "memory.stat") : null;
@@ -132,7 +140,17 @@ export function readCapacityObservation(requests: readonly CapacityRequest[]): C
     totalBytes: Number(total) * 1024, availableBytes: Number(available) * 1024,
     memoryFullAvg10: full === undefined ? null : Number(full), currentBytes, peakBytes,
   } : null;
-  return { owners, reading };
+  return { owners, reading, giveWay };
+}
+
+/**
+ * How readily a holder-owned preview gives way to a landing (SJ-275): a single digit its owner keeps beside its holder,
+ * `<holder>.give-way`, lower first. The owner may change it while the preview runs (a review hold raises it).
+ */
+export function capacityGiveWay(request: CapacityRequest): number | null {
+  if (request.owner.kind !== "holder") return null;
+  const declared = file(`${request.owner.path}.give-way`);
+  return declared.state === "read" && /^\d$/.test(declared.text.trim()) ? Number(declared.text.trim()) : null;
 }
 
 
