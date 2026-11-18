@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { readCapacityPolicy } from "../../src/lib/runner/host-capacity-local.ts";
-import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
+import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, countedBytes, decideCapacity, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
   mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5, takeRoomAfterMs: 5 * 60_000,
@@ -206,7 +206,9 @@ test("a landing queued beside three running previews is admitted within its wait
   // Before: typical sizes learned from memory.peak (landing at its 24 GiB ceiling, previews 7.75 GiB) left 24 GiB free.
   // Its first poll is still inside the five minutes in which real memory alone does not decide.
   const inflated = { ...incident, typical: { ...incident.typical, landing: 24 * GiB, preview: 7.75 * GiB } };
-  const before = decideCapacity(inflated, [...previews, landing], landing.id, incidentReading(4.5, 5.6), 31 * minute);
+  // The previews are taken as just started here, so each still counts by the lane's size as every preview did then.
+  const fresh = previews.map((preview) => ({ ...preview, admittedAt: 30 * minute }));
+  const before = decideCapacity(inflated, [...fresh, landing], landing.id, incidentReading(4.5, 5.6), 31 * minute);
   assert.equal(before.admitted, false);
   // After: legacy peaks size nothing, so the configured typical sizes apply, and the previews count by the memory they
   // cannot give back. The landing is admitted at its first poll.
@@ -336,4 +338,22 @@ test("the take-room threshold is read from hostBudget and defaults to five minut
   const landing = queued("landing", 5 * minute);
   assert.equal(decideCapacity(patient, [...previews, landing], landing.id, growing, 35 * minute).admitted, false);
   assert.equal(decideCapacity(patient, [...previews, landing], landing.id, growing, 40 * minute).admitted, true);
+});
+
+test("a preview that has served ten minutes counts by what it holds, so other work is not kept out by room it never takes", () => {
+  // peach-box, 18 Nov: three combined previews held 4.5 GiB (5.6 GiB at most) against a learned 10.6 GiB preview size.
+  const learned: CapacityPolicy = { ...incident, typical: { ...incident.typical, preview: 10.6 * GiB } };
+  const reading = incidentReading(4.5, 5.6);
+  const check = { ...request("check", "agent", 40 * minute, 16 * GiB), polledAt: 40 * minute };
+  const at = (admittedAt: number) => previews.map((preview) => ({ ...preview, admittedAt }));
+  for (const preview of at(0)) assert.equal(countedBytes(learned, preview, reading, 40 * minute), 6.6 * GiB, "its 5.6 GiB peak and a 1 GiB margin");
+  assert.equal(decideCapacity(learned, [...at(0), check], check.id, reading, 40 * minute).admitted, true, "16 GiB fits beside three settled previews");
+  // Five minutes in, a preview may still be compiling: it counts at the size previews reach.
+  for (const preview of at(35 * minute)) assert.equal(countedBytes(learned, preview, reading, 40 * minute), 10.6 * GiB);
+  assert.equal(decideCapacity(learned, [...at(35 * minute), check], check.id, reading, 40 * minute).admitted, false);
+  // Unmeasured, it counts at its whole ceiling, as before.
+  assert.equal(countedBytes(learned, at(0)[0]!, null, 40 * minute), 12 * GiB);
+  // Only previews: a landing gate holding the same counts by its kind's size.
+  const gate = { ...request("c57368b0", "landing", 0, 24 * GiB), admittedAt: 0 };
+  assert.equal(countedBytes(learned, gate, reading, 40 * minute), 12 * GiB);
 });

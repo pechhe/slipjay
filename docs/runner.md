@@ -744,7 +744,10 @@ may fit a smaller profile; multi-compiler audit commands need their full working
 
 A job is admitted at its kind of work's typical size (SJ-244), and while it runs it
 counts as the larger of that and the most unreclaimable memory it has held, never more
-than its profile. Admission needs that size, and the queue head's, within available memory less
+than its profile. A preview that has served ten minutes counts instead by the most it has
+held plus 1 GiB: past its first compile it has shown its size, and on 18 Nov three combined
+previews holding 4-6 GiB each counted at the preview lane's learned 10.6 GiB and kept agent
+checks waiting up to 24 minutes. Admission needs that size, and the queue head's, within available memory less
 the reserve and the room running jobs may still grow back into; there is no separate
 fixed budget (SJ-246).
 

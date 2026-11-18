@@ -149,15 +149,26 @@ const TAKE_ROOM_CLASSES: ReadonlyArray<CapacityClass> = ["landing", "release"];
 
 /**
  * What a running job counts for (SJ-244): the larger of its kind's typical need and the most unreclaimable memory it has
- * held (SJ-267), never more than its ceiling. Ceilings overlap, so a burst past what was counted is met by the host's runtime order
+ * held (SJ-267), never more than its ceiling; a settled preview counts by its own use alone, plus a margin. Ceilings overlap, so a burst past what was counted is met by the host's runtime order
  * of who gives way first, not by holding every ceiling free. Without both measurements it counts at its ceiling.
  */
-export function countedBytes(policy: CapacityPolicy, request: CapacityRequest, reading: CapacityReading | null): number {
+export function countedBytes(policy: CapacityPolicy, request: CapacityRequest, reading: CapacityReading | null, now: number): number {
   const current = reading?.currentBytes[request.id];
   const peak = reading?.peakBytes[request.id];
   if (!measured(current) || !measured(peak)) return request.bytes;
+  // A preview that has served a while has shown what it holds: it counts by that, not by the size previews in general
+  // reach. On 18 Nov three combined previews held 4-6 GiB each but counted at the lane's learned 10.6 GiB, and agent
+  // checks waited up to 24 minutes on room the previews never took. The kernel stops previews first if one grows.
+  if (request.lane === "preview" && request.admittedAt !== null && now - request.admittedAt >= CAPACITY_PREVIEW_SETTLE_MS) {
+    return Math.min(request.bytes, Math.max(peak, current) + CAPACITY_PREVIEW_MARGIN_BYTES);
+  }
   return Math.min(request.bytes, Math.max(admissionBytes(policy, request), peak, current));
 }
+
+/** How long a preview serves before it counts by its own use: past its first compile and page warming. */
+export const CAPACITY_PREVIEW_SETTLE_MS = 10 * 60_000;
+/** What a settled preview counts for beyond the most it has held: room for a recompile after a patch. */
+export const CAPACITY_PREVIEW_MARGIN_BYTES = 1024 ** 3;
 
 /**
  * A queued request whose owner has not asked for two minutes is not waiting now (SJ-244): a preview polls once per
@@ -172,7 +183,7 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
   const active = requests.filter((item) => item.admittedAt !== null);
   const queue = capacityOrder(requests, policy.agingMs);
   const head = queue.find((item) => item.id === id || now - (item.polledAt ?? item.queuedAt) < CAPACITY_WAITER_FRESH_MS);
-  const counted = active.map((item) => ({ item, bytes: countedBytes(policy, item, reading) }));
+  const counted = active.map((item) => ({ item, bytes: countedBytes(policy, item, reading, now) }));
   const activeBytes = counted.reduce((sum, { bytes }) => sum + bytes, 0);
   // Room each running job may still grow into before it exceeds what it is counted for; already in use is already
   // missing from available memory.
