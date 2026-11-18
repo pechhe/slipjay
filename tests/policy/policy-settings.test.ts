@@ -25,6 +25,13 @@ test("process round-trips, defaults to standard when absent, and refuses anythin
   assert.equal(parseExecutionPolicy(applyPolicyPatch(text, { process: null }).text).process, undefined);
 });
 
+test("migration finalization names up to 100 trigger paths, and refuses more", () => {
+  const withTriggers = (count: number) => JSON.stringify({ ...JSON.parse(base), migrationFinalization: {
+    ...JSON.parse(base).migrationFinalization, triggerPaths: Array.from({ length: count }, (_, index) => `packages/p${index}/src/schema.ts`) } });
+  assert.equal(parseExecutionPolicy(withTriggers(100)).migrationFinalization?.triggerPaths.length, 100);
+  assert.throws(() => parseExecutionPolicy(withTriggers(101)), /triggerPaths must list 1-100 paths/);
+});
+
 test("budgets are a settings field of positive seconds, and anything else is refused", () => {
   const budgets = { verifyP50Seconds: 90, verifyP90Seconds: 180, testFileSeconds: 30 };
   const { text } = applyPolicyPatch(base, { budgets });

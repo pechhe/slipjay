@@ -99,6 +99,8 @@ const POLICY_BYTES = 64 * 1024;
 const MAX_CHECKS = 20;
 const MAX_ARGS = 100;
 const MAX_ARG_LENGTH = 32_000;
+/** A repository with a schema package per domain names each schema file; 50 was outgrown (YardSmith, 17 Nov 2026). */
+const MAX_MIGRATION_PATHS = 100;
 /** A bookmark name that cannot be read as an option, a revset operator or a range. */
 export const SAFE_BRANCH: RegExp = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 const EXECUTABLE = /^[A-Za-z0-9._+-]+$/;
@@ -160,7 +162,8 @@ const migrationPath = (value: unknown): string => {
   return value;
 };
 const migrationPaths = (value: unknown, field: string): string[] => {
-  if (!Array.isArray(value) || !value.length || value.length > 50) fail(`migrationFinalization.${field} must list 1-50 paths`);
+  if (!Array.isArray(value) || !value.length || value.length > MAX_MIGRATION_PATHS)
+    fail(`migrationFinalization.${field} must list 1-${MAX_MIGRATION_PATHS} paths`);
   return [...new Set(value.map(migrationPath))];
 };
 const migrationCommand = (value: unknown, field: string): MigrationCommand => {
