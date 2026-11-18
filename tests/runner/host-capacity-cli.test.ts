@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,6 +88,35 @@ test("explicit smaller bounds fail before execution when unconfigured, malformed
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
 
+
+test("the waits report answers from the ledger without waiting for room, and a metric reads its value", () => {
+  const home = fixture();
+  try {
+    // A host that never used the ledger reports no waits rather than an error, and the report writes nothing.
+    const empty = run(home, ["waits", "--json"]);
+    assert.equal(empty.status, 0, empty.stderr);
+    assert.deepEqual(JSON.parse(empty.stdout), { value: 0, evidence: {} });
+    assert.equal(existsSync(join(home, ".slipjay", "host-budget.sqlite")), false);
+    assert.match(run(home, ["waits"]).stdout, /none/);
+    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "shadow" } }));
+    const holder = join(home, "holder");
+    writeFileSync(holder, "fixture");
+    const request = { id: "b".repeat(32), job: "waited gate", lane: "landing", cgroup: "/missing-fixture", owner: { kind: "holder", path: holder, identity: "fixture" } };
+    assert.equal(JSON.parse(run(home, ["poll", JSON.stringify(request)]).stdout).outcome, "admitted");
+    const text = run(home, ["waits"]);
+    assert.equal(text.status, 0, text.stderr);
+    assert.match(text.stdout, /landing: 1 ended, p50 0s, p90 0s, max 0s, 0 at the wait limit/);
+    const report = JSON.parse(run(home, ["waits", "--json", "--hours", "12"]).stdout);
+    assert.deepEqual(report.evidence, { landing: { count: 1, p50: 0, p90: 0, max: 0, waitLimit: 0 } });
+    assert.equal(report.value, 0, "the number a metric reads is the largest p90, zero when nothing waited for room");
+    assert.deepEqual(JSON.parse(run(home, ["waits", "--json", "--hours", "168"]).stdout), report, "a week is the longest window the ledger keeps");
+    for (const args of [["--hours", "0"], ["--hours", "169"], ["--hours"], ["--since", "1"], ["--json", "--json"]]) {
+      const refused = run(home, ["waits", ...args]);
+      assert.equal(refused.status, 2, args.join(" "));
+      assert.match(refused.stderr, /Usage: slipjay host-budget waits/);
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
 
 const systemdUsable = process.platform === "linux" && spawnSync("systemctl", ["--user", "show-environment"], { timeout: 5000, stdio: "ignore" }).status === 0;
 

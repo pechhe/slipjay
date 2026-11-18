@@ -1,6 +1,6 @@
 import { awaitHostBudget, hostShell, type HostBudgetClass } from "../lib/runner/host-budget.ts";
-import { CAPACITY_CLASSES, parseCapacityMemoryMax, type CapacityClass, type CapacityRequest } from "../lib/runner/host-capacity.ts";
-import { hostCapacityStatus, pollHostCapacity, recoverHostCapacity, runWithHostCapacity, sampleHostCapacity } from "../lib/runner/host-capacity-command.ts";
+import { CAPACITY_CLASSES, CAPACITY_WAIT_DEFAULT_HOURS, formatCapacityWaits, parseCapacityMemoryMax, type CapacityClass, type CapacityRequest } from "../lib/runner/host-capacity.ts";
+import { hostCapacityStatus, hostCapacityWaits, pollHostCapacity, recoverHostCapacity, runWithHostCapacity, sampleHostCapacity } from "../lib/runner/host-capacity-command.ts";
 import { readCapacityPolicy } from "../lib/runner/host-capacity-local.ts";
 
 export async function runHostBudget(args: string[]): Promise<number> {
@@ -12,6 +12,21 @@ export async function runHostBudget(args: string[]): Promise<number> {
   if (args[0] === "status" || args[0] === "recover") {
     if (args.length !== 1) throw new Error("usage: slipjay host-budget status|recover");
     console.log(JSON.stringify(args[0] === "status" ? hostCapacityStatus() : recoverHostCapacity()));
+    return 0;
+  }
+  if (args[0] === "waits") {
+    const usage = "Usage: slipjay host-budget waits [--hours <n>] [--json]";
+    let hours: number | undefined;
+    let json = false;
+    for (let index = 1; index < args.length; index += 1) {
+      if (args[index] === "--json" && !json) json = true;
+      else if (args[index] === "--hours" && hours === undefined) {
+        hours = Number(args[++index]);
+        if (!Number.isFinite(hours) || hours <= 0 || hours > 24 * 7) { console.error(usage); return 2; }
+      } else { console.error(usage); return 2; }
+    }
+    const waits = hostCapacityWaits(hours ?? CAPACITY_WAIT_DEFAULT_HOURS);
+    console.log(json ? JSON.stringify(waits) : formatCapacityWaits(waits, hours ?? CAPACITY_WAIT_DEFAULT_HOURS));
     return 0;
   }
   if (args[0] === "sample") {

@@ -4,8 +4,8 @@ import { setTimeout as pause } from "node:timers/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources, readContainerResidentBytes } from "./host-capacity-local.ts";
-import { openCapacityStore } from "./host-capacity-store.ts";
-import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, type CapacityClass, type CapacityRequest } from "./host-capacity.ts";
+import { openCapacityStore, readCapacityWaits } from "./host-capacity-store.ts";
+import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, summariseCapacityWaits, type CapacityClass, type CapacityRequest, type CapacityWaits } from "./host-capacity.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 
 /** One transaction per poll; the caller owns its wait and can keep it outside verification deadlines. */
@@ -59,6 +59,11 @@ export function hostCapacityStatus() {
     const requests = store.requests();
     return { configured: true as const, policy, typical: store.typical(policy), requests, observation: readCapacityObservation(requests), history: store.history() };
   } finally { store.close(); }
+}
+
+/** How long each kind of work waited over the last `hours`, read from the ledger without waiting for room or writing. */
+export function hostCapacityWaits(hours: number, now = Date.now()): CapacityWaits {
+  return summariseCapacityWaits(readCapacityWaits(capacityStorePath(), now - hours * 3_600_000));
 }
 
 const systemctl = (args: string[]) => {

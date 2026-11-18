@@ -733,7 +733,7 @@ and record its duration separately from a later authoritative `verifying` stage.
 ## Completion-aware host capacity (SJ-241)
 
 A host opts in with `hostBudget` in its own `~/.slipjay/config.json`. All participants
-must use a SlipJay version supporting `host-budget policy|poll|status|recover|run|sample`.
+must use a SlipJay version supporting `host-budget policy|poll|status|recover|run|sample|waits`.
 Start with `mode: "shadow"`; the default service reserve is 8 GiB, aging interval 60 seconds, maximum wait 30 minutes and memory-full PSI avg10
 limit 5 percent. Default profiles are landing 24 GiB; release, image, agent and audit
 16 GiB; preview 4 GiB. A profile is a kind of work's ceiling: the most one job can count
@@ -815,6 +815,20 @@ Example (merge this property into the host config, preserving other settings):
 {"hostBudget":{"mode":"shadow","reserveBytes":8589934592,"profiles":{"preview":12884901888},"typical":{"preview":6442450944}}}
 ```
 
+The ledger keeps each request's wait, in its own rows apart from both the live requests and the
+per-poll decisions: one row per request holding its kind of work, its job name, its arrival, the
+moment it stopped waiting and how, whether it was admitted, ran out of time at the wait limit
+or ended with its owner first. The row is written in the same transaction that admitted the
+request or gave up on it, so a request admitted one day ago keeps exactly one row however often
+it polls after that, and a request that waited nothing records a zero-second wait. Rows older
+than seven days go with the next wait written. `slipjay host-budget waits [--hours <n>] [--json]`
+answers how long work waits for room: one line per kind of work with how many waits ended in the
+window (24 hours unless `--hours` says otherwise), p50, p90 and the longest in seconds, and how
+many hit the wait limit. `--json` adds `value`, the largest p90 across kinds of work in the
+window and zero when nothing waited, which a Champion metric reads without a shell in well under
+30 seconds; it reads the ledger read-only, so it never waits for admission or spans a
+transaction, and an unconfigured or never-used host reports nothing rather than an error.
+
 Machine attempts register their holder identity before checkout preparation and keep
 one commitment across every setup/check command. Holder deletion certifies exact
 slice and labelled Docker cleanup. Cooperative jobs use:
@@ -823,6 +837,7 @@ slice and labelled Docker cleanup. Cooperative jobs use:
 slipjay host-budget run --class agent --job 'bounded check' -- bun run check:changed
 slipjay host-budget run --class image --job 'images' --measure-container buildx_buildkit_builder0 -- ./build-images
 slipjay host-budget status
+slipjay host-budget waits --hours 24
 slipjay host-budget recover
 ```
 

@@ -199,6 +199,55 @@ export function decideCapacity(policy: CapacityPolicy, requests: readonly Capaci
 /** A finished job's measured peak of unreclaimable memory, kept in the ledger's own history (SJ-246, SJ-267). */
 export type CapacitySample = { lane: CapacityClass; peakBytes: number };
 
+/** How a request stopped waiting: admitted, out of time, or its owner ended first. */
+export type CapacityWaitOutcome = "admitted" | "wait-limit" | "abandoned";
+
+/** One request's wait, recorded in the ledger when it ended, so a day of waits outlives the per-poll decisions. */
+export type CapacityWait = { lane: CapacityClass; job: string; queuedAt: number; endedAt: number; outcome: CapacityWaitOutcome };
+
+/** How long one kind of work waited: every wait that ended in the window, in seconds, and those that ran out of time. */
+export type CapacityWaitSummary = { count: number; p50: number; p90: number; max: number; waitLimit: number };
+
+/** A window's waits: `value` is the number a Champion metric reads, the largest p90 across kinds of work. */
+export type CapacityWaits = { value: number; evidence: Record<string, CapacityWaitSummary> };
+
+/** How long waits are kept: long enough to answer what waited yesterday, short enough to stay small. */
+export const CAPACITY_WAIT_RETENTION_MS = 7 * 24 * 3_600_000;
+export const CAPACITY_WAIT_DEFAULT_HOURS = 24;
+
+const waitSeconds = (ms: number) => Math.round(Math.max(0, ms) / 100) / 10;
+
+/**
+ * Each kind of work's waits over a window: how many ended, the median, the 90th percentile and the longest in
+ * seconds, and how many hit the wait limit. Kinds with no waits are left out, so `evidence` names only work that waited.
+ */
+export function summariseCapacityWaits(waits: readonly CapacityWait[]): CapacityWaits {
+  const lanes = [...new Set(waits.map((wait) => wait.lane))]
+    .sort((a, b) => CAPACITY_CLASSES.indexOf(a) - CAPACITY_CLASSES.indexOf(b) || a.localeCompare(b));
+  const evidence = Object.fromEntries(lanes.map((lane): [string, CapacityWaitSummary] => {
+    const mine = waits.filter((wait) => wait.lane === lane);
+    const seconds = mine.map((wait) => waitSeconds(wait.endedAt - wait.queuedAt)).toSorted((a, b) => a - b);
+    return [lane, {
+      count: seconds.length, p50: seconds[Math.ceil(seconds.length * 0.5) - 1]!, p90: seconds[Math.ceil(seconds.length * 0.9) - 1]!,
+      max: seconds.at(-1)!, waitLimit: mine.filter((wait) => wait.outcome === "wait-limit").length,
+    }];
+  }));
+  return { value: Math.max(0, ...Object.values(evidence).map((summary) => summary.p90)), evidence };
+}
+
+/** What the waits report says to a person: one line per kind of work that waited, and the number a metric reads. */
+export function formatCapacityWaits(waits: CapacityWaits, hours: number): string {
+  const lanes = Object.entries(waits.evidence);
+  if (!lanes.length) return `Waits ending in the last ${hours}h: none`;
+  const lines = [`Waits ending in the last ${hours}h: ${lanes.reduce((sum, [, summary]) => sum + summary.count, 0)} ended`];
+  for (const [lane, summary] of lanes) {
+    lines.push(`${lane}: ${summary.count} ended, p50 ${summary.p50}s, p90 ${summary.p90}s, max ${summary.max}s, ${summary.waitLimit} at the wait limit`);
+  }
+  const [longest] = lanes.filter(([, summary]) => summary.p90 === waits.value);
+  lines.push(`Longest p90: ${longest![0]} ${waits.value}s`);
+  return lines.join("\n");
+}
+
 /** How many of a kind of work's latest peaks are learned from, and how many it needs before they replace its configured size. */
 export const CAPACITY_SAMPLE_WINDOW = 50;
 export const CAPACITY_SAMPLE_MINIMUM = 3;

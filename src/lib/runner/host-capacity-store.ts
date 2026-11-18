@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { dirname } from "node:path";
-import { chmodSync, mkdirSync } from "node:fs";
-import { CAPACITY_GROWTH_STEP_BYTES, CAPACITY_SAMPLE_FLOOR_BYTES, CAPACITY_SAMPLE_WINDOW, decideCapacity, learnTypical, sameCapacityOwner, withLearnedTypical, type CapacityDecision, type CapacityPolicy, type CapacityReading, type CapacityRequest, type CapacitySample } from "./host-capacity.ts";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { CAPACITY_GROWTH_STEP_BYTES, CAPACITY_SAMPLE_FLOOR_BYTES, CAPACITY_SAMPLE_WINDOW, CAPACITY_WAIT_RETENTION_MS, decideCapacity, learnTypical, sameCapacityOwner, withLearnedTypical, type CapacityDecision, type CapacityPolicy, type CapacityReading, type CapacityRequest, type CapacitySample, type CapacityWait, type CapacityWaitOutcome } from "./host-capacity.ts";
 
 export type CapacityObservation = {
   reading: CapacityReading | null;
@@ -14,6 +14,32 @@ export type CapacityReceipt = {
   decision: CapacityDecision;
   request: CapacityRequest;
 };
+
+/** Waits ended at or after `since`, oldest first: one row per request, kept a week. */
+const WAITS_SINCE = "SELECT lane, job, queued_at AS queuedAt, ended_at AS endedAt, outcome FROM waits WHERE ended_at >= ? ORDER BY ended_at, request_id";
+const waitsSince = (db: DatabaseSync, since: number): CapacityWait[] =>
+  (db.prepare(WAITS_SINCE).all(since) as CapacityWait[]).map((wait) => ({ ...wait }));
+
+/**
+ * The waits that ended at or after `since`, read without writing to the ledger, so a metric can ask it beside live
+ * admissions. A ledger that was never written, or one from before waits were, has none; that is an empty report, not an
+ * error. A ledger whose write-ahead log still needs recovery opens only for writing, so it is read the way admission
+ * reads it.
+ */
+export function readCapacityWaits(path: string, since: number): CapacityWait[] {
+  if (!existsSync(path)) return [];
+  try {
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      db.exec("PRAGMA busy_timeout=5000;");
+      if (!db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='waits'").get()) return [];
+      return waitsSince(db, since);
+    } finally { db.close(); }
+  } catch {
+    const store = openCapacityStore(path);
+    try { return store.waits(since); } finally { store.close(); }
+  }
+}
 
 /**
  * One host ledger, shared by every CLI/runner caller. Observation and admission happen in the same SQLite write
@@ -32,7 +58,7 @@ export function openCapacityStore(path: string) {
     const pause = new Int32Array(new SharedArrayBuffer(4));
     for (;;) {
       try {
-        db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request_id TEXT NOT NULL, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS peaks (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, lane TEXT NOT NULL, job TEXT NOT NULL, peak_bytes INTEGER NOT NULL);");
+        db.exec("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS decisions (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, request_id TEXT NOT NULL, body TEXT NOT NULL); CREATE TABLE IF NOT EXISTS peaks (seq INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, lane TEXT NOT NULL, job TEXT NOT NULL, peak_bytes INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS waits (request_id TEXT PRIMARY KEY, lane TEXT NOT NULL, job TEXT NOT NULL, queued_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, outcome TEXT NOT NULL); CREATE INDEX IF NOT EXISTS waits_ended_at ON waits(ended_at);");
         // A ledger from before growth, or the measure of its peaks, was recorded gains the column; a concurrent opener
         // adding it first is not an error.
         const columns = (db.prepare("PRAGMA table_info(peaks)").all() as Array<{ name: string }>).map(({ name }) => name);
@@ -73,9 +99,23 @@ export function openCapacityStore(path: string) {
   // peaks of unreclaimable memory (`measure` 'resident', SJ-267) size work; the `memory.peak` ones before them (no
   // measure) stay as history.
   const samples = () => (db.prepare("SELECT lane, peak_bytes AS peakBytes FROM peaks WHERE measure = 'resident' ORDER BY seq").all() as CapacitySample[]);
+  /**
+   * The one row a waiting request leaves when its wait ends, written in the transaction that admitted it or gave up on
+   * it. A request already admitted writes nothing, and the primary key means a wait whose end is seen again (a repeat
+   * poll after the wait limit, or recovery of a request that already recorded its end) keeps its first row. Waits older
+   * than a week go with the write that follows them, so a day's question stays small.
+   */
+  const endWait = (request: CapacityRequest, outcome: CapacityWaitOutcome, at: number) => {
+    if (request.admittedAt !== null) return;
+    db.prepare("INSERT OR IGNORE INTO waits(request_id,lane,job,queued_at,ended_at,outcome) VALUES (?,?,?,?,?,?)")
+      .run(request.id, request.lane, request.job, request.queuedAt, at, outcome);
+    db.prepare("DELETE FROM waits WHERE ended_at < ?").run(at - CAPACITY_WAIT_RETENTION_MS);
+  };
   const complete = (request: CapacityRequest, kind: "finished" | "recovered", evidence: unknown = null, at = Date.now()) => {
     record(request.id, { kind, request, queueMs: (request.admittedAt ?? at) - request.queuedAt,
       runMs: request.admittedAt === null ? null : at - request.admittedAt, evidence }, at);
+    // An owner that ended before admission abandoned its wait; one that ran and finished had no wait left to end.
+    if (kind === "recovered") endWait(request, "abandoned", at);
     // Its evidence's `memoryPeakBytes` is the kernel's `memory.peak`, file cache included, so it sizes nothing (SJ-267).
     const reported = evidence as { memoryResidentBytes?: unknown; measuredPeakBytes?: unknown } | null;
     const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : -1;
@@ -108,6 +148,7 @@ export function openCapacityStore(path: string) {
     /** Each kind of work's effective typical size, where it came from and how many peaks it rests on. */
     typical: (policy: CapacityPolicy) => learnTypical(policy, samples()),
     history: () => db.prepare("SELECT at, request_id AS requestId, body FROM decisions ORDER BY seq DESC LIMIT 100").all(),
+    waits: (since: number) => waitsSince(db, since),
     /** A running job's runner reports memory it uses outside its cgroup; its peak only ever rises. */
     noteUsage(id: string, owner: CapacityRequest["owner"], externalBytes: number, peakBytes: number): void {
       transaction(() => {
@@ -173,20 +214,24 @@ export function openCapacityStore(path: string) {
           outcome: admitted ? "admitted" : expired ? "unavailable" : "waiting", mode: policy.mode, decision, request: updated,
         };
         record(registered.id, receipt, now);
+        // The wait's end is written with the decision that ended it: admitted now, or out of time and not running. A poll
+        // that keeps waiting ends nothing.
+        if (admitted) endWait(registered, "admitted", now);
+        else if (expired) endWait(registered, "wait-limit", now);
         // Diagnostics are bounded, unlike live ownership. Never prune a live claim merely to bound the ledger.
         db.exec("DELETE FROM decisions WHERE seq < (SELECT COALESCE(MAX(seq),0)-1000 FROM decisions)");
         return receipt;
       });
     },
     /** A release is an observation, not an authority to forget descendants. Unknown means keep. */
-    recover(observe: (requests: readonly CapacityRequest[]) => CapacityObservation): number {
+    recover(observe: (requests: readonly CapacityRequest[]) => CapacityObservation, now = Date.now()): number {
       return transaction(() => {
         const requests = all();
         const observed = observe(requests);
         let removed = 0;
-        for (const request of notePeaks(requests, observed.reading, Date.now())) {
+        for (const request of notePeaks(requests, observed.reading, now)) {
           if (observed.owners[request.id] !== "gone") continue;
-          complete(request, "recovered");
+          complete(request, "recovered", null, now);
           removed += 1;
         }
         return removed;
