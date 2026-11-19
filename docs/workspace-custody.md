@@ -142,15 +142,37 @@ Ordinary remove/release/landing cleanup, direct orphan discard, partial-spare
 discard and dependency/generated-output eviction share the authority. Content,
 process-holder, legacy PID, pending-delivery and recovery guards still apply.
 
+The fence names the process that placed it (`controller`) and, once the
+operation reaches its point of no return, that it may have destroyed checkout state
+(`destructive: true`). The operation declares that point itself, immediately before
+its first step that can destroy or orphan state, while re-proving under the writer
+lock that the fence is still its own. Retirement declares it after its last checks,
+before the dependency handover: the move-back runs only if the process survives and
+can fail tree by tree, so the move is treated as destructive. Discard and eviction
+declare it before their deletion step. A record written before the fence
+carried a controller still loads, and is treated as destructive.
+
 A process crash or uncertain destructive failure leaves its fence inspectably
 recovery-required. Public generation and fence identifiers are diagnostics, never
 permission to clear that fence. There is no command or public library operation
 that accepts a caller's retirement-settlement reference: SlipJay cannot verify
 that an interrupted destructive worker and its work have stopped or transferred.
 Such unknown teardown remains fenced. Ordinary successful completion clears only
-the retiring operation's own fence; known working-copy-changed refusals also clear
-it because retirement proved that it kept the checkout. Credential-authenticated
-caller-claim settlement and transfer remain available through the protocol above.
+the retiring operation's own fence, known working-copy-changed refusals clear it
+because retirement proved that it kept the checkout, and so does any failure that
+arrives **before** the operation declared its point of no return: nothing was
+destroyed, so the checkout is exactly as it was and may admit work again.
+Credential-authenticated caller-claim settlement and transfer remain available
+through the protocol above.
+
+The hourly `maintain` pass releases the fence a process could not clear itself: a
+crash before the point of no return. It acts only on a fence that names a controller,
+is not destructive, and whose controller is provably gone — its PID probes `ESRCH`
+and no readable identity stands there, the same standard the abandoned-custody rule
+uses, so a missing identity, a permission error and a reused PID all keep the fence.
+It re-reads the fence id under the canonical writer before deleting it. Legacy fences
+(no controller) and destructive fences are left alone and continue to be reported as
+recovery-required wherever custody is judged.
 
 Controller matching on Linux uses boot ID plus `/proc` start time and excludes
 zombies. Darwin uses `kern.boottime` and `ps lstart` for diagnostics; its timestamp

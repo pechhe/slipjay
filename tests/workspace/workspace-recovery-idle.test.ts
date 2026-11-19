@@ -5,7 +5,8 @@ import { test } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { holdWorkspace } from "../support/workspace-holder.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
-import { abandonedCustodyNote, acquireWorkspaceClaim, STALE_CUSTODY_IDLE_MS, withUnclaimedWorkspace, workspaceClaimRefusal, workspaceClaimStatus } from "../../src/lib/workspace/workspace-claims.ts";
+import { abandonedCustodyNote, acquireWorkspaceClaim, releaseAbandonedRetirementFences, STALE_CUSTODY_IDLE_MS, withUnclaimedWorkspace, workspaceClaimRefusal, workspaceClaimStatus } from "../../src/lib/workspace/workspace-claims.ts";
+import { goneController, writeRetirementFence } from "./fixtures/workspace-fence.ts";
 import type { ClaimView } from "../../src/lib/workspace/workspace-claims.ts";
 import { recordWorkspaceActivity } from "../../src/lib/workspace/workspace-eviction.ts";
 import { claimController } from "../../src/lib/workspace/workspace-claim-identity.ts";
@@ -83,6 +84,41 @@ test("confirmed-gone, 24h-idle custody settles only at the destructive fence", a
     const status = await workspaceClaimStatus(w.workspacePath);
     assert.equal(status.claims[0]!.state, "released");
     assert.equal(status.claims[0]!.settlementRef, "slipjay:confirmed-controller-gone-idle-24h");
+  } finally { await f.dispose(); }
+});
+
+test("the hourly pass releases only a harmless fence whose controller is provably gone", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("fence-housekeeping", f.repo);
+    await withUnclaimedWorkspace(w.workspacePath, "test guarded destructive action", async (check) => { await check(); });
+    const fence = async (fence: Record<string, unknown> | null) => {
+      await writeRetirementFence(w.workspacePath, fence);
+      return (await workspaceClaimStatus(w.workspacePath)).retirement;
+    };
+    // A retirement whose process died before its point of no return: nothing was destroyed, so the
+    // checkout admits work again instead of failing every claim on it for ever.
+    await fence({ id: "abandoned", reason: "retire checkout", controller: goneController() });
+    assert.deepEqual((await releaseAbandonedRetirementFences()).map((entry) => entry.reason), ["retire checkout"]);
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).retirement, null);
+    assert.ok(await acquireWorkspaceClaim(w.workspacePath, f.repo, w.current.name, { requestId: "after:release", ownerId: "after", credential: "y".repeat(32), obligationRef: "after:obligation", controller: await claimController() }));
+
+    const alive = await claimController();
+    assert.ok(alive);
+    assert.ok(await fence({ id: "live-owner", reason: "retire checkout", controller: alive }), "a live controller may still be destroying");
+    assert.deepEqual(await releaseAbandonedRetirementFences(), [], "housekeeping needs proof the controller is gone");
+    assert.ok((await workspaceClaimStatus(w.workspacePath)).retirement);
+
+    assert.ok(await fence({ id: "uncertain", reason: "retire checkout", controller: goneController(), destructive: true }), "a destructive fence stays fenced, fail closed");
+    assert.deepEqual(await releaseAbandonedRetirementFences(), [], "a fence past its point of no return is never released");
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).retirement?.destructive, true);
+
+    const legacy = await fence({ id: "legacy", reason: "retire checkout" });
+    assert.equal(legacy?.id, "legacy", "a legacy fence still loads and is reported");
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).reason, "retirement in progress or interrupted; recovery required");
+    await assert.rejects(acquireWorkspaceClaim(w.workspacePath, f.repo, w.current.name, { requestId: "during:legacy", ownerId: "during", credential: "z".repeat(32), obligationRef: "during:obligation", controller: await claimController() }), { code: "CLAIM_RETIRING" });
+    assert.deepEqual(await releaseAbandonedRetirementFences(), [], "a fence that names no controller proves nothing");
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).retirement?.id, "legacy");
   } finally { await f.dispose(); }
 });
 

@@ -2,7 +2,7 @@ import type { EvictionOutcome } from "../lib/slipjay.ts";
 import { readBuildThroughRunner, runnerLocation } from "../lib/runner/runner-client.ts";
 import type { SweepOptions } from "../lib/workspace/workspace-sweep.ts";
 import { callerPids, workspaceHolders } from "../lib/workspace/workspace-holders.ts";
-import { cleanupLandedWorkspace, planDisposableWorkspaces, pruneEmptyWorkspaces, evictIdleWorkspaces, EVICTION_IDLE_MS, archiveWorkspace, latestArchiveFor, listArchives, restoreArchive, releaseWorkspace, readReleaseResult, latestReleaseFor, listReleaseResults, processArchiveRequests, workspaceContext, describeRetention, removeWorkspace, withWorkspaceTransaction } from "../lib/slipjay.ts";
+import { cleanupLandedWorkspace, planDisposableWorkspaces, pruneEmptyWorkspaces, evictIdleWorkspaces, EVICTION_IDLE_MS, archiveWorkspace, latestArchiveFor, listArchives, restoreArchive, releaseWorkspace, readReleaseResult, latestReleaseFor, listReleaseResults, processArchiveRequests, releaseAbandonedRetirementFences, workspaceContext, describeRetention, removeWorkspace, withWorkspaceTransaction } from "../lib/slipjay.ts";
 import { landingIO } from "../lib/landing/landing-steps.ts";
 import { primaryCheckoutDisposition } from "../lib/landing/landing-candidate.ts";
 import type { PrimaryCheckoutOutcome } from "../lib/landing/landing-candidate.ts";
@@ -183,6 +183,9 @@ export async function runMaintain(rest: string[]): Promise<void> {
     try { upgrade = await upgradeMachine({ waitForInstallLock: false }); }
     catch (error) { upgrade = { slot: "client", from: null, to: null, action: "failed", reason: error instanceof Error ? error.message : String(error), command: null }; }
   }
+  // A retirement whose process died before it destroyed anything left a fence that refuses every
+  // claim on that checkout for ever. The hourly pass is where those are proved harmless and released.
+  const retirementFences = await releaseAbandonedRetirementFences();
   // Honouring a request consumes it, so its outcome must be reported even when the
   // eviction that follows fails: otherwise the pass silently loses what it already did.
   const outcomes = await processArchiveRequests();
@@ -223,7 +226,7 @@ export async function runMaintain(rest: string[]): Promise<void> {
     try { eviction = (await evictIdleWorkspaces(process.cwd())).outcome; }
     catch (error) { evictionError = error instanceof Error ? error.message : String(error); }
   }
-  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, requests: outcomes, evictions: eviction, ...evictionError === null ? {} : { evictionError }, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError } }, null, 2));
+  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, retirementFences, requests: outcomes, evictions: eviction, ...evictionError === null ? {} : { evictionError }, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError } }, null, 2));
   else {
     if (upgrade) {
       // `upgraded` names what it moved between, `current` the install the slot already had.
@@ -231,6 +234,7 @@ export async function runMaintain(rest: string[]): Promise<void> {
         ? `${upgrade.from.slice(0, 12)} → ${upgrade.to.slice(0, 12)}` : upgrade.to?.slice(0, 12) ?? "");
       (upgrade.action === "failed" ? console.error : console.log)(`upgrade\t${upgrade.action}\t${detail}`);
     }
+    for (const entry of retirementFences) console.log(`released retirement fence\t${entry.path}\t${entry.reason}`);
     // A request that could not be read has no workspace path to name, so it names the request instead.
     for (const entry of outcomes) console.log(`${entry.outcome}\t${entry.workspacePath || entry.requestId}\t${entry.reason}`);
     if (primaryCheckout?.action === "moved") console.log(`moved primary checkout onto ${integrationBranch}`);

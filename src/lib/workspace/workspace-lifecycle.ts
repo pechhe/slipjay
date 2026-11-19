@@ -694,13 +694,13 @@ export async function removalRefusal(workspace: { name: string; root: string }, 
  * to its evidence during the copy is refused too (each throws `WorkingCopyChangedError`).
  */
 export async function retireWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks = {}, options: { expectedCommitId?: string; retainMaterial?: boolean } = {}): Promise<void> {
-  return withUnclaimedWorkspace(workspace.root, "retire checkout", async (check) => {
+  return withUnclaimedWorkspace(workspace.root, "retire checkout", async (check, pointOfNoReturn) => {
     await check();
-    await retireUnclaimedWorkspace(integrationRoot, workspace, { ...hooks, beforeForget: async () => { await check(); await hooks.beforeForget?.(); } }, options);
+    await retireUnclaimedWorkspace(integrationRoot, workspace, { ...hooks, beforeForget: async () => { await check(); await hooks.beforeForget?.(); } }, options, pointOfNoReturn);
   }, { retired: true });
 }
 
-async function retireUnclaimedWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks, options: { expectedCommitId?: string; retainMaterial?: boolean }): Promise<void> {
+async function retireUnclaimedWorkspace(integrationRoot: string, workspace: { name: string; root: string }, hooks: RetirementHooks, options: { expectedCommitId?: string; retainMaterial?: boolean }, pointOfNoReturn: () => Promise<void>): Promise<void> {
   const metadata = await workspaceMetadata(workspace.name);
   if (hasPendingRunnerFacts(metadata)) throw new Error(`jj:${workspace.name} has pending runner facts; reconnect from that workspace to deliver them before removal`);
   await runWorkspaceTeardown(integrationRoot, workspace, { timeoutMs: hooks.teardownTimeoutMs });
@@ -729,6 +729,9 @@ async function retireUnclaimedWorkspace(integrationRoot: string, workspace: { na
       if (preserved) await rm(preserved.directory, { recursive: true, force: true });
       throw error;
     }
+    // The dependency move is undone only by a rollback that runs and succeeds, so a crash or a partial
+    // move-back from here on must leave the checkout fenced.
+    await pointOfNoReturn();
     const moveStarted = performance.now();
     const moved = handover ? await moveNodeModules(workspace.root, handover.path, handover.manifests) : [];
     const moveMs = Math.round(performance.now() - moveStarted);

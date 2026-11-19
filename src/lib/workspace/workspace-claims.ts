@@ -1,6 +1,6 @@
 import { closeSync, fsyncSync, openSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { holdersOfOpenFiles, openPathsByProcess } from "../host-disk/disk-holders.ts";
 import { processWorkingDirectories, workspaceHolders } from "./workspace-holders.ts";
@@ -37,9 +37,15 @@ export type ClaimView = {
   reason: string; obligationRef: string; settlementRef: string | null; controller: ClaimController | null;
 };
 type Claim = Omit<ClaimView, "state" | "reason"> & { state: "active" | "released" | "transferred"; credentialHash: string; recoveryReason?: string };
+/**
+ * The retirement admission fence. `controller` is the process that placed it and
+ * `destructive` records that the operation reached its point of no return, so a fence
+ * without them is either a legacy record or one that provably destroyed nothing yet.
+ */
+type Retirement = { id: string; reason: string; controller?: ClaimController | null; destructive?: true };
 type Generation = {
   id: string; fingerprint: string; repository: string; workspaceName: string; retired: boolean; claims: Claim[];
-  retirement?: { id: string; reason: string };
+  retirement?: Retirement;
 };
 type RecordState = { version: 1; path: string; current: string; generations: Generation[]; receipts: Record<string, { digest: string; result: unknown }> };
 export type ClaimStatus = { version: 1; path: string; generation: string | null; workspaceName: string | null; claims: ClaimView[]; retirement: Generation["retirement"] | null; reason: string | null };
@@ -167,6 +173,50 @@ async function staleRecovery(path: string, status: ClaimStatus, fresh = false): 
   return { settle: recoveryCustodyIdle({ claims, controllersGone, holdersClear: holdersClear === true, lastActivityAt, now: Date.now() }), note: note(holdersClear) };
 }
 
+/**
+ * Whether a fence's controller is provably gone: its PID probes ESRCH and no readable identity
+ * stands there. A missing identity, a permission error and a reused PID all prove nothing.
+ */
+async function retirementControllerGone(controller: ClaimController): Promise<boolean> {
+  try { process.kill(controller.pid, 0); return false; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") return false; }
+  return !sameClaimController(await claimController(controller.pid), controller);
+}
+
+/**
+ * Release the fences of operations whose process died before declaring its point of no return.
+ * Such a fence guarded nothing: the operation stopped short of its first step that can destroy
+ * or orphan checkout state, so the checkout is as it was and may admit work again. A fence that
+ * reached its point of no return stays, and so does a legacy fence that cannot say either way;
+ * both keep their custody recovery-required and are reported as such.
+ */
+export async function releaseAbandonedRetirementFences(): Promise<Array<{ path: string; reason: string }>> {
+  const released: Array<{ path: string; reason: string }> = [];
+  for (const name of await readdir(home()).catch(() => [] as string[])) {
+    if (!name.endsWith(".json")) continue;
+    const root = await readFile(join(home(), name), "utf8").then((text) => (JSON.parse(text) as { path?: unknown }).path, () => undefined);
+    if (typeof root !== "string" || !root) continue;
+    const record = await load(root).catch(() => null);
+    const current = record ? record.generations.find((generation) => generation.id === record.current) : undefined;
+    const fence = current?.retirement;
+    if (!fence?.controller || fence.destructive) continue;
+    if (!await retirementControllerGone(fence.controller)) continue;
+    try {
+      await withClaimWriter(root, async () => {
+        // Judged again under the writer, and only for the fence this pass proved harmless.
+        const fresh = await load(root);
+        const generation = fresh ? fresh.generations.find((entry) => entry.id === fresh.current) : undefined;
+        const fenced = generation?.retirement;
+        if (!fresh || !generation || !fenced || fenced.id !== fence.id || fenced.destructive) return;
+        delete generation.retirement;
+        await save(fresh);
+        released.push({ path: root, reason: fence.reason });
+      });
+    } catch { /* Unreadable or contended custody is left recovery-required: this pass never guesses. */ }
+  }
+  return released;
+}
+
 /** Read-only plans and all destructive paths fail closed on unknown authority. */
 export async function workspaceClaimRefusal(path: string): Promise<string | null> {
   try {
@@ -270,8 +320,15 @@ export async function markWorkspaceClaimRecovery(path: string, input: ClaimRecov
   });
 }
 
-/** Fence admission under a short canonical writer lock; slow teardown runs outside this lock. */
-export async function withUnclaimedWorkspace<T>(path: string, reason: string, operation: (check: () => Promise<void>) => Promise<T>, options: { retired?: boolean } = {}): Promise<T> {
+/**
+ * Fence admission under a short canonical writer lock; slow teardown runs outside this lock.
+ *
+ * The operation is handed `check`, which re-proves that it still holds this fence, and
+ * `pointOfNoReturn`, which it calls immediately before its first step that can destroy or
+ * orphan checkout state. A failure before that call destroyed nothing, so it releases the
+ * fence; one after it stays fenced whatever the outcome (fail closed).
+ */
+export async function withUnclaimedWorkspace<T>(path: string, reason: string, operation: (check: () => Promise<void>, pointOfNoReturn: () => Promise<void>) => Promise<T>, options: { retired?: boolean } = {}): Promise<T> {
   const root = await canonicalClaimPath(path);
   const id = randomUUID();
   await withClaimWriter(root, async () => {
@@ -286,22 +343,32 @@ export async function withUnclaimedWorkspace<T>(path: string, reason: string, op
       record.current = randomUUID();
       record.generations.push({ id: record.current, fingerprint: await fingerprint(root).catch(() => "missing"), repository: "", workspaceName: "", retired: false, claims: [] });
     }
-    record.generations.find((g) => g.id === record.current)!.retirement = { id, reason };
+    record.generations.find((g) => g.id === record.current)!.retirement = { id, reason, controller: await claimController() };
     await save(record);
   });
   const check = () => withClaimWriter(root, async () => {
     const record = await load(root); const current = record?.generations.find((g) => g.id === record.current);
     if (!record || current?.retirement?.id !== id || retained(record).length) fail("CLAIM_FENCE_CHANGED", "Destructive custody authority changed; recovery required");
   });
-  let completed = false; let unchanged = false;
-  try { await check(); const result = await operation(check); completed = true; return result; }
+  const declarePointOfNoReturn = () => withClaimWriter(root, async () => {
+    const record = await load(root); const current = record?.generations.find((g) => g.id === record.current);
+    if (!record || current?.retirement?.id !== id) fail("CLAIM_FENCE_CHANGED", "Destructive custody fence changed; recovery required");
+    current.retirement = { ...current.retirement, destructive: true };
+    await save(record);
+  });
+  let completed = false; let unchanged = false; let destructive = false;
+  // The flag follows the durable record, never the call's intention: a point of no return whose
+  // own write failed never authorised a deletion, so the fence stays releasable.
+  const pointOfNoReturn = async () => { await declarePointOfNoReturn(); destructive = true; };
+  try { await check(); const result = await operation(check, pointOfNoReturn); completed = true; return result; }
   catch (error) {
     unchanged = (error as { code?: string } | null)?.code === "WORKING_COPY_CHANGED";
     throw error;
   }
   finally {
-    // A partial/unknown destructive failure is not permission to admit new work.
-    if (completed || unchanged) await withClaimWriter(root, async () => {
+    // A partial/unknown destructive failure is not permission to admit new work, but a fence that
+    // never became destructive guarded nothing: the operation threw before it could destroy.
+    if (completed || unchanged || !destructive) await withClaimWriter(root, async () => {
       const record = await load(root); const current = record?.generations.find((g) => g.id === record.current);
       if (!record || current?.retirement?.id !== id) fail("CLAIM_FENCE_CHANGED", "Destructive custody fence changed; recovery required");
       delete current.retirement;

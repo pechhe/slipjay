@@ -10,7 +10,8 @@ import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
-import { acquireWorkspaceClaim, releaseWorkspaceClaim, transferWorkspaceClaim, workspaceClaimStatus, withUnclaimedWorkspace, resetWorkspaceClaimGeneration } from "../../src/lib/workspace/workspace-claims.ts";
+import { acquireWorkspaceClaim, releaseAbandonedRetirementFences, releaseWorkspaceClaim, transferWorkspaceClaim, workspaceClaimStatus, withUnclaimedWorkspace, resetWorkspaceClaimGeneration } from "../../src/lib/workspace/workspace-claims.ts";
+import { writeRetirementFence } from "./fixtures/workspace-fence.ts";
 import { claimController } from "../../src/lib/workspace/workspace-claim-identity.ts";
 import { sweepDisposableWorkspaces, EMPTY_IDLE_MS } from "../../src/lib/workspace/workspace-sweep.ts";
 import { findOrphanedCheckouts, retireOrphanedCheckouts } from "../../src/lib/workspace/workspace-orphans.ts";
@@ -157,6 +158,57 @@ test("held and unreadable claims stop declared preview teardown, and settled cus
 });
 
 
+test("a retirement that fails before its point of no return releases its fence and admits claims again", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("fence-before-destruction", f.repo);
+    // The landing follower's failure: retirement stopped before it could forget anything, which
+    // used to fence the checkout for ever and fail every message sent to its thread.
+    await assert.rejects(withUnclaimedWorkspace(w.workspacePath, "fixture retirement", async (check) => {
+      await check();
+      throw new Error("teardown failed before touching the checkout");
+    }), /teardown failed before touching the checkout/);
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).retirement, null);
+    assert.ok(await acquireWorkspaceClaim(w.workspacePath, f.repo, w.current.name, await acquisition("after-harmless-failure")));
+  } finally { await f.dispose(); }
+});
+
+test("a retirement that fails after its point of no return keeps its destructive fence", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("fence-after-destruction", f.repo);
+    await assert.rejects(withUnclaimedWorkspace(w.workspacePath, "fixture retirement", async (check, pointOfNoReturn) => {
+      await check();
+      await pointOfNoReturn();
+      throw new Error("unknown destructive outcome");
+    }), /unknown destructive outcome/);
+    const status = await workspaceClaimStatus(w.workspacePath);
+    assert.ok(status.retirement?.id);
+    assert.equal(status.retirement?.destructive, true);
+    assert.ok(status.retirement?.controller, "the fence records the process that placed it");
+    await assert.rejects(acquireWorkspaceClaim(w.workspacePath, f.repo, w.current.name, await acquisition("too-late")), { code: "CLAIM_RETIRING" });
+    assert.deepEqual(await releaseAbandonedRetirementFences(), [], "a destructive fence is never released by housekeeping");
+    assert.ok((await workspaceClaimStatus(w.workspacePath)).retirement);
+  } finally { await f.dispose(); }
+});
+
+test("a custody record carrying a fence from before fences recorded their controller still loads", async () => {
+  const f = await project();
+  try {
+    const w = await createWorkspace("legacy-fence", f.repo);
+    await withUnclaimedWorkspace(w.workspacePath, "test guarded destructive action", async (check) => { await check(); });
+    // A record written by a version whose fence was `{id, reason}` alone: it must load, still say
+    // what it is, and still refuse admission, because nothing can prove it harmless.
+    await writeRetirementFence(w.workspacePath, { id: "legacy-fence", reason: "retire checkout" });
+    const status = await workspaceClaimStatus(w.workspacePath);
+    assert.equal(status.retirement?.id, "legacy-fence");
+    assert.equal(status.reason, "retirement in progress or interrupted; recovery required");
+    await assert.rejects(acquireWorkspaceClaim(w.workspacePath, f.repo, w.current.name, await acquisition("during-legacy-fence")), { code: "CLAIM_RETIRING" });
+    assert.deepEqual(await releaseAbandonedRetirementFences(), [], "a fence that cannot name its controller proves nothing");
+    assert.equal((await workspaceClaimStatus(w.workspacePath)).retirement?.id, "legacy-fence");
+  } finally { await f.dispose(); }
+});
+
 test("public retirement identity and fabricated proof cannot clear running or uncertain teardown", async () => {
   const f = await project();
   const entered = deferred(); const resume = deferred();
@@ -164,8 +216,12 @@ test("public retirement identity and fabricated proof cannot clear running or un
   try {
     const activation = await activateWorkspaceClaims();
     const w = await createWorkspace("uncertain-retirement", f.repo);
-    teardown = withUnclaimedWorkspace(w.workspacePath, "fixture incomplete teardown", async () => {
-      entered.resolve(); await resume.promise; throw new Error("unknown destructive outcome");
+    // An uncertain destructive teardown: it reaches its point of no return, then cannot say
+    // whether the checkout was destroyed, so its fence must stay.
+    teardown = withUnclaimedWorkspace(w.workspacePath, "fixture incomplete teardown", async (_check, pointOfNoReturn) => {
+      await pointOfNoReturn();
+      entered.resolve(); await resume.promise;
+      throw new Error("unknown destructive outcome");
     });
     await entered.promise;
     const status = await workspaceClaimStatus(w.workspacePath);

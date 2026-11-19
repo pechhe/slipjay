@@ -123,7 +123,11 @@ export async function retireOrphanedCheckouts(options: { now?: number } = {}): P
         if (again?.action !== "remove") continue;
         // Not `retireWorkspace`: an orphan has no registration to forget and no policy whose teardown applies.
         try {
-          await withUnclaimedWorkspace(orphan.root, "discard orphan", async (check) => { await check(); await discardCheckout(orphan.root); }, { retired: true });
+          await withUnclaimedWorkspace(orphan.root, "discard orphan", async (check, pointOfNoReturn) => {
+            await check();
+            await pointOfNoReturn();
+            await discardCheckout(orphan.root);
+          }, { retired: true });
         } catch { continue; }
         removed.push(orphan.root);
       }

@@ -240,7 +240,7 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
     // race a spare being claimed, and a claim cannot race a tree being removed.
     let result: EvictionResult | null;
     try {
-      result = await withWorkspaceTransaction(`pool:${integrationRoot}`, async (): Promise<EvictionResult | null> => withUnclaimedWorkspace(root, "evict generated material", async (check) => {
+      result = await withWorkspaceTransaction(`pool:${integrationRoot}`, async (): Promise<EvictionResult | null> => withUnclaimedWorkspace(root, "evict generated material", async (check, pointOfNoReturn) => {
         // A claim or a resume may have landed while this pass decided, so judge again inside the lock.
         const fresh = options.processes !== undefined ? options.processes : await processWorkingDirectories();
         const holders = fresh === null ? null : await workspaceHolders(root, { processes: fresh }).catch(() => null);
@@ -267,6 +267,9 @@ export async function evictIdleWorkspaces(cwd: string = process.cwd(), options: 
           return null;
         }
         await check();
+        // The readiness record above is written, not deleted: nothing reproducible is gone yet, so the
+        // fence may still be released if the pass fails here.
+        await pointOfNoReturn();
         const removed: string[] = [];
         const failed: string[] = [];
         const generated = await generatedPathsIn(root, integrationRoot).catch(() => [] as string[]);
