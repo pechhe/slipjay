@@ -29,13 +29,18 @@ test("a release branch with changes the integration branch lacks is refused", as
   }
 });
 
-test("a returned release moves the release branch back to before its merge, only while it still holds that merge", async () => {
+test("a returned release moves the release branch back to before its merge, only while it still holds that merge and only for its own candidate", async () => {
   const f = await releaseProject();
   try {
-    const candidate = await landFile(f, "a.txt");
+    const older = await landFile(f, "a.txt");
+    const candidate = await landFile(f, "b.txt");
     const base = remoteRef(f, "release");
     const released = await confirmRelease(f.repo, { candidate });
     assert.ok(released.status === "released", JSON.stringify(released));
+    // An older commit this release also carries does not own it: undoing its failed deploy leaves the release in place.
+    const notItsOwn = await returnRelease(f.repo, { merge: released.merge, candidate: older });
+    assert.ok(!notItsOwn.returned && /released [0-9a-f]{12}, not [0-9a-f]{12}$/.test(notItsOwn.reason), JSON.stringify(notItsOwn));
+    assert.equal(remoteRef(f, "release"), released.merge);
     assert.deepEqual(await returnRelease(f.repo, { merge: released.merge, candidate }), { returned: true, releaseBranch: base });
     assert.equal(remoteRef(f, "release"), base);
     const again = await returnRelease(f.repo, { merge: released.merge, candidate });

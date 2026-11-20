@@ -1150,12 +1150,16 @@ export function createRunnerQueue(input: {
   /**
    * The production deploy of a promoted commit: an open or finished deploy of it, or a
    * new one carrying what undoing it needs. A rerun confirm of a promotion whose deploy
-   * failed deploys it again.
+   * failed deploys it again. A candidate a later release already shipped deploys nothing:
+   * that release's deploy carries it, and deploying the older commit would take Production
+   * backwards (and undoing it would return the later release's merge).
    */
-  function productionDeploy(promotion: ReleaseOperation, result: CompletedRelease): string {
-    const existing = log.deployments(promotion.repo, "production").find((entry) => entry.commitId === promotion.commitId
+  function productionDeploy(promotion: ReleaseOperation, result: CompletedRelease): string | undefined {
+    const open = (commitId: string) => log.deployments(promotion.repo, "production").find((entry) => entry.commitId === commitId
       && (entry.status === "queued" || entry.status === "running" || entry.status === "deployed"));
+    const existing = open(promotion.commitId);
     if (existing) return existing.id;
+    if (result.status === "released_by" && result.releasedBy !== promotion.commitId) return result.releasedBy ? open(result.releasedBy)?.id : undefined;
     // A rerun confirm of a candidate the release branch already holds plans no commits, so
     // the facts come from the deploy that first carried them.
     const shipped = result.status === "released_by"
@@ -2376,7 +2380,8 @@ export function createRunnerQueue(input: {
         } });
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.status === "released" || result.status === "released_by") {
-        append(operation.id, { type: "released", result, ...promotes ? { deploy: productionDeploy(operation, result) } : {} });
+        const deploy = promotes ? productionDeploy(operation, result) : undefined;
+        append(operation.id, { type: "released", result, ...deploy ? { deploy } : {} });
         if (promotes) wakeDeploys();
       } else if (result.status === "verification_failed") append(operation.id, {
         type: "failed", stage: "verifying", reason: result.reason,

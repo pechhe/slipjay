@@ -66,3 +66,30 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.equal(f.result(redeploy)?.type, "deployed", JSON.stringify(f.result(redeploy)));
   } finally { await f.dispose(); }
 }, 180_000);
+
+test("a confirm of a commit a later release already shipped deploys nothing: the later release's deploy carries it", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  try {
+    await f.land(f.submit(await f.candidate("a.txt")));
+    await f.queue.idle();
+    const older = f.main();
+    await f.land(f.submit(await f.candidate("b.txt")));
+    await f.queue.idle();
+    const newer = f.main();
+    const shipped = f.submitRelease(newer);
+    await f.land(shipped);
+    await f.queue.idle();
+    const first = f.result(shipped);
+    assert.ok(first?.type === "released" && first.result.status === "released" && first.deploy, JSON.stringify(first));
+    const merge = f.releaseRef();
+
+    const late = f.submitRelease(older);
+    await f.land(late);
+    await f.queue.idle();
+    const outcome = f.result(late);
+    assert.ok(outcome?.type === "released" && outcome.result.status === "released_by" && outcome.result.releasedBy === newer, JSON.stringify(outcome));
+    assert.equal(outcome.deploy, first.deploy, "it names the deploy that carries it");
+    assert.deepEqual(f.log.deployments("fixture/repo", "production").map((entry) => entry.commitId), [newer], "production is not taken back to the older commit");
+    assert.equal(f.releaseRef(), merge, "the later release stays on the release branch");
+  } finally { await f.dispose(); }
+}, 180_000);

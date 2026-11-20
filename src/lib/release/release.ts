@@ -495,8 +495,13 @@ async function shippedBy(plan: ReleasePlan): Promise<{ merge: string; releasedBy
   const [found] = await commitIds(plan.root,
     `roots(merges() & ${plan.candidate}:: & ::${released} & description(substring:${symbol(CANDIDATE_TRAILER)}))`);
   const merge = found ?? plan.base;
-  const description = await jjOut(plan.root, ["log", "--no-graph", "-r", merge, "-T", "description"]);
-  return { merge, releasedBy: description.match(/^Release-Candidate: ([a-f0-9]+)$/m)?.[1] ?? null };
+  return { merge, releasedBy: await releasedCandidate(plan.root, merge) };
+}
+
+/** The candidate whose release `merge` is, from its trailer; null when it is no release merge. */
+async function releasedCandidate(root: string, merge: string): Promise<string | null> {
+  const description = await jjOut(root, ["log", "--no-graph", "-r", merge, "-T", "description"]);
+  return description.match(/^Release-Candidate: ([a-f0-9]+)$/m)?.[1] ?? null;
 }
 
 const releaseMessage = (plan: ReleasePlan): string =>
@@ -538,7 +543,8 @@ async function publish(plan: ReleasePlan, merge: string): Promise<void> {
 /**
  * Undo a published release whose production deploy failed: move the release branch from
  * `merge` back to its first parent, the release branch before it. Refused, moving
- * nothing, when the release branch has moved on since (a later release). `checkout` need
+ * nothing, when the release branch has moved on since (a later release), or when `merge`
+ * is not `candidate`'s own release (a later one that also carries it). `checkout` need
  * not hold the merge, which it fetches: the policy comes from the released `candidate`,
  * whose tree the merge's is.
  */
@@ -553,6 +559,9 @@ export async function returnRelease(checkout: string, { merge, candidate }: { me
     const published = `${symbol(releaseBranch)}@${symbol(remote)}`;
     const head = await commitOf(checkout, published);
     if (head !== merge) refuse(`${releaseBranch} has moved on to ${head?.slice(0, 12) ?? "nothing"} since the release merge ${merge.slice(0, 12)}`);
+    // Only the release of `candidate` is undone: a later release that also carries it is not this deploy's to return.
+    const released = await releasedCandidate(checkout, merge);
+    if (released !== candidate) refuse(`The release merge ${merge.slice(0, 12)} released ${released?.slice(0, 12) ?? "no candidate"}, not ${candidate.slice(0, 12)}`);
     const [before] = lines(await jjOut(checkout, ["log", "--no-graph", "-r", merge, "-T", 'parents.map(|c| c.commit_id()).join("\\n")']));
     if (!before) refuse(`The release merge ${merge.slice(0, 12)} has no parent`);
     await jjRun(checkout, ["bookmark", "track", published]);
