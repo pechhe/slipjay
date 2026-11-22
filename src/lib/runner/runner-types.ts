@@ -200,7 +200,12 @@ export type OperationEvent =
   | { type: "verification_passed"; base: string; candidate: string }
   /** A settings landing: only `fields` of the policy changed, so its landing checks did not run (see `policy-settings.ts`). */
   | { type: "verification_skipped"; base: string; candidate: string; fields: string[]; reason: string }
-  | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false }
+  /**
+   * `patchId` is the retained commit's verbatim patch-id (`git diff-tree -p <commit> | git patch-id --verbatim`), absent when
+   * git gave none (an empty diff, a diff past the output bound) or the row predates it. Build matches a preliminary review
+   * by it, so a rebase or reworded message after the review keeps the review (WV-74).
+   */
+  | { type: "source_retained"; commitId: string; sourceRef: string; manifestSha256: string; handoffComplete: false; patchId?: string }
   /**
    * What the retained source changes: a digest of each path its commit adds, changes or deletes against its first parent,
    * with the content it leaves there. Two submissions with one digest submitted the same source (YS-1305).

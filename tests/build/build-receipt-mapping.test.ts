@@ -92,6 +92,26 @@ test("a settings landing that skipped its checks is published without a verified
   log.close();
 });
 
+test("only a publication tells Build the candidate's patch-id, from its retained source, and only when the runner recorded one (WV-74)", () => {
+  const log = openLog(":memory:");
+  const base = "b".repeat(40), candidate = "c".repeat(40), patchId = "9".repeat(40);
+  const retained = { type: "source_retained" as const, commitId: "a".repeat(40), sourceRef: "refs/slipjay/submissions/x", manifestSha256: "0".repeat(64), handoffComplete: false as const };
+  const landing = (source: OperationEvent) => operation(log, { admission: record() }, [source,
+    { type: "verification_base", base, candidate }, { type: "verification_passed", base, candidate },
+    { type: "integration_held", repo: "owner/repo", commitId: "d".repeat(40), reason: "push refused" },
+    { type: "landed", base, commitId: "d".repeat(40), branch: "main", remote: "origin" }]);
+  const facts = attempts(owed(log, landing({ ...retained, patchId })));
+  assert.deepEqual(facts.map((fact) => [fact.event, fact.candidatePatchId]), [["held", undefined], ["published", patchId]]);
+  // An older retention row carries none, and the receipt then says nothing rather than inventing one.
+  assert.equal("candidatePatchId" in attempts(owed(log, landing(retained))).at(-1)!, false);
+  // A late-confirmed publication reports it too.
+  const late = operation(log, { admission: record() }, [{ ...retained, patchId },
+    { type: "integrated", base, commitId: "e".repeat(40) }, { type: "failed", stage: "publishing", reason: "Integration publication failed" }]);
+  log.append(newOperationId(), { type: "integration_recovered", repo: "owner/repo", commitId: "e".repeat(40) });
+  assert.deepEqual(attempts(owed(log, late)).map((fact) => [fact.event, fact.candidatePatchId]), [["failed", undefined], ["published", patchId]]);
+  log.close();
+});
+
 test("a confirmation counts only in the integration's own repository, and only once it follows the failure", () => {
   const log = openLog(":memory:");
   const unknown: OperationEvent[] = [{ type: "verification_passed", base: "b".repeat(40), candidate: "c".repeat(40) },

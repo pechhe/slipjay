@@ -71,7 +71,32 @@ export async function retainSubmissionSource(input: {
     const handle = await open(directory, "r");
     try { await handle.sync(); } finally { await handle.close(); }
   }
-  return { type: "source_retained", commitId: request.commitId, manifestSha256: digest(manifest), sourceRef: ref, handoffComplete: false };
+  const patchId = await verbatimPatchId({ executor, gitExecutable, gitDir: store, commitId: request.commitId, cwd: home, env });
+  return { type: "source_retained", commitId: request.commitId, manifestSha256: digest(manifest), sourceRef: ref, handoffComplete: false, ...patchId ? { patchId } : {} };
+}
+
+/** The largest diff whose patch-id is computed; a bigger one gets none, so Build falls back to the exact commit. */
+const PATCH_ID_DIFF_MAX_BYTES = 32 * 1024 * 1024;
+
+/**
+ * The verbatim patch-id of `commitId`'s diff against its first parent: `git diff-tree -p <commit> | git patch-id --verbatim`,
+ * the first field of its output. The same change keeps it when a rebase moves its base without touching its lines or its
+ * message is reworded, which is what lets Build match a preliminary review to the landing (WV-74). `--verbatim`, not
+ * `--stable`: the stable id ignores whitespace, even inside a string literal, so `"hello world"` and `"helloworld"` would
+ * share one and a review of the first would count for the second. Undefined when git gives
+ * none (an empty diff, a root commit) or cannot run: retention never fails for want of one.
+ */
+export async function verbatimPatchId(input: { executor: Executor; gitExecutable: string; gitDir: string; commitId: string; cwd: string; env?: NodeJS.ProcessEnv }): Promise<string | undefined> {
+  const run = (args: string[], stdin?: string) => input.executor.run({ executable: input.gitExecutable, args: ["--git-dir", input.gitDir, ...args], cwd: input.cwd,
+    env: input.env, timeoutMs: 60_000, maxOutputBytes: PATCH_ID_DIFF_MAX_BYTES, maxOutputBytesPerStream: PATCH_ID_DIFF_MAX_BYTES, ...stdin === undefined ? {} : { input: stdin } });
+  const failed = (result: Awaited<ReturnType<typeof run>>) => result.exitCode !== 0 || result.signal || result.timedOut || result.cancelled || result.stdoutTruncated;
+  try {
+    const diff = await run(["diff-tree", "-p", input.commitId]);
+    if (failed(diff) || !diff.stdout.trim()) return undefined;
+    const patch = await run(["patch-id", "--verbatim"], diff.stdout);
+    if (failed(patch)) return undefined;
+    return /^([0-9a-f]{40}|[0-9a-f]{64})\b/.exec(patch.stdout.trim())?.[1];
+  } catch { return undefined; }
 }
 
 /**
