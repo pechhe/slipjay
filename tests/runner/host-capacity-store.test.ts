@@ -7,7 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "vite-plus/test";
 import { openCapacityStore } from "../../src/lib/runner/host-capacity-store.ts";
-import { stopYieldedPreview } from "../../src/lib/runner/host-capacity-command.ts";
+import { requireCappedPreview, stopYieldedPreview } from "../../src/lib/runner/host-capacity-command.ts";
 import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityObservation, readCapacityPolicy, residentBytes } from "../../src/lib/runner/host-capacity-local.ts";
 import { decideCapacity, type CapacityClass, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
@@ -419,4 +419,23 @@ test("a preview declares how readily it gives way beside its holder, and a stopp
     stopYieldedPreview(preview, (unit) => stops.push(unit));
     assert.deepEqual(stops, ["preview-gen-preview.slice"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a preview holder claims a smaller bound only under a kernel cap at or below it, and keeps that first claim", () => {
+  const preview = { lane: "preview" as const, cgroup: "/user.slice/p.slice", owner: request("p", "preview").owner };
+  const bound = 3 * 1024 ** 3;
+  assert.doesNotThrow(() => requireCappedPreview(preview, bound, () => bound));
+  assert.doesNotThrow(() => requireCappedPreview(preview, bound, () => bound - 4096));
+  for (const limit of [null, bound + 4096]) assert.throws(() => requireCappedPreview(preview, bound, () => limit), /memory\.max at or below/);
+  assert.throws(() => requireCappedPreview({ ...preview, cgroup: null }, bound, () => bound), /memory\.max at or below/);
+  assert.throws(() => requireCappedPreview({ ...preview, lane: "agent" }, bound, () => bound), /capped command owner/);
+  assert.doesNotThrow(() => requireCappedPreview({ ...preview, owner: { kind: "process", pid: 1, start: "1", boot: "b" } as never, lane: "landing" }, bound, () => null));
+  const root = fixture();
+  const store = openCapacityStore(join(root, "ledger.sqlite"));
+  try {
+    const claim = { ...request("p", "preview"), bytes: bound };
+    assert.equal(store.poll(claim, policy, observe, 1).request.bytes, bound);
+    assert.throws(() => store.poll({ ...claim, bytes: bound * 4 }, policy, observe, 2), /different owner or commitment/);
+    assert.equal(store.requests().find((item) => item.id === "p")!.bytes, bound);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

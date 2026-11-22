@@ -43,7 +43,8 @@ export async function runHostBudget(args: string[]): Promise<number> {
   }
   if (args[0] === "poll") {
     if (args.length !== 2) throw new Error("usage: slipjay host-budget poll '<request JSON>'");
-    const request = JSON.parse(args[1]!) as Omit<CapacityRequest, "bytes" | "queuedAt" | "admittedAt">;
+    const { memoryMaxBytes, ...request } = JSON.parse(args[1]!) as Omit<CapacityRequest, "bytes" | "queuedAt" | "admittedAt"> & { memoryMaxBytes?: unknown };
+    if (memoryMaxBytes !== undefined && (typeof memoryMaxBytes !== "number" || !Number.isSafeInteger(memoryMaxBytes) || memoryMaxBytes <= 0 || memoryMaxBytes % 4096 !== 0)) throw new Error("invalid host capacity request");
     if (!request || !/^[a-f0-9]{32}$/.test(request.id) || !CAPACITY_CLASSES.includes(request.lane)
       || typeof request.job !== "string" || request.job.length > 500 || !request.owner || !["holder", "process"].includes(request.owner.kind)
       || !(request.cgroup === null || typeof request.cgroup === "string" && request.cgroup.startsWith("/") && !request.cgroup.includes("\0") && !request.cgroup.split("/").includes(".."))) throw new Error("invalid host capacity request");
@@ -51,7 +52,10 @@ export async function runHostBudget(args: string[]): Promise<number> {
       || typeof request.owner.identity !== "string" || !request.owner.identity || request.owner.identity.length > 128)) throw new Error("invalid host capacity holder identity");
     if (request.owner.kind === "process" && (!Number.isSafeInteger(request.owner.pid) || request.owner.pid < 1 || !/^\d+$/.test(request.owner.start)
       || typeof request.owner.boot !== "string" || !request.owner.boot)) throw new Error("invalid host capacity process identity");
-    console.log(JSON.stringify(pollHostCapacity(request)));
+    // A process owner's smaller claim comes only from `run --memory-max`, which caps its own group; through poll only a
+    // preview holder may ask, and pollHostCapacity then checks the kernel cap on its exact cgroup.
+    if (memoryMaxBytes !== undefined && (request.lane !== "preview" || request.owner.kind !== "holder")) throw new Error("memoryMaxBytes is only for a preview holder");
+    console.log(JSON.stringify(pollHostCapacity(request, Date.now(), memoryMaxBytes as number | undefined)));
     return 0;
   }
   if (args[0] === "run") {

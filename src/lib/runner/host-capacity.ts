@@ -13,12 +13,14 @@ export function parseCapacityMemoryMax(value: string): number {
   return bytes;
 }
 
-/** A smaller demand is a caller-selected hard bound, never an estimate inferred from command text or usage. */
-export function agentMemoryCommitment(policy: CapacityPolicy, lane: CapacityClass, memoryMaxBytes?: number): number {
+/** A smaller demand is a caller-selected hard bound, never an estimate inferred from command text or usage. Only the agent and preview lanes accept one. */
+export function memoryCommitment(policy: CapacityPolicy, lane: CapacityClass, memoryMaxBytes?: number): number {
   if (memoryMaxBytes === undefined) return policy.profiles[lane];
-  if (lane !== "agent" || !Number.isSafeInteger(memoryMaxBytes) || memoryMaxBytes < 4096
-    || memoryMaxBytes % 4096 !== 0 || memoryMaxBytes > policy.profiles.agent) {
-    throw new Error("explicit --memory-max requires the agent lane and a page-aligned bound within its configured profile");
+  if (lane !== "agent" && lane !== "preview") throw new Error("explicit --memory-max requires the agent lane and a page-aligned bound within its configured profile");
+  if (!Number.isSafeInteger(memoryMaxBytes) || memoryMaxBytes < 4096 || memoryMaxBytes % 4096 !== 0
+    || memoryMaxBytes > policy.profiles[lane]) {
+    throw new Error(lane === "agent" ? "explicit --memory-max requires the agent lane and a page-aligned bound within its configured profile"
+      : "a smaller preview commitment must be a page-aligned byte count within the preview profile");
   }
   return memoryMaxBytes;
 }

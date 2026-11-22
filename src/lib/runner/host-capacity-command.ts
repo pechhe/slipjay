@@ -4,20 +4,34 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as pause } from "node:timers/promises";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { capacityControllerState, capacityGroupEmpty, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources, readContainerResidentBytes } from "./host-capacity-local.ts";
+import { capacityControllerState, capacityGroupEmpty, capacityGroupMemoryMax, capacityStorePath, currentCapacityOwner, readCapacityObservation, readCapacityPolicy, readCapacityResources, readContainerResidentBytes } from "./host-capacity-local.ts";
 import { openCapacityStore, readCapacityWaits } from "./host-capacity-store.ts";
-import { agentMemoryCommitment, CAPACITY_OOM_SCORE_ADJUST, CAPACITY_WAIT_RETENTION_MS, summariseCapacityWaits, type CapacityClass, type CapacityRequest, type CapacityWaits } from "./host-capacity.ts";
+import { memoryCommitment, CAPACITY_OOM_SCORE_ADJUST, CAPACITY_WAIT_RETENTION_MS, summariseCapacityWaits, type CapacityClass, type CapacityRequest, type CapacityWaits } from "./host-capacity.ts";
 import { SYSTEMD_SLICE_ENV } from "./runner-contract.ts";
 
+/**
+ * A process owner is capped by runWithHostCapacity. A preview holder may claim less than its profile only when the kernel
+ * already caps its exact cgroup at or below the claim, so the ledger never promises memory the cgroup could exceed.
+ */
+export function requireCappedPreview(request: Pick<CapacityRequest, "lane" | "owner" | "cgroup">, memoryMaxBytes: number, readMemoryMax: (cgroup: string) => number | null = capacityGroupMemoryMax): void {
+  if (request.owner.kind === "process") return;
+  const limit = request.lane === "preview" && request.owner.kind === "holder" && request.cgroup ? readMemoryMax(request.cgroup) : null;
+  if (limit === null || limit > memoryMaxBytes) {
+    throw new Error(request.lane === "preview" && request.owner.kind === "holder"
+      ? "a smaller preview commitment needs its cgroup's memory.max at or below it"
+      : "smaller commitments require a capped command owner");
+  }
+}
+
 /** One transaction per poll; the caller owns its wait and can keep it outside verification deadlines. */
-export function pollHostCapacity(request: Omit<CapacityRequest, "bytes" | "queuedAt" | "admittedAt">, now = Date.now(), memoryMaxBytes?: number, expectedBytes?: number) {
+export function pollHostCapacity(request: Omit<CapacityRequest, "bytes" | "queuedAt" | "admittedAt">, now = Date.now(), memoryMaxBytes?: number, expectedBytes?: number, readMemoryMax?: (cgroup: string) => number | null) {
   const policy = readCapacityPolicy();
   if (!policy) {
     if (memoryMaxBytes !== undefined) throw new Error("explicit --memory-max requires configured host capacity");
     return { configured: false as const };
   }
-  if (memoryMaxBytes !== undefined && request.owner.kind !== "process") throw new Error("smaller commitments require a capped command owner");
-  const bytes = agentMemoryCommitment(policy, request.lane, memoryMaxBytes);
+  if (memoryMaxBytes !== undefined) requireCappedPreview(request, memoryMaxBytes, readMemoryMax);
+  const bytes = memoryCommitment(policy, request.lane, memoryMaxBytes);
   if (expectedBytes !== undefined && bytes !== expectedBytes) throw new Error("host capacity commitment changed while waiting; retry the command");
   recoverHostCapacity();
   const store = openCapacityStore(capacityStorePath());
@@ -135,7 +149,9 @@ export async function runWithHostCapacity(input: {
     if (input.memoryMaxBytes !== undefined) throw new Error("explicit --memory-max requires configured host capacity");
     return execute(input.command);
   }
-  const bytes = agentMemoryCommitment(policy, input.lane, input.memoryMaxBytes);
+  // `run --memory-max` stays the agent lane's: only a preview holder that caps its own group claims less on the preview lane.
+  if (input.memoryMaxBytes !== undefined && input.lane !== "agent") throw new Error("explicit --memory-max requires the agent lane and a page-aligned bound within its configured profile");
+  const bytes = memoryCommitment(policy, input.lane, input.memoryMaxBytes);
   if (process.platform !== "linux") throw new Error("configured host capacity requires Linux cgroup accounting");
   recoverHostCapacity();
   const id = randomUUID().replaceAll("-", "");

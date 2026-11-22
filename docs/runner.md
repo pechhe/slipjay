@@ -940,3 +940,17 @@ memory.max before relying on that bound in place of its legacy memory slots. CPU
 and command lifetime guards remain separate. Roll out the supporting PeachBox CLI and
 PeachLive runner before new callers. Rollback stops requesting the new option, keeping
 the ledger and running claims; no new host configuration fields are required.
+
+### Smaller preview commitments (YS-1811)
+
+A preview holder registered with `slipjay host-budget poll '<request JSON>'` normally
+claims the whole preview profile. The request may carry an optional `memoryMaxBytes`:
+a positive, page-aligned safe integer no larger than the preview profile. SlipJay then
+freezes that many bytes as the claim, but only for a request on the preview lane with a
+holder owner and an exact cgroup whose kernel `memory.max` is already a decimal byte
+count at or below the bound; `max`, a larger cap or an unreadable file refuses the
+poll. The caller installs that cap before polling. The field is not stored in the
+request. A later poll of the same id must carry the same bound: the ledger keeps the
+first commitment and refuses a different one. Admission, yields and sampling are
+unchanged. Agent `run` commands keep their own option above; `poll` refuses the field
+from a process owner or any other lane, so no other caller can request a smaller claim.

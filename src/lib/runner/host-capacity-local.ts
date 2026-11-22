@@ -76,6 +76,13 @@ export function currentCapacityOwner(): CapacityOwner {
 const validCgroup = (path: string) => path.startsWith("/") && !path.split("/").includes("..") && !path.includes("\0");
 const cgroupFile = (path: string, name: string): FileReading => validCgroup(path) ? file(`/sys/fs/cgroup${path}/${name}`) : { state: "unknown" };
 
+/** The kernel's own memory cap on a cgroup: null for "max", an unreadable file or anything but a decimal byte count. */
+export function capacityGroupMemoryMax(cgroup: string): number | null {
+  const reading = cgroupFile(cgroup, "memory.max");
+  const text = reading.state === "read" ? reading.text.trim() : "";
+  return /^\d+$/.test(text) && Number.isSafeInteger(Number(text)) ? Number(text) : null;
+}
+
 /** Read-only: a dead controller alone does not release descendants, and an unreadable counter never means empty. */
 export function capacityControllerState(request: CapacityRequest): "alive" | "gone" | "unknown" {
   if (request.owner.kind === "holder") {

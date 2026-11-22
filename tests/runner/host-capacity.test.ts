@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import { readCapacityPolicy } from "../../src/lib/runner/host-capacity-local.ts";
-import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, agentMemoryCommitment, parseCapacityMemoryMax, capacityOrder, countedBytes, decideCapacity, planLandingRoom, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
+import { CAPACITY_OOM_SCORE_ADJUST, learnTypical, withLearnedTypical, type CapacitySample, memoryCommitment, parseCapacityMemoryMax, capacityOrder, countedBytes, decideCapacity, planLandingRoom, type CapacityPolicy, type CapacityRequest, type CapacityReading } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
   mode: "enforce", reserveBytes: 8, agingMs: 100, maxWaitMs: 10_000, maxMemoryFullAvg10: 5, takeRoomAfterMs: 5 * 60_000,
@@ -60,10 +60,14 @@ test("explicit agent bounds parse exact binary page sizes and retain the default
     assert.throws(() => parseCapacityMemoryMax(value), /memory-max/);
   }
   const configured = { ...policy, profiles: { ...policy.profiles, agent: 16 * 1024 ** 3 } };
-  assert.equal(agentMemoryCommitment(configured, "agent"), 16 * 1024 ** 3);
-  assert.equal(agentMemoryCommitment(configured, "agent", 2 * 1024 ** 3), 2 * 1024 ** 3);
-  for (const bytes of [0, NaN, Infinity, 4097, 17 * 1024 ** 3]) assert.throws(() => agentMemoryCommitment(configured, "agent", bytes), /memory-max/);
-  assert.throws(() => agentMemoryCommitment(configured, "release", 4096), /agent lane/);
+  assert.equal(memoryCommitment(configured, "agent"), 16 * 1024 ** 3);
+  assert.equal(memoryCommitment(configured, "agent", 2 * 1024 ** 3), 2 * 1024 ** 3);
+  for (const bytes of [0, NaN, Infinity, 4097, 17 * 1024 ** 3]) assert.throws(() => memoryCommitment(configured, "agent", bytes), /memory-max/);
+  assert.throws(() => memoryCommitment(configured, "release", 4096), /agent lane/);
+  const previews = { ...configured, profiles: { ...configured.profiles, preview: 12 * 1024 ** 3 } };
+  assert.equal(memoryCommitment(previews, "preview"), 12 * 1024 ** 3);
+  assert.equal(memoryCommitment(previews, "preview", 3 * 1024 ** 3), 3 * 1024 ** 3);
+  for (const bytes of [0, NaN, 4097, 13 * 1024 ** 3]) assert.throws(() => memoryCommitment(previews, "preview", bytes), /preview profile/);
 });
 
 test("bounded small checks fit remaining growth capacity that cannot admit a default agent", () => {
@@ -445,4 +449,21 @@ test("only a landing at the head of the queue stops previews; other work and sha
   assert.deepEqual(planLandingRoom(tonight, [...stopped, shortLanding, second], second.id, tonightReading(24), 61 * minute, declared), []);
   // Out of time it stops nothing: the wait limit has already decided.
   assert.deepEqual(planLandingRoom(tonight, [...stopped, shortLanding], shortLanding.id, tonightReading(24), 91 * minute, declared), []);
+});
+
+test("host-budget poll refuses an invalid memoryMaxBytes before touching the ledger", async () => {
+  const { runHostBudget } = await import("../../src/launcher/host-budget-command.ts");
+  const base = { id: "a".repeat(32), lane: "preview", job: "preview", cgroup: "/user.slice/p.slice", owner: { kind: "holder", path: "/tmp/h", identity: "x" } };
+  for (const memoryMaxBytes of [0, -4096, 4097, 1.5, "3G", null, 2 ** 60]) {
+    await assert.rejects(runHostBudget(["poll", JSON.stringify({ ...base, memoryMaxBytes })]), /invalid host capacity request/);
+  }
+});
+
+test("host-budget poll takes a smaller commitment only from a preview holder, never a process owner or another lane", async () => {
+  const { runHostBudget } = await import("../../src/launcher/host-budget-command.ts");
+  const holder = { id: "a".repeat(32), lane: "preview", job: "preview", cgroup: "/user.slice/p.slice", owner: { kind: "holder", path: "/tmp/h", identity: "x" }, memoryMaxBytes: 4096 };
+  const processOwner = { ...holder, owner: { kind: "process", pid: 1, start: "1", boot: "b" } };
+  for (const request of [processOwner, { ...processOwner, lane: "agent" }, { ...holder, lane: "agent" }]) {
+    await assert.rejects(runHostBudget(["poll", JSON.stringify(request)]), /only for a preview holder/);
+  }
 });
