@@ -6,6 +6,13 @@ const command = { executable: "bun", args: ["scripts/images.ts", "build"] };
 const environment = (extra: object) => ({ minIntervalMs: 0, timeoutMs: 1000, environmentKeys: [], projects: [{ name: "apps", command, activate: command }], ...extra });
 const policy = (name: string, extra: object) => deploymentPolicy({ version: 1, environments: { [name]: environment(extra) } });
 
+test("a deploy may declare a preflight command but cannot escape its source view", () => {
+  assert.deepEqual(policy("production", { preflight: command })?.environments.production?.preflight, { ...command, cwd: "." });
+  assert.equal(policy("staging", {})?.environments.staging?.preflight, undefined);
+  assert.throws(() => policy("staging", { preflight: { executable: "bun" } }), /Invalid preflight command/);
+  assert.throws(() => policy("production", { preflight: { ...command, cwd: ".." } }), /Preflight cwd must stay within/);
+});
+
 test("production with a machine may declare a prebuild", () => {
   assert.equal(policy("production", { machine: "images", prebuild: command })?.environments.production?.prebuild?.executable, "bun");
   assert.equal(policy("production", { machine: "images" })?.environments.production?.prebuild, undefined);

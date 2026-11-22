@@ -1,7 +1,7 @@
 import path from "node:path";
 import { runBoundedProcess, sanitizedProcessEnv } from "../infra/bounded-process.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
-import { withFinalizationSource } from "./post-integration-source.ts";
+import { readExactExecutionPolicy, withFinalizationSource } from "./post-integration-source.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { DeploymentEnvironment, PrebuildCommand } from "../policy/deployment-policy.ts";
 import type { FinalizationCommand } from "../policy/post-integration-policy.ts";
@@ -52,9 +52,10 @@ async function changesSince(gitDirectory: string, previous: string | null, commi
 /** Why a finished command did not succeed, with the tail of its output; null when it did. */
 /** Why a step failed: the first error block in either stream when it printed one (an uncaught error's last lines are its stack), else its last lines. */
 /** What a deploy's commands run with: the declared keys, and which environment and commit they serve. */
-function commandEnvironment(policy: DeploymentEnvironment, environment: string, commitId: string, declared: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+function commandEnvironment(policy: DeploymentEnvironment, environment: string, commitId: string, declared: NodeJS.ProcessEnv, previous: string | null = null): NodeJS.ProcessEnv {
   const env = sanitizedProcessEnv();
   for (const key of policy.environmentKeys) if (declared[key] !== undefined) env[key] = declared[key];
+  if (previous !== null) env.SLIPJAY_DEPLOY_PREVIOUS = previous;
   return Object.assign(env, { SLIPJAY_DEPLOY_ENVIRONMENT: environment, SLIPJAY_DEPLOY_COMMIT: commitId });
 }
 
@@ -149,11 +150,17 @@ export async function runDeploy(input: {
   onProgress(line: string): void;
 }): Promise<DeployRecord> {
   const { gitDirectory, environment, commitId, previous, policy, previousUrls = {}, nonAdditive = false, earlierSchemaChange = false } = input;
-  const changes = await changesSince(gitDirectory, previous, commitId);
+  // A serving release can outlive its local Git object (for example in a shallow store).
+  // List just the candidate when the previous object cannot anchor the range.
+  const previousAvailable = previous && previous !== commitId
+    ? await git(gitDirectory, ["rev-parse", "--verify", "--quiet", "--end-of-options", `${previous}^{commit}`]).then((resolved) => resolved.trim() === previous, () => false)
+    : false;
+  const changes = await changesSince(gitDirectory, previousAvailable || previous === commitId ? previous : null, commitId);
   let migrations: DeployMigrations | undefined;
   let machine: DeployRecord["machine"];
   const projects = await withFinalizationSource(gitDirectory, commitId, async (root) => {
-    const env = commandEnvironment(policy, environment, commitId, input.readEnvironment());
+    const declared = input.readEnvironment();
+    const env = commandEnvironment(policy, environment, commitId, declared, previous);
     // The machine is the environment's for the whole deploy: its migrations may need it as much as its projects.
     // A production redeploy of the commit it serves needs none: whatever the machine built for that commit exists already.
     // A promotion retrying a commit production partly serves still leases, since what failed may need the machine.
@@ -166,9 +173,9 @@ export async function runDeploy(input: {
       input.onProgress(`[deploy] on ${lease.machine.name}`);
     }
     const deploy = async (): Promise<DeployProjectOutcome[]> => {
-      const step = (command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}) => input.run({ executable: command.executable, args: command.args,
-        cwd: path.join(root, command.cwd), env: { ...env, ...url ? { SLIPJAY_DEPLOY_URL: url } : {}, ...extra }, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
-      // A shared migration runs once; each project's record references the same interval.
+      const step = (command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}, source = { root, env }) => input.run({ executable: command.executable, args: command.args,
+        cwd: path.join(source.root, command.cwd), env: { ...source.env, ...url ? { SLIPJAY_DEPLOY_URL: url } : {}, ...extra }, timeoutMs: policy.timeoutMs, maxOutputBytes: 256 * 1024 });
+      // Shared steps run once; each project's record references the same interval.
       const timings = policy.projects.map((): NonNullable<DeployProjectOutcome["timings"]> => ({}));
       const timed = async <T>(save: (timing: DeployStepTiming) => void, work: () => Promise<T>, passed: (value: T) => boolean): Promise<T> => {
         const startedAt = new Date().toISOString(), start = performance.now();
@@ -176,8 +183,9 @@ export async function runDeploy(input: {
         try { const value = await work(); outcome = passed(value) ? "passed" : "failed"; return value; }
         finally { save({ startedAt, durationMs: Math.max(0, performance.now() - start), outcome }); }
       };
-      const projectStep = (index: number, name: "build" | "health" | "activate" | "rollback", command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}, missing?: string) =>
-        missing ? Promise.resolve(missing) : timed((timing) => { timings[index]![name] = timing; }, async () => failure(await step(command, url, extra), policy.timeoutMs), (reason) => reason === null);
+      const failedStep = async (...args: Parameters<typeof step>) => failure(await step(...args), policy.timeoutMs);
+      const projectStep = (index: number, name: "health" | "activate" | "rollback", command: FinalizationCommand, url?: string, extra: NodeJS.ProcessEnv = {}, missing?: string, source?: Parameters<typeof step>[3]) =>
+        missing ? Promise.resolve(missing) : timed((timing) => { timings[index]![name] = timing; }, () => failedStep(command, url, extra, source), (reason) => reason === null);
       // Brings the database to the commit and records how; false when it could not.
       const migrateCommands = async (): Promise<boolean> => {
         if (!policy.migrations) return true;
@@ -205,6 +213,17 @@ export async function runDeploy(input: {
         for (const project of timings) project.migrate = timing;
       }, migrateCommands, (ok) => ok);
       const holdBack = () => input.onProgress(`[deploy] activating nothing: ${environment} keeps serving what it served before`);
+      if (policy.preflight) {
+        const preflight = policy.preflight;
+        input.onProgress(`[deploy] checking preflight for ${environment}`);
+        const preflightFailed = await timed((timing) => {
+          for (const project of timings) project.preflight = timing;
+        }, () => failedStep(preflight), (reason) => reason === null);
+        if (preflightFailed) {
+          holdBack();
+          return policy.projects.map((project, index) => ({ name: project.name, ok: false, activated: false, reason: `preflight failed: ${preflightFailed}`, timings: timings[index] }));
+        }
+      }
       const activates = policy.projects.some((project) => project.activate);
       // Additive migrations go first, so the health checks run the new code on its own schema;
       // the code before the commit already fits it. Any others go last before traffic moves, so
@@ -263,22 +282,52 @@ export async function runDeploy(input: {
         input.onProgress(`[deploy ${project.name}] activation failed: ${failed}`);
         // A non-zero activation can have moved traffic before it failed. Recover that
         // project too; only a successful restore proves the earlier deployment serves.
-        for (const [earlier, moved] of policy.projects.slice(0, index + 1).entries()) {
-          const activated = outcomes[earlier]!;
-          if (!restore || activated.activated === false) continue;
-          const before = previousUrls[moved.name];
-          // A deployment that served before may need another call than a first activation (Vercel: rollback, not promote).
-          const unrestored = await projectStep(earlier, "rollback", moved.activate!, before, { SLIPJAY_DEPLOY_RESTORE: "1", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "1" }, before ? undefined : "no earlier deployment is recorded");
-          // An unsuccessful recovery cannot prove the earlier deployment serves.
-          if (unrestored) {
-            if (before) activated.activated = "unknown";
-            activated.reason = `${activated.reason ? `${activated.reason}; ` : ""}could not be moved back: ${unrestored}`;
-            input.onProgress(`[deploy ${moved.name}] could not be moved back: ${unrestored}`);
-          } else {
-            Object.assign(activated, { activated: false, restored: true });
-            input.onProgress(`[deploy ${moved.name}] moved back to ${before}`);
+        if (!restore) break;
+        const movedProjects = policy.projects.slice(0, index + 1).flatMap((moved, earlier) =>
+          outcomes[earlier]!.activated === false ? [] : [{ moved, earlier, before: previousUrls[moved.name] }]);
+        const restoreProjects = async (serving?: { root: string; env: NodeJS.ProcessEnv; policy: DeploymentEnvironment }, sourceFailure?: string) => {
+          for (const { moved, earlier, before } of movedProjects) {
+            const activated = outcomes[earlier]!;
+            const previousActivate = serving?.policy.projects.find((project) => project.name === moved.name)?.activate;
+            // A deployment that served before may need another call than a first activation (Vercel: rollback, not promote).
+            const unrestored = await projectStep(earlier, "rollback", previousActivate ?? moved.activate!, before,
+              { SLIPJAY_DEPLOY_RESTORE: "1", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "1" }, before ? sourceFailure : "no earlier deployment is recorded",
+              previousActivate ? serving : undefined);
+            // An unsuccessful recovery cannot prove the earlier deployment serves.
+            if (unrestored) {
+              if (before) activated.activated = "unknown";
+              activated.reason = `${activated.reason ? `${activated.reason}; ` : ""}could not be moved back: ${unrestored}`;
+              input.onProgress(`[deploy ${moved.name}] could not be moved back: ${unrestored}`);
+            } else {
+              Object.assign(activated, { activated: false, restored: true });
+              input.onProgress(`[deploy ${moved.name}] moved back to ${before}`);
+            }
+          }
+        };
+        if (previous && previousAvailable && movedProjects.some(({ before }) => before)) {
+          let restoring = false, restored = false;
+          try {
+            const exact = await readExactExecutionPolicy(gitDirectory, previous);
+            const servingPolicy = exact.configuration?.deployments?.environments[environment];
+            if (servingPolicy && movedProjects.some(({ moved, before }) => before && servingPolicy.projects.some(({ name, activate }) => name === moved.name && activate))) {
+              const servingEnv = { ...commandEnvironment(servingPolicy, environment, previous, declared, previous), ...lease?.env };
+              await withFinalizationSource(exact.gitDirectory, previous, async (servingRoot) => {
+                restoring = true;
+                await restoreProjects({ root: servingRoot, env: servingEnv, policy: servingPolicy });
+                restored = true;
+              });
+              break;
+            }
+          } catch (error) {
+            if (restored) {
+              input.onProgress(`[deploy] rollback source cleanup failed after restoring ${previous.slice(0, 12)}: ${error instanceof Error ? error.message : String(error)}`);
+              break;
+            }
+            if (restoring) throw error; // Never retry a restore that may already have moved traffic.
+            input.onProgress(`[deploy] could not prepare previous release ${previous.slice(0, 12)} for rollback (${error instanceof Error ? error.message : String(error)}); falling back to candidate source`);
           }
         }
+        await restoreProjects();
         break;
       }
       return outcomes;

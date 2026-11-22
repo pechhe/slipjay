@@ -28,6 +28,8 @@ export type DeploymentEnvironment = {
   timeoutMs: number;
   environmentKeys: string[];
   projects: DeploymentProject[];
+  /** Checks whether the deploy may proceed, before migrations or any project command. */
+  preflight?: FinalizationCommand;
   /** Production only: how the runner brings the database to the deployed commit (see `DeploymentMigrations`). */
   migrations?: DeploymentMigrations;
   /**
@@ -120,6 +122,7 @@ export function deploymentPolicy(value: unknown): DeploymentPolicy | null {
     environments[name] = {
       minIntervalMs: minIntervalMs as number, timeoutMs: environment.timeoutMs as number,
       environmentKeys: environmentKeys(environment, "Deployment"), projects, ...migrations ? { migrations } : {},
+      ...environment.preflight === undefined ? {} : { preflight: command(environment.preflight, "Preflight") },
       ...environment.machine === undefined ? {} : { machine: machineName(environment.machine, name) },
       ...environment.prebuild === undefined ? {} : { prebuild: prebuildCommand(environment.prebuild) },
     };

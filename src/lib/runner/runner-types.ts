@@ -26,7 +26,7 @@ export type CompletedRelease = Extract<ReleaseResult, { status: "released" | "re
 
 /** A reached deploy step; elapsed time uses a monotonic clock. Absent from older records. */
 export type DeployStepTiming = { startedAt: string; durationMs: number; outcome: "passed" | "failed" };
-export type DeployStep = "build" | "migrate" | "health" | "activate" | "rollback";
+export type DeployStep = "preflight" | "build" | "migrate" | "health" | "activate" | "rollback";
 
 /**
  * One project's outcome in a deploy: `url` is the deployment its command reported, and

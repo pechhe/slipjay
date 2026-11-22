@@ -5,10 +5,10 @@
 Deploy records add `startedAt` (ISO timestamp) and `durationMs` for overall elapsed
 execution, measured by the runner from admission through any release-branch
 compensation, including source preparation and cleanup. Each project's optional
-`timings` maps `build` (build/prepare), `migrate`, `health`, `activate` and `rollback`
-to `{ startedAt, durationMs, outcome }`, where outcome is `passed` or `failed`.
-Only steps whose commands ran have intervals; a shared migration runs once and its same interval
-appears on every project. Activation and rollback retain their serial order.
+`timings` maps `preflight`, `build` (build/prepare), `migrate`, `health`, `activate`
+and `rollback` to `{ startedAt, durationMs, outcome }`, where outcome is `passed` or
+`failed`. Only steps whose commands ran have intervals; preflight and migration each
+run once, and their intervals appear on every project. Activation and rollback retain their serial order.
 `slipjay deploys` prints these intervals and outcomes, and `--json` carries the
 fields in `record`. Older records without timings remain readable and printable.
 
@@ -50,10 +50,15 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   build never holds a landing. Each project's command runs, all side by side, in an
   exact source view of the commit (a detached git checkout that borrows the warm
   checkout's objects). It gets the declared `environmentKeys`,
-  `SLIPJAY_DEPLOY_ENVIRONMENT` and `SLIPJAY_DEPLOY_COMMIT`, and must finish within
+  `SLIPJAY_DEPLOY_ENVIRONMENT`, `SLIPJAY_DEPLOY_COMMIT` and, when known,
+  `SLIPJAY_DEPLOY_PREVIOUS` (the commit that served before). It must finish within
   `timeoutMs` (at most 30 minutes). The last line it prints that is a URL is recorded
   as that project's deployment. A deploy is never killed by `runner kill`, but it
   honours `runner pause`.
+- **Preflight.** An environment may declare a `preflight` command. It runs once
+  with the candidate's source, environment, machine lease (if any) and timeout, before
+  migrations or any project deploys. If it fails, nothing migrates or deploys and
+  every project records a preflight failure with `activated: false`.
 - **Health and activation.** A project may declare `healthCheck`, run after its
   deploy with `SLIPJAY_DEPLOY_URL` set to the deployment; a failing check fails the
   project. An environment whose projects all declare `activate` deploys without
@@ -65,6 +70,10 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   the projects already activated are
   activated again on the deployment they last served, with `SLIPJAY_DEPLOY_RESTORE=1`
   (a host may move back to an earlier deployment differently from activating a new one).
+  When the previous commit is available and declares that project's `activate` command,
+  the restore runs that command from the previous commit's source with
+  `SLIPJAY_DEPLOY_COMMIT` set to the previous commit and its declared environment keys.
+  Otherwise, it uses the candidate's activation command and source.
   A missing previous URL or a failed restore leaves recovery unresolved; a successful
   restore records `activated: false` and `restored: true`. Later projects that were
   never attempted are unchanged. Unknown outcomes cannot establish a future served

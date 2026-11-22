@@ -85,7 +85,7 @@ test("a command that throws fails the deploy only after the other projects stop,
   });
 });
 
-test("migrations go before the projects deploy only when the promotion's known files are all additive", async () => {
+test("preflight goes first, then migrations go before projects only when the known files are all additive", async () => {
   const repo = mkdtempSync(path.join(tmpdir(), "slipjay-deploy-order-"));
   try {
     const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
@@ -93,23 +93,48 @@ test("migrations go before the projects deploy only when the promotion's known f
     writeFileSync(path.join(repo, "README.md"), "fixture\n");
     git("add", "README.md");
     git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--quiet", "-m", "Initial");
+    const previous = git("rev-parse", "HEAD");
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--quiet", "--allow-empty", "-m", "Candidate");
+    const commitId = git("rev-parse", "HEAD");
     const command = (name: string) => ({ executable: name, args: [], cwd: "." });
-    const policy: DeploymentEnvironment = { minIntervalMs: 0, timeoutMs: 60_000, environmentKeys: [],
+    const policy: DeploymentEnvironment = { minIntervalMs: 0, timeoutMs: 60_000, environmentKeys: [], machine: "images",
+      preflight: command("preflight"),
       projects: [{ name: "app", command: command("deploy"), healthCheck: command("health"), activate: command("activate") }],
       migrations: { verify: command("verify"), apply: command("apply") } };
-    const order = async (migrationArtifacts: string[] | undefined, nonAdditive = false) => {
-      const steps: string[] = [];
-      let applied = false;
+    const order = async (migrationArtifacts: string[] | undefined, nonAdditive = false, refuse = false) => {
+      const steps: string[] = [], progress: string[] = [];
+      let applied = false, closed = false, source: string | undefined;
       const record = await runDeploy({
-        gitDirectory: path.join(repo, ".git"), environment: "production", commitId: git("rev-parse", "HEAD"), previous: null, policy,
-        nonAdditive, ...migrationArtifacts ? { migrationArtifacts } : {}, readEnvironment: () => ({}), onProgress: () => {},
-        run: async ({ executable }) => {
+        gitDirectory: path.join(repo, ".git"), environment: "production", commitId, previous, policy,
+        nonAdditive, ...migrationArtifacts ? { migrationArtifacts } : {}, readEnvironment: () => ({}), onProgress: (line) => progress.push(line),
+        lease: async () => ({ machine: { verifier: "boat", id: "fixture", name: "fixture", size: "large", image: "fixture" },
+          env: { SLIPJAY_MACHINE_SSH: "/fixture/ssh" }, close: async () => { closed = true; return null; } }),
+        run: async ({ executable, cwd, env, timeoutMs }) => {
           steps.push(executable);
+          source ??= cwd;
+          assert.equal(cwd, source);
+          assert.equal(env?.SLIPJAY_DEPLOY_PREVIOUS, previous);
+          assert.equal(env?.SLIPJAY_DEPLOY_COMMIT, commitId);
+          assert.equal(env?.SLIPJAY_DEPLOY_ENVIRONMENT, "production");
+          assert.equal(env?.SLIPJAY_MACHINE_SSH, "/fixture/ssh");
+          assert.equal(timeoutMs, policy.timeoutMs);
+          if (executable === "preflight" && refuse) return { ...exited(1, ""), stderr: "Live is incompatible" };
           if (executable === "apply") applied = true;
           return exited(executable === "verify" && !applied ? 2 : 0, executable === "deploy" ? "https://app.example.test" : "");
         },
       });
-      for (const name of ["build", "migrate", "health", "activate"] as const) {
+      assert.equal(closed, true);
+      if (refuse) {
+        assert.equal(record.migrations, undefined);
+        assert.equal(applied, false);
+        assert.ok(progress.some((line) => line.includes("activating nothing")));
+        const { timings, ...project } = record.projects[0]!;
+        assert.deepEqual(project, { name: "app", ok: false, activated: false, reason: "preflight failed: exited 1: Live is incompatible" });
+        assert.deepEqual(Object.keys(timings!), ["preflight"]);
+        assert.equal(timings?.preflight?.outcome, "failed");
+        return steps.join(" ");
+      }
+      for (const name of ["preflight", "build", "migrate", "health", "activate"] as const) {
         const timing = record.projects[0]!.timings?.[name];
         assert.equal(timing?.outcome, "passed", name);
         assert.ok(timing!.durationMs >= 0, name);
@@ -117,8 +142,9 @@ test("migrations go before the projects deploy only when the promotion's known f
       }
       return steps.join(" ");
     };
-    const early = "verify apply verify deploy health activate";
-    const late = "deploy health verify apply verify activate";
+    const early = "preflight verify apply verify deploy health activate";
+    const late = "preflight deploy health verify apply verify activate";
+    assert.equal(await order(["migrations/0001.sql"], false, true), "preflight", "a failed preflight runs no migrations or projects");
     assert.equal(await order(["migrations/0001.sql"]), early);
     assert.equal(await order(["migrations/0001.sql"], true), late, "non-additive");
     assert.equal(await order(["drizzle/0001.sql", "drizzle/meta/0001_snapshot.json", "drizzle/meta/_journal.json"]), early, "Drizzle metadata beside the SQL");
