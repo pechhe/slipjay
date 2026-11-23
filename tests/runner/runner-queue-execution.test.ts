@@ -412,7 +412,7 @@ exec ${JSON.stringify(real)} "$@"
       (_error, stdout) => resolve(stdout.trim())));
     await until(async () => await state() === "inactive" ? true : undefined, 15_000);
     assert.equal((await readFile(refusals, "utf8")).trim().split("\n").length, 2, "the stop was refused twice, then retried until it succeeded");
-  } finally { process.env.PATH = path; await rm(home, { recursive: true, force: true }); }
+  } finally { process.env.PATH = path; await rm(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 }, 60_000);
 
 systemdTest("after the runner is killed outright, the next process stops only the commands it left before reusing their checkout", async () => {
