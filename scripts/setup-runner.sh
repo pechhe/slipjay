@@ -61,7 +61,15 @@ shims="$home/corepack-bin"
 mkdir -p "$shims"
 corepack enable --install-directory "$shims" pnpm
 
-# PATH as this login shell sees it, so gate commands find bun, jj and node.
+# PATH as this login shell sees it, so gate commands find bun, jj and node. Vite+ installs `vp` into
+# ~/.local/share/vite-plus/bin and wires it up only in login/interactive rc files, so a non-login
+# invocation omits it even when Vite+ is installed on the host; include it after corepack's shims so
+# corepack pnpm still wins over Vite+'s pnpm shim.
+unit_path="$PATH"
+vp_bin="$HOME/.local/share/vite-plus/bin"
+if [ -d "$vp_bin" ] && [[ ":$unit_path:" != *":$vp_bin:"* ]]; then
+  unit_path="$vp_bin:$unit_path"
+fi
 cat > "$HOME/.config/systemd/user/slipjay-runner.service" <<UNIT
 [Unit]
 Description=SlipJay runner
@@ -72,7 +80,7 @@ After=network-online.target
 StartLimitIntervalSec=0
 
 [Service]
-Environment=PATH=$shims:$PATH
+Environment=PATH=$shims:$unit_path
 Environment=COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 ExecStartPre=-$HOME/.local/bin/slipjay-disk-rescue
 ExecStart=$(command -v bws) run -- $slot/src/launcher/workspace.ts runner serve
