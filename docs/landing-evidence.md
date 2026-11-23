@@ -330,7 +330,7 @@ whose known gap names the changed fields and the reason. Repair linkage comes on
 proposed, never from queue-prefix ancestry. A declared chore reports only its
 publication, through `recordChoreLanding`, and its `land` output says the landing is a chore: it names
 the Forge number Forge created for the chore and the landed revision, and names
-`weave_forge_associate_landing` as the way to attach it to a Spec, in this repository or another Forge
+`weave_forge_session` (`action: "associate_landing"`) as the way to attach it to a Spec, in this repository or another Forge
 repository. A Spec spanning repositories lands its parts in the other repositories as chores, each
 attached the same way. Nothing is attached automatically, a `Forge: #<n>` or `Spec #<n>` line in a commit
 message is never trusted, and SlipJay has no attach command of its own: Forge refuses the runner's identity.

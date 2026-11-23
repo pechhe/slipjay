@@ -92,10 +92,10 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   assert.deepEqual((await request({ issueNumber: null, sessionId: undefined })).build, { unassociated: true });
   assert.equal((await request({})).intent, "Do it");
 
-  await assert.rejects(request({ sessionId: undefined }), /weave_forge_start_session.*--session <id>.*WEAVE_FORGE_SESSION_ID/);
+  await assert.rejects(request({ sessionId: undefined }), /weave_forge_session \(action "start_session"\).*--session <id>.*WEAVE_FORGE_SESSION_ID/);
   await assert.rejects(request({ sessionId: "not-a-session" }), /not a session id/);
-  await assert.rejects(request({ issueNumber: 21 }), /Spec #20 has no current lead: bind it with weave_forge_bind/);
-  await assert.rejects(request({ issueNumber: 40 }), /Spec #40 shaped and bound, but it is in inbox: set it to ready with weave_forge_set_status/, "an unshaped Spec names shaping first, with or without a session");
+  await assert.rejects(request({ issueNumber: 21 }), /Spec #20 has no current lead: bind it with weave_forge_session \(action "bind"\)/);
+  await assert.rejects(request({ issueNumber: 40 }), /Spec #40 shaped and bound, but it is in inbox: set it to ready with weave_forge_item \(action "set_status"/, "an unshaped Spec names shaping first, with or without a session");
   await assert.rejects(request({ issueNumber: 40, sessionId: undefined }), /it is in inbox/);
   await assert.rejects(request({ tickets: [21] }), /#21 is not a Ticket of Spec #10/);
   await assert.rejects(request({ issueNumber: 30 }), /is a decision, not a Spec or a Spec's Ticket/);
@@ -111,10 +111,10 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
   assert.deepEqual((await request({ issueNumber: 51 })).build, { unassociated: true }, "a Ticket whose Spec has landed lands as a chore too");
   assert.deepEqual((await request({ issueNumber: 60 })).build, { unassociated: true });
   // A named --ticket cannot be honored as a chore: the error names the routes that work, not a session Build would refuse.
-  await assert.rejects(request({ issueNumber: 50, tickets: [51] }), /cannot be a delivery of Spec #50, which is landed.*bind_status_invalid.*weave_forge_dispose_finding \(decision fix\).*In progress.*--session <id> --ticket <n>.*weave_forge_associate_landing/);
+  await assert.rejects(request({ issueNumber: 50, tickets: [51] }), /cannot be a delivery of Spec #50, which is landed.*bind_status_invalid.*weave_forge_finding \(action "dispose_finding", decision fix\).*In progress.*--session <id> --ticket <n>.*weave_forge_session \(action "associate_landing"\)/);
   await assert.rejects(request({ issueNumber: 50, tickets: [51] }), /drop --ticket/, "the chore route says to drop --ticket");
-  await assert.rejects(request({ issueNumber: 60, tickets: [61] }), /Spec #60, which is accepted, and Build would refuse the bind \(bind_status_invalid\): accepted work is not reopened, so a later defect is new linked work: land it as a chore \(drop --ticket\) and attach it with weave_forge_associate_landing/,
-    "accepted work names its route, never a reopen");
+  await assert.rejects(request({ issueNumber: 60, tickets: [61] }), /Spec #60, which is accepted, and Build would refuse the bind \(bind_status_invalid\): an Accepted Spec can be reopened.*weave_forge_outcome \(action "reopen"\).*new work, so land it as a chore \(drop --ticket\) and attach it with weave_forge_session \(action "associate_landing"\)/,
+    "accepted work names reopen and the chore route");
   await assert.doesNotReject(request({ issueNumber: 50, sessionId: "not-a-session" }), "a closed Spec never needs the session's shape: nothing is bound");
 
   // The notice printed for a chore fallback names the route for that status only.
@@ -123,16 +123,16 @@ test("a Build-tracked landing refuses before submitting when Build cannot confir
     await request({ issueNumber, onNoDelivery: (message) => told.push(message) });
     return told;
   };
-  assert.match((await notices(50)).join(), /Spec #50 is landed.*weave_forge_dispose_finding \(decision fix\)/, "a Landed Spec may be reopened by a fix disposition");
+  assert.match((await notices(50)).join(), /Spec #50 is landed.*weave_forge_finding \(action "dispose_finding", decision fix\)/, "a Landed Spec may be reopened by a fix disposition");
   const [acceptedNotice] = await notices(60);
-  assert.match(acceptedNotice!, /Spec #60 is accepted.*accepted work is not reopened/);
+  assert.match(acceptedNotice!, /Spec #60 is accepted.*Accepted Spec can be reopened.*weave_forge_outcome/);
   assert.doesNotMatch(acceptedNotice!, /dispose_finding/, "an Accepted Spec is never pointed at a reopen");
   assert.deepEqual(await notices(10), [], "a Spec Build takes a delivery of says nothing");
   const dropped = item({ number: 70, kind: "spec", status: "dropped" });
   const later = build([dropped]).read;
   const told: string[] = [];
   await buildLandingHandoff({ source: "a".repeat(40), description: "x", issueNumber: 70, tickets: [], sessionId: undefined, read: later, onNoDelivery: (message) => told.push(message) });
-  assert.match(told.join(), /Spec #70 is dropped.*land it as a chore.*weave_forge_associate_landing/);
+  assert.match(told.join(), /Spec #70 is dropped.*land it as a chore.*weave_forge_session \(action "associate_landing"\)/);
   assert.doesNotMatch(told.join(), /dispose_finding/);
 });
 

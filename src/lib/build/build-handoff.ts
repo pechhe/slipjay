@@ -8,8 +8,8 @@
  * A Spec Build takes no delivery of also lands as a chore, so a fix found in a Landed Spec's own
  * workspace still reaches Build there: Build binds a Spec only while it is Ready or In progress,
  * and a Landed one takes an evidence bind at most, which carries no source. Its lead attaches the
- * chore to the Spec with `weave_forge_associate_landing`, or has Build return the Spec to In progress
- * with `weave_forge_dispose_finding` (decision `fix`) so a later fix lands as its delivery.
+ * chore to the Spec with `weave_forge_session` (`action: "associate_landing"`), or has Build return the Spec to In progress
+ * with `weave_forge_finding` (`action: "dispose_finding"`, decision `fix`) so a later fix lands as its delivery.
  */
 import { readBuildItem } from "./tracker.ts";
 import type { BuildItem, BuildReader } from "./tracker.ts";
@@ -52,10 +52,10 @@ async function item(read: BuildReader, reference: { number: number } | { itemId:
  * Landed Spec, Build's `fix` disposition returns the Spec to In progress so a later fix lands as its delivery.
  */
 export function noDeliveryRoute(spec: BuildItem): string {
-  const chore = "land it as a chore (drop --ticket) and attach it with weave_forge_associate_landing";
+  const chore = 'land it as a chore (drop --ticket) and attach it with weave_forge_session (action "associate_landing")';
   return spec.status === "landed"
-    ? `dispose the finding with weave_forge_dispose_finding (decision fix), which returns Spec #${spec.number} to In progress for a later fix to land with --session <id> --ticket <n>; or ${chore}`
-    : spec.status === "accepted" ? `accepted work is not reopened, so a later defect is new linked work: ${chore}` : chore;
+    ? `dispose the finding with weave_forge_finding (action "dispose_finding", decision fix), which returns Spec #${spec.number} to In progress for a later fix to land with --session <id> --ticket <n>; or ${chore}`
+    : spec.status === "accepted" ? `an Accepted Spec can be reopened for repairs to its existing promise with weave_forge_outcome (action "reopen"); a later defect lands as new work, so ${chore}` : chore;
 }
 
 const unassociated = (request: BuildHandoffRequest): { unassociated: true; project?: string } =>
@@ -83,7 +83,7 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
   }
   // Build binds only a shaped Spec, so an Inbox or Shaping one needs shaping before any lead session.
   if (spec.status === "inbox" || spec.status === "shaping")
-    throw new Error(`Landing Build #${issueNumber} needs Spec #${spec.number} shaped and bound, but it is in ${spec.status}: set it to ready with weave_forge_set_status (inbox → shaping → ready), bind it with weave_forge_bind, start a session with weave_forge_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
+    throw new Error(`Landing Build #${issueNumber} needs Spec #${spec.number} shaped and bound, but it is in ${spec.status}: set it to ready with weave_forge_item (action "set_status"; inbox → shaping → ready), bind it with weave_forge_session (action "bind"), start a session with weave_forge_session (action "start_session"), then pass --session <id> or set ${BUILD_SESSION_ENV}`);
   // A Spec Build will not bind takes no source: rather than asking for a session Build would refuse, the fix lands as a
   // chore from the workspace it was found in, which its lead attaches to the Spec. A named --ticket cannot be honored
   // that way, so it is refused with the routes that work.
@@ -95,11 +95,11 @@ async function binding(request: BuildHandoffRequest): Promise<BuildBinding | { u
   }
   const sessionId = request.sessionId?.trim();
   if (!sessionId)
-    throw new Error(`Landing Build #${issueNumber} needs your lead session for Spec #${spec.number}: start one with weave_forge_start_session, then pass --session <id> or set ${BUILD_SESSION_ENV}`);
+    throw new Error(`Landing Build #${issueNumber} needs your lead session for Spec #${spec.number}: start one with weave_forge_session (action "start_session"), then pass --session <id> or set ${BUILD_SESSION_ENV}`);
   if (!UUID.test(sessionId)) throw new Error(`The Build session ${JSON.stringify(sessionId)} is not a session id`);
   const binds = await read("binds", { specId: spec.id }) as Bind[];
   const current = binds.filter((bind) => bind.endedAt === null).at(-1);
-  if (!current) throw new Error(`Spec #${spec.number} has no current lead: bind it with weave_forge_bind before landing`);
+  if (!current) throw new Error(`Spec #${spec.number} has no current lead: bind it with weave_forge_session (action "bind") before landing`);
   return { specId: spec.id, ticketIds, bodyRevision: spec.bodyRevision ?? null,
     bindGeneration: current.generation, sessionId };
 }
