@@ -19,6 +19,8 @@ export type BatchVerification = {
    * only when a promotion falls due, as before.
    */
   everyMinutes?: number;
+  /** Background recovery interval after a failed batch, measured from its end. Defaults to the lesser of everyMinutes and 10. */
+  retryMinutes?: number;
   /**
    * A flaky check verifies its head when its rerun passed everything it ran: every test that failed once passed on the
    * same head, and none failed twice, so it shows no regression. Absent, a flaky head needs a complete green check, which
@@ -31,13 +33,15 @@ export type BatchVerification = {
 export function batchVerification(declared: unknown, fail: (message: string) => never): BatchVerification | undefined {
   if (declared === undefined) return undefined;
   if (declared === null || typeof declared !== "object" || Array.isArray(declared)) fail("batchVerification must be an object");
-  const { machine, everyMinutes, promoteFlaky, ...rest } = declared as Record<string, unknown>;
+  const { machine, everyMinutes, retryMinutes, promoteFlaky, ...rest } = declared as Record<string, unknown>;
   if (Object.keys(rest).length) fail(`batchVerification declares unknown fields: ${Object.keys(rest).join(", ")}`);
   if (typeof machine !== "string" || !MACHINE_POOL.test(machine)) fail("batchVerification.machine must be a machine pool name (a-z, 0-9, -)");
-  if (everyMinutes !== undefined && !(Number.isInteger(everyMinutes) && (everyMinutes as number) >= 1 && (everyMinutes as number) <= 1440))
-    fail("batchVerification.everyMinutes must be a whole number of minutes from 1 to 1440");
+  for (const [field, minutes] of Object.entries({ everyMinutes, retryMinutes })) {
+    if (minutes !== undefined && !(typeof minutes === "number" && Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440))
+      fail(`batchVerification.${field} must be a whole number of minutes from 1 to 1440`);
+  }
   if (promoteFlaky !== undefined && typeof promoteFlaky !== "boolean") fail("batchVerification.promoteFlaky must be true or false");
-  return { machine, ...everyMinutes === undefined ? {} : { everyMinutes: everyMinutes as number }, ...promoteFlaky ? { promoteFlaky: true } : {} };
+  return { machine, ...typeof everyMinutes === "number" ? { everyMinutes } : {}, ...typeof retryMinutes === "number" ? { retryMinutes } : {}, ...promoteFlaky ? { promoteFlaky: true } : {} };
 }
 
 /**

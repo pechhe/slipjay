@@ -20,3 +20,12 @@ test("background checks are an interval in whole minutes beside the batch machin
   for (const everyMinutes of [0, 1.5, 1441, "20"])
     assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "peach-box", everyMinutes } })), /everyMinutes must be a whole number of minutes from 1 to 1440/);
 });
+
+test("background recovery accepts only whole minutes from 1 to 1440", () => {
+  for (const retryMinutes of [1, 1440]) {
+    const batchVerification = { machine: "peach-box", everyMinutes: 20, retryMinutes };
+    assert.deepEqual(parseExecutionPolicy(policy({ batchVerification })).batchVerification, batchVerification);
+  }
+  for (const retryMinutes of [0, 1.5, 1441, "5", null])
+    assert.throws(() => parseExecutionPolicy(policy({ batchVerification: { machine: "peach-box", retryMinutes } })), /retryMinutes must be a whole number of minutes from 1 to 1440/);
+});

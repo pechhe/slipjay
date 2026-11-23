@@ -539,27 +539,31 @@ export function createRunnerQueue(input: {
   }
   /** The release branch's policy: at the base a pre-verification ran against, never the candidate's; else at the branch's head. */
   async function releasePolicy(repo: string, commitId: string, ranAgainst?: string) {
+    return (await releasePolicySnapshot(repo, commitId, ranAgainst)).policy;
+  }
+  async function releasePolicySnapshot(repo: string, commitId: string, ranAgainst?: string) {
     const directory = repoCheckout(repo);
     const candidate = await readExactExecutionPolicy(join(directory, ".git"), commitId).then((exact) => exact.configuration, () => null);
     // The release checkout exists once a first pre-verification or release ran; before that the landing checkout holds the branch.
     const releases = join(home, "releases", repo);
     const checkout = await stat(releases).then(() => releases, () => directory);
-    if (ranAgainst) return readExactExecutionPolicy(join(checkout, ".git"), ranAgainst).then((exact) => exact.configuration, () => null);
+    const at = (base: string) => readExactExecutionPolicy(join(checkout, ".git"), base).then((exact) => exact.configuration, () => null);
+    if (ranAgainst) return { base: ranAgainst, policy: await at(ranAgainst) };
     let policy = candidate;
     if (!policy?.releaseBranch) {
       // A candidate removing the release branch must still use the release policy of the integration
       // parent it extended. Only a repository already without a release branch uses its own policy.
       // A read: it never snapshots the landing checkout, which a turn may be working in.
       const parents = (await jj(directory, ["--ignore-working-copy", "log", "-r", `${commitId}-`, "--no-graph", "-T", 'commit_id ++ "\\n"']).catch(() => "")).trim().split("\n").filter(Boolean);
-      if (parents.length !== 1) return null;
+      if (parents.length !== 1) return { base: null, policy: null };
       const previous = await readExactExecutionPolicy(join(directory, ".git"), parents[0]!).then((exact) => exact.configuration, () => null);
-      if (!previous) return null;
-      if (!previous.releaseBranch) return candidate;
+      if (!previous) return { base: null, policy: null };
+      if (!previous.releaseBranch) return { base: null, policy: candidate };
       policy = previous;
     }
     // A read as well: background checks ask for the policy beside landings and recovery working in this checkout.
     const releaseBase = await jj(checkout, ["--ignore-working-copy", "log", "-r", `${policy.releaseBranch}@${policy.remote ?? "origin"}`, "--no-graph", "-T", "commit_id"]).catch(() => "");
-    return releaseBase ? readExactExecutionPolicy(join(checkout, ".git"), releaseBase).then((exact) => exact.configuration, () => null) : null;
+    return { base: releaseBase || null, policy: releaseBase ? await at(releaseBase) : null };
   }
   function reportPolicy(repo: string, configuration: Awaited<ReturnType<typeof releasePolicy>>, applied: Awaited<ReturnType<typeof releasePolicy>>): void {
     if (!configuration) return;
@@ -889,19 +893,29 @@ export function createRunnerQueue(input: {
   const buildsAhead = new Map<string, ReturnType<typeof setTimeout>>();
   const now = input.now ?? Date.now;
   /**
-   * The commit `process: "development"` promotes: the newest landed commit whose pre-verification passed,
-   * looking back no further than the newest commit already released or tried (`except` names a release that does not
-   * count, the one asking). A newer landing that is still verifying, or whose verification failed, does not hold it
-   * back, so a stream of landings cannot keep every verified commit from being promoted.
+   * A stale-base refusal did not test or release the candidate; it may be checked again against the new base.
    */
-  function promotionCandidate(repo: string, except?: string): { commitId: string; verification: ReturnType<typeof log.verifications>[number] } | undefined {
-    const verifications = log.verifications(repo);
+  function staleAutomaticRelease(release: ReleaseOperation): boolean {
+    if (!release.automatic || release.result?.type !== "failed") return false;
+    const { reason } = release.result;
+    // Recognize the old generic refusal as well as the current base mismatch diagnostic.
+    return /^Not promoted automatically: (?:no pre-verification of .* passed against (?!a readable release base)|Pre-verification of .* passed against .*?, not [0-9a-f]+$)/i.test(reason);
+  }
+  const currentChecks = (repo: string) =>
+    log.verifications(repo).filter((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+  /**
+   * The newest landed commit whose pre-verification passed against the current release branch tip, looking back
+   * no further than the newest commit already released or tried (`except` names the release asking).
+   * A newer landing still verifying, failed, or verified against an older base does not hold it back.
+   */
+  function promotionCandidate(repo: string, releaseBase: string | null, except?: string): { commitId: string; verification: VerificationOperation } | undefined {
+    const verifications = currentChecks(repo);
     // Read once: each projects every one of the repository's releases or deploys.
-    const tried = new Set([...log.releases(repo).filter((release) => release.id !== except), ...log.deployments(repo, "production")].map((entry) => entry.commitId));
+    const tried = new Set([...log.releases(repo).filter((release) => release.id !== except && !staleAutomaticRelease(release)), ...log.deployments(repo, "production")].map((entry) => entry.commitId));
     for (const entry of log.landings(repo).reverse()) {
       if (tried.has(entry.commitId)) return undefined;
-      const verification = verifications.find((other) => other.commitId === entry.commitId && other.result?.type === "verified");
-      if (verification) return { commitId: entry.commitId, verification };
+      const verification = verifications.find((other) => other.commitId === entry.commitId);
+      if (verification?.result?.type === "verified" && (!releaseBase || verification.result.base === releaseBase)) return { commitId: entry.commitId, verification };
     }
     return undefined;
   }
@@ -950,7 +964,7 @@ export function createRunnerQueue(input: {
    */
   const standsFor = (repo: string, commitId: string): string | null => {
     const states: string[] = [];
-    const release = log.releases(repo, commitId)[0];
+    const release = log.releases(repo, commitId).find((entry) => !staleAutomaticRelease(entry));
     if (release) states.push(release.result?.type === "released" ? "is already released"
       : release.status === "queued" || release.status === "running" ? `has a release (${release.id}) still open`
       : `has a release that ended ${release.status}`);
@@ -996,17 +1010,17 @@ export function createRunnerQueue(input: {
       // landed here, for one, says nothing.
       if (reason) note(ended.commitId, ended.id, reason, decision ? { kind: "decision" } : { kind: "busy" });
     };
-    const choice = promotionCandidate(repo);
+    const { base: releaseBase, policy: releasePolicyAtHead } = await releasePolicySnapshot(repo, newest.commitId);
+    const choice = promotionCandidate(repo, releaseBase);
     // The pre-verification that woke this consideration is answered whether or not it is the candidate.
     if (after && after !== choice?.verification.id) await explain(after, choice?.commitId);
     // A batching release branch checks its newest landing when the promotion falls due; a candidate that already passed promotes as before.
     if (!choice) {
-      const releaseBase = await releasePolicy(repo, newest.commitId);
-      if (releaseBase?.process === "development" && releaseBase.batchVerification && !missingPromotion(releaseBase)) return considerBatch(repo, newest.commitId, releaseBase);
+      if (releasePolicyAtHead?.process === "development" && releasePolicyAtHead.batchVerification && !missingPromotion(releasePolicyAtHead)) return considerBatch(repo, newest.commitId, releasePolicyAtHead);
     }
     // A newest landing whose verification failed is left behind, and says why.
     const failed = log.verifications(repo, newest.commitId).find((entry) => entry.status === "failed");
-    if (failed && !log.releases(repo, failed.commitId).length && (await releasePolicy(repo, failed.commitId))?.process === "development")
+    if (failed && !log.releases(repo, failed.commitId).length && releasePolicyAtHead?.process === "development")
       note(failed.commitId, failed.id, "its pre-verification failed", { kind: "decision" });
     if (!choice) return;
     const { commitId, verification } = choice;
@@ -1021,7 +1035,7 @@ export function createRunnerQueue(input: {
     // A release or a production deploy already in flight promotes what it holds; this one waits for it to end.
     const open = log.openOperations(repo).find((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"));
     if (open) return busy(`a ${open.kind === "release" ? "release" : "production deploy"} (${open.id}) is already open`);
-    const base = await releasePolicy(repo, commitId, verified.base);
+    const base = releaseBase ? releasePolicyAtHead : await releasePolicy(repo, commitId, verified.base);
     if (!base) return withheld("its release base's policy could not be read");
     if (base.process !== "development") return;
     // Every decision input is the release base's, never the candidate's.
@@ -1044,7 +1058,7 @@ export function createRunnerQueue(input: {
     const refusal = base.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
     if (refusal) return busy(refusal);
     // Asked again after the reads above, which let a newer candidate pass and a release or a production deploy begin.
-    const current = promotionCandidate(repo);
+    const current = promotionCandidate(repo, releaseBase);
     if (current?.commitId !== commitId) return busy(current
       ? `a newer candidate (${current.commitId.slice(0, 12)}) passed while it was decided`
       : "a release or production deploy now holds it");
@@ -1071,10 +1085,14 @@ export function createRunnerQueue(input: {
     if (due - BUILD_AHEAD_MS <= now()) return;
     const ahead = setTimeout(() => {
       buildsAhead.delete(repo);
-      const commitId = promotionCandidate(repo)?.commitId ?? log.lastLanded(repo)?.commitId;
-      if (!commitId || standsFor(repo, commitId)) return;
-      void prebuild(repo, commitId, "ahead of the scheduled promotion", (line) => console.error(`[runner] ${repo}: ${line.replace(/^\[prebuild\] /, "")}`))
-        .catch((error: unknown) => { console.error(`[prebuild] ${repo} ${commitId.slice(0, 12)} could not start: ${message(error)}`); });
+      void (async () => {
+        const head = log.lastLanded(repo)?.commitId;
+        if (!head) return;
+        const { base } = await releasePolicySnapshot(repo, head);
+        const commitId = promotionCandidate(repo, base)?.commitId ?? head;
+        if (standsFor(repo, commitId)) return;
+        await prebuild(repo, commitId, "ahead of the scheduled promotion", (line) => console.error(`[runner] ${repo}: ${line.replace(/^\[prebuild\] /, "")}`));
+      })().catch((error: unknown) => { console.error(`[prebuild] ${repo} could not start: ${message(error)}`); });
     }, due - BUILD_AHEAD_MS - now());
     ahead.unref?.();
     buildsAhead.set(repo, ahead);
@@ -1084,15 +1102,16 @@ export function createRunnerQueue(input: {
   /**
    * `batchVerification.everyMinutes` (SJ-202): check the newest landing in the background, so a promotion finds an
    * already-checked tip and a red check names its culprit soon after it lands. A check starts when the newest landing
-   * has none of its own (so a red head waits for a new landing), no other check is open, no release or production
-   * deploy is open, the interval has passed since the last check started, and no landing gate is queued or waiting for
-   * a place; otherwise the runner looks again later. Asked whenever promotion is, and by its own timer.
+   * has no current coverage (a red head waits for a new landing), no other check, release or production deploy is
+   * open, the cadence or recovery interval has passed, and no landing gate is queued or waiting for a place.
+   * Asked whenever promotion is, and by its own timer.
    */
   async function considerBackgroundCheck(repo: string): Promise<void> {
     const newest = log.lastLanded(repo);
     if (!newest) return;
-    const base = await releasePolicy(repo, newest.commitId);
-    const every = base?.process === "development" && !missingPromotion(base) ? base.batchVerification?.everyMinutes : undefined;
+    const { base: releaseBase, policy } = await releasePolicySnapshot(repo, newest.commitId);
+    const batch = policy?.process === "development" && !missingPromotion(policy) ? policy.batchVerification : undefined;
+    const every = batch?.everyMinutes;
     if (!every) return;
     const later = (ms: number) => {
       clearTimeout(backgroundChecks.get(repo));
@@ -1101,18 +1120,22 @@ export function createRunnerQueue(input: {
       backgroundChecks.set(repo, timer);
     };
     if (standsFor(repo, newest.commitId)) return;
-    const checks = log.verifications(repo).filter((entry) => entry.status !== "superseded" && entry.status !== "cancelled");
+    const checks = currentChecks(repo);
     const own = checks.filter((entry) => entry.commitId === newest.commitId);
-    // A head with a check waits for a new landing, unless that check ended flaky or by infrastructure: it is checked
-    // again on the interval, within the same bound as a scheduled batch.
-    if (own.length) {
-      const outcome = own[0]!.status === "failed" ? batchOutcomeOf(own[0]!.id)?.outcome : undefined;
+    const latestOwn = own[0];
+    // A pass from before the release branch moved no longer covers this head. A red head still waits for a new landing.
+    if (latestOwn && !(latestOwn.result?.type === "verified" && releaseBase && latestOwn.result.base !== releaseBase)) {
+      const outcome = latestOwn.status === "failed" ? batchOutcomeOf(latestOwn.id)?.outcome : undefined;
       if ((outcome !== "flaky" && outcome !== "infrastructure") || own.filter((entry) => entry.status === "failed").length >= BATCH_ATTEMPTS) return;
     }
     if (checks.some((entry) => entry.status === "queued" || entry.status === "running")) return;
     if (log.openOperations(repo).some((entry) => entry.kind === "release" || (entry.kind === "deploy" && entry.environment === "production"))) return later(60_000);
     const last = checks[0];
-    const due = last ? Date.parse(last.submittedAt) + every * 60_000 : now();
+    const outcome = last?.status === "failed" ? batchOutcomeOf(last.id)?.outcome : undefined;
+    const recovering = outcome === "red" || outcome === "flaky" || outcome === "infrastructure";
+    const due = last ? (recovering
+      ? Date.parse(last.finishedAt ?? last.submittedAt) + (batch?.retryMinutes ?? Math.min(every, 10)) * 60_000
+      : Date.parse(last.submittedAt) + every * 60_000) : now();
     if (due > now()) return later(due - now());
     // Landing gates go first: a check waits while one is queued for the lane or for a place on its machine.
     const gateMachine = configuredRepository(config, repo)?.gateMachine;
@@ -2376,13 +2399,18 @@ export function createRunnerQueue(input: {
       let { configuration } = await readExactExecutionPolicy(join(checkout, ".git"), operation.commitId);
       if (operation.automatic) {
         // No human approved it: it must still be the candidate to promote, and its decisions come from the release base's policy, not the candidate's.
-        const newest = promotionCandidate(operation.repo, operation.id)?.commitId;
-        if (newest !== operation.commitId) {
-          append(operation.id, { type: "failed", stage, reason: `Not promoted automatically: superseded by ${newest?.slice(0, 12) ?? "a newer candidate"}` });
+        const { base: releaseBase, policy } = await releasePolicySnapshot(operation.repo, operation.commitId);
+        const choice = promotionCandidate(operation.repo, releaseBase, operation.id);
+        if (choice?.commitId !== operation.commitId) {
+          const checked = currentChecks(operation.repo).find((entry) => entry.commitId === operation.commitId)?.result;
+          const reason = checked?.type === "verified" && releaseBase && checked.base !== releaseBase
+            ? `Pre-verification of ${operation.commitId.slice(0, 12)} passed against ${checked.base.slice(0, 12)}, not ${releaseBase.slice(0, 12)}`
+            : `superseded by ${choice?.commitId.slice(0, 12) ?? "a newer candidate"}`;
+          append(operation.id, { type: "failed", stage, reason: `Not promoted automatically: ${reason}` });
           return;
         }
-        const base = log.verifications(operation.repo, operation.commitId).find((entry) => entry.result?.type === "verified")?.result;
-        const baseConfiguration = base?.type === "verified"
+        const base = choice.verification.result;
+        const baseConfiguration = releaseBase ? policy : base?.type === "verified"
           ? await readExactExecutionPolicy(join(checkout, ".git"), base.base).then((exact) => exact.configuration, () => null) : null;
         if (!baseConfiguration) {
           append(operation.id, { type: "failed", stage, reason: `Not promoted automatically: no pre-verification of ${operation.commitId.slice(0, 12)} passed against a readable release base` });

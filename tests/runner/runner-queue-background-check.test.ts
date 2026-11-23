@@ -33,7 +33,7 @@ test("a background check starts on its interval only when something new landed, 
   let clock = Date.now();
   const requests: BatchCheckRecord[] = [];
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
-    { process: "development", promotionSchedule: schedule, now: () => clock, batchVerification: { machine: "batch", everyMinutes: 20 }, releaseGates: (root) => [batchCheck(root)],
+    { process: "development", promotionSchedule: schedule, now: () => clock, batchVerification: { machine: "batch", everyMinutes: 20, retryMinutes: 3 }, releaseGates: (root) => [batchCheck(root)],
       recordBatchCheck: async (record) => { requests.push(record); return { kind: "accepted", value: { number: 7001, specId: "s", runId: "r" } }; } });
   try {
     // The first landing promotes at once, after its scheduled check.
@@ -50,7 +50,12 @@ test("a background check starts on its interval only when something new landed, 
     const one = f.main();
     assert.equal(checks().length, 1, "the interval has not passed");
 
-    // Once it has, the newest tip is checked in the background from the commit Production serves, and nothing promotes.
+    clock = promotedAt + 4 * MINUTE;
+    await f.queue.recover();
+    await settle(f);
+    assert.equal(checks().length, 1, "a green check does not use the shorter recovery interval");
+
+    // Once the ordinary interval has passed, the newest tip is checked in the background and nothing promotes.
     clock = promotedAt + 21 * MINUTE;
     await f.queue.recover();
     await settle(f);
@@ -94,9 +99,16 @@ test("a background check starts on its interval only when something new landed, 
     await settle(f);
     assert.equal(checks().length, 3);
 
-    // The next landing is checked; it names the same culprit for the same suite, which is not routed again.
+    // A new head waits through recovery, but not through the full green cadence.
+    const recoveryAt = Date.parse(red.finishedAt!) + 3 * MINUTE;
+    clock = recoveryAt - MINUTE;
     await f.land(f.submit(await f.candidate("three.txt")));
     await settle(f);
+    assert.equal(checks().length, 3);
+    clock = recoveryAt;
+    await f.queue.recover();
+    await settle(f);
+    // It names the same culprit for the same suite, which is not routed again.
     const three = f.main();
     const again = checks().find((entry) => entry.commitId === three)!;
     assert.equal(again.status, "failed");
@@ -222,7 +234,7 @@ test("a culprit already routed for one suite is routed again only for the suite 
   } finally { await f.dispose(); }
 }, 300_000);
 
-test("a background check that ends flaky is checked again on the interval, without waiting for a new landing", async () => {
+test("a background check that ends flaky retries on the recovery interval without a new landing", async () => {
   let clock = Date.now();
   let routed = 0;
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
@@ -238,12 +250,25 @@ test("a background check that ends flaky is checked again on the interval, witho
     const one = f.main();
     // `workbench` fails once, then passes its rerun: the check ends flaky.
     await writeFile(join(f.root, "flaky-once"), "");
+    await writeFile(join(f.root, "hold"), "");
     clock = promotedAt + 21 * MINUTE;
     await f.queue.recover();
+    await until(async () => (await f.lines("batch-env.jsonl")).some((line) => JSON.parse(line).head === one) || undefined);
+    // The ledger uses real time. Bring the test clock back before letting the check finish, so it cannot skip recovery.
+    clock = Date.now();
+    await rm(join(f.root, "hold"));
     await settle(f);
-    // Nothing new has landed, yet the head is checked again (at once here: the test clock is already past the next
-    // interval), and the second check passes.
-    await until(() => f.log.verifications(REPO).some((entry) => entry.commitId === one && entry.status === "verified") || undefined);
+    const failed = f.log.verifications(REPO).find((entry) => entry.commitId === one)!;
+    assert.equal(failed.status, "failed");
+    const recoveryAt = Date.parse(failed.finishedAt!) + 10 * MINUTE;
+    clock = recoveryAt - MINUTE;
+    await f.queue.recover();
+    await settle(f);
+    assert.equal(f.log.verifications(REPO).filter((entry) => entry.commitId === one).length, 1);
+    // Nothing new has landed, yet the same head retries at the default ten-minute recovery interval.
+    clock = recoveryAt;
+    await f.queue.recover();
+    await settle(f);
     const [first, second] = f.log.verifications(REPO).filter((entry) => entry.commitId === one).reverse();
     assert.equal(events(f, first!.id, "batch_outcome")[0]!.outcome, "flaky");
     assert.ok(second!.submittedBy.endsWith(":background"));

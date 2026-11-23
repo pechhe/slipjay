@@ -187,11 +187,14 @@ check and its failure reason if any. It is not verification of the plan's exact 
 **Continuous checks (`batchVerification.everyMinutes`, SJ-202).** With `everyMinutes` (1 to 1440), the runner also
 checks the newest landing in the background, so a promotion usually finds its tip already checked and a breakage is
 named soon after it lands. A background check is an ordinary batch check from the commit Production serves to the
-newest landing, and starts only when that landing has no check of its own (so a red head waits for something new),
-no other check is open, no release or production deploy is open, `everyMinutes` have passed since the last check
-started, and no landing is queued or waiting for a gate place; otherwise the runner looks again later. A scheduled or
-confirmed promotion then promotes the newest landing with a passed check, and checks the head first only when none is
-newer than Production. A confirm of another commit stops a running background check that has not entered diagnosis: it ends `stopped` (cancelled,
+newest landing. It waits while another check, release or production deploy is open, or a landing is queued or waiting
+for a gate place. A pass against an older release branch tip no longer covers the landing: the runner checks it again
+in the background or when a promotion is due. Automatic promotion selects the newest eligible landing with a pass
+against the current release branch; a stale-base refusal does not disqualify a landing from trying again.
+
+Normally the background interval runs from the last check's start. After a red, unverified flaky, or infrastructure
+outcome, it runs from that check's finish instead, using `batchVerification.retryMinutes` (1 to 1440; defaults to the
+lesser of `everyMinutes` and 10). A red head still waits for a new landing. A confirm of another commit stops a running background check that has not entered diagnosis: it ends `stopped` (cancelled,
 never a failure, never infrastructure, never routed) and its head is checked again later. Diagnosis of a red check
 considers only the landings after the newest one whose complete check passed (`after` on `batch_started`), and a
 culprit an earlier check already routed for the same suites is recorded `batch_unrouted` (`already routed by batch
@@ -199,7 +202,7 @@ check …`) instead of being sent to Forge again. When a runner machine's releas
 ([runner](runner.md#named-ssh-gate-places)), checks and the nightly audit run there, ranked above agent work for CPU, and on the
 pool's boat VMs only while it is down (the audit, which never used boat, runs on the runner host then, and says so);
 otherwise the audit runs on the runner host as before. A flaky or infrastructure background check is checked again on
-the interval, at most three complete checks of one head, unless `promoteFlaky` verified it.
+the recovery interval, at most three complete checks of one head, unless `promoteFlaky` verified it.
 A check that changed the source it ran on (a boat VM's tree differs once the check ends, or the host checkout differs
 from the commit) is not evidence for it: the batch fails, routes nothing and is checked again like infrastructure.
 
