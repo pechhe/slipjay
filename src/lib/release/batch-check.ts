@@ -28,7 +28,7 @@ export type BatchScope = { checks: number[]; suites: string[] };
 /** One run of the release checks at one commit. */
 export type BatchRun =
   | { status: "passed"; suites: Record<string, SuiteState>; setupMs?: number }
-  | { status: "failed"; failedChecks: number[]; command: string | null; suites: Record<string, SuiteState>; failingTests: string[]; output: string; setupMs?: number }
+  | { status: "failed"; failedChecks: number[]; command: string | null; suites: Record<string, SuiteState>; failingTests: string[]; output: string; prebuildOutput?: string; setupMs?: number }
   | { status: "infrastructure"; reason: string; setupMs?: number };
 
 /** A landing of the batch, in landing order: its published commit and its landing operation. */
@@ -58,6 +58,31 @@ const CHECK_KEY = /^check (\d+)$/;
 export const PREBUILD_KEY = "prebuild";
 const checkKey = (index: number) => `check ${index + 1}`;
 
+/** Compare what broke, not the BuildKit step, chunk hash, or measured bundle size. */
+export function prebuildFailureSignature(output: string): { target?: string; causes: string[] } | null {
+  const target = /\bthe (\S+) image build failed\b/.exec(output)?.[1];
+  const causes = new Set<string>();
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim().replace(/^exited \d+:\s*/, "").replace(/^#\d+\s+[\d.]+\s+/, "");
+    if (/^(?:#\d+\s+ERROR:|ERROR: failed to build\b|error: (?:script )?"[^"]+" exited with code|the build's plain-progress output|at\s|Bun v)/.test(line)) continue;
+    if (!/\s->\s|\b(?:error(?: TS\d+)?|\w*Error):/i.test(line)) continue;
+    const cause = line.replace(/-[A-Za-z0-9_-]{6,}\.js\b/g, "-*.js")
+      .replace(/\b\d+(?:[.,]\d+)*\s*(?=(?:[kMGT]i?B|bytes?)\b)/gi, "<n> ")
+      .replace(/:\d+(?::\d+)?(?=[:)\s]|$)/g, ":<n>")
+      .replace(/\(\d+,\d+\)(?=:\s*error)/g, "(<n>)");
+    causes.add(cause);
+  }
+  return causes.size ? { ...(target ? { target } : {}), causes: [...causes] } : null;
+}
+
+export function prebuildFailuresMatch(headOutput: string, probeOutput: string): boolean {
+  const head = prebuildFailureSignature(headOutput);
+  const probe = prebuildFailureSignature(probeOutput);
+  if (!head || !probe) return true; // Old or opaque build logs only have the prebuild verdict.
+  return !(head.target && probe.target && head.target !== probe.target)
+    && head.causes.every((cause) => probe.causes.includes(cause));
+}
+
 /** What failed, as keys a later run can be compared on: the failing suites, else the failing checks themselves. */
 export function failureKeys(run: Extract<BatchRun, { status: "failed" }>): string[] {
   const suites = Object.entries(run.suites).filter(([suite, state]) => state === "failed" && suite !== PREBUILD_KEY).map(([suite]) => suite).sort();
@@ -83,6 +108,9 @@ export async function runBatchCheck(input: {
   run: (commit: string, scope: BatchScope | null, phase: BatchRunRecord["phase"]) => Promise<BatchRun>;
   onRun?: (record: BatchRunRecord) => void;
   now?: () => number;
+  diagnosisSignal?: AbortSignal;
+  diagnosisStopReason?: () => string | null;
+  onDiagnosisStart?: () => void;
 }): Promise<BatchOutcome> {
   const now = input.now ?? Date.now;
   const timed = async (phase: BatchRunRecord["phase"], commit: string, scope: BatchScope | null): Promise<BatchRun> => {
@@ -122,7 +150,15 @@ export async function runBatchCheck(input: {
     key, lo: 0, hi: headIndex, unknowns: new Set<number>(), failingRun: rerun,
   }));
   let incomplete: string | undefined;
-  while (true) {
+  let stopped = false;
+  const diagnosisStopped = () => {
+    if (!input.diagnosisSignal?.aborted) return false;
+    stopped = true;
+    incomplete = input.diagnosisStopReason?.() ?? "diagnosis stopped";
+    return true;
+  };
+  input.onDiagnosisStart?.();
+  while (!diagnosisStopped()) {
     // Prefer the widest unresolved key (first in key order on ties).
     let widest: typeof searches[number] | undefined;
     let remaining = 0;
@@ -149,7 +185,11 @@ export async function runBatchCheck(input: {
       suites: active.map(({ key }) => key).filter((key) => !CHECK_KEY.test(key)),
     };
     let run = await timed("diagnosis", commit, probeScope);
-    if (run.status === "infrastructure") run = await timed("diagnosis", commit, probeScope);
+    if (diagnosisStopped()) break;
+    if (run.status === "infrastructure") {
+      run = await timed("diagnosis", commit, probeScope);
+      if (diagnosisStopped()) break;
+    }
     if (run.status === "infrastructure") {
       incomplete ??= `diagnosis could not run at ${commit.slice(0, 12)}: ${run.reason}`;
       for (const search of active) search.unknowns.add(p);
@@ -158,8 +198,12 @@ export async function runBatchCheck(input: {
     for (const search of active) {
       const verdict = stateOf(run, search.key);
       if (verdict === "failed" && run.status === "failed") {
-        search.hi = p;
-        search.failingRun = run;
+        if (search.key === PREBUILD_KEY && !prebuildFailuresMatch(rerun.prebuildOutput ?? rerun.output, run.prebuildOutput ?? run.output)) {
+          search.lo = p + 1;
+        } else {
+          search.hi = p;
+          search.failingRun = run;
+        }
       } else if (verdict === "passed" || (verdict === "missing" && search.key !== PREBUILD_KEY
         && ![...search.unknowns].some((index) => index < p))) {
         search.lo = p + 1;
@@ -199,7 +243,7 @@ export async function runBatchCheck(input: {
   });
   const unattributed = [...ranges.values()];
   return { outcome: "red", culprits, keys: still, diagnosis: incomplete ? "incomplete" : "complete", unattributed,
-    shorterCandidate: Number.isFinite(earliest) && earliest > 0 ? input.landings[earliest - 1]!.commitId : null, ...incomplete ? { reason: incomplete } : {} };
+    shorterCandidate: !stopped && Number.isFinite(earliest) && earliest > 0 ? input.landings[earliest - 1]!.commitId : null, ...incomplete ? { reason: incomplete } : {} };
 }
 
 /**

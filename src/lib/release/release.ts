@@ -713,9 +713,17 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
       if (plan.audits && auditRefusal) refuse(auditRefusal);
       const delta = await promotionDelta(plan, approved);
       requireMigrationsReady(plan, false);
-      promotion = { ...delta ? { delta } : {}, candidateSource,
+      const verification = verificationState(plan, verifications);
+      const other = plan.batchesChecks ? verifications.filter((entry) => entry.id !== verification.operationId) : [];
+      const batch = other.find((entry) => entry.status === "queued" || entry.status === "running")
+        ?? other.find((entry) => entry.status === "failed" || entry.status === "verified");
+      const latestBatch: PromotionPlan["latestBatch"] = batch && (batch.status === "queued" || batch.status === "running" || batch.status === "failed" || batch.status === "verified")
+        ? { operationId: batch.id, commit: batch.commitId, status: batch.status === "verified" ? "passed" : batch.status,
+          ...batch.result?.type === "failed" ? { reason: batch.result.reason } : {} }
+        : undefined;
+      promotion = { ...delta ? { delta } : {}, candidateSource, ...latestBatch ? { latestBatch } : {},
         ...candidateSource === "requested" && !plan.skipsStaging ? { newerGreen: green.slice(0, green.indexOf(plan.candidate)) } : {},
-        ...plan.commits.length ? { verification: verificationState(plan, verifications), approval: await approvalCoverage(plan, approved) } : {} };
+        ...plan.commits.length ? { verification, approval: await approvalCoverage(plan, approved) } : {} };
     } else if (plan.audits) {
       // The audit ledger lives on the runner, so an audited release plans only against it.
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} is audited on the runner, which a promotion plan reads: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);

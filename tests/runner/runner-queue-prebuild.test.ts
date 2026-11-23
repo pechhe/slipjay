@@ -310,3 +310,50 @@ test("a landing waiting for its scheduled promotion starts building fifteen minu
     assert.ok(!s.leases.some((lease) => lease.startsWith("boat")), "boat built nothing");
   } finally { await f.dispose(); }
 }, 120_000);
+
+test("successive red batches reuse historical build and suite verdicts and do not re-route a permanent refusal", async () => {
+  let clock = Date.now();
+  const s = stand();
+  const build = `${s.prebuild}; if (require("node:fs").existsSync("broken.txt")) { console.error("Error: the app does not build"); process.exit(1) }`;
+  const routed: string[] = [];
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images", prebuild: build }, false,
+    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "release-check" }, batchRemote: s.boat,
+      machineBuilds: { images: { machine: "peach-box", lease: s.machine } },
+      recordBatchCheck: async (record) => { routed.push(record.culprit.commitId); return { kind: "refused", code: "batch_culprit_unassociated" }; },
+      releaseGates: (root) => [`const fs = require("node:fs");
+        fs.appendFileSync(${JSON.stringify(join(root, "checked"))}, process.env.SLIPJAY_RELEASE_HEAD + "\\n");
+        const failed = fs.existsSync("broken.txt");
+        fs.writeFileSync(require("node:path").join(process.env.SLIPJAY_TEST_REPORT_DIR, "slipjay-test-reports.json"),
+          JSON.stringify({ version: 1, reports: [], outcomes: [{ suite: "app", outcome: failed ? "failed" : "passed" }] }));
+        if (failed) { console.error("FAIL tests/app.test.ts > app > verifies"); process.exit(1) }`] });
+  try {
+    await f.land(f.submit(await f.candidate("zero.txt")));
+    await settle(f);
+    const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
+    clock = promotedAt + 60_000;
+    await f.land(f.submit(await f.candidate("broken.txt")));
+    const culprit = f.main();
+    await f.land(f.submit(await f.candidate("second.txt")));
+    const head = f.main();
+    clock = promotedAt + 31 * 60_000;
+    await f.queue.recover();
+    await settle(f);
+    assert.equal(f.log.verifications(REPO, head)[0]?.status, "failed");
+    assert.equal(s.prebuilt().filter((line) => line.includes(culprit)).length, 1);
+    assert.deepEqual(routed, [culprit]);
+
+    await f.land(f.submit(await f.candidate("third.txt")));
+    await settle(f);
+    const newest = f.main();
+    const [check] = f.log.verifications(REPO, newest);
+    assert.equal(check?.status, "failed");
+    assert.equal(s.prebuilt().filter((line) => line.includes(culprit)).length, 1, "historical build was not spawned again");
+    assert.equal((await f.lines("checked")).filter((line) => line === culprit).length, 1, "historical suite was not spawned again");
+    assert.equal(s.prebuilt().filter((line) => line.includes(newest)).length, 2, "the head and its rerun are fresh");
+    assert.equal((await f.lines("checked")).filter((line) => line === newest).length, 2);
+    assert.deepEqual(routed, [culprit], "permanent refusal is not sent to Forge again");
+    const events = f.log.events({ operationId: check!.id }).map(({ event }) => event);
+    assert.ok(events.some((event) => event.type === "progress" && event.line.includes("reusing cached diagnosis result")));
+    assert.ok(events.some((event) => event.type === "batch_unrouted" && /already unassociated in batch check .* for app, prebuild/.test(event.reason)));
+  } finally { await f.dispose(); }
+}, 180_000);

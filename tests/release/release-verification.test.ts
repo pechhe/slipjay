@@ -1,8 +1,10 @@
 import { landFile, releaseProject, remoteParents, remoteRef } from "../support/release-project.ts";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { join } from "node:path";
 import { test } from "vite-plus/test";
-import { confirmRelease, verifyRelease } from "../../src/lib/release/release.ts";
+import { confirmRelease, releaseIntegration, verifyRelease } from "../../src/lib/release/release.ts";
 import type { OperationEvent, VerificationOperation } from "../../src/lib/runner/runner-types.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { promotingProject, verificationOf } from "./fixtures/release-fixture.ts";
@@ -78,5 +80,32 @@ test("an owner kill during release verification schedules no check after the one
     assert.ok(!verified.ok && verified.status === "verification_failed", JSON.stringify(verified));
     assert.deepEqual(started, ["one", "two"], "check three is never started");
     assert.deepEqual(verified.evidence.checks.map((check) => check.outcome), ["failed", "failed", "not_run"]);
+  } finally { await f.dispose(); }
+});
+
+test("a batched promotion plan shows the newest open other batch before a finished one", async () => {
+  const f = await releaseProject({ promotes: true });
+  try {
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+    const base = await f.commit({ "slipjay.json": JSON.stringify({ ...policy, process: "development", batchVerification: { machine: "batch" } }) }, "Enable batches");
+    execFileSync("git", ["push", "origin", `${base}:refs/heads/release`], { cwd: f.repo, stdio: "pipe" });
+    const older = await f.commit({ "older.txt": "one" }, "Older batch");
+    const head = await f.commit({ "head.txt": "two" }, "Head");
+    const failed = verificationOf(older, "failed", { type: "failed", stage: "verifying", reason: "red batch" });
+    const running = verificationOf(older, "running");
+    const ignored = verificationOf(older, "superseded");
+    const passed = verificationOf(older, "verified");
+    const exact = verificationOf(head, "queued");
+    const plan = async (verifications: VerificationOperation[]) => {
+      const result = await releaseIntegration(f.repo, { readPromotion: async () => ({ stagingGreen: null, approved: [], verifications }) });
+      assert.ok(result.ok && result.status === "planned", JSON.stringify(result));
+      return result;
+    };
+    const open = await plan([ignored, failed, running]);
+    assert.deepEqual(open.verification, { status: "none", commit: head, operationId: null });
+    assert.deepEqual(open.latestBatch, { operationId: running.id, commit: older, status: "running" });
+    assert.deepEqual((await plan([exact, ignored, failed, passed])).latestBatch, { operationId: failed.id, commit: older, status: "failed", reason: "red batch" });
+    assert.deepEqual((await plan([ignored, passed])).latestBatch, { operationId: passed.id, commit: older, status: "passed" });
+    assert.equal((await plan([exact, ignored])).latestBatch, undefined);
   } finally { await f.dispose(); }
 });

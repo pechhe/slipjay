@@ -177,7 +177,12 @@ to that head. Landings after the freeze wait for the next batch. The check runs 
 without a complete green batch check of the exact commit, or, with `promoteFlaky`, a flaky one whose rerun passed every
 suite that failed (below). `slipjay promote --confirm` of a candidate without one asks
 the runner for its batch check at once, whatever the schedule, follows it to its end and confirms only if it passed;
-an open or passed check of that commit is reused, and a red one refuses.
+an open or passed check of that commit is reused, and a red one refuses. Scheduled checks wait while any check is
+open for the repository. Automatic checks cannot displace queued confirms, and confirms of different commits stay
+queued in arrival order, ahead of automatic checks. A confirm can stop another batch's diagnosis (including a
+background batch's): the batch remains red with incomplete diagnosis and no shorter candidate. The promotion plan's
+`latestBatch` shows another batch, preferring the newest queued or running check, otherwise the newest completed
+check and its failure reason if any. It is not verification of the plan's exact candidate.
 
 **Continuous checks (`batchVerification.everyMinutes`, SJ-202).** With `everyMinutes` (1 to 1440), the runner also
 checks the newest landing in the background, so a promotion usually finds its tip already checked and a breakage is
@@ -186,7 +191,7 @@ newest landing, and starts only when that landing has no check of its own (so a 
 no other check is open, no release or production deploy is open, `everyMinutes` have passed since the last check
 started, and no landing is queued or waiting for a gate place; otherwise the runner looks again later. A scheduled or
 confirmed promotion then promotes the newest landing with a passed check, and checks the head first only when none is
-newer than Production. A confirm of another commit stops a running background check: it ends `stopped` (cancelled,
+newer than Production. A confirm of another commit stops a running background check that has not entered diagnosis: it ends `stopped` (cancelled,
 never a failure, never infrastructure, never routed) and its head is checked again later. Diagnosis of a red check
 considers only the landings after the newest one whose complete check passed (`after` on `batch_started`), and a
 culprit an earlier check already routed for the same suites is recorded `batch_unrouted` (`already routed by batch
@@ -223,6 +228,11 @@ A failed batch is handled in this order:
   checks; a probe that does not need prebuild skips the build. With conclusive probes this takes at most
   logarithmically many probes per key. Diagnosis locates a passing-to-failing boundary for each key, not every
   earlier break and repair. A missing test suite keeps its earlier state; an inconclusive prebuild is unknown.
+  Build errors retain the image and specific causes rather than just the BuildKit wrapper. When both builds report a
+  recognizable failure, a probe with a different image or without all the head's causes does not reproduce that
+  failure. Diagnosis can reuse conclusive historical build and suite verdicts from bounded runner-memory caches
+  (suite verdicts are scoped to the served base and check declarations). Complete checks and head reruns are fresh;
+  a successful production deploy clears the repository's cached verdicts.
   A probe lost to infrastructure is retried once; a second loss leaves that probe unknown and diagnosis
   `incomplete`. If an unknown still lies at the boundary, the failure is **unattributed**, between the last
   passing landing (or the base) and the failing bound. An inconclusive prebuild outside the final boundary
@@ -235,7 +245,8 @@ A failed batch is handled in this order:
   failing tests and output) and, while the Spec's lead session is open, a `batch_failure` note T3 delivers to the lead
   thread. The record is keyed by batch and culprit, so a restart or retry never records it twice; one Forge could not
   be reached for is sent again later and at startup. A culprit with no Forge association (a chore, or a landing Forge
-  never recorded) is kept on the batch record (`batch_unrouted`) with its commit, operation and workspace. The owner
+  never recorded) is kept on the batch record (`batch_unrouted`) with its commit, operation and workspace. An earlier
+  permanent refusal for the same landing and suites is recorded as already unassociated instead of sent again. The owner
   disposes the finding through Forge's usual route (`fix` makes a repair Ticket and reopens the Spec), and the fix lands
   through the ordinary landing gate. A revert is an ordinary landing too; the runner never reverts.
 

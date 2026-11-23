@@ -97,3 +97,25 @@ for (const baseline of ["exact policy", "missing activation", "missing commit"] 
     } finally { rmSync(repo, { recursive: true, force: true }); }
   });
 }
+
+test("image build failures keep their real errors and retained log pointer, not wrappers", () => {
+  const summary = "the api image build failed (exit 1):";
+  const causes = ["#29 2.231 error: prune-modules: unresolved imports", "#29 2.231 apps/server/chunks/elk-QONTBCTQ.js -> ./elk-api.js", "#29 2.232 RolldownError: bundle budget exceeded: 426 kB"];
+  const stack = "#29 2.232     at /app/build.ts:1:1";
+  const wrapper = "#29 ERROR: process failed\nERROR: failed to build: failed to solve";
+  const log = "the build's plain-progress output is kept at /tmp/build.log";
+  assert.equal(failure(exited([summary, ...causes, stack, wrapper, log].join("\n")), 1000), ["exited 1: " + summary, ...causes, log].join("\n"));
+  assert.equal(failure(exited([...causes, stack, wrapper].join("\n")), 1000), "exited 1: " + causes.join("\n"));
+  const long = failure(exited([summary, ...causes, "#29 2.233 TypeError: " + "unavailable ".repeat(300), wrapper, log].join("\n")), 1000)!;
+  assert.ok(long.length <= 2010);
+  assert.match(long, / unavailable…\nthe build's plain-progress output/);
+});
+
+test("image failure details come from the final summary block, not earlier parallel BuildKit output", () => {
+  const earlier = "#12 0.5 error: unrelated image failure";
+  const summary = "the app image build failed (exit 1):";
+  const cause = "#29 2.231 error: prune-modules: unresolved app imports";
+  const expected = `exited 1: ${summary}\n${cause}`;
+  assert.equal(failure(exited([earlier, summary, cause].join("\n")), 1000), expected);
+  assert.equal(failure(exited(`${summary}\n${cause}`, [earlier, summary, "#22 2.0 Error: stale streamed detail"].join("\n")), 1000), expected);
+});

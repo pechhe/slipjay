@@ -100,10 +100,32 @@ export async function prebuildRelease(input: {
   }
 }
 
+/** Keep source errors and the retained log, not BuildKit's final process wrapper and stack frames. */
+function imageFailure(lines: string[]): string | undefined {
+  const summary = /^the \S+ image build failed \(exit \d+\):/i;
+  const step = /^#\d+\s+[\d.]+\s+/;
+  const cause = /\b(?:error(?: TS\d+)?|\w*Error):|\s->\s/i;
+  const pointer = /^the build's plain-progress output is kept at /;
+  const clean = lines.map((line) => line.trim());
+  const start = clean.findLastIndex((line) => summary.test(line));
+  if (start < 0 && !clean.some((line) => step.test(line) && cause.test(line.replace(step, "")))) return undefined;
+  const log = clean.findLast((line) => pointer.test(line));
+  const kept = clean.filter((line, index) => {
+    const body = line.replace(step, "");
+    if (/^(?:at\s|Bun v|#\d+\s+ERROR:|ERROR: failed to build\b|error: (?:script )?"[^"]+" exited with code)/.test(body)) return false;
+    return (start >= 0 ? index > start : step.test(line)) && cause.test(body);
+  });
+  const limit = 2000 - (log && log.length < 2000 ? log.length + 1 : 0);
+  const detail = [...new Set(start < 0 ? kept : [clean[start]!, ...kept])].join("\n");
+  const clipped = detail.length > limit ? detail.slice(0, limit - 1).replace(/\s*\S*$/, "") + "…" : detail;
+  return [clipped, log && log.length < 2000 ? log : undefined].filter(Boolean).join("\n") || undefined;
+}
+
 export function failure(result: BoundedProcessResult, timeoutMs: number): string | null {
   if (result.exitCode === 0 && !result.timedOut && !result.signal && !result.error) return null;
-  const error = firstError(outputLines(result));
-  const detail = error.length ? error.join("\n").slice(0, 600) : (result.stderr || result.stdout).trim().split("\n").slice(-3).join("\n").slice(-600);
+  const lines = outputLines(result);
+  const error = firstError(lines);
+  const detail = imageFailure(lines) ?? (error.length ? error.join("\n").slice(0, 600) : (result.stderr || result.stdout).trim().split("\n").slice(-3).join("\n").slice(-600));
   return `${result.timedOut ? `timed out after ${timeoutMs} ms` : result.signal ? `stopped by ${result.signal}` : `exited ${result.exitCode ?? result.error}`}${detail ? `: ${detail}` : ""}`;
 }
 

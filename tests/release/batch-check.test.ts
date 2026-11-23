@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { FAILING_TESTS_LIMIT, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchRun, type BatchScope, type SuiteState } from "../../src/lib/release/batch-check.ts";
+import { FAILING_TESTS_LIMIT, flakyVerifies, PREBUILD_KEY, prebuildFailuresMatch, prebuildFailureSignature, runBatchCheck, type BatchRun, type BatchScope, type SuiteState } from "../../src/lib/release/batch-check.ts";
 
 const landing = (n: number) => ({ commitId: String(n).padEnd(40, "a"), operationId: `op-${n}` });
 const L = [1, 2, 3, 4, 5].map(landing);
@@ -292,4 +292,39 @@ test("a failed build whose rebuild could not run is infrastructure, never flaky"
     ? { status: "failed", failedChecks: [], command: "bun scripts/images.ts build", suites: { [PREBUILD_KEY]: "failed" }, failingTests: [], output: "exit code: 1" }
     : pass() });
   assert.equal(outcome.outcome, "infrastructure");
+});
+
+test("diagnosis skips unrelated old build failures and matches normalized cause subsets", async () => {
+  const active = "the app image build failed (exit 1):\n#29 2.31 apps/server/chunks/workflows-QONTBCTQ.js -> ../../../workflows/booking-reminder\n#29 3.0 RolldownError: bundle budget exceeded: 426 kB";
+  const earlier = "the app image build failed (exit 1):\n#2 5.1 apps/server/chunks/elk-QONTBCTQ.js -> ./elk-api.js";
+  const combined = active.replace("QONTBCTQ", "ABCDEFGH").replace("426 kB", "427 kB")
+    + "\n#12 0.1 apps/server/chunks/wav-AGGTTHHB.js -> ./wav.js";
+  assert.equal(prebuildFailuresMatch(active, combined), true);
+  assert.equal(prebuildFailuresMatch(active, earlier), false);
+  assert.equal(prebuildFailuresMatch(active, combined.replace("the app image", "the api image")), false);
+  assert.equal(prebuildFailuresMatch(active, "ERROR: failed to build: process exited 1"), true);
+  assert.equal(prebuildFailureSignature('#7 1.0 error: script "build" exited with code 1\n#7 ERROR: process failed\nBun v1.2'), null);
+  const broken = (output: string): BatchRun => ({
+    status: "failed", suites: { prebuild: "failed" }, output, failedChecks: [], command: "build", failingTests: [],
+  });
+  const outcome = await runBatchCheck({ head: L[4]!.commitId, landings: L,
+    run: async (commit) => broken(commit === L[4]!.commitId ? active : commit === L[3]!.commitId ? combined : earlier) });
+  assert.ok(outcome.outcome === "red");
+  assert.deepEqual(outcome.culprits.map(({ operationId }) => operationId), ["op-4"]);
+});
+
+test("stopping a diagnosis during a probe preserves earlier bounds and never retries or queues a shorter candidate", async () => {
+  const diagnosis = new AbortController();
+  const probes: string[] = [];
+  const outcome = await runBatchCheck({ head: L[4]!.commitId, landings: L, diagnosisSignal: diagnosis.signal, diagnosisStopReason: () => "owner confirmed",
+    run: async (commit, _scope, phase) => {
+      if (phase !== "diagnosis") return fail({ suite: "failed" });
+      probes.push(commit);
+      if (probes.length === 1) return pass({ suite: "passed" });
+      diagnosis.abort();
+      return { status: "infrastructure", reason: "stopped" };
+    } });
+  assert.deepEqual(probes, [L[1]!.commitId, L[2]!.commitId]);
+  assert.deepEqual(outcome, { outcome: "red", culprits: [], keys: ["suite"], diagnosis: "incomplete", reason: "owner confirmed", shorterCandidate: null,
+    unattributed: [{ keys: ["suite"], after: L[1]!.commitId, firstFailing: L[4]!.commitId }] });
 });

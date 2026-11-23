@@ -6,6 +6,7 @@ import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import type { BatchCheckRecord } from "../../src/lib/release/batch-check.ts";
 import type { BuildRouteAnswer } from "../../src/lib/build/build-admission.ts";
+import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import type { OperationEvent, RemoteVerification } from "../../src/lib/runner/runner-types.ts";
 
 /**
@@ -287,3 +288,128 @@ test("a confirm after another promotion does not reuse a check measured from the
     assert.equal(batchEvents(f, fresh.id, "batch_started")[0]!.base, one);
   } finally { await f.dispose(); }
 }, 300_000);
+
+test("a confirm stops an in-flight diagnosis without cancelling the red batch or superseding another confirm", async () => {
+  let clock = Date.now();
+  let heldCommit: string | undefined;
+  let probeStarted = false;
+  let probeAborted = false;
+  let probeClosed = false;
+  const remote = localRemote();
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
+    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "batch" },
+      releaseGates: (root) => [batchCheck(root)],
+      batchRemote: { async open(input) {
+        const attempt = await remote.open(input);
+        if (input.candidate !== heldCommit) return attempt;
+        return { ...attempt,
+          executor: { ...attempt.executor, async run(request) {
+            if (!probeStarted && request.env?.SLIPJAY_RELEASE_SUITES) {
+              probeStarted = true;
+              if (!request.abortSignal!.aborted)
+                await new Promise<void>((resolve) => request.abortSignal!.addEventListener("abort", () => resolve(), { once: true }));
+              probeAborted = true;
+              request.abortSignal!.throwIfAborted();
+            }
+            return attempt.executor.run(request);
+          } },
+          async close() { if (probeStarted) probeClosed = true; },
+        };
+      } } });
+  try {
+    await f.land(f.submit(await f.candidate("zero.txt")));
+    await settle(f);
+    const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
+    clock = promotedAt + 60_000;
+    await f.land(f.submit(await f.candidate("break-a")));
+    const older = f.main();
+    const second = f.submit(await f.candidate("second.txt"));
+    await f.land(second);
+    heldCommit = older;
+    const head = f.main();
+    clock = promotedAt + 31 * 60_000;
+    await f.queue.recover();
+    await until(() => probeStarted || undefined);
+    const original = f.log.verifications(REPO, head)[0]!;
+    assert.ok(original.submittedBy.endsWith(":batch"));
+
+    const third = f.submit(await f.candidate("third.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(third)?.result?.type === "landed" || undefined);
+    const newest = f.main();
+    const fourth = f.submit(await f.candidate("fourth.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(fourth)?.result?.type === "landed" || undefined);
+    const latest = f.main();
+    f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "test" });
+    const first = await f.queue.requestBatchCheck(REPO, newest);
+    const next = await f.queue.requestBatchCheck(REPO, older);
+    assert.ok(first?.requested && next?.requested);
+    await until(() => f.log.operation(original.id)?.result ?? undefined);
+    assert.equal(probeAborted, true);
+    assert.equal(probeClosed, true);
+    const [outcome] = batchEvents(f, original.id, "batch_outcome");
+    assert.ok(outcome?.outcome === "red");
+    assert.equal(outcome.diagnosis, "incomplete");
+    assert.equal(outcome.shorterCandidate, null);
+    assert.match(outcome.reason!, /diagnosis stopped for the release of/);
+    assert.equal(f.log.operation(original.id)?.status, "failed");
+
+    await f.queue.recover();
+    const queued = f.log.verifications(REPO).filter((entry) => entry.status === "queued");
+    assert.deepEqual(new Set(queued.map((entry) => entry.id)), new Set([first.operation.id, next.operation.id]));
+    assert.equal(f.log.verifications(REPO, latest).length, 0, "the scheduled batch waits while confirms are queued");
+    f.log.append(RUNNER_CONTROL_ID, { type: "resumed", by: "test" });
+    await settle(f);
+    const sequence = (id: string) => f.log.events({ operationId: id }).find(({ event }) => event.type === "batch_started")!.seq;
+    assert.ok(sequence(first.operation.id) < sequence(next.operation.id), "the newer requested commit still checks first");
+  } finally { await f.dispose(); }
+}, 180_000);
+
+test("a confirm arriving during the completed probe's remote finish leaves its verdict reusable", async () => {
+  let clock = Date.now();
+  let culprit: string | undefined;
+  const finishing = Promise.withResolvers<AbortSignal>();
+  const finish = Promise.withResolvers<void>();
+  const remote = localRemote();
+  let probes = 0;
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
+    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "batch" },
+      releaseGates: (root) => [batchCheck(root)],
+      batchRemote: { async open(input) {
+        const attempt = await remote.open(input);
+        if (input.candidate !== culprit) return attempt;
+        probes++;
+        return { ...attempt, async finish() {
+          finishing.resolve(input.signal!);
+          await finish.promise;
+          input.signal!.throwIfAborted();
+          return attempt.finish();
+        } };
+      } } });
+  try {
+    await f.land(f.submit(await f.candidate("zero.txt")));
+    await settle(f);
+    clock = Date.parse(f.log.releases(REPO)[0]!.submittedAt) + 60_000;
+    await f.land(f.submit(await f.candidate("break-a")));
+    culprit = f.main();
+    await f.land(f.submit(await f.candidate("second.txt")));
+    const second = f.main();
+    await f.land(f.submit(await f.candidate("third.txt")));
+    const original = await f.queue.requestBatchCheck(REPO, f.main());
+    const signal = await finishing.promise;
+    const waiting = await f.queue.requestBatchCheck(REPO, second);
+    assert.ok(original?.requested && waiting?.requested);
+    assert.equal(signal.aborted, false, "remote finish is not in-flight diagnosis");
+    finish.resolve();
+    await settle(f);
+    const [outcome] = batchEvents(f, original.operation.id, "batch_outcome");
+    assert.ok(outcome?.outcome === "red");
+    assert.equal(outcome.diagnosis, "complete");
+    assert.equal(probes, 1, "the queued confirm reused the cleanly finished historical probe");
+    assert.ok(batchEvents(f, waiting.operation.id, "progress").some(({ line }) => line.includes("reusing cached diagnosis result")));
+  } finally {
+    finish.resolve();
+    await f.dispose();
+  }
+}, 180_000);

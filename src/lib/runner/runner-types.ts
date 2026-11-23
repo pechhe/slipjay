@@ -288,7 +288,7 @@ export type OperationEvent =
   /** A culprit's failure was recorded on its Forge work: `runId` holds the blocking finding, `noteId` the message to its open lead thread. */
   | { type: "batch_routed"; commitId: string; operationId: string; specId: string; number: number | null; runId: string; noteId: string | null }
   /** A culprit has no Forge association (a chore, or a landing Forge never recorded): it stays reported here only. */
-  | { type: "batch_unrouted"; commitId: string; operationId: string; reason: string }
+  | { type: "batch_unrouted"; commitId: string; operationId: string; reason: string; keys?: string[] }
   | { type: "stage"; stage: RunnerStage; health?: RunnerHealth;
     /** On a landing's first stage when it was admitted as short: it counts toward `workers + 1`, not toward `workers`. */
     shortLanding?: true }

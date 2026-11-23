@@ -61,6 +61,8 @@ export type ReleaseSummary = {
 
 /** What a promotion's plan adds: its candidate's pre-verification, and whether an earlier approval covers it. */
 export type PromotionPlan = { verification?: ReleaseVerificationState; approval?: ApprovalCoverage;
+  /** A batch at another candidate; informational only, never evidence for this promotion. */
+  latestBatch?: { operationId: string; commit: string; status: "queued" | "running" | "passed" | "failed"; reason?: string };
   /** `requested` when `--candidate` chose an older staging-green commit; `newerGreen` then names the newer green commits it leaves out, newest first. */
   candidateSource?: "newest_green" | "integration" | "requested"; newerGreen?: string[] };
 
