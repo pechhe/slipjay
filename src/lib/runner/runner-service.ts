@@ -92,7 +92,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     return repository.url;
   };
   const server = await serveRunner(createRunnerHandler({
-    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, requestBatchCheck: queue.requestBatchCheck, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled, recoverHeld: queue.recoverHeld, releaseHeld: queue.releaseHeld,
+    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, requestBatchCheck: queue.requestBatchCheck, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled, prioritize: queue.prioritize, recoverHeld: queue.recoverHeld, releaseHeld: queue.releaseHeld,
     subscribe: log.subscribe,
     // Without both, Build-bound submissions are refused, never queued unadmitted.
     ...build ? { admitBuild: buildAdmitter(build), onAdmissionUnresolved: () => receipts?.wake(), readBuild: build, buildChecks } : {},

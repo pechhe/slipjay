@@ -3,7 +3,7 @@ import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim,
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, servedCommit, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
-import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
+import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, PrioritizeOptions, PrioritizeOutcome, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
@@ -47,6 +47,7 @@ export function createRunnerHandler(input: {
   releaseHeld?(repo: string, by: string): Promise<{ ok: boolean; reason: string }>;
   /** A queued operation was cancelled: a landing's candidate bookmark is the queue's to delete, and an audit's slot is due again. */
   onCancelled?(operation: Operation): void;
+  prioritize?(operationId: string, options: PrioritizeOptions): PrioritizeOutcome;
   subscribe(listener: (event: StoredEvent) => void): () => void;
   /** Build admission for Build-bound landings; absent, the runner refuses them rather than skipping admission. */
   admitBuild?: BuildAdmitter;
@@ -529,8 +530,8 @@ export function createRunnerHandler(input: {
       try { return json(await input.readArtifact(operationId, runId, reference, Number(rawOffset), Number(rawLimit))); }
       catch { return json({ error: "Retained artifact is missing or does not match ledger evidence" }, 410); }
     }
-    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|handoff|source|cancel))?$`));
-    if (!route || (route[2] === "cancel" ? request.method !== "POST" : request.method !== "GET"))
+    const route = path.match(new RegExp(`^${RUNNER_API}/operations/([^/]+)(?:/(events|log|outcome|handoff|source|cancel|prioritize))?$`));
+    if (!route || ((route[2] === "cancel" || route[2] === "prioritize") ? request.method !== "POST" : request.method !== "GET"))
       return json({ error: "Not found" }, 404);
     const id = decodeURIComponent(route[1]!);
     const operation = input.log.operation(id);
@@ -552,6 +553,16 @@ export function createRunnerHandler(input: {
         catch { return json({ error: "Retained handoff is missing or does not match ledger evidence" }, 410); }
       case "outcome":
         return operation.kind === "landing" ? json({ outcome: operation.outcome }) : json({ error: "Outcome v1 supports landing operations only" }, 409);
+      case "prioritize": {
+        let body: unknown = {};
+        try { const text = await request.text(); if (text) body = JSON.parse(text); } catch { return json({ error: "Invalid JSON body" }, 400); }
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || ("whilePaused" in body && typeof body.whilePaused !== "boolean")
+          || ("reason" in body && typeof body.reason !== "string")) return json({ error: "Invalid priority options" }, 400);
+        if (!input.prioritize) return json({ error: "Prioritizing landings is unsupported" }, 501);
+        const result = input.prioritize(id, body as PrioritizeOptions);
+        return result.ok ? json({ operation: result.operation }) : json({ error: result.error }, result.status);
+      }
       case "cancel": {
         let body: unknown = {};
         try { const text = await request.text(); if (text) body = JSON.parse(text); } catch { return json({ error: "Invalid JSON body" }, 400); }

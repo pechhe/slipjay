@@ -300,9 +300,15 @@ and held state through the existing recovery path.
   operation; with several running it kills none, exits 1 and lists the
   `slipjay runner kill <operation>` commands; with none it does nothing.
   `slipjay runner pause` makes the
-  runner take no next operation: running ones finish, and queued ones show
-  `paused` as their stage until `slipjay runner resume`, then proceed in order. The
-  pause is recorded in the operation log, so it survives a restart. Each run's
+  runner stop admitting ordinary work: running authoritative operations finish, and queued
+  ones show `paused` until `slipjay runner resume`. The pause survives a restart.
+  Use `slipjay runner prioritize <operationId> [--while-paused] [--reason <text>] [--json]`
+  to move an urgent landing ahead of other queued landings for its repository. It
+  cannot displace an authoritative landing or pass a release or reset fence.
+  Priority is recorded in the ledger; the first request sets the landing's place
+  among prioritized landings. By default it still waits for resume. With
+  `--while-paused`, only that landing is exempt from the pause; normal admission
+  checks and capacity limits still apply. Each run's
   commands go in their own systemd user slice when the runner has a user manager
   (`XDG_RUNTIME_DIR` set, as under the setup's unit), so a kill or timeout also reaches
   processes a gate tool started in a separate process group or scope within it; the
@@ -429,7 +435,7 @@ and held state through the existing recovery path.
   containment scope then adds only `XDG_RUNTIME_DIR` and `SLIPJAY_SYSTEMD_SLICE`.
   This does not replace dependency fingerprints or reuse an install: runner candidates
   still receive their own frozen install, and packageManager remains a tracked install input.
-- **API.** Under `/v1`: operations (submit, read, cancel, event stream, log),
+- **API.** Under `/v1`: operations (submit, read, cancel, prioritize, event stream, log),
   releases (submit), deploys (submit, list) and changes by jj change ID.
 
 ### Remote verification on boat

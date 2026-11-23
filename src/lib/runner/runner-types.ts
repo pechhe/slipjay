@@ -336,7 +336,8 @@ export type OperationEvent =
   /** A queued operation replaced by a newer submission of the same change. */
   | { type: "superseded"; by: string }
   | { type: "cancelled"; reason: string; by?: string }
-  /** Runner-wide, under RUNNER_CONTROL_ID: the queue takes no next operation until resumed. */
+  | { type: "prioritized"; whilePaused?: boolean; reason?: string }
+  /** Runner-wide, under RUNNER_CONTROL_ID: only explicitly exempted landings may start until resumed. */
   | { type: "paused"; by: string }
   | { type: "resumed"; by: string }
   /** Repository-local admission hold while the boat API is unreachable. */
@@ -391,7 +392,12 @@ export type LandingOperation = OperationFields & { kind: "landing"; changeId: st
   /** Build-bound only: `pending` until Build admits it, and the queue never starts it while pending. */
   admission?: "pending" | "admitted";
   /** Latest unanswered admission attempt, while admission is pending. */
-  admissionUnavailable?: { reason: string; at: string } };
+  admissionUnavailable?: { reason: string; at: string };
+  /** The first priority request sets the landing’s place; later requests can allow it through a pause. */
+  prioritized?: { seq: number; whilePaused: boolean; reason?: string } };
+
+export type PrioritizeOptions = { whilePaused?: boolean; reason?: string };
+export type PrioritizeOutcome = { ok: true; operation: LandingOperation } | { ok: false; status: 404 | 409; error: string };
 
 /** Versioned recorded evidence, not authority to repair, retry, or release the author. */
 export type LandingOutcome = {
@@ -614,6 +620,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - GET  /v1/operations/:id/log                 → `text/plain` retained operation events (not complete process output)
  * - GET  /v1/operations/:id/outcome             → `{ outcome: LandingOutcome }` (409 for other operation kinds)
  * - GET  /v1/operations/:id/artifacts/:runId?offset=0&limit=1048576 → ArtifactChunk (410 if unavailable; 400 invalid range)
+ * - POST /v1/operations/:id/prioritize          `{ whilePaused?, reason? }` → `{ operation }`; only an open landing (else 409)
  * - POST /v1/operations/:id/cancel              → `{ operation }`; only a queued operation can be cancelled (else 409)
  * - GET  /v1/changes/:changeId?repo=<owner/name> → `{ operations: Operation[] }` newest first
  * - POST /v1/runner/kill                         `{ by }` → `{ operation }`: the running operation as the kill

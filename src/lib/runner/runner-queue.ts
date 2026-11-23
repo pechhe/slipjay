@@ -48,7 +48,7 @@ import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
 import { HostCapacityUnavailable } from "./host-capacity-remote.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, PromotionHold, LandingOperation, Operation, OperationEvent, OperationLog, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, PromotionHold, LandingOperation, Operation, OperationEvent, OperationLog, PrioritizeOptions, PrioritizeOutcome, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -224,6 +224,7 @@ export function createRunnerQueue(input: {
   drain(): Promise<void>;
   /** Delete the remote candidate of a landing cancelled while queued, after the running turn. */
   cancelled(operation: Operation): void;
+  prioritize(operationId: string, options?: PrioritizeOptions): PrioritizeOutcome;
   /** Stop scheduling deploys and resets: clears timers that are waiting for an interval. */
   close(): void;
   /**
@@ -1171,19 +1172,21 @@ export function createRunnerQueue(input: {
     return id;
   }
   /**
-   * Admit queued landings, releases and resets, oldest first, while the rule (`admits`) has
-   * a place for them: each to its lane once that lane is idle, so a lane's operations keep
-   * their order, and a short landing never passes an older operation of its repository lane
-   * that waits for a place. A pause admits nothing new; running operations finish.
+   * Admit queued work in ledger order while the rule (`admits`) has a place for it.
+   * During a pause, only landings explicitly exempted from it can start or publish a passed screen.
    */
   function wakeMain(): void {
-    if (recovering || draining || log.paused() || heldStart) return;
-    for (const repo of boatHolds.keys()) probeBoat(repo);
+    if (recovering || draining || heldStart) return;
+    const paused = log.paused() !== null;
     const open = log.openOperations();
+    const eligible = (operation: Operation) => !paused || (operation.kind === "landing" && operation.prioritized?.whilePaused === true);
+    if (paused && !open.some(eligible)) return;
+    if (!paused) for (const repo of boatHolds.keys()) probeBoat(repo);
     // Completed screens compete in completion order; a slow screen owns no queue position.
     for (const turn of [...screens.values()].filter((turn) => turn.screen?.phase === "passed")
       .sort((a, b) => a.screen!.passedAt! - b.screen!.passedAt!)) {
       const operation = turn.operation;
+      if (paused && !open.some((entry) => entry.id === operation.id && eligible(entry))) continue;
       // A screen behind a predicted prefix publishes only once that prefix has.
       if (turn.predecessor && screens.get(turn.predecessor.operation.id) === turn.predecessor) continue;
       // Its gate has passed: what is left is seconds of publication, and the repository lane already takes those in turn.
@@ -1199,6 +1202,7 @@ export function createRunnerQueue(input: {
     // Repository lanes whose oldest startable operation found no place: nothing later in them may pass it.
     const behind = new Set<string>();
     for (const operation of open) {
+      if (!eligible(operation)) continue;
       if (!admits(true, places(), workers, shortPlace)) break;
       if (operation.kind === "deploy") {
         if (!executor.combinedLimits && operation.status === "queued" && !activeDeploys.has(operation.id) && !auditRunning()) admitDeploy(operation);
@@ -1217,7 +1221,8 @@ export function createRunnerQueue(input: {
         // A settled screen still owns its checkout and retained artifact until the turn ends.
         const slot = Array.from({ length: maxOccupied }, (_, i) => i).find((i) => !occupied.some((turn) => turn.screenSlot === i))!;
         const previous = log.events({ operationId: operation.id }).flatMap(({ event }) => event.type === "attempt_started" ? [event.attempt] : []);
-        const predecessor = predictedPrefix(operation.repo, operation);
+        // An exempt screen must not depend on a speculative predecessor that cannot publish during the pause.
+        const predecessor = paused ? undefined : predictedPrefix(operation.repo, operation);
         const turn: PrefixTurn = { operation, slot: 0, screenSlot: slot, attempt: Math.max(0, ...previous) + 1,
           prepared: deferred(), completed: deferred(), invalidation: new AbortController(), screen: { phase: "preparing", ready: deferred() },
           ...predecessor ? { predecessor } : {} };
@@ -1234,6 +1239,8 @@ export function createRunnerQueue(input: {
         attempts.add(pending);
         continue;
       }
+      // While paused a fence will not itself be admitted; skipping it must not waive it.
+      if (paused && screeningFence(operation, open)) continue;
       const start = startable(operation, open);
       if (!start) continue;
       // A pre-verification waits for its place without holding back the landings behind it.
@@ -1312,6 +1319,11 @@ export function createRunnerQueue(input: {
       && [...admitted.values()].some((entry) => entry.kind === "reset" && laneOf(entry.repo) === laneOf(operation.repo));
   }
   async function processOperation(operation: LandingOperation | ReleaseOperation | RecoveryOperation | ResetOperation | VerificationOperation | AuditOperation, prefix?: PrefixTurn): Promise<void> {
+    const pauseBlocks = () => {
+      if (!log.paused()) return false;
+      const current = operation.kind === "landing" ? log.operation(operation.id) : null;
+      return current?.kind !== "landing" || current.prioritized?.whilePaused !== true;
+    };
     let stage: RunnerStage = "queued";
     let stageStarted = Date.now();
     let provenancePolicy: Pick<import("../policy/execution-policy.ts").ExecutionPolicy, "migrationFinalization" | "provenance"> | undefined;
@@ -1601,8 +1613,8 @@ export function createRunnerQueue(input: {
       const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
       progress(`[verify] preparing a remote verifier for ${candidate.slice(0, 12)}`);
       const paused = new AbortController();
-      const unsubscribe = log.subscribe(({ event }) => { if (event.type === "paused") paused.abort(); });
-      if (log.paused()) paused.abort();
+      const unsubscribe = log.subscribe(({ event }) => { if (event.type === "paused" && pauseBlocks()) paused.abort(); });
+      if (pauseBlocks()) paused.abort();
       // Only this open's own failure says no machine was supplied; an earlier one's verdict never carries over.
       remoteUnavailable = undefined;
       const attempt = await remoteVerification!.open({ repo: operation.repo, slot, screening, retrying: remoteUnavailableRetries() > 0, checkout, base, candidate, integrationBranch, signal: AbortSignal.any([signal, paused.signal]) }).catch((error: RemoteOpenFailure) => {
@@ -2053,7 +2065,7 @@ export function createRunnerQueue(input: {
         leftPrediction = !controller.signal.aborted && (prefix!.invalidation.signal.aborted || !await ahead.completed.promise);
       }
       const overtaken = prefix?.overtakenBy;
-      retryPrefix = Boolean(prefix && !leftPrediction && !controller.signal.aborted && !log.paused()
+      retryPrefix = Boolean(prefix && !leftPrediction && !controller.signal.aborted && !pauseBlocks()
         && !overtaken && (prefix.predecessor && !prefix.screen ? prefix.invalidation.signal.aborted : error instanceof PrefixInvalidated && !prefix.remoteRebuilt));
       // A failed reset after a publication failure must not append a second verdict.
       if (log.operation(operation.id)?.result) progress(message(error));
@@ -2071,7 +2083,7 @@ export function createRunnerQueue(input: {
           : `${ahead!.operation.id} ahead will not publish as predicted; screening again`}`);
         verdict = { type: "yielded", to: "a new predicted prefix" };
       }
-      else if (overtaken) verdict = { type: "yielded", to: log.paused() ? "the runner pause" : "the moved integration tip" };
+      else if (overtaken) verdict = { type: "yielded", to: pauseBlocks() ? "the runner pause" : "the moved integration tip" };
       else if (prefix?.invalidation.signal.aborted) verdict = { type: "failed", stage: "waiting-for-predecessor", reason: "Exact predecessor invalidated this attempt; its verification does not diagnose the submitted source" };
       else if (operation.kind === "landing" && (error instanceof BoatPaused || (error as RemoteOpenFailure)?.boatUnavailable && remoteVerification?.probe)) {
         retryPrefix = false;
@@ -2081,7 +2093,7 @@ export function createRunnerQueue(input: {
       // A landing whose remote executor was never available ran nothing of the candidate, so it is no verdict on the
       // source: it returns to the queue a bounded number of times, and the attempt past that bound fails as it did
       // before. A pause that began meanwhile leaves it queued until the runner resumes.
-      else if (operation.kind === "landing" && remoteUnavailable !== undefined && log.paused()) verdict = { type: "yielded", to: "the runner pause" };
+      else if (operation.kind === "landing" && remoteUnavailable !== undefined && pauseBlocks()) verdict = { type: "yielded", to: "the runner pause" };
       else if (operation.kind === "landing" && remoteUnavailable !== undefined && remoteUnavailableRetries() < REMOTE_UNAVAILABLE_RETRIES) {
         const retried = remoteUnavailableRetries() + 1;
         progress(`[verify] the remote executor was not ready before any gate command ran: ${remoteUnavailable}; returned to the queue to try again (${retried} of ${REMOTE_UNAVAILABLE_RETRIES})`);
@@ -2114,7 +2126,7 @@ export function createRunnerQueue(input: {
           const killed = new Promise<void>((resolve) => controller.signal.addEventListener("abort", () => resolve(), { once: true }));
           await Promise.race([prefix.predecessor.completed.promise, killed]);
           if (controller.signal.aborted) { retryPrefix = false; verdict = { type: "cancelled", reason: OWNER_KILL_REASON }; }
-          else if (log.paused()) retryPrefix = false;
+          else if (pauseBlocks()) retryPrefix = false;
           // It rebuilds as the head, on whatever that outcome left.
           else prefix.predecessor = undefined;
         }
@@ -3044,6 +3056,16 @@ export function createRunnerQueue(input: {
       discoverAudits(Object.keys(config.repos).map(repositoryKey).filter((repo) => !log.lastLanded(repo)));
     },
     cancelled,
+    prioritize(operationId, { whilePaused, reason } = {}) {
+      const operation = log.operation(operationId);
+      if (!operation) return { ok: false, status: 404, error: `Unknown operation ${operationId}` };
+      if (operation.kind !== "landing") return { ok: false, status: 409, error: `Operation ${operationId} is not a landing` };
+      if (operation.status !== "queued" && operation.status !== "running")
+        return { ok: false, status: 409, error: `Landing ${operationId} already finished (${operation.status})` };
+      append(operationId, { type: "prioritized", ...whilePaused ? { whilePaused: true } : {}, ...reason ? { reason } : {} });
+      wakeMain();
+      return { ok: true, operation: log.operation(operationId) as LandingOperation };
+    },
     recoverHeld,
     releaseHeld,
     async drain() {

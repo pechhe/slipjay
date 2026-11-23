@@ -82,12 +82,12 @@ export class RunnerRequestRefused extends Error {
   constructor(status: number, message: string, operation?: Operation) { super(message); this.status = status; this.operation = operation; }
 }
 
-export async function request(baseUrl: string, token: string, path: string, init: RequestInit = {}): Promise<Response> {
+export async function request(baseUrl: string, token: string, path: string, init: RequestInit = {}, { acceptNotFound = false } = {}): Promise<Response> {
   const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
     ...init, headers: { ...init.headers, authorization: `Bearer ${token}` },
   });
   if (response.status === 401) throw new RunnerRequestRefused(401, "runner refused the credential; check SLIPJAY_RUNNER_TOKEN");
-  if (response.ok || response.status === 409) return response;
+  if (response.ok || response.status === 409 || (acceptNotFound && response.status === 404)) return response;
   // A refusal (400) names why in its body, such as a reset of a repository that never landed on the runner;
   // so does a landing that would conflict with what lands before it (422), and a known retryable one (503),
   // such as Build admission that did not complete.

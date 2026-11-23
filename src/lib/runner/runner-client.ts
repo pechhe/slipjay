@@ -23,7 +23,7 @@ import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { isEarlyFailureLine } from "../landing/required-verification.ts";
 import { candidateBookmark, COMMAND_ARTIFACT_LIMIT_BYTES, COMMAND_ARTIFACT_PAGE_BYTES, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import type { AuditOperation, ClientFact, DeployOperation, Operation, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest, VerificationResponse } from "./runner-types.ts";
+import type { AuditOperation, ClientFact, DeployOperation, Operation, PrioritizeOptions, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
 import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
@@ -1341,6 +1341,26 @@ export async function watchThroughRunner(
       };
     },
   });
+}
+
+export async function prioritizeOperation(
+  location: string,
+  operationId: string,
+  options: PrioritizeOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ ok: boolean; result: { operation?: Operation; error?: string } }> {
+  const token = await runnerToken(env);
+  const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
+  try {
+    const response = await request(connection.baseUrl, token, `/v1/operations/${encodeURIComponent(operationId)}/prioritize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(options),
+    }, { acceptNotFound: true });
+    return { ok: response.ok, result: await response.json() as { operation?: Operation; error?: string } };
+  } finally {
+    connection.close();
+  }
 }
 
 export async function cancelThroughRunner(

@@ -197,6 +197,38 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     // Nor does a candidate Build may yet replace with a newer one.
     const replaced = open.filter((operation) => awaitingReplacement(operation, open));
     for (const operation of replaced) operation.waitingFor = "Build admission of a newer candidate";
+    if (open.some((op) => op.kind === "landing" && op.prioritized)) {
+      // Reorder landing slots of the same repository, keeping running work ahead of queued landings.
+      // A release, reset, audit or
+      // recovery fences the whole execution lane, including other repositories sharing it.
+      const segments = new Map<string, Map<string, number[]>>();
+      const sortSlots = (slots: number[]) => {
+        const landings = slots.map((index) => open[index] as LandingOperation);
+        if (!landings.some((op) => op.prioritized)) return;
+        const bypass = (op: LandingOperation) => Number(held && op.prioritized?.whilePaused === true);
+        const seq = (op: LandingOperation) => op.prioritized?.seq ?? Number.MAX_SAFE_INTEGER;
+        landings.sort((a, b) => a.status === "running" ? (b.status === "running" ? 0 : -1)
+          : b.status === "running" ? 1 : bypass(b) - bypass(a) || seq(a) - seq(b));
+        slots.forEach((index, i) => { open[index] = landings[i]!; });
+      };
+      const flush = (key: string) => {
+        for (const slots of segments.get(key)?.values() ?? []) sortSlots(slots);
+        segments.delete(key);
+      };
+      for (const [index, op] of open.entries()) {
+        const key = lane(op.repo);
+        if (op.kind !== "landing") {
+          if (op.kind !== "deploy" && op.kind !== "verification") flush(key);
+        } else if (op.admission !== "pending" && !replaced.includes(op)) {
+          const repositories = segments.get(key) ?? new Map<string, number[]>();
+          segments.set(key, repositories);
+          const slots = repositories.get(op.repo) ?? [];
+          repositories.set(op.repo, slots);
+          slots.push(index);
+        }
+      }
+      for (const key of segments.keys()) flush(key);
+    }
     const serial = open.filter((operation) => operation.kind !== "deploy" && !(operation.kind === "landing" && operation.admission === "pending") && !replaced.includes(operation));
     const deploys = open.filter((operation) => operation.kind === "deploy");
     const runningDeploys = deploys.filter((operation) => operation.status === "running");
@@ -232,11 +264,12 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
       entries.forEach((operation, index) => {
         operation.position = index + 1;
         if (operation.status !== "queued") return;
-        if (held) operation.stage = "paused";
+        const bypass = operation.kind === "landing" && held && operation.prioritized?.whilePaused;
+        if (held && !bypass) operation.stage = "paused";
         // A depth-two landing verifies beside the one landing its repository runs, when a place is free.
         const turn = index === 1 && running !== undefined && entries[0] === running && running.kind === "landing" && operation.kind === "landing" && depth(operation.repo) === 2;
         // As the queue does, an older reset, release or audit of its repository fences a depth-two head and successor.
-        const fence = (turn || index === 0 && operation.kind === "landing" && depth(operation.repo) === 2) ? open.slice(0, open.indexOf(operation)).find((other) => repositoryKey(other.repo) === repositoryKey(operation.repo)
+        const fence = (bypass || turn || index === 0 && operation.kind === "landing" && depth(operation.repo) === 2) ? open.slice(0, open.indexOf(operation)).find((other) => lane(other.repo) === lane(operation.repo)
           && other.kind !== "landing" && other.kind !== "deploy" && other.kind !== "verification") : undefined;
         const successor = turn && !fence;
         if (fence) operation.waitingFor = label(fence);
@@ -702,6 +735,13 @@ function project(id: string, events: StoredEvent[], projections: OperationLogPro
       case "yielded":
         operation.status = "queued";
         operation.stage = "queued";
+        break;
+      case "prioritized":
+        if (operation.kind === "landing") {
+          const previous = operation.prioritized;
+          const reason = event.reason ?? previous?.reason;
+          operation.prioritized = { seq: previous?.seq ?? stored.seq, whilePaused: Boolean(previous?.whilePaused || event.whilePaused), ...reason ? { reason } : {} };
+        }
         break;
       case "admission_unavailable":
         if (operation.kind === "landing" && operation.admission === "pending") operation.admissionUnavailable = { reason: event.reason, at: stored.at };
