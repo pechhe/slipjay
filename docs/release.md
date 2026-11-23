@@ -353,3 +353,32 @@ migrations](deployments.md#deploys)): its production deployment must declare `mi
 `--migrations-ready` is refused. A release that is not a promotion and whose range
 carries migration artifacts needs `--migrations-ready`: apply those migrations
 where the release branch deploys first; slipjay does not migrate it.
+
+## Release watchdog
+
+On a systemd runner host, `scripts/install-release-watchdog.sh` copies the standalone
+probe and enables the user timer. It preserves
+`~/.config/slipjay/release-watchdog-webhook.url`; provide the HTTP(S) endpoint in
+that file (mode `0600`) before enabling the timer, or supply
+`--webhook-url <url>` at install time to write it with owner-only permissions.
+The existing runner host's user systemd session must stay up after logout.
+
+The probe defaults to `pechhe/yardsmith`. It reads the runner service status
+and opens `~/.slipjay/runner/operations.sqlite` read-only. It alerts for:
+
+- An inactive runner (30-minute cooldown).
+- A verification or release in its current stage for more than 45 minutes,
+  or a deploy in its stage for more than 20 minutes (2 hours). Queued work is excluded.
+- A fresh unassociated culprit in the newest completed red batch (24 hours per culprit),
+  or an unbroken red streak lasting at least 45 minutes (2 hours). Superseded,
+  cancelled and stopped batches are ignored.
+- Two non-passing flaky or infrastructure batches in the last 3 hours (2 hours).
+- The latest production deploy if it failed after the last success (2 hours).
+- The latest nightly audit if it failed within the last 6 hours (6 hours).
+
+A successful delivery starts cooldown; a later healthy observation clears
+the recovered key. Failed deliveries remain due next run. Use
+`bun scripts/release-watchdog-probe.ts --dry-run --repo owner/name` to inspect
+without posting or updating state; `--db`, `--webhook-file` and `--cooldown-file`
+override paths. This check is independent of the runner's immediate
+[`releaseAlertWebhook`](runner.md#state) and never changes the ledger.

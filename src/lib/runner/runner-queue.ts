@@ -48,7 +48,7 @@ import { machinePlaceHolds } from "./machine-place-holds.ts";
 import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
 import { HostCapacityUnavailable } from "./host-capacity-remote.ts";
-import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, PromotionHold, LandingOperation, Operation, OperationEvent, OperationLog, PrioritizeOptions, PrioritizeOutcome, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
+import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, PromotionHold, LandingOperation, Operation, OperationEvent, OperationLog, PrioritizeOptions, PrioritizeOutcome, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseAlertDetails, ReleaseAlertPayload, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
 const promotesFrom = (configuration: Awaited<ReturnType<typeof readExactExecutionPolicy>>["configuration"] | null): boolean =>
@@ -203,6 +203,7 @@ export function createRunnerQueue(input: {
   recordBatchCheck?: (input: BatchCheckRecord) => Promise<BuildRouteAnswer>;
   /** How long after Forge could not be reached a culprit is sent again. */
   batchRouteRetryMs?: number;
+  sendReleaseAlert?: (url: string, payload: ReleaseAlertPayload, timeoutMs: number) => Promise<void>;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /** A confirm's batch check of a commit under `batchVerification`; null for a repository that does not batch. */
@@ -2784,9 +2785,17 @@ export function createRunnerQueue(input: {
           return { type: "failed", stage: "verifying", reason: `Batch check of ${head.slice(0, 12)} was flaky: ${outcome.keys.join(", ")} failed, and its rerun passed or failed only other tests; nothing is routed, and the head needs a complete green check before it deploys` };
         }
         const culprits = outcome.culprits.map((culprit) => ({ ...culprit, keys: boundedKeys(culprit.keys), workspace: log.operation(culprit.operationId)?.submittedBy ?? null }));
+        const unattributed = outcome.unattributed.map((entry) => ({ ...entry, keys: boundedKeys(entry.keys) }));
+        const alreadyRecorded = !culprits.length && unattributed.length > 0 && config.releaseAlertWebhook
+          && log.events({ operationId: operation.id }).some(({ event }) => event.type === "batch_outcome" && event.outcome === "red"
+            && !event.culprits?.length && Boolean(event.unattributed?.length));
         append(operation.id, { type: "batch_outcome", outcome: "red", ...recorded, keys: boundedKeys(outcome.keys), diagnosis: outcome.diagnosis,
-          shorterCandidate: outcome.shorterCandidate, culprits, ...outcome.unattributed.length ? { unattributed: outcome.unattributed.map((entry) => ({ ...entry, keys: boundedKeys(entry.keys) })) } : {},
+          shorterCandidate: outcome.shorterCandidate, culprits, ...unattributed.length ? { unattributed } : {},
           ...outcome.reason ? { reason: outcome.reason } : {} });
+        if (!culprits.length && unattributed.length && !alreadyRecorded) {
+          releaseAlert(operation, head, boundedKeys(outcome.keys), { event: "batch_unattributed",
+            unattributed: unattributed.slice(0, 30).map(({ after, firstFailing, keys }) => ({ after, firstFailing, keys: keys.slice(0, 30) })) });
+        }
         // The part of the batch before the first culprit ships only after its own complete check passes.
         const shorter = outcome.shorterCandidate && !log.verifications(operation.repo).some((entry) => entry.status === "queued" && ownerVerification(entry))
           ? outcome.shorterCandidate : null;
@@ -2845,6 +2854,24 @@ export function createRunnerQueue(input: {
   const releaseEnvironment = (base: string | null, head: string, suites?: readonly string[]) => (): NodeJS.ProcessEnv => ({
     ...(environment?.() ?? process.env), ...base ? { [RELEASE_BASE_ENV]: base } : {}, [RELEASE_HEAD_ENV]: head,
     ...suites?.length ? { [RELEASE_SUITES_ENV]: suites.join(",") } : {} });
+  function releaseAlert(operation: { repo: string; id: string }, headCommitId: string, suites: string[],
+    details: ReleaseAlertDetails): void {
+    const hook = config.releaseAlertWebhook;
+    if (!hook) return;
+    const timeoutMs = hook.timeoutMs ?? 10_000;
+    const payload: ReleaseAlertPayload = {
+      source: "slipjay-runner", repo: operation.repo, operationId: operation.id, headCommitId, suites,
+      logCommand: `slipjay runner log ${operation.id}`, timestamp: new Date().toISOString(), ...details,
+    };
+    // Do not include the endpoint or a transport error that might contain its secret URL.
+    void Promise.resolve().then(async () => {
+      if (input.sendReleaseAlert) return input.sendReleaseAlert(hook.url, payload, timeoutMs);
+      const response = await fetch(hook.url, { method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload), signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
+      if (!response.ok) console.error(`[runner] release alert for ${operation.id} returned HTTP ${response.status}`);
+      await response.body?.cancel();
+    }).catch(() => console.error(`[runner] release alert for ${operation.id} could not be delivered`));
+  }
   /** Culprits whose record is on its way to Forge, so two passes never send one twice at once. */
   const routing = new Set<string>();
   const batchRouteRetryMs = input.batchRouteRetryMs ?? 300_000;
@@ -2906,8 +2933,12 @@ export function createRunnerQueue(input: {
           const value = (answer.value ?? {}) as { runId?: unknown; specId?: unknown; number?: unknown; noteId?: unknown };
           append(operationId, { type: "batch_routed", ...reference, specId: String(value.specId ?? ""), number: typeof value.number === "number" ? value.number : null,
             runId: String(value.runId ?? ""), noteId: typeof value.noteId === "string" ? value.noteId : null });
-        } else if (answer.kind === "refused") append(operationId, { type: "batch_unrouted", ...reference, ...answer.code === "batch_culprit_unassociated" ? { keys: fresh } : {}, reason: `${answer.code}${answer.message ? `: ${answer.message}` : ""}` });
-        else retry = true;
+        } else if (answer.kind === "refused") {
+          const unassociated = answer.code === "batch_culprit_unassociated";
+          append(operationId, { type: "batch_unrouted", ...reference, ...unassociated ? { keys: fresh } : {}, reason: `${answer.code}${answer.message ? `: ${answer.message}` : ""}` });
+          if (unassociated) releaseAlert(operation, outcome.head, fresh, { event: "batch_culprit_unassociated",
+            culprit: reference, failingTests: boundedTests(culprit.failingTests).slice(0, 30), command: culprit.command, output: culprit.output.slice(-4_000) });
+        } else retry = true;
       } catch (error) {
         retry = true;
         console.error(`[runner] ${operation.repo}: batch culprit ${culprit.commitId.slice(0, 12)} could not be routed: ${message(error)}`);

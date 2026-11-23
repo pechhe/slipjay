@@ -764,7 +764,18 @@ export interface MachineVerification extends RemoteVerification {
   reason(): string;
 }
 
+export type ReleaseAlertDetails =
+  | { event: "batch_culprit_unassociated"; culprit: { commitId: string; operationId: string }; failingTests: string[]; command: string | null; output: string }
+  | { event: "batch_unattributed"; unattributed: { keys: string[]; after: string | null; firstFailing: string }[] };
+
+export type ReleaseAlertPayload = ReleaseAlertDetails & {
+  source: "slipjay-runner"; repo: string; operationId: string; headCommitId: string;
+  suites: string[]; logCommand: string; timestamp: string;
+};
+
 export type RunnerConfig = {
+  /** Best-effort recovery alerts for red batches Forge cannot route. */
+  releaseAlertWebhook?: { url: string; timeoutMs?: number };
   /** Shown in every client progress line; defaults to the host name. */
   name?: string;
   /** Always loopback; the port defaults to RUNNER_DEFAULT_PORT. */

@@ -7,7 +7,7 @@ import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import type { BatchCheckRecord } from "../../src/lib/release/batch-check.ts";
 import type { BuildRouteAnswer } from "../../src/lib/build/build-admission.ts";
 import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import type { OperationEvent, RemoteVerification } from "../../src/lib/runner/runner-types.ts";
+import type { OperationEvent, ReleaseAlertPayload, RemoteVerification } from "../../src/lib/runner/runner-types.ts";
 
 /**
  * YardSmith's batch command in miniature: two independent suites fail when their respective break lands.
@@ -25,6 +25,10 @@ const reports = process.env.SLIPJAY_TEST_REPORT_DIR;
 if (reports) fs.writeFileSync(path.join(reports, "slipjay-test-reports.json"), JSON.stringify({ version: 1, reports: [], outcomes }));
 for (const { suite, outcome } of outcomes) if (outcome === "failed") {
   process.stderr.write("FAIL tests/" + suite + ".test.ts > " + suite + " > " + (suite === "yard" ? "b" : "a") + " breaks\\n");
+  if (suite === "yard") {
+    for (let n = 0; n < 40; n++) process.stderr.write("FAIL tests/yard.test.ts > yard > case " + n + "\\n");
+    process.stderr.write("x".repeat(5000) + "\\n");
+  }
   process.exitCode = 1;
 }`;
 
@@ -47,6 +51,7 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
   const forge = new Map<string, BatchCheckRecord>();
   const requests: BatchCheckRecord[] = [];
   let unavailable = true;
+  const alerts: ReleaseAlertPayload[] = [];
   const recordBatchCheck = async (record: BatchCheckRecord): Promise<BuildRouteAnswer> => {
     requests.push(record);
     // The first request is lost on its way, as an outage would lose it: the runner sends it again later.
@@ -58,7 +63,14 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
   };
   const landings: string[] = [];
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
-    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "batch" }, releaseGates: (root) => [batchCheck(root)], recordBatchCheck });
+    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "batch" }, releaseGates: (root) => [batchCheck(root)], recordBatchCheck,
+      releaseAlertWebhook: { url: "https://example.test/release" },
+      sendReleaseAlert: async (url, payload, timeout) => {
+        assert.equal(url, "https://example.test/release");
+        assert.equal(timeout, 10_000);
+        alerts.push(payload);
+        throw new Error("webhook not reachable");
+      } });
   try {
     // Nothing promoted yet: the first landing's batch is due at once, passes and ships.
     await f.land(f.submit(await f.candidate("zero.txt")));
@@ -91,7 +103,8 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
     const [outcome] = batchEvents(f, red.id, "batch_outcome");
     assert.equal(outcome!.outcome, "red");
     assert.deepEqual(outcome!.culprits!.map((culprit) => culprit.operationId), [landings[1], landings[3]]);
-    assert.deepEqual(outcome!.culprits!.map((culprit) => culprit.failingTests), [["tests/workbench.test.ts > workbench > a breaks"], ["tests/yard.test.ts > yard > b breaks"]]);
+    assert.deepEqual(outcome!.culprits![0]!.failingTests, ["tests/workbench.test.ts > workbench > a breaks"]);
+    assert.ok(outcome!.culprits![1]!.failingTests.includes("tests/yard.test.ts > yard > b breaks"));
     assert.equal(outcome!.shorterCandidate, commits[0]);
     // The rerun and first probe share both suites; later probes narrow to one suite, all from the same base.
     const env = (await f.lines("batch-env.jsonl")).map((line) => JSON.parse(line) as { base: string; head: string; suites: string | null });
@@ -123,6 +136,20 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
     assert.match(unrouted!.reason, /batch_culprit_unassociated/);
     assert.equal(requests[0]!.base, zero);
     assert.equal(requests[0]!.head, commits[4]);
+    assert.equal(alerts.length, 1);
+    const alert = alerts[0]!;
+    assert.equal(alert.event, "batch_culprit_unassociated");
+    assert.equal(alert.source, "slipjay-runner");
+    assert.equal(alert.repo, REPO);
+    assert.equal(alert.operationId, red.id);
+    assert.equal(alert.headCommitId, commits[4]);
+    assert.deepEqual(alert.suites, ["yard"]);
+    assert.equal(alert.logCommand, `slipjay runner log ${red.id}`);
+    assert.ok(Number.isFinite(Date.parse(alert.timestamp)));
+    assert.deepEqual(alert.culprit, { commitId: commits[3], operationId: landings[3] });
+    assert.equal(alert.command, outcome!.culprits![1]!.command);
+    assert.equal(alert.failingTests.length, 30);
+    assert.equal(alert.output.length, 4_000);
   } finally { await f.dispose(); }
 }, 300_000);
 
@@ -364,10 +391,16 @@ test("a confirm stops an in-flight diagnosis without cancelling the red batch or
   let probeStarted = false;
   let probeAborted = false;
   let probeClosed = false;
+  const alerts: ReleaseAlertPayload[] = [];
   const remote = localRemote();
   const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
     { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "batch" },
       releaseGates: (root) => [batchCheck(root)],
+      releaseAlertWebhook: { url: "https://example.test/release", timeoutMs: 1_000 },
+      sendReleaseAlert: (_url, payload) => {
+        alerts.push(payload);
+        return new Promise<void>(() => {}); // A transport that never settles cannot stall the queue.
+      },
       batchRemote: { async open(input) {
         const attempt = await remote.open(input);
         if (input.candidate !== heldCommit) return attempt;
@@ -432,6 +465,13 @@ test("a confirm stops an in-flight diagnosis without cancelling the red batch or
     await settle(f);
     const sequence = (id: string) => f.log.events({ operationId: id }).find(({ event }) => event.type === "batch_started")!.seq;
     assert.ok(sequence(first.operation.id) < sequence(next.operation.id), "the newer requested commit still checks first");
+    const originalAlerts = alerts.filter(({ operationId }) => operationId === original.id);
+    assert.equal(originalAlerts.length, 1);
+    const alert = originalAlerts[0]!;
+    assert.equal(alert.event, "batch_unattributed");
+    assert.equal(alert.headCommitId, head);
+    assert.deepEqual(alert.suites, ["workbench"]);
+    assert.deepEqual(alert.unattributed, outcome.unattributed);
   } finally { await f.dispose(); }
 }, 180_000);
 

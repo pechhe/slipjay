@@ -345,6 +345,13 @@ and held state through the existing recovery path.
     An optional `build.origin` names the HQ that Forge admission and receipts go to; it takes effect
     only with `YARDSMITH_SLIPJAY_BUILD_TOKEN` in the runner's environment.
     With both, the runner also pushes its metrics export to HQ (see [Pipeline metrics relay](landing-evidence.md#pipeline-metrics-relay)).
+    Optional `releaseAlertWebhook: { url, timeoutMs? }` sends an immediate JSON POST when Forge first refuses a
+    culprit as unassociated, or when a red batch records unattributed ranges without any named culprit.
+    `url` must be HTTP(S); `timeoutMs` is a whole number from 1000 to 60000 and defaults to 10000.
+    Already-answered culprits and already-unassociated suppressions do not send again. Delivery is best-effort
+    and does not stall verification or routing. Treat the endpoint as a secret and use a trusted receiver:
+    culprit alerts can contain the command and an excerpt of test output. The separate [release watchdog](release.md#release-watchdog)
+    rechecks the ledger even when the runner is down.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
     The runner is one event loop, so a large ledger must never stall the landing in progress (SJ-200): reads
     across operations (gate verdicts, published landings, receipts, open builds) are indexed by event type and

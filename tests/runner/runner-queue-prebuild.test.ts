@@ -311,14 +311,17 @@ test("a landing waiting for its scheduled promotion starts building fifteen minu
   } finally { await f.dispose(); }
 }, 120_000);
 
-test("successive red batches reuse historical build and suite verdicts and do not re-route a permanent refusal", async () => {
+for (const configured of [true, false]) test(`successive red batches do not re-route permanent refusals (webhook configured: ${configured})`, async () => {
   let clock = Date.now();
   const s = stand();
   const build = `${s.prebuild}; if (require("node:fs").existsSync("broken.txt")) { console.error("Error: the app does not build"); process.exit(1) }`;
   const routed: string[] = [];
+  const alerts: string[] = [];
   const f = await fixture(false, true, { minIntervalMs: 0, production: true, machine: "images", prebuild: build }, false,
     { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "release-check" }, batchRemote: s.boat,
       machineBuilds: { images: { machine: "peach-box", lease: s.machine } },
+      releaseAlertWebhook: configured ? { url: "https://example.test/release" } : undefined,
+      sendReleaseAlert: async (_url, alert) => { alerts.push(alert.operationId); },
       recordBatchCheck: async (record) => { routed.push(record.culprit.commitId); return { kind: "refused", code: "batch_culprit_unassociated" }; },
       releaseGates: (root) => [`const fs = require("node:fs");
         fs.appendFileSync(${JSON.stringify(join(root, "checked"))}, process.env.SLIPJAY_RELEASE_HEAD + "\\n");
@@ -338,7 +341,8 @@ test("successive red batches reuse historical build and suite verdicts and do no
     clock = promotedAt + 31 * 60_000;
     await f.queue.recover();
     await settle(f);
-    assert.equal(f.log.verifications(REPO, head)[0]?.status, "failed");
+    const red = f.log.verifications(REPO, head)[0]!;
+    assert.equal(red.status, "failed");
     assert.equal(s.prebuilt().filter((line) => line.includes(culprit)).length, 1);
     assert.deepEqual(routed, [culprit]);
 
@@ -352,6 +356,7 @@ test("successive red batches reuse historical build and suite verdicts and do no
     assert.equal(s.prebuilt().filter((line) => line.includes(newest)).length, 2, "the head and its rerun are fresh");
     assert.equal((await f.lines("checked")).filter((line) => line === newest).length, 2);
     assert.deepEqual(routed, [culprit], "permanent refusal is not sent to Forge again");
+    assert.deepEqual(alerts, configured ? [red.id] : [], "only a configured webhook sees the fresh refusal");
     const events = f.log.events({ operationId: check!.id }).map(({ event }) => event);
     assert.ok(events.some((event) => event.type === "progress" && event.line.includes("reusing cached diagnosis result")));
     assert.ok(events.some((event) => event.type === "batch_unrouted" && /already unassociated in batch check .* for app, prebuild/.test(event.reason)));

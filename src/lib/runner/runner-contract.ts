@@ -124,6 +124,13 @@ export const RUNNER_JJ_DEFAULTS: Readonly<Record<string, string>> = { "snapshot.
 
 /** Why the runner refuses to start with `config`; null when it can. */
 export const runnerConfigProblem = (config: RunnerConfig): string | null => {
+  const alert = config.releaseAlertWebhook;
+  if (alert !== undefined) {
+    if (typeof alert?.url !== "string" || !/^https?:\/\/[^/\\\s][^\\\s]*$/i.test(alert.url) || !URL.canParse(alert.url))
+      return `The runner config's "releaseAlertWebhook.url" must be an HTTP or HTTPS URL`;
+    if (alert.timeoutMs !== undefined && !(Number.isSafeInteger(alert.timeoutMs) && alert.timeoutMs >= 1_000 && alert.timeoutMs <= 60_000))
+      return `The runner config's "releaseAlertWebhook.timeoutMs" must be a whole number from 1000 to 60000`;
+  }
   const missing = ["user.name", "user.email"].filter((key) => !config.jj?.[key]?.trim());
   if (missing.length) return `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity`;
   if (config.workers !== undefined && !(Number.isSafeInteger(config.workers) && config.workers >= 1)) return `The runner config's "workers" must be a whole number of at least 1`;

@@ -18,3 +18,14 @@ test("a build pool is a pool's name, and one machine at most builds for it", () 
   assert.match(runnerConfigProblem(machines({ a: { ...machine, buildPool: "not a pool" } })) ?? "", /"buildPool" to the name of the build machine pool/);
   assert.match(runnerConfigProblem(machines({ a: { ...machine, buildPool: "images" }, b: { ...machine, buildPool: "images" } })) ?? "", /the build pool "images" more than once/);
 });
+
+test("release alert configuration accepts HTTP(S) and a bounded integer timeout", () => {
+  const validate = (webhook: unknown) => runnerConfigProblem({ ...config(undefined),
+    releaseAlertWebhook: webhook as RunnerConfig["releaseAlertWebhook"] });
+  for (const url of ["http://localhost:1234/hook", "https://example.test/hook"])
+    for (const timeoutMs of [undefined, 1_000, 60_000]) assert.equal(validate({ url, timeoutMs }), null);
+  for (const url of ["", "https://", "https:///hook", "https://?", "/hook", "ftp://example.test", 42])
+    assert.match(validate({ url }) ?? "", /releaseAlertWebhook.url/);
+  for (const timeoutMs of [999, 60_001, 1000.5, "1000", null])
+    assert.match(validate({ url: "https://example.test/hook", timeoutMs }) ?? "", /releaseAlertWebhook.timeoutMs/);
+});
