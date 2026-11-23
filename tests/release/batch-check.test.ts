@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { FAILING_TESTS_LIMIT, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchRun, type BatchScope } from "../../src/lib/release/batch-check.ts";
+import { FAILING_TESTS_LIMIT, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchRun, type BatchScope, type SuiteState } from "../../src/lib/release/batch-check.ts";
 
-const landing = (n: number) => ({ commitId: `${n}`.repeat(40).slice(0, 40), operationId: `op-${n}` });
+const landing = (n: number) => ({ commitId: String(n).padEnd(40, "a"), operationId: `op-${n}` });
 const L = [1, 2, 3, 4, 5].map(landing);
 const fail = (suites: Record<string, "passed" | "failed" | "missing">, failingTests: string[] = []): BatchRun =>
   ({ status: "failed", failedChecks: [0], command: "bun run test:release:batch", suites, failingTests, output: "FAIL" });
 const pass = (suites: Record<string, "passed" | "failed" | "missing"> = {}): BatchRun => ({ status: "passed", suites });
 
-test("a five-landing batch with two independent regressions names the second and fourth landings as separate culprits", async () => {
-  // Landing 2 breaks the suite, landing 3 repairs it, landing 4 breaks it again independently, and landing 5 depends on landing 2.
+test("a suite that breaks, recovers and breaks again is bisected to its active regression", async () => {
   const states: Record<string, BatchRun> = {
     [L[0]!.commitId]: pass({ workbench: "passed" }),
     [L[1]!.commitId]: fail({ workbench: "failed" }, ["a > breaks"]),
@@ -17,21 +16,80 @@ test("a five-landing batch with two independent regressions names the second and
     [L[3]!.commitId]: fail({ workbench: "failed" }, ["b > breaks"]),
     [L[4]!.commitId]: fail({ workbench: "failed" }, ["b > breaks"]),
   };
+  const sixth = landing(6);
+  states[sixth.commitId] = states[L[4]!.commitId]!;
   const calls: { commit: string; scope: BatchScope | null; phase: string }[] = [];
-  const outcome = await runBatchCheck({ head: L[4]!.commitId, landings: L,
+  const outcome = await runBatchCheck({ head: sixth.commitId, landings: [...L, sixth],
     run: async (commit, scope, phase) => { calls.push({ commit, scope, phase }); return states[commit]!; } });
   assert.equal(outcome.outcome, "red");
   if (outcome.outcome !== "red") return;
-  assert.deepEqual(outcome.culprits.map((culprit) => culprit.operationId), ["op-2", "op-4"]);
-  assert.deepEqual(outcome.culprits.map((culprit) => culprit.failingTests), [["a > breaks"], ["b > breaks"]]);
-  // The only offer is the commit before the first culprit, which still needs its own complete check.
-  assert.equal(outcome.shorterCandidate, L[0]!.commitId);
-  // Complete check and rerun at the head, then only the failing suite at each earlier landing, in landing order.
-  assert.deepEqual(calls.map((call) => [call.phase, call.commit]), [
-    ["complete", L[4]!.commitId], ["rerun", L[4]!.commitId],
-    ...L.slice(0, 4).map((entry) => ["diagnosis", entry.commitId]),
+  assert.deepEqual(outcome.culprits.map((culprit) => culprit.operationId), ["op-4"]);
+  assert.deepEqual(outcome.culprits.map((culprit) => culprit.failingTests), [["b > breaks"]]);
+  assert.equal(outcome.shorterCandidate, L[2]!.commitId);
+  assert.deepEqual(calls.filter(({ phase }) => phase === "diagnosis").map(({ commit }) => commit), [L[2]!.commitId, L[3]!.commitId]);
+});
+
+async function independentRegressions(size: number, testBreak: number, buildBreak: number) {
+  const landings = Array.from({ length: size }, (_, index) => landing(index + 1));
+  const probes: { op: number; scope: BatchScope | null }[] = [];
+  const outcome = await runBatchCheck({ head: landings.at(-1)!.commitId, landings, run: async (commit, scope, phase) => {
+    const op = landings.findIndex((entry) => entry.commitId === commit) + 1;
+    if (phase === "diagnosis") probes.push({ op, scope });
+    const suites: Record<string, SuiteState> = {};
+    if (!scope || scope.suites.includes("workbench")) suites.workbench = op >= testBreak ? "failed" : "passed";
+    if (!scope || scope.suites.includes(PREBUILD_KEY)) suites[PREBUILD_KEY] = op >= buildBreak ? "failed" : "passed";
+    const testsFailed = suites.workbench === "failed";
+    return testsFailed || suites[PREBUILD_KEY] === "failed"
+      ? { ...fail(suites, testsFailed ? ["workbench > breaks"] : []), failedChecks: testsFailed ? [0] : [] }
+      : pass(suites);
+  } });
+  assert.ok(outcome.outcome === "red");
+  assert.equal(outcome.diagnosis, "complete");
+  assert.deepEqual(outcome.unattributed, []);
+  assert.deepEqual(outcome.culprits.map(({ operationId, keys }) => [operationId, keys]), [
+    [`op-${testBreak}`, ["workbench"]], [`op-${buildBreak}`, [PREBUILD_KEY]],
   ]);
-  assert.deepEqual(calls.slice(1).map((call) => call.scope), Array(5).fill({ checks: [0], suites: ["workbench"] }));
+  assert.equal(outcome.shorterCandidate, landings[testBreak - 2]!.commitId);
+  return probes;
+}
+
+test("independent test and prebuild regressions share probes and stop running outside their own search windows", async () => {
+  const probes = await independentRegressions(5, 2, 4);
+  assert.deepEqual(probes, [
+    { op: 2, scope: { checks: [0], suites: ["workbench", PREBUILD_KEY] } },
+    { op: 3, scope: { checks: [], suites: [PREBUILD_KEY] } },
+    { op: 1, scope: { checks: [0], suites: ["workbench"] } },
+    { op: 4, scope: { checks: [], suites: [PREBUILD_KEY] } },
+  ]);
+});
+
+test("a 46-landing batch with two independent regressions is diagnosed in at most 12 probes", async () => {
+  const probes = await independentRegressions(46, 12, 35);
+  assert.ok(probes.length <= 12, `used ${probes.length} diagnosis probes`);
+});
+
+test("the head rerun is reused, even if there are no landings or the head is unlisted", async () => {
+  const head = L[1]!.commitId;
+  for (const landings of [[], [L[1]!], [L[0]!]]) {
+    const commits: string[] = [];
+    const outcome = await runBatchCheck({ head, landings, run: async (commit) => {
+      commits.push(commit);
+      return commit === head ? fail({ workbench: "failed" }, ["a", "a"]) : pass({ workbench: "passed" });
+    } });
+    assert.ok(outcome.outcome === "red");
+    if (!landings.length) {
+      assert.deepEqual(outcome, { outcome: "red", keys: ["workbench"], diagnosis: "complete",
+        culprits: [], unattributed: [], shorterCandidate: null });
+    } else if (landings[0]!.commitId === head) {
+      assert.deepEqual(outcome.culprits, [{ ...L[1]!, keys: ["workbench"], failingTests: ["a"], command: "bun run test:release:batch", output: "FAIL" }]);
+    } else {
+      assert.deepEqual(outcome.culprits, []);
+      assert.deepEqual(outcome.unattributed, [{ keys: ["workbench"], after: L[0]!.commitId, firstFailing: head }]);
+      assert.equal(outcome.shorterCandidate, L[0]!.commitId);
+      assert.equal(outcome.diagnosis, "incomplete");
+    }
+    assert.deepEqual(commits, landings[0]?.commitId === L[0]!.commitId ? [head, head, L[0]!.commitId] : [head, head]);
+  }
 });
 
 test("a failure that passes its rerun is flaky and diagnoses nothing; infrastructure is never a regression", async () => {
@@ -138,17 +196,64 @@ test("a diagnosis step lost to infrastructure twice leaves the failure unattribu
   assert.match(outcome.reason!, /ssh lost/);
   // Only the part before the landing diagnosis could not see is offered.
   assert.equal(outcome.shorterCandidate, L[0]!.commitId);
-  assert.deepEqual(calls, ["complete:4", "rerun:4", "diagnosis:1", "diagnosis:2", "diagnosis:2", "diagnosis:3"]);
+  assert.deepEqual(calls, ["complete:4", "rerun:4", "diagnosis:2", "diagnosis:2", "diagnosis:1", "diagnosis:3"]);
 
   // A lost step that a retry recovers changes nothing: landing 2 is named.
   let lost = true;
-  const retried = await runBatchCheck({ head: L[2]!.commitId, landings: L.slice(0, 3), run: async (commit) => {
+  const retried = await runBatchCheck({ head: L[3]!.commitId, landings: L.slice(0, 4), run: async (commit) => {
     if (commit === L[0]!.commitId) return pass({ workbench: "passed" });
     if (commit === L[1]!.commitId && lost) { lost = false; return { status: "infrastructure", reason: "ssh lost" }; }
     return fail({ workbench: "failed" });
   } });
   assert.ok(retried.outcome === "red" && retried.diagnosis === "complete" && retried.unattributed.length === 0);
   if (retried.outcome === "red") assert.deepEqual(retried.culprits.map((culprit) => culprit.operationId), ["op-2"]);
+});
+
+test("a missing suite after an unknown probe keeps the failure unattributed", async () => {
+  const outcome = await runBatchCheck({ head: L[3]!.commitId, landings: L.slice(0, 4), run: async (commit) => {
+    if (commit === L[0]!.commitId) return pass({ workbench: "passed" });
+    if (commit === L[1]!.commitId) return { status: "infrastructure", reason: "ssh lost" };
+    if (commit === L[2]!.commitId) return pass();
+    return fail({ workbench: "failed" });
+  } });
+  assert.ok(outcome.outcome === "red");
+  assert.deepEqual(outcome.culprits, []);
+  assert.deepEqual(outcome.unattributed, [{ keys: ["workbench"], after: L[0]!.commitId, firstFailing: L[3]!.commitId }]);
+  assert.equal(outcome.shorterCandidate, L[0]!.commitId);
+});
+
+test("an inconclusive prebuild is unattributed at the boundary, but a tighter bound can rule it out", async () => {
+  for (const before of ["passed", "failed"] as const) {
+    for (const after of ["passed", "failed"] as const) {
+      const probes: string[] = [];
+      const outcome = await runBatchCheck({ head: L[4]!.commitId, landings: L, run: async (commit, scope, phase) => {
+        if (phase === "diagnosis") {
+          assert.deepEqual(scope, { checks: [], suites: [PREBUILD_KEY] });
+          probes.push(commit);
+        }
+        if (commit === L[1]!.commitId) return pass();
+        const state = commit === L[0]!.commitId ? before : commit === L[2]!.commitId ? after : "failed";
+        return state === "passed" ? pass({ [PREBUILD_KEY]: state })
+          : { ...fail({ [PREBUILD_KEY]: state }), failedChecks: [] };
+      } });
+      assert.ok(outcome.outcome === "red");
+      assert.equal(probes[0], L[1]!.commitId);
+      assert.equal(probes.filter((commit) => commit === L[1]!.commitId).length, 1, "an inconclusive build is not an infrastructure retry");
+      if (before === "passed" && after === "failed") {
+        assert.equal(outcome.diagnosis, "incomplete");
+        assert.match(outcome.reason!, /prebuild was inconclusive/);
+        assert.deepEqual(outcome.culprits, []);
+        assert.deepEqual(outcome.unattributed, [{ keys: [PREBUILD_KEY], after: L[0]!.commitId, firstFailing: L[2]!.commitId }]);
+        assert.equal(outcome.shorterCandidate, L[0]!.commitId);
+      } else {
+        assert.equal(outcome.diagnosis, "complete");
+        assert.equal(outcome.reason, undefined);
+        assert.deepEqual(outcome.unattributed, []);
+        assert.deepEqual(outcome.culprits.map(({ operationId }) => operationId), [before === "failed" ? "op-1" : "op-4"]);
+        assert.equal(outcome.shorterCandidate, before === "failed" ? null : L[2]!.commitId);
+      }
+    }
+  }
 });
 
 test("a build that breaks is diagnosed like a suite, and a check failure beside it keeps its own key", async () => {

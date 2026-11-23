@@ -218,12 +218,17 @@ A failed batch is handled in this order:
   With `batchVerification.promoteFlaky: true`, a flaky check whose rerun passed everything it ran (every test that
   failed once passed on the same head, and none failed twice) verifies its head instead, provided its images built,
   and its `batch_outcome` says `verified: true`. A rerun that failed other tests still needs a complete green check.
-- **Red: diagnosis.** Only what failed is rerun at each landing's commit, in landing order, from the same base. Every
-  landing at which a failing suite goes from passing to failing is a **culprit** (a suite missing at a revision keeps
-  its last state), so a batch with several independent regressions names each. A diagnosis step lost to
-  infrastructure is run once more; lost again, the failure is never blamed on a later landing: it is reported
-  **unattributed**, between the last landing known to pass and the first seen failing, and diagnosis is `incomplete`.
-  Diagnosis never promotes: the commit before the first culprit (or the first landing diagnosis could not see) is queued for a complete batch check of its own and ships only if that passes.
+- **Red: diagnosis.** SlipJay bisects the batch for each key that still fails at the head, using the same base for
+  every probe. Keys whose search windows overlap at a landing share the probe. A prebuild-only probe skips the
+  checks; a probe that does not need prebuild skips the build. With conclusive probes this takes at most
+  logarithmically many probes per key. Diagnosis locates a passing-to-failing boundary for each key, not every
+  earlier break and repair. A missing test suite keeps its earlier state; an inconclusive prebuild is unknown.
+  A probe lost to infrastructure is retried once; a second loss leaves that probe unknown and diagnosis
+  `incomplete`. If an unknown still lies at the boundary, the failure is **unattributed**, between the last
+  passing landing (or the base) and the failing bound. An inconclusive prebuild outside the final boundary
+  does not make diagnosis incomplete on its own.
+  Diagnosis never promotes: the commit before the earliest possible culprit is queued for a complete batch check
+  of its own and ships only if that passes.
 - **Routing.** Each culprit commit maps to its landing operation in the ledger, and Forge maps that operation to its
   Spec through its own attempt records (never commit trailers): the runner calls Forge's `recordBatchCheck`, which
   records a failed `batch_check` run with a blocking finding on that Spec (base and head, culprit commit and operation,

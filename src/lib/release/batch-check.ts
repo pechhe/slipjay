@@ -3,23 +3,20 @@
  * release verification on the frozen head; a failure is rerun once on the same head, narrowed to what failed, to tell
  * a flaky test from a regression. A regression is the same failure twice: a rerun that fails only tests the first run
  * passed shows the suites unstable, not broken (a loaded machine fails a different timing test each time), so it is
- * flaky too, when both runs name their failing tests and neither list is at its bound. A regression is then diagnosed by rerunning only what failed at each landing's commit,
- * in landing order. Every landing at which a failing suite goes from passing to failing is a culprit, so a batch with
- * two independent regressions names both, and a regression a later landing repaired is still named for the landing
- * that caused it. A suite missing at a revision says nothing about it: the suite keeps the state it last had.
- * A diagnosis step lost to infrastructure is retried once; if it is lost again, every failing suite's state there is
- * unknown, and a suite next seen failing is left unattributed (never blamed on the later landing) and reported as such.
+ * flaky too, when both runs name their failing tests and neither list is at its bound. Diagnosis bisects the landings
+ * for each key still failing at the head, sharing probes and running only keys whose search windows include the probe.
+ * It finds the failing boundary for each key, not every break and repair. A missing suite keeps its earlier state;
+ * a probe lost to infrastructure is retried once and, if lost again, leaves the probed keys unknown there.
  *
- * Production's prebuild, when a fixed machine builds for it, is one more suite of every run, `PREBUILD_KEY`: the head's
- * images are built beside its checks, a failed build is rebuilt once to tell a flaky build from a broken one, and a
- * broken one is diagnosed by building at each landing like any failing suite. A build that could not run (its machine,
- * a timeout, an inconclusive exit) leaves the suite `missing` for that run, so it says nothing either way: a failed build
+ * Production's prebuild, when a fixed machine builds for it, is one more suite, `PREBUILD_KEY`: the head's images are
+ * built beside its checks, and a failed build is rebuilt once and, if still broken, bisected like any other suite.
+ * A prebuild-only probe skips the checks. Unlike a missing test suite, an inconclusive build is unknown: a failed build
  * whose rebuild could not run is `infrastructure`, never flaky, and a green check whose head could not build proves
  * nothing about the build, so the runner never starts a diagnosis after it.
  *
  * Infrastructure (a machine, setup or tooling failure) is never a regression: the check ends `infrastructure` and
  * nothing is diagnosed or routed. Diagnosis never authorises a promotion: its only offer is `shorterCandidate`, the
- * landing before the first culprit, which the runner promotes only after its own complete batch check passes.
+ * landing before the earliest possible culprit, which the runner promotes only after its own complete batch check passes.
  */
 
 /** A suite's verdict in one run; `missing` when the run's selection does not hold it at that revision. */
@@ -73,7 +70,6 @@ export function scopeOf(run: Extract<BatchRun, { status: "failed" }>, keys: stri
   return { checks: [...run.failedChecks], suites: keys.filter((key) => !CHECK_KEY.test(key)) };
 }
 
-type KeyState = SuiteState | "unknown";
 /** `key`'s state in `run`: a suite by its own outcome, a check by whether it failed. */
 function stateOf(run: Exclude<BatchRun, { status: "infrastructure" }>, key: string): SuiteState {
   const check = CHECK_KEY.exec(key);
@@ -114,48 +110,94 @@ export async function runBatchCheck(input: {
   if (!still.length && keys.includes(PREBUILD_KEY) && stateOf(rerun, PREBUILD_KEY) === "missing")
     return { outcome: "infrastructure", reason: `${PREBUILD_KEY} failed at ${input.head.slice(0, 12)} and its rebuild could not run, so whether it is broken or flaky is unknown` };
   // A suite the rerun did not report (missing) was never run again, so it says nothing: only every failed key passing counts.
-  if (!still.length) return { outcome: "flaky", keys, failingTests: complete.failingTests,
+  if (rerun.status !== "failed" || !still.length) return { outcome: "flaky", keys, failingTests: complete.failingTests,
     rerunPassed: rerun.status === "passed" && keys.every((key) => stateOf(rerun, key) === "passed") };
-  // Production's served commit passed its own batch check, so every key starts passing.
-  const state = new Map<string, KeyState>(still.map((key) => [key, "passed"]));
-  const culprits: BatchCulprit[] = [];
-  const unattributed: Extract<BatchOutcome, { outcome: "red" }>["unattributed"] = [];
+  const { landings, head } = input;
+  type Unattributed = Extract<BatchOutcome, { outcome: "red" }>["unattributed"][number];
+  if (!landings.length) return { outcome: "red", culprits: [], keys: still, diagnosis: "complete", unattributed: [], shorterCandidate: null };
+
+  // The served base passed; the head failed. If the head has no final landing record, use it only as a failing bound.
+  const headIndex = landings.at(-1)?.commitId === head ? landings.length - 1 : landings.length;
+  const searches = still.map((key) => ({
+    key, lo: 0, hi: headIndex, unknowns: new Set<number>(), failingRun: rerun,
+  }));
   let incomplete: string | undefined;
-  let firstUnknown: number | undefined;
-  /** The landing after which each key's state became unknown: the last one known to pass it, or null for the base. */
-  const knownBefore = new Map<string, string | null>();
-  let lastKnown: string | null = null;
-  const diagnosisScope = { checks: scope.checks, suites: still.filter((key) => !CHECK_KEY.test(key)) };
-  for (const [index, landing] of input.landings.entries()) {
-    // The head itself was just run twice; its landing's state is the rerun's.
-    let run = landing.commitId === input.head ? rerun : await timed("diagnosis", landing.commitId, diagnosisScope);
-    if (run.status === "infrastructure") run = await timed("diagnosis", landing.commitId, diagnosisScope);
+  while (true) {
+    // Prefer the widest unresolved key (first in key order on ties).
+    let widest: typeof searches[number] | undefined;
+    let remaining = 0;
+    for (const search of searches) {
+      const count = search.hi - search.lo - search.unknowns.size;
+      if (count > remaining) { widest = search; remaining = count; }
+    }
+    if (!widest) break;
+
+    const { lo, hi, unknowns } = widest;
+    const midpoint = Math.floor((lo + hi - 1) / 2);
+    let p = midpoint;
+    for (let distance = 0; unknowns.has(p);) {
+      distance++;
+      const lower = midpoint - distance;
+      const upper = midpoint + distance;
+      if (lower >= lo && !unknowns.has(lower)) { p = lower; break; }
+      if (upper < hi && !unknowns.has(upper)) { p = upper; break; }
+    }
+    const active = searches.filter((search) => search.lo <= p && p < search.hi && !search.unknowns.has(p));
+    const commit = landings[p]!.commitId;
+    const probeScope = {
+      checks: active.every(({ key }) => key === PREBUILD_KEY) ? [] : scope.checks,
+      suites: active.map(({ key }) => key).filter((key) => !CHECK_KEY.test(key)),
+    };
+    let run = await timed("diagnosis", commit, probeScope);
+    if (run.status === "infrastructure") run = await timed("diagnosis", commit, probeScope);
     if (run.status === "infrastructure") {
-      incomplete ??= `diagnosis could not run at ${landing.commitId.slice(0, 12)}: ${run.reason}`;
-      firstUnknown ??= index;
-      for (const key of still) if (state.get(key) !== "unknown") { knownBefore.set(key, lastKnown); state.set(key, "unknown"); }
+      incomplete ??= `diagnosis could not run at ${commit.slice(0, 12)}: ${run.reason}`;
+      for (const search of active) search.unknowns.add(p);
       continue;
     }
-    const started: string[] = [];
-    const unknownThen: string[] = [];
-    for (const key of still) {
-      const now = stateOf(run, key);
-      if (now === "missing") continue;
-      const before = state.get(key);
-      if (now === "failed" && before === "passed") started.push(key);
-      if (now === "failed" && before === "unknown") unknownThen.push(key);
-      state.set(key, now);
+    for (const search of active) {
+      const verdict = stateOf(run, search.key);
+      if (verdict === "failed" && run.status === "failed") {
+        search.hi = p;
+        search.failingRun = run;
+      } else if (verdict === "passed" || (verdict === "missing" && search.key !== PREBUILD_KEY
+        && ![...search.unknowns].some((index) => index < p))) {
+        search.lo = p + 1;
+      } else {
+        search.unknowns.add(p);
+      }
+      for (const index of search.unknowns) if (index < search.lo || index >= search.hi) search.unknowns.delete(index);
     }
-    if (started.length) culprits.push({ ...landing, keys: started,
-      failingTests: run.status === "failed" ? run.failingTests : [], command: run.status === "failed" ? run.command : null,
-      output: run.status === "failed" ? run.output : "" });
-    for (const after of new Set(unknownThen.map((key) => knownBefore.get(key) ?? null)))
-      unattributed.push({ keys: unknownThen.filter((key) => (knownBefore.get(key) ?? null) === after), after, firstFailing: landing.commitId });
-    lastKnown = landing.commitId;
   }
-  // The batch before the earliest landing that may have caused a failure: a named culprit, or one diagnosis could not see.
-  const firstCulprit = culprits[0] ? input.landings.findIndex((landing) => landing.commitId === culprits[0]!.commitId) : -1;
-  const earliest = Math.min(...[firstCulprit, unattributed.length ? firstUnknown ?? -1 : -1].filter((index) => index >= 0));
+
+  const byLanding = new Map<number, BatchCulprit>();
+  const ranges = new Map<string, Unattributed>();
+  let earliest = Infinity;
+  for (const { key, lo, hi, failingRun } of searches) {
+    earliest = Math.min(earliest, lo);
+    const landing = landings[hi];
+    if (lo < hi || !landing) {
+      const after = landings[lo - 1]?.commitId ?? null;
+      const firstFailing = landing?.commitId ?? head;
+      if (!landing && lo === hi) incomplete ??= `failing head ${head.slice(0, 12)} has no landing record`;
+      else if (key === PREBUILD_KEY) incomplete ??= `prebuild was inconclusive at ${landings[lo]!.commitId.slice(0, 12)}`;
+      const rangeKey = JSON.stringify([after, firstFailing]);
+      const range = ranges.get(rangeKey) ?? { keys: [], after, firstFailing };
+      range.keys.push(key);
+      ranges.set(rangeKey, range);
+    } else {
+      const { failingTests, command, output } = failingRun;
+      const culprit = byLanding.get(hi) ?? { ...landing, keys: [], failingTests: [], command, output };
+      culprit.keys.push(key);
+      culprit.failingTests = [...new Set([...culprit.failingTests, ...failingTests])];
+      byLanding.set(hi, culprit);
+    }
+  }
+  const culprits = [...byLanding.entries()].sort(([left], [right]) => left - right).map(([, culprit]) => {
+    culprit.keys.sort();
+    return culprit;
+  });
+  const unattributed = [...ranges.values()];
   return { outcome: "red", culprits, keys: still, diagnosis: incomplete ? "incomplete" : "complete", unattributed,
     shorterCandidate: Number.isFinite(earliest) && earliest > 0 ? input.landings[earliest - 1]!.commitId : null, ...incomplete ? { reason: incomplete } : {} };
 }

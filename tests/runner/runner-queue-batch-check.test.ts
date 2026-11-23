@@ -9,17 +9,23 @@ import type { BuildRouteAnswer } from "../../src/lib/build/build-admission.ts";
 import type { OperationEvent, RemoteVerification } from "../../src/lib/runner/runner-types.ts";
 
 /**
- * YardSmith's batch command, in miniature: one suite, `workbench`, which fails while landing 2's regression is in the
- * tree and unrepaired, or landing 4's is; once only while `flaky-once` exists beside the fixture. It reports the suite's
- * outcome in its test-report manifest and records the release environment it was given.
+ * YardSmith's batch command in miniature: two independent suites fail when their respective break lands.
+ * The workbench fails once while `flaky-once` exists. The command honors suite selection and records its environment.
  */
 const batchCheck = (root: string) => `const fs=require("node:fs"), path=require("node:path"); const at=(name)=>path.join(${JSON.stringify(root)}, name);
-fs.appendFileSync(at("batch-env.jsonl"), JSON.stringify({ base: process.env.SLIPJAY_RELEASE_BASE, head: process.env.SLIPJAY_RELEASE_HEAD, suites: process.env.SLIPJAY_RELEASE_SUITES ?? null }) + "\\n");
-let broken = (fs.existsSync("break-a") && !fs.existsSync("fix-a")) || fs.existsSync("break-b");
-if (fs.existsSync(at("flaky-once"))) { fs.rmSync(at("flaky-once")); broken = true; }
+const suites = process.env.SLIPJAY_RELEASE_SUITES ?? null;
+fs.appendFileSync(at("batch-env.jsonl"), JSON.stringify({ base: process.env.SLIPJAY_RELEASE_BASE, head: process.env.SLIPJAY_RELEASE_HEAD, suites }) + "\\n");
+let workbench = fs.existsSync("break-a");
+if (fs.existsSync(at("flaky-once"))) { fs.rmSync(at("flaky-once")); workbench = true; }
+const states = { workbench, yard: fs.existsSync("break-b") };
+const outcomes = Object.entries(states).filter(([suite]) => !suites || suites.split(",").includes(suite))
+  .map(([suite, broken]) => ({ suite, outcome: broken ? "failed" : "passed" }));
 const reports = process.env.SLIPJAY_TEST_REPORT_DIR;
-if (reports) fs.writeFileSync(path.join(reports, "slipjay-test-reports.json"), JSON.stringify({ version: 1, reports: [], outcomes: [{ suite: "workbench", outcome: broken ? "failed" : "passed" }] }));
-if (broken) { process.stderr.write("FAIL tests/workbench.test.ts > workbench > " + (fs.existsSync("break-b") ? "b" : "a") + " breaks\\n"); process.exit(1); }`;
+if (reports) fs.writeFileSync(path.join(reports, "slipjay-test-reports.json"), JSON.stringify({ version: 1, reports: [], outcomes }));
+for (const { suite, outcome } of outcomes) if (outcome === "failed") {
+  process.stderr.write("FAIL tests/" + suite + ".test.ts > " + suite + " > " + (suite === "yard" ? "b" : "a") + " breaks\\n");
+  process.exitCode = 1;
+}`;
 
 const schedule = (everyMinutes: number) => ({ everyMinutes, from: "00:00", until: "23:59", timeZone: "Europe/London" });
 const batchEvents = <T extends OperationEvent["type"]>(f: Awaited<ReturnType<typeof fixture>>, id: string, type: T) =>
@@ -63,7 +69,7 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
 
     // Five landings inside the interval: none queues a check of its own.
     clock = promotedAt + 60_000;
-    for (const file of ["one.txt", "break-a", "fix-a", "break-b", "needs-a.txt"]) {
+    for (const file of ["one.txt", "break-a", "three.txt", "break-b", "needs-a.txt"]) {
       const id = f.submit(await f.candidate(file));
       await f.land(id);
       landings.push(id);
@@ -84,11 +90,14 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
     const [outcome] = batchEvents(f, red.id, "batch_outcome");
     assert.equal(outcome!.outcome, "red");
     assert.deepEqual(outcome!.culprits!.map((culprit) => culprit.operationId), [landings[1], landings[3]]);
-    assert.deepEqual(outcome!.culprits!.map((culprit) => culprit.failingTests), [["tests/workbench.test.ts > workbench > a breaks"], ["tests/workbench.test.ts > workbench > b breaks"]]);
+    assert.deepEqual(outcome!.culprits!.map((culprit) => culprit.failingTests), [["tests/workbench.test.ts > workbench > a breaks"], ["tests/yard.test.ts > yard > b breaks"]]);
     assert.equal(outcome!.shorterCandidate, commits[0]);
-    // Only the failing suite reran at each landing, measured from the same base.
+    // The rerun and first probe share both suites; later probes narrow to one suite, all from the same base.
     const env = (await f.lines("batch-env.jsonl")).map((line) => JSON.parse(line) as { base: string; head: string; suites: string | null });
-    assert.deepEqual(env.filter((entry) => entry.suites === "workbench").map((entry) => entry.head), [commits[4], ...commits.slice(0, 4)]);
+    assert.deepEqual(env.filter((entry) => entry.suites !== null).map((entry) => [entry.head, entry.suites]), [
+      [commits[4], "workbench,yard"], [commits[1], "workbench,yard"], [commits[2], "yard"],
+      [commits[0], "workbench"], [commits[3], "yard"],
+    ]);
     assert.ok(env.every((entry) => entry.head === zero || entry.base === zero));
 
     // Diagnosis promoted nothing: the commit before landing 2 shipped only once its own complete check passed.
