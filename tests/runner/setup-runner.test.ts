@@ -100,3 +100,36 @@ test("the runner unit does not duplicate an existing Vite+ bin on PATH or add a 
   assert.equal(withVp.status, 0, withVp.stderr);
   assert.equal(unitPath().split(":").filter((entry) => entry === vpBin).length, 1);
 });
+
+function runWith(args: string[]) {
+  return spawnSync("bash", [setupScript, ...args], {
+    encoding: "utf8",
+    env: { HOME: home, USER: "ubuntu", PATH: `${bin}:/usr/bin:/bin`, SLIPJAY_RUNNER_USER_NAME: "SlipJay Runner", SLIPJAY_RUNNER_USER_EMAIL: "runner@example.com" },
+  });
+}
+
+test("a re-run keeps top-level and per-repository settings, matches names case-insensitively and drops unlisted repositories", () => {
+  const configPath = join(home, ".slipjay", "runner", "config.json");
+  mkdirSync(dirname(configPath), { recursive: true });
+  const yardsmith = { url: "old-url", verifier: "boat", verificationDepth: 1, screeningLanes: 2, gateMachine: "peach-box", lane: "ys", hostPlaces: ["a"] };
+  writeFileSync(configPath, JSON.stringify({ build: { x: 1 }, machines: { m: 1 }, repos: { "pechhe/yardsmith": yardsmith, "pechhe/gone": { url: "g", lane: "g" }, "pechhe/odd": "nope" } }));
+
+  const run = runWith(["pechhe/YardSmith=new-url", "pechhe/odd=odd-url", "pechhe/fresh=fresh-url"]);
+  assert.equal(run.status, 0, run.stderr);
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.deepEqual(config.build, { x: 1 });
+  assert.deepEqual(config.machines, { m: 1 });
+  assert.deepEqual(config.repos, {
+    "pechhe/YardSmith": { ...yardsmith, url: "new-url" },
+    "pechhe/odd": { url: "odd-url" },
+    "pechhe/fresh": { url: "fresh-url" },
+  });
+});
+
+test("a re-run copes with a config whose repos is not an object", () => {
+  const configPath = join(home, ".slipjay", "runner", "config.json");
+  mkdirSync(dirname(configPath), { recursive: true });
+  writeFileSync(configPath, JSON.stringify({ repos: [1] }));
+  assert.equal(runWith(["a/b=u"]).status, 0);
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")).repos, { "a/b": { url: "u" } });
+});

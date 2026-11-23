@@ -29,12 +29,19 @@ name="${SLIPJAY_RUNNER_USER_NAME:-$(git config --global user.name)}"
 email="${SLIPJAY_RUNNER_USER_EMAIL:-$(git config --global user.email)}"
 [ -n "$name" ] && [ -n "$email" ] || { echo "set SLIPJAY_RUNNER_USER_NAME and SLIPJAY_RUNNER_USER_EMAIL (or git's global user)" >&2; exit 1; }
 # Serialized by bun, so names with quotes or backslashes stay valid JSON. Settings this script does not own
-# (such as "build") survive a re-run.
+# survive a re-run: top-level ones (such as "build", "machines") and per-repository ones (such as
+# "gateMachine", "screeningLanes"), matched case-insensitively. Only the repositories named here are kept.
 bun -e '
 import { existsSync, readFileSync } from "node:fs";
 const [host, name, email, existing, ...pairs] = process.argv.slice(1);
-const repos = Object.fromEntries(pairs.map((pair) => { const at = pair.indexOf("="); return [pair.slice(0, at), { url: pair.slice(at + 1) }]; }));
 const kept = existsSync(existing) ? JSON.parse(readFileSync(existing, "utf8")) : {};
+const plain = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const old = plain(kept.repos) ? Object.entries(kept.repos).map(([key, value]) => [key.toLowerCase(), value]) : [];
+const repos = Object.fromEntries(pairs.map((pair) => {
+  const at = pair.indexOf("="), repo = pair.slice(0, at);
+  const before = old.find(([key]) => key === repo.toLowerCase())?.[1];
+  return [repo, { ...(plain(before) ? before : {}), url: pair.slice(at + 1) }];
+}));
 console.log(JSON.stringify({ ...kept, name: host, listen: { host: "127.0.0.1", port: 7787 }, repos, jj: { "user.name": name, "user.email": email } }));
 ' "$(hostname -s)" "$name" "$email" "$home/config.json" "$@" > "$home/config.json.tmp"
 mv "$home/config.json.tmp" "$home/config.json"
