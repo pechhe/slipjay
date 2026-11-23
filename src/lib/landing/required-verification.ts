@@ -130,20 +130,36 @@ export async function runRequiredVerification(input: {
   // The real root: commands run at real paths, so redaction must match them.
   const root = await realpath(input.root);
   const environment = (input.environment ?? (() => process.env))();
-  const outcomes = await runVerificationStages<{ concurrent?: unknown } | null, CheckResult>(checks as readonly ({ concurrent?: unknown } | null)[], async (declared, index) => {
+  const outcomes = await runVerificationStages<{ concurrent?: unknown } | null, CheckResult>(checks as readonly ({ concurrent?: unknown } | null)[], async (declared, index, stageController) => {
     if (!declared || typeof declared !== "object") throw new Error("The repository policy contains malformed requiredLandingVerification");
     const check: VerificationDeclaration = normalizeVerificationDeclaration(declared, "requiredLandingVerification");
     const args = check.args.map(String);
     const command = [check.executable, ...args].join(" ");
     const recordCommand = truncateUtf8(redactVerificationOutput(command, root), COMMAND_BYTES);
+    const signal = stageController.signal;
+    const siblingAborted = () => signal.aborted && !input.abortSignal?.aborted;
+    const notRun = (runId?: string): CheckResult => ({
+      record: { checkIndex: index, command: recordCommand, outcome: "not_run", ...runId ? { runId } : {} },
+    });
+    const runInStage = async (request: BoundedProcessRequest) => {
+      if (siblingAborted()) return null;
+      try {
+        return await run({ ...request, abortSignal: signal });
+      } catch (error) {
+        // An executor may reject with the abort reason rather than return a cancelled result.
+        if (siblingAborted() && error === signal.reason) return null;
+        throw error;
+      }
+    };
     // Both directories are contained before anything in this check runs.
     const subject = `Required verification check ${index + 1}`;
     const checkCwd = await checkoutCwd(root, check.cwd, subject);
     if (check.capability) {
       const { probe } = check.capability;
       const probeCwd = await checkoutCwd(root, probe.cwd, `${subject} capability probe ${check.capability.id}`);
-      const probeResult = await run({ executable: probe.executable, args: probe.args, cwd: probeCwd,
+      const probeResult = await runInStage({ executable: probe.executable, args: probe.args, cwd: probeCwd,
         timeoutMs: 30_000, maxOutputBytes: PROBE_OUTPUT_BYTES, env: environment });
+      if (!probeResult || (probeResult.cancelled && siblingAborted())) return notRun(probeResult?.runId);
       const probed = { ...probeResult, code: probeResult.exitCode ?? undefined };
       const availability = classifyCapabilityProbe(check.capability, probed);
       if (availability.status === "failed") throw new Error(`Capability probe failed for ${check.capability.id}: ${availability.reason}`);
@@ -153,15 +169,21 @@ export async function runRequiredVerification(input: {
           record: { checkIndex: index, command: recordCommand, outcome: "capability_unavailable" } };
       }
     }
+    if (siblingAborted()) return notRun();
     onProgress(`[verify ${index + 1}/${checks.length}] ${command}`);
     const started = Date.now();
-    const result = await run({ executable: check.executable, args, cwd: checkCwd,
+    const result = await runInStage({ executable: check.executable, args, cwd: checkCwd,
       // A failed check keeps this much of each stream, so the capture is sized for it; a passing one retains today's 8 KiB.
       timeoutMs: CHECK_TIMEOUT_MS, maxOutputBytes: 2 * FAILED_STREAM_BYTES, maxOutputBytesPerStream: FAILED_STREAM_BYTES, env: environment, captureDiagnostics: true });
+    if (!result || (result.cancelled && siblingAborted())) return notRun(result?.runId);
     const runId = result.runId ? { runId: result.runId } : {};
     if (result.exitCode !== 0 || result.timedOut || result.cancelled || result.signal || result.error) {
       const accepted = await acceptFailure?.({ ...check, args }, result, environment);
       if (accepted) return { passed: accepted, record: { checkIndex: index, command: recordCommand, outcome: "accepted_by_baseline", ...runId } };
+      const failed = outcome(result);
+      const cancelSiblings = check.cancelSiblingsOnFailure === true && !input.abortSignal?.aborted
+        && (failed === "nonzero_exit" || failed === "signal" || failed === "timeout");
+      if (cancelSiblings) stageController.abort();
       const evidence = failureEvidence(result, index, command, root);
       const output = {
         stdout: redactVerificationOutput(`${result.diagnosticOutput?.stdout ?? ""}\n${result.stdout}`, root),
@@ -177,11 +199,11 @@ export async function runRequiredVerification(input: {
       if (evidence.outcome === "cancelled" || evidence.outcome === "spawn_failure") {
         throw new RequiredVerificationError({ ...evidence, failures: [failure], checks: [record] }, summary);
       }
-      return { failure, record, stop: check.stopOnFailure === true };
+      return { failure, record, stop: cancelSiblings || check.stopOnFailure === true };
     }
     onProgress(`[verify ${index + 1}/${checks.length}] passed in ${formatDuration(Date.now() - started)}`);
     return { passed: command, record: { checkIndex: index, command: recordCommand, outcome: "passed", ...runId } };
-  }, (item) => item.stop === true || input.abortSignal?.aborted === true);
+  }, (item) => item.stop === true, input.abortSignal);
   const failures = outcomes.flatMap((item) => item.failure ? [item.failure] : []);
   if (failures.length) {
     const records = checks.map((declared, index): RequiredVerificationCheckRecord =>

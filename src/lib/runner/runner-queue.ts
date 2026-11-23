@@ -304,7 +304,7 @@ export function createRunnerQueue(input: {
     base?: string;
     /** The landing whose publication moved the tip past this screen's base, ending this attempt now. */
     overtakenBy?: string;
-    screen?: { phase: "preparing" | "screening" | "passed" | "authoritative"; ready: ReturnType<typeof deferred<void>>; passedAt?: number } };
+    screen?: { phase: "preparing" | "screening" | "passed" | "failed" | "authoritative"; ready: ReturnType<typeof deferred<void>>; passedAt?: number } };
   const prefixes = new Map<string, PrefixTurn[]>();
   const screens = new Map<string, PrefixTurn>();
   let screenPassOrder = 0;
@@ -416,7 +416,7 @@ export function createRunnerQueue(input: {
   function predictedPrefix(repo: string, operation: LandingOperation): PrefixTurn | undefined {
     if (unpredicted.has(operation.id)) return undefined;
     const alive = [...screens.values()].filter((turn) => turn.operation.repo === repo && turn.operation.id !== operation.id
-      && !turn.invalidation.signal.aborted);
+      && turn.screen?.phase !== "failed" && !turn.invalidation.signal.aborted);
     const tail = alive.at(-1);
     return tail && tail.overlap !== false ? tail : undefined;
   }
@@ -1209,8 +1209,13 @@ export function createRunnerQueue(input: {
       if (screenCount && operation.kind === "landing" && runnable(operation, open)
         && !admitted.has(operation.id) && !screens.has(operation.id) && !heldForBoat(operation.repo)) {
         const occupied = [...screens.values()].filter((turn) => turn.operation.repo === operation.repo);
-        if (!admits(false, places(), workers, shortPlace) || occupied.length >= screenCount || screeningFence(operation, open)) continue;
-        const slot = Array.from({ length: screenCount }, (_, i) => i).find((i) => !occupied.some((turn) => turn.screenSlot === i))!;
+        // Remote screens release the runner worker before running their gate, not their screening capacity.
+        const active = occupied.filter((turn) => admitted.has(turn.operation.id) || turn.screen?.phase === "screening");
+        const maxOccupied = screenCount > 1 ? screenCount * 2 : screenCount;
+        if (!admits(false, places(), workers, shortPlace) || active.length >= screenCount
+          || occupied.length >= maxOccupied || screeningFence(operation, open)) continue;
+        // A settled screen still owns its checkout and retained artifact until the turn ends.
+        const slot = Array.from({ length: maxOccupied }, (_, i) => i).find((i) => !occupied.some((turn) => turn.screenSlot === i))!;
         const previous = log.events({ operationId: operation.id }).flatMap(({ event }) => event.type === "attempt_started" ? [event.attempt] : []);
         const predecessor = predictedPrefix(operation.repo, operation);
         const turn: PrefixTurn = { operation, slot: 0, screenSlot: slot, attempt: Math.max(0, ...previous) + 1,
@@ -1404,6 +1409,7 @@ export function createRunnerQueue(input: {
       const selected = await candidateBun(checkout, request.env, home);
       request = { ...request, env: selected.environment };
       const build = ["gate", "migration_generate", "migration_verify"].includes(runPurpose) ? await buildCheckEnvironment() : {};
+      // Preserve the command's stage signal for both the local executor and remote gate places.
       const abortSignal = AbortSignal.any([controller.signal, ...prefix ? [prefix.invalidation.signal] : [], ...request.abortSignal ? [request.abortSignal] : []]);
       const privateRun = stage === "resetting" || stage === "finalizing";
       const runEnvironment = privateRun ? request.env : { ...sanitizedProcessEnv(request.env), TMPDIR: scratch };
@@ -2038,6 +2044,7 @@ export function createRunnerQueue(input: {
       } else if (ahead) {
         // Any other failure stands only if the prefix it ran behind lands: wait for that, without a worker.
         if (!prefix!.invalidation.signal.aborted) {
+          if (prefix!.screen!.phase !== "authoritative") prefix!.screen!.phase = "failed";
           admitted.delete(operation.id);
           wakeMain();
           const stopped = (signal: AbortSignal) => new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));

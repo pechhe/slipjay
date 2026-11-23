@@ -83,6 +83,14 @@ test("inconclusiveExitCodes is kept when declared, absent by default, and refuse
     assert.throws(() => normalizeVerificationDeclaration({ ...base, inconclusiveExitCodes: bad }), /Malformed/, JSON.stringify(bad));
 });
 
+test("cancelSiblingsOnFailure is an opt-in boolean", () => {
+  const base = { executable: "node", args: [] };
+  assert.equal(normalizeVerificationDeclaration({ ...base, cancelSiblingsOnFailure: true }).cancelSiblingsOnFailure, true);
+  assert.equal("cancelSiblingsOnFailure" in normalizeVerificationDeclaration(base), false);
+  assert.equal("cancelSiblingsOnFailure" in normalizeVerificationDeclaration({ ...base, cancelSiblingsOnFailure: false }), false);
+  for (const bad of ["true", 1, {}]) assert.throws(() => normalizeVerificationDeclaration({ ...base, cancelSiblingsOnFailure: bad }), /Malformed/);
+});
+
 test("stopOnFailure is kept when true, absent by default, and refused when not a boolean", () => {
   const base = { executable: "bun", args: ["install"] };
   assert.equal(normalizeVerificationDeclaration({ ...base, stopOnFailure: true }).stopOnFailure, true);

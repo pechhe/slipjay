@@ -168,7 +168,7 @@ and held state through the existing recovery path.
 ### Landing contract
 
 - **Gate.** `requiredLandingVerification` in `slipjay.json`, an array of commands
-  (`{ "executable", "args"?, "cwd"?, "concurrent"?, "stopOnFailure"? }`), run in the runner's checkout.
+  (`{ "executable", "args"?, "cwd"?, "concurrent"?, "stopOnFailure"?, "cancelSiblingsOnFailure"? }`), run in the runner's checkout.
   Consecutive `concurrent` checks run together. A failed check (nonzero exit, signal or
   timeout) does not stop the gate: every later check still runs, and one failure reports
   every failed check in declaration order (the moment a check fails, `land` prints a
@@ -176,8 +176,10 @@ and held state through the existing recovery path.
   failed, timed out, accepted by baseline, capability unavailable, not run). The index and
   summaries are capped at about 24,000 characters; the structured record is complete.
   `"stopOnFailure": true` marks a check that later checks depend on, such as an install or
-  a generation step: if it fails, nothing after its stage (its concurrent siblings included)
-  starts and the later checks show as not run. Dependency is declared, never inferred.
+  a generation step: if it fails, its concurrent siblings finish but later stages do not start.
+  `"cancelSiblingsOnFailure": true` also aborts any still-running checks in the same stage
+  on a failure not accepted by baseline. Cancelled siblings and later checks show as not run;
+  the failure report names the check that failed. Dependency is declared, never inferred.
   Cancellation and infrastructure errors still end verification at once.
   A policy declaring its former name, `requiredLocalVerification`, is refused.
   A policy declaring `postLandVerification` (no longer run)
@@ -701,11 +703,16 @@ existing host worker; remote gates release that reservation so screens do not mu
 concurrent fetches or installs on the VPS. Screens never integrate, apply migrations, finalize
 the integration target, run post-integration steps or deploy.
 
+At most `N` screens can execute at once. A settled screen waiting for a predecessor
+frees execution capacity but keeps its own checkout slot until its turn ends.
+With multiple lanes, up to `2 × N` screens can retain slots; a single lane stays serial.
+
 A screen behind a prefix publishes only after that prefix has. If the prefix does not publish
 (its gate fails, it is killed, superseded or rebuilt), the screen behind it is stopped, returns
 to the queue and screens again behind whatever is predicted then: its result behind a prefix
 that will not land diagnoses nothing. A screen's failure behind a prefix that does land is its
-verdict. A failed head screen returns the normal failure summary and classification at once.
+verdict. New screens skip known failed screens when predicting their prefix.
+A failed head screen returns the normal failure summary and classification at once.
 
 Admission to the authoritative lane is oldest passed screen first, by completion order, among
 screens whose prefix has published. The canonical publisher retains its exact-base and source

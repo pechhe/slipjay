@@ -149,6 +149,77 @@ test("once the abort signal fires, a check that came back signalled is followed 
   assert.deepEqual(error.evidence.checks.map((check) => check.outcome), ["passed", "failed", "not_run"]);
 });
 
+test("a fast opted-in failure aborts a running sibling and reports only the fast failure", async () => {
+  const slow = Promise.withResolvers<void>();
+  const lines: string[] = [];
+  const started: string[] = [];
+  const error = await failedWith([
+    decl("slow", { concurrent: true }), decl("fast", { concurrent: true, cancelSiblingsOnFailure: true }), decl("later"),
+  ], async ({ args: [name], abortSignal }) => {
+    started.push(name!);
+    assert.ok(abortSignal);
+    if (name === "slow") {
+      const stopped = new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }));
+      slow.resolve();
+      await stopped;
+      return result({ exitCode: null, cancelled: true, runId: "slow-run" });
+    }
+    await slow.promise;
+    return failing("fast");
+  }, { onProgress: (line: string) => lines.push(line) });
+  assert.deepEqual(started.sort(), ["fast", "slow"]);
+  assert.deepEqual(error.evidence.failures.map((failure) => failure.command), ["node fast"]);
+  assert.deepEqual(error.evidence.checks.map((check) => check.outcome), ["not_run", "failed", "not_run"]);
+  assert.equal(error.evidence.checks[0]?.runId, "slow-run");
+  assert.match(error.message, /^Required verification failed \(nonzero_exit\): node fast/);
+  assert.equal(lines.filter(isEarlyFailureLine).length, 1);
+});
+
+for (const acceptBaseline of [false, true]) test(`opted-in checks run concurrently and continue on ${acceptBaseline ? "a baseline acceptance" : "a pass"}`, async () => {
+  const ready = Promise.withResolvers<void>();
+  const started: string[] = [];
+  const f = await fixture();
+  try {
+    const evidence = await runRequiredVerification({
+      root: f.root,
+      checks: [decl("first", { concurrent: true, cancelSiblingsOnFailure: true }),
+        decl("second", { concurrent: true, cancelSiblingsOnFailure: true }), decl("later")],
+      run: async ({ args: [name], abortSignal }) => {
+        started.push(name!);
+        if (name !== "later") {
+          if (started.length === 2) ready.resolve();
+          await ready.promise;
+        }
+        assert.equal(abortSignal?.aborted, false);
+        return acceptBaseline && name === "first" ? failing("first") : result();
+      },
+      acceptFailure: async () => "node first",
+    });
+    assert.deepEqual(evidence.passed, ["node first", "node second", "node later"]);
+    assert.equal(started.at(-1), "later");
+  } finally { await f.dispose(); }
+});
+
+test("external abort cancels every running check and prevents later stages", async () => {
+  const controller = new AbortController();
+  const started: string[] = [];
+  const cancelled: string[] = [];
+  const error = await failedWith([
+    decl("one", { concurrent: true, cancelSiblingsOnFailure: true }), decl("two", { concurrent: true }), decl("later"),
+  ], async ({ args: [name], abortSignal }) => {
+    assert.ok(abortSignal);
+    started.push(name!);
+    const stopped = new Promise<void>((resolve) => abortSignal.addEventListener("abort", () => resolve(), { once: true }));
+    if (started.length === 2) controller.abort();
+    await stopped;
+    cancelled.push(name!);
+    return result({ exitCode: null, cancelled: true });
+  }, { abortSignal: controller.signal });
+  assert.deepEqual(started.sort(), ["one", "two"]);
+  assert.deepEqual(cancelled.sort(), ["one", "two"]);
+  assert.equal(error.evidence.outcome, "cancelled");
+});
+
 test("a stopOnFailure check that passes does not stop later checks", async () => {
   const s = scripted({ install: [{}], a: [failing("a")] });
   await failedWith([decl("install", { stopOnFailure: true }), decl("a")], s.run);
@@ -255,6 +326,7 @@ test("a failed check reports its failing tests while a concurrent check still ru
     if (request.args[0] === "slow") {
       // The slow check finishes only once the fast one's failure has been reported.
       await new Promise<void>((resolve) => { const wait = () => lines.some(isEarlyFailureLine) ? resolve() : setTimeout(wait, 5); wait(); });
+      assert.equal(request.abortSignal?.aborted, false, "default failures do not abort siblings");
       finishSlow();
     }
     return s.run(request);

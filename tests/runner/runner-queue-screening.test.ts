@@ -371,6 +371,44 @@ test("screen capacity is independent of the host preparation worker limit", asyn
   } finally { r.releaseAll(); await f.dispose(); }
 });
 
+for (const secondFails of [false, true]) test(`a ${secondFails ? "failed" : "passed"} screen waiting for its prefix frees a lane but retains its slot`, async () => {
+  const r = controlledRemote();
+  const f = await fixture(false, false, undefined, false, { screeningLanes: 2, workers: 1, remoteVerification: r.remote });
+  try {
+    const first = f.submit(await f.candidate("first.txt"));
+    const secondFile = secondFails ? "fail" : "second.txt";
+    const second = f.submit(await f.candidate(secondFile));
+    const third = f.submit(await f.candidate("third.txt"));
+    f.queue.wake();
+    await until(() => r.opened.length === 2 || undefined);
+    assert.equal(f.log.operation(third)?.status, "queued", "the remote gates use both execution lanes");
+
+    const firstScreen = r.opened.find((entry) => !entry.files.includes(secondFile))!;
+    const secondScreen = r.opened.find((entry) => entry.files.includes(secondFile))!;
+    assert.equal(secondScreen.base, firstScreen.candidate);
+    secondScreen.release();
+    const thirdScreen = await until(() => r.opened.find((entry) => entry.files.includes("third.txt")));
+    assert.equal(f.result(first), undefined);
+    assert.equal(f.result(second), undefined, "the settled screen is still waiting for its prefix");
+    assert.equal(r.closed.length, 1, "one gate ended before the third opened");
+    assert.equal(new Set([firstScreen.slot, secondScreen.slot, thirdScreen.slot]).size, 3);
+    const predicted = secondFails ? { screen: firstScreen, id: first } : { screen: secondScreen, id: second };
+    assert.equal(thirdScreen.base, predicted.screen.candidate);
+    assert.equal(thirdScreen.files.includes(secondFile), !secondFails);
+    thirdScreen.release();
+    await until(() => f.log.operation(third)?.stage === "waiting-for-predecessor" || undefined);
+
+    firstScreen.release();
+    await f.queue.idle();
+    assert.equal(f.result(first)?.type, "landed");
+    assert.equal(f.result(second)?.type, secondFails ? "failed" : "landed");
+    if (!secondFails) assert.equal(events(f, second).find((event) => event.type === "screen_reused")?.behind, first);
+    assert.equal(f.result(third)?.type, "landed", JSON.stringify(f.result(third)));
+    assert.equal(events(f, third).find((event) => event.type === "screen_reused")?.behind, predicted.id);
+    assert.equal(r.opened.length, 3, "none of the screens reran verification");
+  } finally { r.releaseAll(); await f.dispose(); }
+});
+
 test("zero screening lanes preserves the ordinary landing path", async () => {
   const r = controlledRemote();
   r.releaseAll();

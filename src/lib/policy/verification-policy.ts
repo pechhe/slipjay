@@ -1,6 +1,8 @@
 export type VerificationCommand = { executable: string; args: string[]; cwd?: string; baseline?: unknown; concurrent?: boolean;
   /** A failed check ends verification once its stage settles; later checks do not start (for installs and generation steps). */
   stopOnFailure?: boolean;
+  /** A failed check also cancels still-running checks in its stage. */
+  cancelSiblingsOnFailure?: boolean;
   /** Exit codes that say this command could not judge (an audit only): never 0, 1 or anything from 126 up. */
   inconclusiveExitCodes?: number[] };
 
@@ -40,7 +42,8 @@ const command = (value: unknown, field: string): VerificationCommand => {
     || (value.cwd != null && typeof value.cwd !== "string")) {
     throw new Error(`Malformed ${field} command`);
   }
-  if (value.stopOnFailure != null && typeof value.stopOnFailure !== "boolean") throw new Error(`Malformed ${field} command`);
+  if ((value.stopOnFailure != null && typeof value.stopOnFailure !== "boolean")
+    || (value.cancelSiblingsOnFailure != null && typeof value.cancelSiblingsOnFailure !== "boolean")) throw new Error(`Malformed ${field} command`);
   if (value.inconclusiveExitCodes != null && (!Array.isArray(value.inconclusiveExitCodes) || !value.inconclusiveExitCodes.length
     || value.inconclusiveExitCodes.some((code) => !Number.isInteger(code) || (code as number) < 2 || (code as number) >= 126)))
     throw new Error(`Malformed ${field} command`);
@@ -48,6 +51,7 @@ const command = (value: unknown, field: string): VerificationCommand => {
     ...(value.baseline && typeof value.baseline === "object" ? { baseline: value.baseline } : {}),
     ...(value.concurrent === true ? { concurrent: true } : {}),
     ...(value.stopOnFailure === true ? { stopOnFailure: true } : {}),
+    ...(value.cancelSiblingsOnFailure === true ? { cancelSiblingsOnFailure: true } : {}),
     ...(value.inconclusiveExitCodes != null ? { inconclusiveExitCodes: [...new Set(value.inconclusiveExitCodes as number[])] } : {}) };
 };
 
@@ -59,9 +63,13 @@ const command = (value: unknown, field: string): VerificationCommand => {
  * has settled. Outcomes keep declaration order and cover only the checks that
  * started, so a shorter result means the rest were not run. A thrown error is not
  * an outcome: the first one in declaration order propagates once its stage settles,
- * so no check is left running.
+ * so no check is left running. The shared stage controller lets a check cancel
+ * its siblings without cancelling the attempt; external aborts reach each stage.
  */
-export async function runVerificationStages<Check extends { concurrent?: unknown } | null, Outcome>(checks: readonly Check[], verify: (check: Check, index: number) => Promise<Outcome>, stopsAfter: (outcome: Outcome) => boolean = () => false): Promise<Outcome[]> {
+export async function runVerificationStages<Check extends { concurrent?: unknown } | null, Outcome>(
+  checks: readonly Check[], verify: (check: Check, index: number, stageController: AbortController) => Promise<Outcome>,
+  stopsAfter: (outcome: Outcome) => boolean = () => false, abortSignal?: AbortSignal,
+): Promise<Outcome[]> {
   const stages: number[][] = [];
   checks.forEach((check, index) => {
     const last = stages.at(-1);
@@ -70,12 +78,20 @@ export async function runVerificationStages<Check extends { concurrent?: unknown
   });
   const outcomes: Outcome[] = [];
   for (const stage of stages) {
-    const settled = await Promise.allSettled(stage.map((index) => verify(checks[index]!, index)));
-    for (const result of settled) {
-      if (result.status === "rejected") throw result.reason;
-      outcomes.push(result.value);
+    const stageController = new AbortController();
+    const abort = () => stageController.abort(abortSignal?.reason);
+    if (abortSignal?.aborted) abort();
+    else abortSignal?.addEventListener("abort", abort, { once: true });
+    try {
+      const settled = await Promise.allSettled(stage.map((index) => verify(checks[index]!, index, stageController)));
+      for (const result of settled) {
+        if (result.status === "rejected") throw result.reason;
+        outcomes.push(result.value);
+      }
+      if (abortSignal?.aborted || settled.some((result) => result.status === "fulfilled" && stopsAfter(result.value))) break;
+    } finally {
+      abortSignal?.removeEventListener("abort", abort);
     }
-    if (settled.some((result) => result.status === "fulfilled" && stopsAfter(result.value))) break;
   }
   return outcomes;
 }
