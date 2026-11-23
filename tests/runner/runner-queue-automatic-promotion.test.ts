@@ -165,3 +165,19 @@ test("a candidate cannot select development mode by dropping the repository rele
   } finally { await f.dispose(); }
 }, 120_000);
 
+test("development confirm on the runner names the failed pre-verification and runner log when it refuses", async () => {
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, { process: "development" });
+  try {
+    await writeFile(join(f.root, "fail-release"), "");
+    await f.land(f.submit(await f.candidate("a.txt")));
+    await settle(f);
+    const failedVerify = f.log.verifications(REPO)[0]!;
+    assert.equal(failedVerify.status, "failed");
+    const confirm = f.submitRelease(f.main());
+    await f.land(confirm);
+    const outcome = f.result(confirm);
+    assert.ok(outcome?.type === "failed" && outcome.reason.includes("Not promoted: Pre-verification of")
+      && outcome.reason.includes(`slipjay runner log ${failedVerify.id}`), JSON.stringify(outcome));
+  } finally { await f.dispose(); }
+}, 120_000);
+

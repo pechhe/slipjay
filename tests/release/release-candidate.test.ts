@@ -196,9 +196,66 @@ test("under batchVerification a confirm without a passed check asks the runner f
     assert.ok((await confirmableCandidate(f.repo, head, false, read, async (commit) => { asked.push(commit); })).ok);
     assert.equal(asked.length, 1);
 
-    // The check fails: the confirm is refused.
+    // The check fails: the confirm is refused with the failure details and runner log command.
     verifications = [];
-    const refused = await confirmableCandidate(f.repo, head, false, read, async () => { verifications = [verificationOf(head, "failed")]; });
-    assert.ok(!refused.ok && /No pre-verification of .* passed/.test(refused.reason), JSON.stringify(refused));
+    const failed = verificationOf(head, "failed", { type: "failed", stage: "verifying", command: "bun run test:release", reason: "1 test failed" });
+    const refused = await confirmableCandidate(f.repo, head, false, read, async () => { verifications = [failed]; });
+    assert.ok(!refused.ok && refused.reason.includes(`Pre-verification of ${head.slice(0, 12)} failed on \`bun run test:release\` (see \`slipjay runner log ${failed.id}\`): 1 test failed`), JSON.stringify(refused));
+  } finally { await f.dispose(); }
+});
+
+test("in development mode confirmableCandidate explains why a candidate has no usable pre-verification", async () => {
+  const f = await promotingProject();
+  try {
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+    await f.commit({ "slipjay.json": JSON.stringify({ ...policy, process: "development" }) }, "Run in development mode");
+    execFileSync("git", ["push", "-q", "origin", "main:refs/heads/release"], { cwd: f.repo, stdio: "pipe" });
+    const olderBase = remoteRef(f, "release");
+    const head = await f.commit({ "a.txt": "a\n" }, "Add a");
+    const read = (verifications: PromotionState["verifications"]) => async (): Promise<PromotionState> =>
+      ({ stagingGreen: null, stagingGreenCommits: [], approved: [], verifications });
+    const check = async (verifications: PromotionState["verifications"]) => {
+      const result = await confirmableCandidate(f.repo, head, false, read(verifications));
+      assert.ok(!result.ok && result.status === "refused", JSON.stringify(result));
+      return result.reason;
+    };
+
+    assert.match(await check([]), /No pre-verification of .* passed against release /);
+
+    const failedWithCmd = verificationOf(head, "failed", { type: "failed", stage: "verifying", command: "bun run verify:release", reason: "exit code 1" });
+    const failedReason = await check([failedWithCmd]);
+    assert.ok(failedReason.includes("Pre-verification of") && failedReason.includes("`bun run verify:release`")
+      && failedReason.includes("exit code 1") && failedReason.includes(`slipjay runner log ${failedWithCmd.id}`), failedReason);
+
+    const failedNoCmd = verificationOf(head, "failed", { type: "failed", stage: "verifying", reason: "Batch check failed: suite workbench" });
+    const failedNoCmdReason = await check([failedNoCmd]);
+    assert.ok(failedNoCmdReason.includes("Batch check failed: suite workbench")
+      && failedNoCmdReason.includes(`slipjay runner log ${failedNoCmd.id}`)
+      && !failedNoCmdReason.includes(" failed on "), failedNoCmdReason);
+
+    const running = verificationOf(head, "running");
+    assert.equal(await check([running]), `Pre-verification of ${head.slice(0, 12)} is still running (${running.id})`);
+
+    const queued = verificationOf(head, "queued");
+    assert.equal(await check([queued]), `Pre-verification of ${head.slice(0, 12)} is still queued (${queued.id})`);
+
+    const superseded = verificationOf(head, "superseded", { type: "superseded", by: "op_newer" });
+    assert.equal(await check([superseded]), `Pre-verification of ${head.slice(0, 12)} (${superseded.id}) was superseded by op_newer`);
+
+    const cancelled = verificationOf(head, "cancelled", { type: "cancelled", reason: "stopped by owner" });
+    assert.equal(await check([cancelled]), `Pre-verification of ${head.slice(0, 12)} (${cancelled.id}) was cancelled: stopped by owner`);
+
+    const changedChecks = verificationOf(head, "verified", { type: "verified", base: olderBase, candidate: head, checks: [] } as OperationEvent);
+    assert.equal(await check([changedChecks]), `Pre-verification of ${head.slice(0, 12)} (${changedChecks.id}) passed against release ${olderBase.slice(0, 12)}, but the release checks changed`);
+
+    // Move release branch forward so the passed pre-verification is for an older base.
+    const nextHead = await f.commit({ "b.txt": "b\n" }, "Add b");
+    execFileSync("git", ["push", "-q", "origin", `${head}:refs/heads/release`], { cwd: f.repo, stdio: "pipe" });
+    const newBase = remoteRef(f, "release");
+    const checkNext = await confirmableCandidate(f.repo, nextHead, false, read([
+      verificationOf(nextHead, "verified", { type: "verified", base: olderBase, candidate: nextHead, checks: f.checks } as OperationEvent),
+    ]));
+    assert.ok(!checkNext.ok && checkNext.status === "refused", JSON.stringify(checkNext));
+    assert.match(checkNext.reason, new RegExp(`passed against release ${olderBase.slice(0, 12)}, not ${newBase.slice(0, 12)}`));
   } finally { await f.dispose(); }
 });

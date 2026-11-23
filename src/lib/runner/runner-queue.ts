@@ -18,7 +18,7 @@ import { createAuditScheduler } from "../release/audit-scheduler.ts";
 import { runReset } from "../release/reset.ts";
 import { ensureDeployCommit, ensureOnIntegrationBranch, prebuildRelease, runDeploy, schemaMayHaveChanged, type PrebuildResult } from "../release/deploy.ts";
 import { readExactExecutionPolicy } from "../release/post-integration-source.ts";
-import { confirmRelease, passedVerification, planRelease, returnRelease, verifyRelease } from "../release/release.ts";
+import { confirmRelease, passedVerification, planRelease, returnRelease, unverifiedCandidateReason, verifyRelease } from "../release/release.ts";
 import { boundedKeys, boundedOutput, boundedTests, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchCheckRecord, type BatchLanding, type BatchRun, type BatchScope, type SuiteState } from "../release/batch-check.ts";
 import { RELEASE_BASE_ENV, RELEASE_ENV_KEYS, RELEASE_HEAD_ENV, RELEASE_SUITES_ENV, type BatchVerification } from "../policy/batch-verification.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
@@ -2361,12 +2361,13 @@ export function createRunnerQueue(input: {
       const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(await servedBase(operation.repo, checkout), operation.commitId), abortSignal: controller.signal,
         preverified: (plan) => {
-          const passed = passedVerification(plan, log.verifications(operation.repo))?.id ?? null;
+          const verifications = log.verifications(operation.repo);
+          const passed = passedVerification(plan, verifications)?.id ?? null;
           // No human approved an automatic promotion: it publishes only what a pre-verification passed against this release base,
           // and never migrations that are not known to be additive.
-          if (operation.automatic && !passed) throw new Error(`Not promoted automatically: no pre-verification of ${plan.candidate.slice(0, 12)} passed against ${plan.releaseBranch} ${plan.base.slice(0, 12)}`);
+          if (operation.automatic && !passed) throw new Error(`Not promoted automatically: ${unverifiedCandidateReason(plan, verifications)}`);
           // An owner-confirmed promotion in development mode skips staging, so a passed pre-verification stands in for it.
-          if (development && !passed) throw new Error(`Not promoted: no pre-verification of ${plan.candidate.slice(0, 12)} passed against ${plan.releaseBranch} ${plan.base.slice(0, 12)}, which stands in for staging in process "development"`);
+          if (development && !passed) throw new Error(`Not promoted: ${unverifiedCandidateReason(plan, verifications)}`);
           if (operation.automatic && plan.nonAdditiveMigrations.length) throw new Error(`Not promoted automatically: it carries non-additive migrations (${plan.nonAdditiveMigrations.join(", ")}): the owner decides`);
           return passed;
         },

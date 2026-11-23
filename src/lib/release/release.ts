@@ -489,6 +489,38 @@ export function verificationState(plan: ReleasePlan, operations: VerificationOpe
   return state("none");
 }
 
+/** Why `plan.candidate` has no reusable passed pre-verification in `operations`. */
+export function unverifiedCandidateReason(plan: ReleasePlan, operations: VerificationOperation[]): string {
+  const current = currentVerification(plan, operations);
+  if (current) {
+    if (current.status === "queued" || current.status === "running")
+      return `Pre-verification of ${short(plan.candidate)} is still ${current.status} (${current.id})`;
+    if (current.result?.type === "failed" || current.status === "failed") {
+      const failed = current.result?.type === "failed" ? current.result : undefined;
+      const onCommand = failed?.command ? ` on \`${failed.command}\`` : "";
+      const detail = failed?.reason ? `: ${failed.reason}` : "";
+      return `Pre-verification of ${short(plan.candidate)} failed${onCommand} (see \`slipjay runner log ${current.id}\`)${detail}`;
+    }
+    if (current.result?.type === "verified") {
+      if (current.result.base !== plan.base)
+        return `Pre-verification of ${short(plan.candidate)} (${current.id}) passed against ${plan.releaseBranch} ${short(current.result.base)}, not ${short(plan.base)}`;
+      if (JSON.stringify(current.result.checks) !== JSON.stringify(plan.checks))
+        return `Pre-verification of ${short(plan.candidate)} (${current.id}) passed against ${plan.releaseBranch} ${short(plan.base)}, but the release checks changed`;
+    }
+  } else {
+    const newest = operations.find((operation) => operation.commitId === plan.candidate);
+    if (newest?.status === "superseded") {
+      const by = newest.result?.type === "superseded" ? ` by ${newest.result.by}` : "";
+      return `Pre-verification of ${short(plan.candidate)} (${newest.id}) was superseded${by}`;
+    }
+    if (newest?.status === "cancelled") {
+      const reason = newest.result?.type === "cancelled" && newest.result.reason ? `: ${newest.result.reason}` : "";
+      return `Pre-verification of ${short(plan.candidate)} (${newest.id}) was cancelled${reason}`;
+    }
+  }
+  return `No pre-verification of ${short(plan.candidate)} passed against ${plan.releaseBranch} ${short(plan.base)}: in \`process: "development"\` a promotion ships only a commit whose pre-verification passed, in place of staging`;
+}
+
 /** The release merge on the release branch that first shipped `plan.candidate`, and its candidate. */
 async function shippedBy(plan: ReleasePlan): Promise<{ merge: string; releasedBy: string | null }> {
   const released = `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`;
@@ -722,7 +754,7 @@ export async function confirmableCandidate(cwd: string, confirm: string, migrati
         state = await readPromotion();
       }
       if (plan.skipsStaging) {
-        if (!passedVerification(plan, state.verifications)) refuse(`No pre-verification of ${short(plan.candidate)} passed against ${plan.releaseBranch} ${short(plan.base)}: in \`process: "development"\` a promotion ships only a commit whose pre-verification passed, in place of staging`);
+        if (!passedVerification(plan, state.verifications)) refuse(unverifiedCandidateReason(plan, state.verifications));
       } else if (!greenCommits(state).includes(plan.candidate)) refuse(state.stagingGreenCommits ? `Staging recorded no green deploy of ${short(plan.candidate)}: production promotes only a commit staging deployed`
         : `Staging recorded no green deploy of ${short(plan.candidate)} among the commits this runner lists: it is too old to list older green commits, so only the newest can be confirmed`);
       await requireReleasePrefix(plan);
