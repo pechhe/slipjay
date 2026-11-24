@@ -46,6 +46,8 @@ export type CreatedWorkspace<Readiness = unknown> = WorkspaceContext & {
   created: boolean;
   reused: boolean;
   pooled: boolean;
+  /** Ready, unoccupied spares counted during allocation, before the claim. */
+  spareCount: number;
   workspacePath: string;
   readiness: Readiness;
   /** Where this start spent its time (see start-steps.ts). */
@@ -62,7 +64,7 @@ async function touchActivity(name: string): Promise<void> {
 
 /** `base` is the commit a new workspace starts from instead of the integration head (see `resolveStartBase`). */
 /** `attemptId` makes the start durable and recoverable as that allocation attempt (see workspace-attempts). */
-type WorkspaceCreationOptions<Readiness = unknown> = { issueNumber?: number; base?: string; attemptId?: string; claim?: ManagedClaimRequest; hooks?: WorkspaceCreationHooks<Readiness>; steps?: StartSteps };
+type WorkspaceCreationOptions<Readiness = unknown> = { integration?: boolean; issueNumber?: number; base?: string; attemptId?: string; claim?: ManagedClaimRequest; hooks?: WorkspaceCreationHooks<Readiness>; steps?: StartSteps };
 type RecoveryIdentity = { changeId?: string; commitId?: string };
 type AssignmentOptions = {
   issueNumber?: number;
@@ -73,6 +75,7 @@ type AssignmentOptions = {
   created: boolean;
   reused: boolean;
   pooled?: boolean;
+  spareCount?: number;
   steps?: StartSteps;
 };
 type AssignedWorkspace = {
@@ -205,7 +208,11 @@ export async function findIssueWorkspace(cwd: string, issueNumber: number, hooks
  */
 export async function unusedWorkspaceStartRefusal(cwd: string, issueNumber: number): Promise<string | null> {
   const context = await workspaceContext(cwd);
-  if (!context || context.current.name === "default") return null;
+  return context && unusedWorkspaceStartRefusalInContext(cwd, context, issueNumber);
+}
+
+async function unusedWorkspaceStartRefusalInContext(cwd: string, context: WorkspaceContext, issueNumber: number): Promise<string | null> {
+  if (context.current.name === "default") return null;
   const metadata = await workspaceMetadata(context.current.name);
   if (metadata?.spare || metadata?.issueNumber) return null;
   // Only looks: the start itself resumes or recovers the Issue's checkout under the allocation lock.
@@ -369,17 +376,29 @@ export async function resolveStartBase(cwd: string, revision: string): Promise<s
  * also serialize per repository so later starts can clone the earlier install.
  */
 export async function createWorkspace<Readiness = unknown>(task: string, cwd: string = process.cwd(), options: WorkspaceCreationOptions<Readiness> = {}): Promise<CreatedWorkspace<Readiness>> {
-  const context = await workspaceContext(cwd);
-  if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
+  const caller = await workspaceContext(cwd);
+  if (!caller) throw new Error("Workspace isolation requires a Jujutsu repository");
+  if (options.integration && options.issueNumber) {
+    const refusal = await unusedWorkspaceStartRefusalInContext(cwd, caller, options.issueNumber);
+    if (refusal) throw new Error(refusal);
+  }
+  const context = options.integration ? { ...caller, current: caller.integration } : caller;
+  if (options.integration) cwd = context.integration.root;
   // Before the allocation lock, so concurrent starts never queue behind each other's fetch.
   const { attemptId } = options;
   if (options.claim) await requireWorkspaceClaimActivation(options.claim.activationId);
   if (attemptId) await beginAttempt(attemptId, context.integration.root, options.issueNumber ?? null);
   const steps: StartSteps = {};
   try {
-    if (await mayStartFromIntegrationHead(cwd, context, options)) await timed(steps, "fetch", () => refreshIntegration(context));
+    const mayFetch = await mayStartFromIntegrationHead(cwd, context, options);
+    if (mayFetch) await timed(steps, "fetch", () => refreshIntegration(context));
     const allocation: AssignedWorkspace = await withWorkspaceTransaction(`allocate:${context.integration.root}`, async () => {
-      const assigned = await createWorkspaceUnlocked(task, cwd, { ...options, steps });
+      // A fetch can change committed policy. A bind must likewise revalidate the checkout's
+      // identity under the lock. Otherwise the already resolved canonical context suffices.
+      const locked = context.current.name !== "default" || (mayFetch && publicationRemote(context))
+        ? await workspaceContext(cwd) : context;
+      if (!locked) throw new Error("Workspace isolation requires a Jujutsu repository");
+      const assigned = await createWorkspaceUnlocked(task, cwd, locked, { ...options, steps });
       if (options.claim) assigned.workspace.claim = await acquireWorkspaceClaim(assigned.context.current.root, assigned.context.integration.root,
         assigned.context.current.name, options.claim, options.claim.generation);
       return assigned;
@@ -394,7 +413,7 @@ export async function createWorkspace<Readiness = unknown>(task: string, cwd: st
     throw error;
   } finally {
     // Every allocation, including a failed one, schedules the repository's bounded background sweep.
-    await startHousekeeping(context.integration.root).catch(() => undefined);
+    await startHousekeeping(context.integration.root, { integrationRoot: context.integration.root }).catch(() => undefined);
   }
 }
 
@@ -414,7 +433,7 @@ async function assigned(hooks: WorkspaceCreationHooks, context: WorkspaceContext
   }
   await timed(steps, "describe", () => describeAssignedWorkspace(context, task, issueNumber));
   if (context.current.name !== "default") await linkSharedPaths(context.integration.root, context.current.root);
-  return { hooks, context, issueNumber, prepared, installInputs, steps, workspace: { ...context, context, pooled: false, ...result, workspacePath } };
+  return { hooks, context, issueNumber, prepared, installInputs, steps, workspace: { ...context, context, pooled: false, spareCount: 0, ...result, workspacePath } };
 }
 
 /**
@@ -479,9 +498,15 @@ async function mayStartFromIntegrationHead(cwd: string, context: WorkspaceContex
 async function syncLocalIntegrationBookmark(context: WorkspaceContext, remote: string) {
   const root = context.integration.root;
   const branch = context.integrationBranch;
-  const tracked = await revisionFacts(root, `${branch}@${remote}`).catch(() => null);
+  // Normally the bookmarks agree. Check the difference in one read, without
+  // snapshotting the primary checkout: these revsets only name bookmarks.
+  const localRef = JSON.stringify(branch);
+  const remoteRef = `${localRef}@${JSON.stringify(remote)}`;
+  const different = await tryJj(root, ["--ignore-working-copy", "log", "-r", `present(${remoteRef}) ~ present(${localRef})`, "--no-graph", "-T", "commit_id"]);
+  if (different.code === 0 && !different.stdout.trim()) return;
+  const tracked = await revisionFacts(root, remoteRef, { ignoreWorkingCopy: true }).catch(() => null);
   if (!tracked) return;
-  const local = await revisionFacts(root, branch).catch(() => null);
+  const local = await revisionFacts(root, localRef, { ignoreWorkingCopy: true }).catch(() => null);
   if (!local || local.commitId === tracked.commitId) return;
   const contains = async (ancestor: string, descendant: string) =>
     Boolean((await tryJj(root, ["--ignore-working-copy", "log", "-r", `${ancestor} & ::${descendant}`, "--no-graph", "-T", "commit_id"])).stdout.trim());
@@ -570,10 +595,8 @@ async function newWorkspaceName(cwd: string, root: string, issueNumber: number |
   return name;
 }
 
-async function createWorkspaceUnlocked(task: string, cwd: string, options: WorkspaceCreationOptions): Promise<AssignedWorkspace> {
+async function createWorkspaceUnlocked(task: string, cwd: string, context: WorkspaceContext, options: WorkspaceCreationOptions): Promise<AssignedWorkspace> {
   const { issueNumber, base, hooks = {}, steps } = options;
-  const context = await workspaceContext(cwd);
-  if (!context) throw new Error("Workspace isolation requires a Jujutsu repository");
   // A base only shapes a new workspace: binding the current one or resuming an Issue's would ignore it.
   if (base && (issueNumber || context.current.name !== "default")) {
     throw new Error("A start base needs a new workspace: start from the integration checkout and without an Issue");
@@ -606,7 +629,8 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   // Named before the checkout is claimed or added, so an interrupted start can still be traced to it.
   if (!survivor && options.attemptId) await updateAttempt(options.attemptId, { workspaceName: name, owned: true });
   if (!survivor) await assertInstallHeadroom();
-  const spare = survivor ? null : await timed(steps, "claim", () => claimSpare(context, name, base, steps));
+  const { spare, spareCount } = survivor ? { spare: null, spareCount: 0 }
+    : await timed(steps, "claim", () => claimSpare(context, name, base, steps));
   if (spare) name = spare.name;
   const workspacePath = spare?.root ?? join(workspaceHome(), name);
   await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });
@@ -624,11 +648,14 @@ async function createWorkspaceUnlocked(task: string, cwd: string, options: Works
   // and path: never carry an older one's implementation binding or creation proof.
   await rm(metadataPath(name), { force: true });
   await applyWorkspaceAuthorIdentity(context.integration.root, workspacePath);
-  const created = await workspaceContext(workspacePath);
-  if (!created || created.current.name !== name) throw new Error("Created workspace could not be verified");
+  // Verify the checkout and its new JJ identity, reusing the allocation's policy.
+  const verified = await workspaceContext(workspacePath, context.integrationBranch);
+  if (!verified || verified.current.name !== name || verified.integration.root !== context.integration.root)
+    throw new Error("Created workspace could not be verified");
+  const created = { ...context, current: verified.current, integration: verified.integration };
   // A host with its own readiness authority (Peach's `prepare` hook) always decides itself.
   const prepared = hooks.prepare ? undefined : spare?.dependencies ?? undefined;
-  const assignment = await assigned(hooks, created, task, { steps, issueNumber, created: true, reused: false, pooled: Boolean(spare), workspacePath, prepared, installInputs: spare?.installInputs });
+  const assignment = await assigned(hooks, created, task, { steps, issueNumber, created: true, reused: false, pooled: Boolean(spare), spareCount, workspacePath, prepared, installInputs: spare?.installInputs });
   await writeWorkspaceJson(metadataPath(name), {
     ...await workspaceMetadata(name),
     adoptionBase: await jj(workspacePath, ["--ignore-working-copy", "log", "-r", "@-", "--no-graph", "-T", "commit_id"]),

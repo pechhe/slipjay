@@ -30,8 +30,8 @@ test("exact locked Bun resolution failure gets one frozen manifest refresh and r
   } });
   assert.equal(ready.state, "ready");
   assert.deepEqual(commands, [
-    ["install", "--frozen-lockfile", "--prefer-offline", "--backend=clonefile"],
-    ["install", "--frozen-lockfile", "--no-cache", "--backend=clonefile"],
+    ["install", "--frozen-lockfile", "--prefer-offline", `--backend=${process.platform === "darwin" ? "clonefile" : "hardlink"}`],
+    ["install", "--frozen-lockfile", "--no-cache", `--backend=${process.platform === "darwin" ? "clonefile" : "hardlink"}`],
   ]);
   assert.deepEqual(ready.installAttempts?.map((attempt) => attempt.outcome), ["nonzero_exit", "success"]);
   assert.match(String(ready.installAttempts?.[0]?.stderr), /No version matching/);

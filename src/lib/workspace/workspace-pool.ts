@@ -443,26 +443,27 @@ async function usableDependencies(root: string, prepared: PreparedDependencies |
  * integration head. `dependencies` is the reusable readiness when the refresh
  * left the install inputs unchanged, else null and the caller installs, reusing
  * `installInputs`, the spare's fingerprint at its new `@`. Returns
- * null when no spare is ready (spares still being prepared are skipped, not
- * waited for); the caller then provisions synchronously. Never falls back to the
- * primary checkout.
+ * the number of claimable spares at selection time, even on a miss (spares
+ * still being prepared are skipped, not waited for). The caller provisions
+ * synchronously on a miss. Never falls back to the primary checkout.
  */
-export async function claimSpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
+export async function claimSpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<SpareClaim> {
   // The pool is held only briefly (a claim, or a refill registering a name), so a short wait suffices.
-  const claimed = await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base, steps), { waitMs: 3000 })
+  const result = await withWorkspaceTransaction(`pool:${context.integration.root}`, () => claimReadySpare(context, name, base, steps), { waitMs: 3000 })
     // Busy, or unable to tell a free spare from a held checkout: the caller provisions a fresh workspace.
     .catch((error: unknown) => {
-      if ((error as { code?: string } | null | undefined)?.code === "ELOCKED" || error instanceof ProcessesUnreadableError) return null;
+      if ((error as { code?: string } | null | undefined)?.code === "ELOCKED" || error instanceof ProcessesUnreadableError) return { spare: null, spareCount: 0 };
       throw error;
     });
   // Outside the pool lock, which a scan of the tree would hold up. The fingerprint and the recorded state say the
   // install was once done, not that the tree still is; a damaged one is installed over (and repaired) by the caller.
-  const damage = claimed?.dependencies && await installedTreeDamage(claimed.root, { trees: claimed.dependencies.trees });
-  if (claimed && damage) {
-    console.error(`[deps] ${claimed.name}: prepared dependencies are incomplete (${damage.total}, e.g. ${damage.paths[0]}); not reusing them`);
-    return { ...claimed, dependencies: null };
+  const { spare } = result;
+  const damage = spare?.dependencies?.state === "ready" && await installedTreeDamage(spare.root, { trees: spare.dependencies.trees });
+  if (spare && damage) {
+    console.error(`[deps] ${spare.name}: prepared dependencies are incomplete (${damage.total}, e.g. ${damage.paths[0]}); not reusing them`);
+    return { ...result, spare: { ...spare, dependencies: null } };
   }
-  return claimed;
+  return result;
 }
 
 /**
@@ -489,12 +490,16 @@ async function renameSpareForClaim(
 /** A claimed spare's checkout, its new name and what its dependencies need (see `claimSpare`). */
 type ClaimedSpare = { root: string; name: string; dependencies: ReusedDependencies | null; installInputs: string | null };
 
-async function claimReadySpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<ClaimedSpare | null> {
+type SpareClaim = { spare: ClaimedSpare | null; spareCount: number };
+
+async function claimReadySpare(context: WorkspaceContext, name: string, base?: string, steps?: StartSteps): Promise<SpareClaim> {
   const workspaces = await listWorkspaces(context.integration.root);
-  const [spare] = newestFirst(await unoccupied(workspaces.filter(isReadySpare)));
-  if (!spare) return null;
+  const ready = newestFirst(await unoccupied(workspaces.filter(isReadySpare)));
+  const [spare] = ready;
+  const spareCount = ready.length;
+  if (!spare) return { spare: null, spareCount };
   const renamed = await renameSpareForClaim(spare, workspaces, name);
-  if (!renamed) return null;
+  if (!renamed) return { spare: null, spareCount };
   const { name: assigned } = renamed;
   await timed(steps, "jjNew", () => jj(spare.root, ["new", base ?? context.integrationBranch]));
   const installInputs = await timed(steps, "fingerprint", () => installInputFingerprint(spare.root));
@@ -508,7 +513,7 @@ async function claimReadySpare(context: WorkspaceContext, name: string, base?: s
     // A claimed checkout's own install is authoritative again, not a leftover eviction mark.
     ...{ evictedAt: undefined, evictedPaths: undefined },
   });
-  return { root: spare.root, name: assigned, dependencies, installInputs };
+  return { spare: { root: spare.root, name: assigned, dependencies, installInputs }, spareCount };
 }
 
 

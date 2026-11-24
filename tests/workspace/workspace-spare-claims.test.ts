@@ -18,6 +18,7 @@ test("the refill never adopts, counts or retires a workspace a thread has claime
     await refill(f.repo);
     const claimed = await createWorkspace("task", f.repo);
     assert.equal(claimed.pooled, true, "the claim takes the provisioned spare");
+    assert.equal(claimed.spareCount, 1, "selection counts the spare before taking it");
     await writeFile(join(claimed.current.root, "work.txt"), "in progress\n");
     const change = head(claimed.current.root);
 
@@ -51,6 +52,7 @@ test("a spare-marked checkout a live process works in is neither claimed, counte
       assert.ok(outcomes.some((outcome) => "provisioned" in outcome && outcome.provisioned), "the held checkout does not count toward the allowance");
       const claimed = await createWorkspace("task", f.repo);
       assert.equal(claimed.pooled, true);
+      assert.equal(claimed.spareCount, 1, "selection excludes the held spare from metrics");
       assert.notEqual(claimed.current.root, held.root, "a claim does not take the held checkout");
       await withMachineSpares({ [f.repo]: 0 }, async () => {
         const retired = (await refill(f.repo)).filter((outcome) => "retired" in outcome).map((outcome) => outcome.retired);

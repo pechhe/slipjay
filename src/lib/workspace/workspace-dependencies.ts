@@ -25,7 +25,7 @@ export function dependencyInstallCommand(packageManager: string, platform: NodeJ
   if (packageManager === "bun" || packageManager.startsWith("bun@")) {
     return {
       command: "bun",
-      args: ["install", "--frozen-lockfile", "--prefer-offline", "--backend=clonefile"],
+      args: ["install", "--frozen-lockfile", "--prefer-offline", `--backend=${platform === "darwin" ? "clonefile" : "hardlink"}`],
     };
   }
   if (packageManager === "pnpm" || packageManager.startsWith("pnpm@")) {
@@ -41,6 +41,14 @@ export function dependencyInstallCommand(packageManager: string, platform: NodeJ
     return { command: "npm", args: ["ci", "--prefer-offline"] };
   }
   return null;
+}
+
+/**
+ * Whether a missing `node_modules` is worth seeding from a sibling checkout. Without APFS clones, pnpm's own
+ * hardlink import from its store (seconds) beats hard-linking a whole sibling tree (tens of seconds).
+ */
+export function seedsNodeModules(command: string, platform: NodeJS.Platform): boolean {
+  return command !== "pnpm" || platform === "darwin";
 }
 
 async function workspaceDependencyCommand(workspacePath: string): Promise<{ command: string; args: string[] } | null> {
@@ -250,7 +258,7 @@ export async function prepareWorkspaceDependencies(workspacePath: string, option
     await removeNodeModules(workspacePath);
     repaired = true;
   }
-  if (inputs && options.seedFrom && !options.discardTrees && !existsSync(join(workspacePath, "node_modules"))) {
+  if (inputs && options.seedFrom && !options.discardTrees && seedsNodeModules(dependencyCommand.command, process.platform) && !existsSync(join(workspacePath, "node_modules"))) {
     try {
       const manifests = await trackedManifests(workspacePath);
       for await (const source of options.seedFrom(inputs)) {

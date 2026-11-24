@@ -67,6 +67,17 @@ test("a package directory without a usable manifest is damage, in every layout",
   });
 });
 
+test("virtual `$` directories are not packages, but a real package without a manifest still is damage", async () => {
+  await scratch(async (root) => {
+    const modules = join(root, "node_modules");
+    await mkdir(join(modules, "$app"), { recursive: true });
+    assert.equal(await dependencyTreeDamage(root, ["package.json"]), null);
+    await mkdir(join(modules, "broken"), { recursive: true });
+    const damage = await dependencyTreeDamage(root, ["package.json"]);
+    assert.deepEqual(damage?.paths, [join(modules, "broken/package.json")]);
+  });
+});
+
 test("a link into a virtual store whose entry is gone is damage; a stale link elsewhere is not", async () => {
   await scratch(async (root) => {
     const modules = join(root, "node_modules");

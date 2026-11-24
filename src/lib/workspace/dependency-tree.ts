@@ -73,7 +73,8 @@ async function packagesIn(modules: string, found: string[]): Promise<{ path: str
       for (const scoped of await list(join(modules, entry.name), found)) {
         packages.push({ path: join(modules, entry.name, scoped.name), link: scoped.isSymbolicLink(), directory: scoped.isDirectory() });
       }
-    } else if (!entry.name.startsWith(".")) packages.push({ path: join(modules, entry.name), link: entry.isSymbolicLink(), directory: entry.isDirectory() });
+    // Framework virtual directories such as SvelteKit's `$app` are not npm packages (names never start with `$`) and have no package.json.
+    } else if (!entry.name.startsWith(".") && !entry.name.startsWith("$")) packages.push({ path: join(modules, entry.name), link: entry.isSymbolicLink(), directory: entry.isDirectory() });
   }
   return packages;
 }

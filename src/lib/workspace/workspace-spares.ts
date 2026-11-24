@@ -94,7 +94,7 @@ export async function spareRecords(integrationRoot: string): Promise<SpareRecord
  * outcome is only in the log. `command` replaces the spawned runner (tests); the
  * integration root is always its last argument.
  */
-export async function startSpareRefill(cwd: string = process.cwd(), options: { command?: string[] } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
+export async function startSpareRefill(cwd: string = process.cwd(), options: { command?: string[]; integrationRoot?: string } = {}): Promise<{ started: boolean; pid?: number; logPath?: string; reason?: string }> {
   return await startBackgroundEntry(cwd, "../../launcher/spare-refill.ts", options);
 }
 

@@ -3,13 +3,9 @@ import type { ManagedClaimRequest } from "../lib/workspace/workspace-claim-servi
 import { recordClientFactsInBackground } from "../lib/runner/runner-client.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
 import { hostname } from "node:os";
-import { createWorkspace, setWorkspaceForgeProject, unusedWorkspaceStartRefusal, resolveStartBase, readySpares, startSpareRefill } from "../lib/slipjay.ts";
+import { createWorkspace, setWorkspaceForgeProject, resolveStartBase, startSpareRefill } from "../lib/slipjay.ts";
 import { startClientUpgradeThrottled } from "../lib/workspace/workspace-upgrade.ts";
-import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
-import type { Readable } from "node:stream";
-import { integrationRoot } from "./command-context.ts";
-import { fileURLToPath } from "node:url";
 
 type StartOptions = { claimStdin: boolean; integration: boolean; json: boolean; refill: boolean; issueNumber: number | undefined; base: string | undefined; attemptId: string | undefined; resultFd: number | undefined; task: string };
 
@@ -60,24 +56,6 @@ function startOptions(args: string[]): StartOptions | null {
   return options;
 }
 
-/**
- * `start --json`: run the start in a child whose stdout is this process's stderr,
- * so dependency-install output can never corrupt the JSON this process prints.
- */
-async function startForJson(args: string[]): Promise<number> {
-  const child = spawn(process.execPath, [...process.execArgv, fileURLToPath(new URL("./workspace.ts", import.meta.url)), "start", "--result-fd", "3", ...args], {
-    stdio: ["inherit", 2, "inherit", "pipe"],
-  });
-  let result = "";
-  (child.stdio[3] as Readable).setEncoding("utf8").on("data", (chunk: string) => { result += chunk; });
-  const code = await new Promise<number>((resolveExit) => {
-    child.once("error", (error) => { console.error(error.message); resolveExit(1); });
-    child.once("close", (exit) => resolveExit(exit ?? 1));
-  });
-  if (code === 0 && result.trim()) process.stdout.write(result);
-  return code === 0 && !result.trim() ? 1 : code;
-}
-
 const ATTEMPT_USAGE = "Usage: slipjay attempt show <id> | attempt release <id>";
 
 export async function runStart(rest: string[]): Promise<void> {
@@ -85,53 +63,73 @@ export async function runStart(rest: string[]): Promise<void> {
   if (!options) {
     console.error('Usage: slipjay start [--integration] [--issue <n> | --base <revision>] [--attempt <id>] [--refill] [--json] ["task"]');
     process.exitCode = 2;
-  } else if (options.json && options.resultFd === undefined) {
-    process.exitCode = await startForJson(rest);
-  } else {
-    const refusal = options.integration && options.issueNumber ? await unusedWorkspaceStartRefusal(process.cwd(), options.issueNumber) : null;
-    if (refusal) throw new Error(refusal);
-    // The base names a revision of the caller's checkout, so it resolves there before moving to the integration root.
-    const base = options.base ? await resolveStartBase(process.cwd(), options.base) : undefined;
-    const root = options.integration ? await integrationRoot(process.cwd()) : process.cwd();
-    const startedAt = new Date().toISOString();
-    const started = Date.now();
-    // A metric only: a host whose processes cannot be read still starts, from a fresh workspace.
-    const spareCount = (await readySpares(root).catch(() => [])).length;
-    const task = options.task || `Issue #${options.issueNumber}`;
-    const claim = options.claimStdin ? await readClaimInput() as ManagedClaimRequest : undefined;
-    const result = await createWorkspace(task, root, {
-      ...claim ? { claim } : {},
-      ...options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {},
-      ...options.attemptId ? { attemptId: options.attemptId } : {},
-    });
-    // An acquisition starts with no Forge project of its own: what a reused workspace served before must not carry over.
-    await setWorkspaceForgeProject(result.workspacePath, null);
-    // The runner is told in the background: a slow or unreachable one never delays the workspace.
-    await recordClientFactsInBackground(result.workspacePath, [
-      { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
-      ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount, durationMs: Date.now() - started, steps: result.steps }] : []),
-    ]);
-    // Prepare the next session's spare in the background, so its start can claim it.
-    // Every new workspace, claimed or fresh, tops the pool up: a miss on an empty pool fills it for the next start.
-    const refill = options.refill || result.created ? await startSpareRefill(root).catch((error) => ({ started: false, reason: error.message })) : undefined;
-    if (refill && !refill.started) console.error(`Spare refill not started: ${refill.reason}`);
-    // Keep this machine's client on what landed, at most once every ten minutes: the spawn is awaited,
-    // the upgrade it starts is detached, so a start never waits for a build.
-    const upgrade = await startClientUpgradeThrottled();
-    if (upgrade.started) console.error(`Started a client upgrade in the background (log: ~/.slipjay/state/upgrade.log)`);
-    if (options.resultFd === undefined) console.log(result.workspacePath);
-    else {
-      writeSync(options.resultFd, `${JSON.stringify({
-        ...(result.claim ? { claim: result.claim } : {}),
-        workspacePath: result.workspacePath, workspaceName: result.current.name, integrationRoot: result.integration.root,
-        issueNumber: options.issueNumber ?? null, created: result.created ?? false, reused: result.reused ?? false, pooled: Boolean(result.pooled),
-        ...(options.attemptId ? { attemptId: options.attemptId } : {}),
-        ...(refill ? { refill } : {}),
-        steps: result.steps,
-        installAttempts: (result.readiness as { installAttempts?: Record<string, unknown>[] } | undefined)?.installAttempts,
-      })}\n`);
+    return;
+  }
+  // Start's subprocesses capture their output or log to files. The install tees
+  // captured stdout through process.stdout.write, and Bun's console.log can
+  // bypass that method. Redirect both for JSON on stdout, then restore them
+  // before emitting the result. An explicit result fd leaves stdout alone.
+  const { write } = process.stdout;
+  const { log } = console;
+  const jsonOnStdout = options.json && options.resultFd === undefined;
+  if (jsonOnStdout) {
+    process.stdout.write = process.stderr.write.bind(process.stderr);
+    console.log = console.error.bind(console);
+  }
+  let receipt: string;
+  try {
+    receipt = await start(options);
+  } finally {
+    if (jsonOnStdout) {
+      process.stdout.write = write;
+      console.log = log;
     }
   }
+  if (options.resultFd === undefined) process.stdout.write(receipt);
+  else writeSync(options.resultFd, receipt);
+}
+
+async function start(options: StartOptions): Promise<string> {
+  // The base names a revision of the caller's checkout, so it resolves there before moving to the integration root.
+  const cwd = process.cwd();
+  const base = options.base ? await resolveStartBase(cwd, options.base) : undefined;
+  const startedAt = new Date().toISOString();
+  const started = Date.now();
+  const task = options.task || `Issue #${options.issueNumber}`;
+  const claim = options.claimStdin ? await readClaimInput() as ManagedClaimRequest : undefined;
+  const result = await createWorkspace(task, cwd, {
+    integration: options.integration,
+    ...claim ? { claim } : {},
+    ...options.issueNumber ? { issueNumber: options.issueNumber } : base ? { base } : {},
+    ...options.attemptId ? { attemptId: options.attemptId } : {},
+  });
+  // New assignments already reset their metadata. Only a reused checkout can
+  // carry a Forge project from a previous acquisition.
+  if (!result.created) await setWorkspaceForgeProject(result.workspacePath, null);
+  // The runner is told in the background: a slow or unreachable one never delays the workspace.
+  await recordClientFactsInBackground(result.workspacePath, [
+    { kind: "workspace_start", workspace: result.current.name, machine: hostname(), startedAt },
+    ...(result.created ? [{ kind: "pool_claim" as const, workspace: result.current.name, hit: Boolean(result.pooled), spareCount: result.spareCount, durationMs: Date.now() - started, steps: result.steps }] : []),
+  ]);
+  // Prepare the next session's spare in the background, so its start can claim it.
+  // Every new workspace, claimed or fresh, tops the pool up: a miss on an empty pool fills it for the next start.
+  const root = result.integration.root;
+  const refill = options.refill || result.created ? await startSpareRefill(root, { integrationRoot: root }).catch((error) => ({ started: false, reason: error.message })) : undefined;
+  if (refill && !refill.started) console.error(`Spare refill not started: ${refill.reason}`);
+  // Keep this machine's client on what landed, at most once every ten minutes: the spawn is awaited,
+  // the upgrade it starts is detached, so a start never waits for a build.
+  const upgrade = await startClientUpgradeThrottled();
+  if (upgrade.started) console.error(`Started a client upgrade in the background (log: ~/.slipjay/state/upgrade.log)`);
+  if (!options.json && options.resultFd === undefined) return `${result.workspacePath}\n`;
+  return `${JSON.stringify({
+    ...(result.claim ? { claim: result.claim } : {}),
+    workspacePath: result.workspacePath, workspaceName: result.current.name, integrationRoot: result.integration.root,
+    issueNumber: options.issueNumber ?? null, created: result.created ?? false, reused: result.reused ?? false, pooled: Boolean(result.pooled),
+    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
+    ...(refill ? { refill } : {}),
+    steps: result.steps,
+    installAttempts: (result.readiness as { installAttempts?: Record<string, unknown>[] } | undefined)?.installAttempts,
+  })}\n`;
 }
 
 export async function runAttempt(rest: string[]): Promise<void> {

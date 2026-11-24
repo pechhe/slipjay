@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { test } from "vite-plus/test";
 import { jj, project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
+import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { acquireWorkspaceClaim, releaseAbandonedRetirementFences, releaseWorkspaceClaim, transferWorkspaceClaim, workspaceClaimStatus, withUnclaimedWorkspace, resetWorkspaceClaimGeneration } from "../../src/lib/workspace/workspace-claims.ts";
 import { writeRetirementFence } from "./fixtures/workspace-fence.ts";
 import { claimController } from "../../src/lib/workspace/workspace-claim-identity.ts";
@@ -24,6 +25,26 @@ import { retireWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts"
 const acquisition = async (ownerId: string) => ({ requestId: `acquire:${ownerId}`, ownerId, credential: `secret-${ownerId}-${"x".repeat(32)}`, controller: await claimController(), obligationRef: `closed-epoch:${ownerId}:1` });
 const release = (claim: Awaited<ReturnType<typeof acquireWorkspaceClaim>>, credential: string, requestId = `release:${claim.claimId}`) => ({ requestId, generation: claim.generation, claimId: claim.claimId, credential, settlementRef: "t3:closed-set:acknowledged" });
 function deferred() { let resolve!: () => void; const promise = new Promise<void>((done) => { resolve = done; }); return { promise, resolve }; }
+
+test("start --claim-stdin --integration --json returns a managed claim for a warm spare", async () => {
+  const f = await project();
+  try {
+    await provisionSpare(f.repo);
+    const { activationId } = await activateWorkspaceClaims();
+    const claim = { ...await acquisition("managed-start"), activationId };
+    const result = spawnSync("bun", [fileURLToPath(new URL("../../src/launcher/workspace.ts", import.meta.url)),
+      "start", "--claim-stdin", "--integration", "--json", "managed task"], {
+      cwd: f.repo, input: JSON.stringify(claim), encoding: "utf8", timeout: 30_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const receipt = JSON.parse(result.stdout);
+    assert.equal(result.stdout, `${JSON.stringify(receipt)}\n`);
+    assert.equal(receipt.pooled, true);
+    assert.ok(receipt.claim.claimId);
+    assert.equal((await workspaceClaimStatus(receipt.workspacePath)).claims[0]?.claimId, receipt.claim.claimId);
+    assert.ok(!result.stdout.includes(claim.credential) && !result.stderr.includes(claim.credential));
+  } finally { await f.dispose(); }
+});
 
 test("claims are independent, alias-safe, credential-private, replay-safe and generation-bound", async () => {
   const f = await project();

@@ -6,6 +6,8 @@ import { existsSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Socket } from "node:net";
+import { text as streamText } from "node:stream/consumers";
+import type { Readable } from "node:stream";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,6 +52,7 @@ test("start --json prints only the result while install output goes to stderr, a
     const created = JSON.parse(first.stdout);
     assert.equal(first.stdout, `${JSON.stringify(created)}\n`, "stdout is exactly one JSON line");
     assert.match(first.stderr, /\[deps\] bun install/);
+    assert.match(first.stderr, /noisy install output/, "installer stdout is forwarded to stderr");
     const workspaces = await realpath(join(homedir(), ".slipjay", "workspaces"));
     assert.ok(created.workspacePath.startsWith(`${workspaces}/`), created.workspacePath);
     assert.equal(created.integrationRoot, f.repo);
@@ -65,6 +68,28 @@ test("start --json prints only the result while install output goes to stderr, a
   } finally {
     await f.dispose();
   }
+});
+
+test("start --result-fd writes the receipt to the requested descriptor", async () => {
+  const f = await project();
+  try {
+    const child = spawn("bun", [cli, "start", "--json", "--result-fd", "3", "explicit receipt"], {
+      cwd: f.repo,
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
+    });
+    const [code, stdout, stderr, receipt] = await Promise.all([
+      new Promise<number | null>((resolve, reject) => { child.once("error", reject); child.once("close", resolve); }),
+      streamText(child.stdout!),
+      streamText(child.stderr!),
+      streamText(child.stdio[3] as Readable),
+    ]);
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout, "");
+    const result = JSON.parse(receipt);
+    assert.equal(receipt, `${JSON.stringify(result)}\n`);
+    assert.equal(result.created, true);
+    assert.equal(result.integrationRoot, f.repo);
+  } finally { await f.dispose(); }
 });
 
 test("a start that misses an empty pool refills it, so the next start claims a spare", async () => {

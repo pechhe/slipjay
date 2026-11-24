@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { cloneNodeModulesCommand, dependencyInstallCommand } from "../../src/lib/workspace/workspace-dependencies.ts";
+import { cloneNodeModulesCommand, dependencyInstallCommand, seedsNodeModules } from "../../src/lib/workspace/workspace-dependencies.ts";
 
 test("pnpm hard-links packages where the filesystem cannot clone", () => {
   const linux = dependencyInstallCommand("pnpm@12.14.0", "linux");
@@ -9,6 +9,18 @@ test("pnpm hard-links packages where the filesystem cannot clone", () => {
   assert.deepEqual(mac?.args.slice(-1), ["--package-import-method=clone-or-copy"], "an APFS clone is free and keeps full isolation");
   assert.equal(linux?.command, "pnpm");
   assert.ok(linux?.args.includes("--frozen-lockfile"), "the install stays lockfile-frozen");
+});
+
+test("bun links with clonefile on APFS and hard links elsewhere", () => {
+  assert.ok(dependencyInstallCommand("bun@1.4.3", "darwin")?.args.includes("--backend=clonefile"));
+  assert.ok(dependencyInstallCommand("bun@1.4.3", "linux")?.args.includes("--backend=hardlink"));
+});
+
+test("pnpm skips tree seeding off APFS, where its store import is faster than hard-linking a sibling tree", () => {
+  assert.equal(seedsNodeModules("pnpm", "linux"), false);
+  assert.equal(seedsNodeModules("pnpm", "darwin"), true);
+  assert.equal(seedsNodeModules("bun", "linux"), true);
+  assert.equal(seedsNodeModules("npm", "linux"), true);
 });
 
 test("every supported package manager keeps its own install command", () => {

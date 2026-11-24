@@ -52,14 +52,14 @@ export async function runHousekeeping(root: string, options: SweepOptions & { in
 }
 
 /** Sweep the repository in a detached child without delaying the caller; see `startBackgroundEntry`. */
-export async function startHousekeeping(cwd: string = process.cwd(), options: { command?: string[] } = {}): ReturnType<typeof startBackgroundEntry> {
+export async function startHousekeeping(cwd: string = process.cwd(), options: { command?: string[]; integrationRoot?: string } = {}): ReturnType<typeof startBackgroundEntry> {
   if (process.env.SLIPJAY_AUTO_HOUSEKEEPING === "0") return { started: false, reason: "disabled" };
-  const context = await workspaceContext(cwd);
-  if (!context) return { started: false, reason: "not-jj" };
+  const root = options.integrationRoot ?? (await workspaceContext(cwd))?.integration.root;
+  if (!root) return { started: false, reason: "not-jj" };
   // A sweep that ran recently needs no child, so frequent allocations cost one small read.
   // The stamp is keyed by the integration root, which is what the child sweeps.
-  if (await recentlySwept(context.integration.root, Date.now(), HOUSEKEEPING_INTERVAL_MS)) return { started: false, reason: "recent" };
-  return await startBackgroundEntry(context.integration.root, "../../launcher/housekeeping-run.ts", { ...options, integrationRoot: context.integration.root });
+  if (await recentlySwept(root, Date.now(), HOUSEKEEPING_INTERVAL_MS)) return { started: false, reason: "recent" };
+  return await startBackgroundEntry(root, "../../launcher/housekeeping-run.ts", { ...options, integrationRoot: root });
 }
 
 /**

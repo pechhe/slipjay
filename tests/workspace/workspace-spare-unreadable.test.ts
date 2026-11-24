@@ -23,6 +23,7 @@ test("when the host's processes cannot be read, the pool takes no spare: a claim
     await assert.rejects(refill(f.repo), ProcessesUnreadableError);
     const created = await createWorkspace("task", f.repo);
     assert.equal(created.pooled, false, "the claim did not take the spare it could not prove free");
+    assert.equal(created.spareCount, 0, "metrics do not count unverifiable spares");
     assert.notEqual(created.current.root, spare.root);
   } finally {
     readable.processes = true;
