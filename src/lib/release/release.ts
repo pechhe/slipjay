@@ -21,6 +21,7 @@ import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
 import { RequiredVerificationError, runRequiredVerification } from "../landing/required-verification.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
 import { jj, run, workspaceContext } from "../infra/workspace-jj.ts";
+import { isTransientRemotePushFailure, remotePushRetryDelaysMs } from "../infra/remote-push.ts";
 
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { RunnerStage, VerificationOperation } from "../runner/runner-types.ts";
@@ -559,17 +560,40 @@ async function buildMerge(plan: ReleasePlan): Promise<string> {
   return merge!;
 }
 
+/**
+ * A failed push may already have changed the remote. Confirm the update first;
+ * retry only while the fetch still sees the exact base jj must push against.
+ */
+async function pushReleaseBookmark(
+  root: string, remote: string, branch: string, expectedBase: string, target: string, acceptDescendant = false,
+): Promise<{ ok: true } | { ok: false; detail: string }> {
+  const tracked = `${symbol(branch)}@${symbol(remote)}`;
+  for (let attempt = 0; ; attempt++) {
+    const pushed = await jjRun(root, ["git", "push", "--remote", remote, "--bookmark", branch]);
+    const fetched = await fetch(root, remote, branch);
+    const detail = (pushed.stderr || pushed.stdout).trim() || "the remote does not contain the requested update";
+    if (fetched.code !== 0) return { ok: false, detail: `${detail}; could not fetch ${branch}: ${(fetched.stderr || fetched.stdout).trim()}` };
+    const head = await commitOf(root, tracked);
+    if (head === target || (acceptDescendant && await commitOf(root, `${target} & ::${tracked}`))) return { ok: true };
+    const delay = remotePushRetryDelaysMs[attempt];
+    if (pushed.code === 0 || head !== expectedBase || delay === undefined
+      || !isTransientRemotePushFailure(`${pushed.stderr}\n${pushed.stdout}`)) return { ok: false, detail };
+    if (delay) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    if (await commitOf(root, tracked) !== expectedBase || await commitOf(root, symbol(branch)) !== target)
+      return { ok: false, detail };
+  }
+}
+
 /** Move the release bookmark to the merge and push it; jj refuses if the remote moved since the fetch. */
 async function publish(plan: ReleasePlan, merge: string): Promise<void> {
-  const bookmark = symbol(plan.releaseBranch);
-  await jjRun(plan.root, ["bookmark", "track", `${bookmark}@${symbol(plan.remote)}`]);
+  const tracked = `${symbol(plan.releaseBranch)}@${symbol(plan.remote)}`;
+  await jjRun(plan.root, ["bookmark", "track", tracked]);
   await jjOut(plan.root, ["bookmark", "set", plan.releaseBranch, "-r", merge]);
-  const pushed = await jjRun(plan.root, ["git", "push", "--remote", plan.remote, "--bookmark", plan.releaseBranch]);
-  await fetch(plan.root, plan.remote, plan.releaseBranch);
-  if (await commitOf(plan.root, `${merge} & ::${bookmark}@${symbol(plan.remote)}`)) return;
-  await jjRun(plan.root, ["bookmark", "set", plan.releaseBranch, "--allow-backwards", "-r", `${bookmark}@${symbol(plan.remote)}`]);
+  const pushed = await pushReleaseBookmark(plan.root, plan.remote, plan.releaseBranch, plan.base, merge, true);
+  if (pushed.ok) return;
+  await jjRun(plan.root, ["bookmark", "set", plan.releaseBranch, "--allow-backwards", "-r", tracked]);
   await jjRun(plan.root, ["abandon", merge]);
-  refuse(`Push of ${plan.releaseBranch} to ${plan.remote} failed: ${(pushed.stderr || pushed.stdout).trim() || "the remote does not contain the release"}`);
+  refuse(`Push of ${plan.releaseBranch} to ${plan.remote} failed: ${pushed.detail}`);
 }
 
 /**
@@ -599,11 +623,10 @@ export async function returnRelease(checkout: string, { merge, candidate }: { me
     await jjRun(checkout, ["bookmark", "track", published]);
     await jjOut(checkout, ["bookmark", "set", releaseBranch, "--allow-backwards", "-r", before]);
     // jj pushes only if the remote still holds the merge it fetched.
-    const pushed = await jjRun(checkout, ["git", "push", "--remote", remote, "--bookmark", releaseBranch]);
-    await fetch(checkout, remote, releaseBranch);
-    if (await commitOf(checkout, published) !== before) {
+    const pushed = await pushReleaseBookmark(checkout, remote, releaseBranch, merge, before);
+    if (!pushed.ok) {
       await jjRun(checkout, ["bookmark", "set", releaseBranch, "--allow-backwards", "-r", published]);
-      refuse(`Push of ${releaseBranch} failed: ${(pushed.stderr || pushed.stdout).trim()}`);
+      refuse(`Push of ${releaseBranch} failed: ${pushed.detail}`);
     }
     return { returned: true, releaseBranch: before };
   } catch (error) {

@@ -52,6 +52,7 @@ import type { BuildReader } from "../build/tracker.ts";
 import { stateHome } from "../workspace/workspace-paths.ts";
 import { readJsonOptional, readLandingState, statePath, workspaceMetadata } from "../workspace/workspace-state.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
+import { isTransientRemotePushFailure, remotePushRetryDelaysMs } from "../infra/remote-push.ts";
 
 /**
  * The steps a landing is made of, below the land command itself: preview,
@@ -231,29 +232,35 @@ export async function fetchIntegrationIfMoved(cwd: string, remote: string, branc
 
 /** Push the integration bookmark and confirm the remote-tracking bookmark contains the artifact. */
 export async function publishIntegration(cwd: string, remote: string, branch: string, commitId: string, expectedBase?: string): Promise<LandingPublication> {
-  // The exact-base check reads two bookmarks; neither depends on the checkout's files.
-  if (expectedBase !== undefined) {
-    const local = await revisionFacts(cwd, branch, { ignoreWorkingCopy: true });
-    const tracked = await revisionFacts(cwd, `${branch}@${remote}`, { ignoreWorkingCopy: true });
-    if (local.commitId !== commitId || tracked.commitId !== expectedBase)
-      return { ok: false, status: "push_failed", remote, branch, commitId, reason: "Exact publication candidate or expected remote base changed; retained integration requires reconciliation" };
+  const tracked = `${branch}@${remote}`;
+  for (let attempt = 0; ; attempt++) {
+    // JJ's push uses the remote-tracking old ref as its server-side precondition. Do not
+    // refresh it or accept ancestry after refusal: that would weaken exact-prefix admission.
+    if (expectedBase !== undefined) {
+      const local = await revisionFacts(cwd, branch, { ignoreWorkingCopy: true });
+      const base = await revisionFacts(cwd, tracked, { ignoreWorkingCopy: true });
+      if (local.commitId !== commitId || base.commitId !== expectedBase)
+        return { ok: false, status: "push_failed", remote, branch, commitId, reason: "Exact publication candidate or expected remote base changed; retained integration requires reconciliation" };
+    }
+    // A colocated import can leave the remote bookmark untracked; jj refuses to push it then.
+    if (attempt === 0) await run("jj", ["--color=never", "bookmark", "track", tracked], { cwd });
+    const pushed = await run("jj", ["--color=never", "git", "push", "--remote", remote, "--bookmark", branch], { cwd });
+    const delay = remotePushRetryDelaysMs[attempt];
+    if (pushed.code !== 0 && delay !== undefined && isTransientRemotePushFailure(`${pushed.stderr}\n${pushed.stdout}`)) {
+      if (delay) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      continue;
+    }
+    const detail = (pushed.stderr || pushed.stdout).trim();
+    if (expectedBase !== undefined) return pushed.code === 0
+      ? { ok: true, status: "pushed", remote, branch, commitId }
+      : { ok: false, status: "push_failed", remote, branch, commitId, reason: `Exact-parent publication failed; the local integration is kept: ${detail}` };
+    // Without an exact predecessor, a remote that another landing already advanced past this artifact also counts.
+    if (pushed.code !== 0) await fetchIntegration(cwd, remote, branch);
+    if (await revisionExists(cwd, `${commitId} & ::${tracked}`))
+      return { ok: true, status: "pushed", remote, branch, commitId };
+    return { ok: false, status: "push_failed", remote, branch, commitId,
+      reason: `Push of ${branch} to ${remote} failed${detail ? `: ${detail}` : ""}. The local integration is kept; rerun land to retry the push.` };
   }
-  // A colocated import can leave the remote bookmark untracked; jj refuses to push it then.
-  await run("jj", ["--color=never", "bookmark", "track", `${branch}@${remote}`], { cwd });
-  const pushed = await run("jj", ["--color=never", "git", "push", "--remote", remote, "--bookmark", branch], { cwd });
-  // JJ's push uses the remote-tracking old ref as its server-side precondition. Do not
-  // refresh it or accept ancestry after refusal: that would weaken exact-prefix admission.
-  if (expectedBase !== undefined) return pushed.code === 0
-    ? { ok: true, status: "pushed", remote, branch, commitId }
-    : { ok: false, status: "push_failed", remote, branch, commitId, reason: `Exact-parent publication failed; the local integration is kept: ${(pushed.stderr || pushed.stdout).trim()}` };
-  // A remote that another landing already advanced past this artifact also counts.
-  if (pushed.code !== 0) await fetchIntegration(cwd, remote, branch);
-  if (await revisionExists(cwd, `${commitId} & ::${branch}@${remote}`)) {
-    return { ok: true, status: "pushed", remote, branch, commitId };
-  }
-  const detail = (pushed.stderr || pushed.stdout).trim();
-  return { ok: false, status: "push_failed", remote, branch, commitId,
-    reason: `Push of ${branch} to ${remote} failed${detail ? `: ${detail}` : ""}. The local integration is kept; rerun land to retry the push.` };
 }
 
 /**

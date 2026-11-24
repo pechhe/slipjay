@@ -250,7 +250,10 @@ and held state through the existing recovery path.
   sending their original failure fields.
 - <a id="held-integrations"></a>**Held integrations.** If finalization or publication fails, the external target
   may already reflect the integration, so the runner keeps it on its local
-  integration branch instead of dropping it, and the failure says so. Every later
+  integration branch instead of dropping it, and the failure says so. Before giving
+  up on a push, the runner retries known temporary remote storage or network errors
+  at most twice. An exact-parent push never refreshes its expected remote bookmark
+  or accepts ancestry as confirmation while retrying. Every later
   turn first retries finalizing and publishing it (with the same artifact key, so
   the migration is never regenerated), and nothing else lands until that succeeds.
   Relanding the same commit reports it landed once it is published. A restart does not wait

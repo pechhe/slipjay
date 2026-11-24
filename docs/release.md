@@ -344,8 +344,11 @@ on the schema before it: one whose new code reads what the migration adds.
    candidate; a `Release-Candidate:` trailer) and refuses unless the merge is
    conflict-free and its tree is the candidate's, so a release branch with changes
    the integration branch lacks is refused rather than merged.
-4. It pushes the release branch, refusing if the remote moved since the plan. The
-   runner's operation log records the release.
+4. It pushes the release branch and fetches to confirm the merge reached the remote,
+   even if the push reported an error. It retries known temporary remote storage or
+   network errors at most twice, and only if the remote still points to the planned
+   base. Returning a release uses the same retry limit, requiring the remote to still
+   point to the release merge. The runner's operation log records the release.
 
 ## Migration readiness
 
