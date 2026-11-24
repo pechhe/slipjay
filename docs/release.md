@@ -194,8 +194,9 @@ against the current release branch; a stale-base refusal does not disqualify a l
 
 Normally the background interval runs from the last check's start. After a red, unverified flaky, or infrastructure
 outcome, it runs from that check's finish instead, using `batchVerification.retryMinutes` (1 to 1440; defaults to the
-lesser of `everyMinutes` and 10). A red head still waits for a new landing. A confirm of another commit stops a running background check that has not entered diagnosis: it ends `stopped` (cancelled,
-never a failure, never infrastructure, never routed) and its head is checked again later. Diagnosis of a red check
+lesser of `everyMinutes` and 10). A red head still waits for a new landing. A confirm of another commit stops a
+running automatic check (background or scheduled batch) that has not entered diagnosis: it ends `stopped`
+(cancelled, never a failure, never infrastructure, never routed) and its head is checked again later. Diagnosis of a red check
 considers only the landings after the newest one whose complete check passed (`after` on `batch_started`), and a
 culprit an earlier check already routed for the same suites is recorded `batch_unrouted` (`already routed by batch
 check …`) instead of being sent to Forge again. When a runner machine's release-check place serves the pool `machine` names

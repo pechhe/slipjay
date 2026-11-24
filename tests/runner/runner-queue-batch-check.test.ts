@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { test as serialTest } from "vite-plus/test";
 import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
@@ -385,10 +386,69 @@ for (const refresh of ["background", "batch"] as const) {
   }, 300_000);
 }
 
-test("a confirm stops an in-flight diagnosis without cancelling the red batch or superseding another confirm", async () => {
+// These preemption tests hold a check open while more landings run git/jj. Keep them out of
+// this file's concurrent fixture group and give each queue transition room on a busy runner.
+// After recovery explicitly wake admission; scheduling the batch is not evidence that its check has started.
+const preemptionWaitMs = 120_000;
+
+serialTest("a confirm of a newer commit stops a scheduled batch's in-flight head check", async () => {
+  let clock = Date.now();
+  let routed = 0;
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false,
+    { process: "development", promotionSchedule: schedule(30), now: () => clock, batchVerification: { machine: "batch" },
+      releaseGates: (root) => [`${batchCheck(root)}
+const held = at("hold-head");
+while (fs.existsSync(held) && fs.readFileSync(held, "utf8") === process.env.SLIPJAY_RELEASE_HEAD)
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`],
+      recordBatchCheck: async () => { routed++; return { kind: "accepted", value: {} }; } });
+  try {
+    await f.land(f.submit(await f.candidate("zero.txt")));
+    await settle(f);
+    const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
+    clock = promotedAt + 60_000;
+    await f.land(f.submit(await f.candidate("one.txt")));
+    const older = f.main();
+    await writeFile(join(f.root, "hold-head"), older);
+
+    clock = promotedAt + 31 * 60_000;
+    await f.queue.recover();
+    f.queue.wake();
+    const scheduled = f.log.verifications(REPO, older).find((check) => check.submittedBy.endsWith(":batch"));
+    assert.ok(scheduled, "recovery schedules a batch for the older head");
+    await until(async () => {
+      assert.equal(f.log.operation(scheduled.id)?.result, undefined, "the batch has not ended before its head check");
+      return (await f.lines("batch-env.jsonl")).some((line) => line.includes(older)) || undefined;
+    }, preemptionWaitMs);
+
+    const landing = f.submit(await f.candidate("two.txt"));
+    f.queue.wake();
+    await until(() => f.log.operation(landing)?.result?.type === "landed" || undefined, preemptionWaitMs);
+    const head = f.main();
+    assert.equal(f.log.operation(scheduled.id)?.status, "running");
+
+    const confirm = await f.queue.requestBatchCheck(REPO, head);
+    assert.ok(confirm?.requested && confirm.operation.submittedBy.endsWith(":confirm"));
+    // The older head's command is still held: only an abort can free the place for the confirm.
+    await until(() => f.log.operation(confirm.operation.id)?.result, preemptionWaitMs);
+    assert.equal(f.log.operation(confirm.operation.id)?.status, "verified");
+    assert.equal(f.log.operation(scheduled.id)?.status, "cancelled");
+    const outcomes = batchEvents(f, scheduled.id, "batch_outcome");
+    assert.deepEqual(outcomes.map(({ outcome }) => outcome), ["stopped"]);
+    assert.match(outcomes[0]!.reason!, /stopped for the release of/);
+    assert.equal(outcomes[0]!.shorterCandidate, undefined);
+    assert.deepEqual(batchEvents(f, scheduled.id, "batch_run"), []);
+    assert.equal(routed, 0);
+  } finally {
+    await rm(join(f.root, "hold-head"), { force: true });
+    await f.dispose();
+  }
+}, 300_000);
+
+serialTest("a confirm stops an in-flight diagnosis without cancelling the red batch or superseding another confirm", async () => {
   let clock = Date.now();
   let heldCommit: string | undefined;
   let probeStarted = false;
+  let batchId: string | undefined;
   let probeAborted = false;
   let probeClosed = false;
   const alerts: ReleaseAlertPayload[] = [];
@@ -431,23 +491,28 @@ test("a confirm stops an in-flight diagnosis without cancelling the red batch or
     const head = f.main();
     clock = promotedAt + 31 * 60_000;
     await f.queue.recover();
-    await until(() => probeStarted || undefined);
-    const original = f.log.verifications(REPO, head)[0]!;
-    assert.ok(original.submittedBy.endsWith(":batch"));
+    f.queue.wake();
+    const original = f.log.verifications(REPO, head).find((check) => check.submittedBy.endsWith(":batch"));
+    assert.ok(original, "recovery schedules a batch for diagnosis");
+    batchId = original.id;
+    await until(() => {
+      assert.equal(f.log.operation(original.id)?.result, undefined, "the batch has not ended before its diagnosis probe");
+      return probeStarted || undefined;
+    }, preemptionWaitMs);
 
     const third = f.submit(await f.candidate("third.txt"));
     f.queue.wake();
-    await until(() => f.log.operation(third)?.result?.type === "landed" || undefined);
+    await until(() => f.log.operation(third)?.result?.type === "landed" || undefined, preemptionWaitMs);
     const newest = f.main();
     const fourth = f.submit(await f.candidate("fourth.txt"));
     f.queue.wake();
-    await until(() => f.log.operation(fourth)?.result?.type === "landed" || undefined);
+    await until(() => f.log.operation(fourth)?.result?.type === "landed" || undefined, preemptionWaitMs);
     const latest = f.main();
     f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "test" });
     const first = await f.queue.requestBatchCheck(REPO, newest);
     const next = await f.queue.requestBatchCheck(REPO, older);
     assert.ok(first?.requested && next?.requested);
-    await until(() => f.log.operation(original.id)?.result ?? undefined);
+    await until(() => f.log.operation(original.id)?.result, preemptionWaitMs);
     assert.equal(probeAborted, true);
     assert.equal(probeClosed, true);
     const [outcome] = batchEvents(f, original.id, "batch_outcome");
@@ -472,8 +537,11 @@ test("a confirm stops an in-flight diagnosis without cancelling the red batch or
     assert.equal(alert.headCommitId, head);
     assert.deepEqual(alert.suites, ["workbench"]);
     assert.deepEqual(alert.unattributed, outcome.unattributed);
-  } finally { await f.dispose(); }
-}, 180_000);
+  } finally {
+    if (batchId && f.log.operation(batchId)?.status === "running") f.queue.kill(batchId);
+    await f.dispose();
+  }
+}, 300_000);
 
 test("a confirm arriving during the completed probe's remote finish leaves its verdict reusable", async () => {
   let clock = Date.now();

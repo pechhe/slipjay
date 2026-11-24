@@ -873,19 +873,19 @@ export function createRunnerQueue(input: {
     if (latest?.status === "running") return { operation: latest, requested: false };
     if (latest && (latest.status === "verified" || batchOutcomeOf(latest.id)?.outcome === "red") && await current(latest)) return { operation: latest, requested: false };
     const id = latest?.status === "queued" ? latest.id : queueVerification(repo, commitId, "confirm");
-    // The owner's release goes first: keep a red batch's evidence, but stop its diagnosis; background checks not yet red stop outright.
+    // The owner's release goes first: keep a red batch's evidence, but stop its diagnosis; automatic checks not yet diagnosing stop outright.
     for (const entry of running.values()) {
       if (entry.operation.kind !== "verification" || entry.operation.repo !== repo || entry.operation.id === id) continue;
       if (entry.stopDiagnosis) {
         entry.stopDiagnosis(`diagnosis stopped for the release of ${commitId.slice(0, 12)} the owner pushed (${id})`);
-      } else if (entry.operation.submittedBy.endsWith(":background")) {
+      } else if (automaticVerification(entry.operation)) {
         stopping.set(entry.operation.id, `stopped for the release of ${commitId.slice(0, 12)} the owner pushed (${id}); checked again later`);
         entry.controller.abort();
       }
     }
     return { operation: log.operation(id) as VerificationOperation, requested: latest?.status !== "queued" };
   }
-  /** Background checks stopped for a release the owner pushed, and why: they end `stopped`, never as the owner's kill. */
+  /** Automatic checks stopped for a release the owner pushed, and why: they end `stopped`, never as the owner's kill. */
   const stopping = new Map<string, string>();
   const automaticPromotions = new Map<string, Promise<void>>();
   /** Per repository, the timer that asks again when its `promotionSchedule` next lets a promotion start. */
