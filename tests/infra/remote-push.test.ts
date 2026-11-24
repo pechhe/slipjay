@@ -1,5 +1,5 @@
 import { expect, test } from "vite-plus/test";
-import { isTransientRemotePushFailure } from "../../src/lib/infra/remote-push.ts";
+import { isTransientRemoteFetchFailure, isTransientRemotePushFailure } from "../../src/lib/infra/remote-push.ts";
 
 test.each([
   "remote: error: unable to write file /data/repositories/demo/objects/ghq_Dn4Y0bInQmZ/pack/pack-123.pack: No such file or directory\n"
@@ -40,6 +40,19 @@ test.each([
 ])("permanent diagnostics take precedence over transport noise: %s", (detail) => {
   expect(isTransientRemotePushFailure(`${detail}\nerror: RPC failed; broken pipe`)).toBe(false);
 });
+
+test.each([
+  "Permission denied", "Authentication failed", "repository not found", "HTTP 429",
+  "couldn't find remote ref main", "HTTP request failed with status code 403",
+])("fetch never retries a permanent diagnostic with transport noise: %s", (detail) => {
+  expect(isTransientRemoteFetchFailure(`${detail}\nerror: RPC failed; broken pipe`)).toBe(false);
+});
+
+test.each(["remote: Internal Server Error", "HTTP/2 503", "HTTP status code: 502", "early EOF", "TLS handshake failure"])(
+  "fetch retries transport and server failures: %s", (detail) => {
+    expect(isTransientRemoteFetchFailure(detail)).toBe(true);
+  },
+);
 
 test.each(["refs/heads/main (reason: failed)", "local file size: 503", "unable to write file", ""])(
   "does not retry unclassified errors: %s", (detail) => {

@@ -21,7 +21,7 @@ import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
 import { RequiredVerificationError, runRequiredVerification } from "../landing/required-verification.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
 import { jj, run, workspaceContext } from "../infra/workspace-jj.ts";
-import { isTransientRemotePushFailure, remotePushRetryDelaysMs } from "../infra/remote-push.ts";
+import { isTransientRemotePushFailure, remotePushRetryDelaysMs, retryRemoteFetch } from "../infra/remote-push.ts";
 
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
 import type { RunnerStage, VerificationOperation } from "../runner/runner-types.ts";
@@ -346,7 +346,8 @@ async function commitOf(cwd: string, revset: string): Promise<string | null> {
 const under = (paths: string[], file: string): boolean => paths.some((path) => file === path || file.startsWith(`${path}/`));
 const short = (commit: string): string => commit.slice(0, 12);
 
-const fetch = (cwd: string, remote: string, branch: string): Promise<WorkspaceCommandResult> => jjRun(cwd, ["git", "fetch", "--remote", remote, "--branch", branch]);
+const fetch = (cwd: string, remote: string, branch: string): Promise<WorkspaceCommandResult> =>
+  retryRemoteFetch(() => jjRun(cwd, ["git", "fetch", "--remote", remote, "--branch", branch]), remotePushRetryDelaysMs);
 
 /**
  * What a release from `cwd`'s repository would publish. `candidate` pins a commit
@@ -362,7 +363,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   if (!remote) refuse("slipjay.json declares no publication remote; a release publishes the release branch to it");
 
   const fetched = await fetch(root, remote, integrationBranch);
-  if (fetched.code !== 0) refuse(`Could not fetch ${integrationBranch} from ${remote}: ${fetched.stderr.trim()}`);
+  if (fetched.code !== 0) refuse(`Could not fetch ${integrationBranch} from ${remote}: ${(fetched.stderr || fetched.stdout).trim()}`);
   const published = `${symbol(integrationBranch)}@${symbol(remote)}`;
   if (pinned !== undefined && !COMMIT_PREFIX.test(pinned)) refuse("The release candidate must be a commit id or a prefix of at least 12 hex characters");
   const candidate = await commitOf(root, pinned ?? published);
@@ -377,7 +378,7 @@ export async function planRelease(cwd = process.cwd(), { candidate: pinned }: { 
   if (!checks) refuse(`slipjay.json at ${candidate.slice(0, 12)} declares no requiredReleaseVerification (declare [] to release without checks)`);
 
   const fetchedRelease = await fetch(root, remote, releaseBranch);
-  if (fetchedRelease.code !== 0) refuse(`Could not fetch ${releaseBranch} from ${remote}: ${fetchedRelease.stderr.trim()}`);
+  if (fetchedRelease.code !== 0) refuse(`Could not fetch ${releaseBranch} from ${remote}: ${(fetchedRelease.stderr || fetchedRelease.stdout).trim()}`);
   const base = await commitOf(root, `${symbol(releaseBranch)}@${symbol(remote)}`);
   if (!base) refuse(`${releaseBranch}@${remote} does not exist; publish the release branch once before releasing to it`);
 
@@ -611,7 +612,7 @@ export async function returnRelease(checkout: string, { merge, candidate }: { me
     const remote = policy?.remote;
     if (!releaseBranch || !remote) refuse(`slipjay.json at ${candidate.slice(0, 12)} declares no release branch and remote`);
     const fetched = await fetch(checkout, remote, releaseBranch);
-    if (fetched.code !== 0) refuse(`Could not fetch ${releaseBranch}: ${fetched.stderr.trim()}`);
+    if (fetched.code !== 0) refuse(`Could not fetch ${releaseBranch}: ${(fetched.stderr || fetched.stdout).trim()}`);
     const published = `${symbol(releaseBranch)}@${symbol(remote)}`;
     const head = await commitOf(checkout, published);
     if (head !== merge) refuse(`${releaseBranch} has moved on to ${head?.slice(0, 12) ?? "nothing"} since the release merge ${merge.slice(0, 12)}`);

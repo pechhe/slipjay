@@ -350,11 +350,16 @@ and held state through the existing recovery path.
     With both, the runner also pushes its metrics export to HQ (see [Pipeline metrics relay](landing-evidence.md#pipeline-metrics-relay)).
     Optional `releaseAlertWebhook: { url, timeoutMs? }` sends an immediate JSON POST when Forge first refuses a
     culprit as unassociated, or when a red batch records unattributed ranges without any named culprit.
+    It also reports terminal `release_failed` (except stale-base automatic refusals) and
+    `production_deploy_failed` (not staging), with a bounded reason. The release alert identifies
+    automatic submissions; the deploy alert includes whether rollback succeeded when recorded.
     `url` must be HTTP(S); `timeoutMs` is a whole number from 1000 to 60000 and defaults to 10000.
     Already-answered culprits and already-unassociated suppressions do not send again. Delivery is best-effort
-    and does not stall verification or routing. Treat the endpoint as a secret and use a trusted receiver:
+    and does not stall the operation or its follow-up work. Treat the endpoint as a secret and use a trusted receiver:
     culprit alerts can contain the command and an excerpt of test output. The separate [release watchdog](release.md#release-watchdog)
-    rechecks the ledger even when the runner is down.
+    rechecks the ledger even when the runner is down, including a red batch stalled for at least 20 minutes.
+    Landing's integration `jj git fetch` and release fetches retry transient remote or network failures
+    twice (after 1 s and 3 s); permanent errors fail immediately.
   - `operations.sqlite`: one append-only event log; operations, queue positions and runs are projections of it.
     The runner is one event loop, so a large ledger must never stall the landing in progress (SJ-200): reads
     across operations (gate verdicts, published landings, receipts, open builds) are indexed by event type and

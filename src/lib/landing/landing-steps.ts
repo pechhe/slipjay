@@ -52,7 +52,7 @@ import type { BuildReader } from "../build/tracker.ts";
 import { stateHome } from "../workspace/workspace-paths.ts";
 import { readJsonOptional, readLandingState, statePath, workspaceMetadata } from "../workspace/workspace-state.ts";
 import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
-import { isTransientRemotePushFailure, remotePushRetryDelaysMs } from "../infra/remote-push.ts";
+import { isTransientRemotePushFailure, remotePushRetryDelaysMs, retryRemoteFetch } from "../infra/remote-push.ts";
 
 /**
  * The steps a landing is made of, below the land command itself: preview,
@@ -201,7 +201,7 @@ export function publicationRemote(context: { configuration: { remote?: string | 
 }
 
 export const fetchIntegration = (cwd: string, remote: string, branch: string, { ignoreWorkingCopy = false, ...options }: { timeoutMs?: number; ignoreWorkingCopy?: boolean } = {}): ReturnType<typeof import("../infra/workspace-command.ts").runWorkspaceCommand> =>
-  run("jj", ["--color=never", ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd });
+  retryRemoteFetch(() => run("jj", ["--color=never", ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd }), remotePushRetryDelaysMs);
 
 /** A checkout's own Git repository never moves, so it is read once per checkout (about 0.4 s a read, SJ-223). */
 const gitRoots = new Map<string, Promise<string>>();

@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ReleaseAlertPayload } from "../../src/lib/runner/runner-types.ts";
 import { test, byProject, fixture } from "./fixtures/runner-queue-fixture.ts";
 
 test("a promotion releases only a commit staging deployed, then deploys production from exactly it; a rerun confirm reuses that deploy", async () => {
-  const f = await fixture(false, true, { minIntervalMs: 0, production: true });
+  const alerts: ReleaseAlertPayload[] = [];
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, {
+    releaseAlertWebhook: { url: "https://example.test/release" },
+    sendReleaseAlert: async (_url, payload) => { alerts.push(payload); },
+  });
   try {
     await f.land(f.submit(await f.candidate("a.txt")));
     await f.queue.idle();
@@ -22,6 +27,10 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     await f.land(refused);
     const refusal = f.result(refused);
     assert.ok(refusal?.type === "failed" && /Staging is not green on/.test(refusal.reason), JSON.stringify(refusal));
+    assert.deepEqual(alerts.map(({ timestamp: _timestamp, ...alert }) => alert), [{
+      source: "slipjay-runner", repo: "fixture/repo", operationId: refused, headCommitId: red, suites: [],
+      logCommand: `slipjay runner log ${refused}`, event: "release_failed", reason: refusal.reason, automatic: false,
+    }], "only the release failure alerts, not the failed staging deploy");
     assert.equal(f.releaseRef(), base, "nothing was verified or published");
     assert.deepEqual(f.log.deployments("fixture/repo", "production"), []);
 
@@ -60,6 +69,12 @@ test("a promotion releases only a commit staging deployed, then deploys producti
     assert.ok(refusedRedeploy?.type === "failed", JSON.stringify(refusedRedeploy));
     assert.equal(refusedRedeploy.reason, `production serves ${green.slice(0, 12)} now, not ${red.slice(0, 12)}: nothing redeployed`);
     assert.equal((await f.lines("deploys.jsonl")).length, deployed, "it ran nothing");
+    assert.equal(alerts.length, 2);
+    const { timestamp: _timestamp, ...alert } = alerts[1]!;
+    assert.deepEqual(alert, {
+      source: "slipjay-runner", repo: "fixture/repo", operationId: stale, headCommitId: red, suites: [],
+      logCommand: `slipjay runner log ${stale}`, event: "production_deploy_failed", reason: refusedRedeploy.reason,
+    });
     const redeploy = "redeploy";
     f.log.append(redeploy, { type: "submitted", kind: "deploy", repo: "fixture/repo", environment: "production", commitId: green, submittedBy: "test" });
     f.queue.wake(); await f.queue.idle();

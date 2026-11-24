@@ -348,7 +348,10 @@ on the schema before it: one whose new code reads what the migration adds.
    even if the push reported an error. It retries known temporary remote storage or
    network errors at most twice, and only if the remote still points to the planned
    base. Returning a release uses the same retry limit, requiring the remote to still
-   point to the release merge. The runner's operation log records the release.
+   point to the release merge. Release fetches, including that confirmation fetch,
+   retry known transient network or remote server errors at most twice (after 1 s and 3 s).
+   Permission, authentication, HTTP 4xx and missing refs are not retried.
+   The runner's operation log records the release.
 
 ## Migration readiness
 
@@ -374,10 +377,14 @@ and opens `~/.slipjay/runner/operations.sqlite` read-only. It alerts for:
 - A verification or release in its current stage for more than 45 minutes,
   or a deploy in its stage for more than 20 minutes (2 hours). Queued work is excluded.
 - A fresh unassociated culprit in the newest completed red batch (24 hours per culprit),
-  or an unbroken red streak lasting at least 45 minutes (2 hours). Superseded,
+  or an unbroken red streak lasting at least 20 minutes (`red_batch_stalled`, 2 hours). Superseded,
   cancelled and stopped batches are ignored.
 - Two non-passing flaky or infrastructure batches in the last 3 hours (2 hours).
-- The latest production deploy if it failed after the last success (2 hours).
+- The latest release if it failed and no success was recorded after it in ledger order
+  (`release_failed:<operationId>`, 2 hours). Stale-base automatic refusals do not alert;
+  they leave the candidate eligible to be checked again against the new base.
+- The latest production deploy if it failed after the last success
+  (`production_deploy_failed:<operationId>`, 2 hours).
 - The latest nightly audit if it failed within the last 6 hours (6 hours).
 
 A successful delivery starts cooldown; a later healthy observation clears

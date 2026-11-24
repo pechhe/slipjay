@@ -766,7 +766,9 @@ export interface MachineVerification extends RemoteVerification {
 
 export type ReleaseAlertDetails =
   | { event: "batch_culprit_unassociated"; culprit: { commitId: string; operationId: string }; failingTests: string[]; command: string | null; output: string }
-  | { event: "batch_unattributed"; unattributed: { keys: string[]; after: string | null; firstFailing: string }[] };
+  | { event: "batch_unattributed"; unattributed: { keys: string[]; after: string | null; firstFailing: string }[] }
+  | { event: "release_failed"; reason: string; automatic: boolean }
+  | { event: "production_deploy_failed"; reason: string; rolledBack?: boolean };
 
 export type ReleaseAlertPayload = ReleaseAlertDetails & {
   source: "slipjay-runner"; repo: string; operationId: string; headCommitId: string;
@@ -774,7 +776,7 @@ export type ReleaseAlertPayload = ReleaseAlertDetails & {
 };
 
 export type RunnerConfig = {
-  /** Best-effort recovery alerts for red batches Forge cannot route. */
+  /** Best-effort alerts for release failures, production deploy failures and red batches Forge cannot route. */
   releaseAlertWebhook?: { url: string; timeoutMs?: number };
   /** Shown in every client progress line; defaults to the host name. */
   name?: string;

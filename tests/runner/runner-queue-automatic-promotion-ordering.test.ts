@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ReleaseAlertPayload } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
@@ -72,6 +73,25 @@ test("an automatic release refuses once its commit is no longer the newest green
     assert.deepEqual(f.log.deployments(REPO, "production"), []);
   } finally { await f.dispose(); }
 }, 240_000);
+
+test("an automatic release refused against a stale base records failure without alerting", async () => {
+  const alerts: ReleaseAlertPayload[] = [];
+  const f = await fixture(false, true, { minIntervalMs: 0, production: true }, false, {
+    process: "development", releaseAlertWebhook: { url: "https://example.test/release" },
+    sendReleaseAlert: async (_url, payload) => { alerts.push(payload); },
+  });
+  try {
+    const candidate = await f.seedMain({ "a.txt": "a.txt\n" });
+    const check = newOperationId();
+    f.log.append(check, { type: "submitted", kind: "verification", repo: REPO, commitId: candidate, submittedBy: "test:background" });
+    f.log.append(check, { type: "verified", base: "0".repeat(40), candidate, checks: [], nonAdditiveMigrations: [] });
+    const stale = queuedAutomatic(f, candidate);
+    await settle(f);
+    const outcome = f.result(stale);
+    assert.ok(outcome?.type === "failed" && /passed against 000000000000, not [0-9a-f]+$/.test(outcome.reason), JSON.stringify(outcome));
+    assert.deepEqual(alerts, []);
+  } finally { await f.dispose(); }
+}, 180_000);
 
 const landed = async (f: Awaited<ReturnType<typeof fixture>>, name: string) => {
   const id = f.submit(await f.candidate(name));

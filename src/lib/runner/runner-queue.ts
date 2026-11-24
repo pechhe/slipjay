@@ -40,6 +40,7 @@ import { parseFailureOutput } from "./failure-classification.ts";
 import { failureProvenance, provenanceSource } from "./failure-provenance.ts";
 import { commandEvidence } from "./command-evidence.ts";
 import { retainCommandArtifact } from "./command-artifact.ts";
+import { truncateUtf8 } from "../infra/utf8.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
@@ -468,6 +469,16 @@ export function createRunnerQueue(input: {
   const logPath = (id: string) => join(home, "logs", `${id}.log`);
   function append(id: string, event: OperationEvent): void {
     log.append(id, event);
+    if (event.type !== "failed" || !config.releaseAlertWebhook) return;
+    const operation = log.operation(id);
+    if (operation?.kind === "release" && !staleAutomaticRelease(operation)) {
+      releaseAlert(operation, operation.commitId, [], { event: "release_failed", reason: truncateUtf8(event.reason, 4_000),
+        automatic: operation.submittedBy.endsWith(":automatic") });
+    } else if (operation?.kind === "deploy" && operation.environment === "production") {
+      const rolledBack = event.deployment?.rollback?.automatic;
+      releaseAlert(operation, operation.commitId, [], { event: "production_deploy_failed", reason: truncateUtf8(event.reason, 4_000),
+        ...rolledBack === undefined ? {} : { rolledBack } });
+    }
   }
   function runFinished(runId: string, result: BoundedProcessResult, started: number, request: BoundedProcessRequest, privateOutput = false): Extract<OperationEvent, { type: "run_finished" }> {
     return { type: "run_finished", runId, exitCode: result.exitCode, signal: result.signal, timedOut: result.timedOut,
@@ -899,7 +910,7 @@ export function createRunnerQueue(input: {
   function staleAutomaticRelease(release: ReleaseOperation): boolean {
     if (!release.automatic || release.result?.type !== "failed") return false;
     const { reason } = release.result;
-    // Recognize the old generic refusal as well as the current base mismatch diagnostic.
+    // Keep this in step with the standalone release-watchdog-probe.ts. Recognize both the legacy and current diagnostics.
     return /^Not promoted automatically: (?:no pre-verification of .* passed against (?!a readable release base)|Pre-verification of .* passed against .*?, not [0-9a-f]+$)/i.test(reason);
   }
   const currentChecks = (repo: string) =>

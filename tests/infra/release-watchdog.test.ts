@@ -121,7 +121,7 @@ test("red is measured from the first completed batch in the uninterrupted streak
   const commit = "abcdef1234567890";
   const result = scan([
     ...batch("old-red", 120, "red"), ...batch("green", 75, "green"),
-    ...batch("red-a", 45, "red"), ...batch("red-b", 5, "red"), unrouted("red-b", 4, commit),
+    ...batch("red-a", 20, "red"), ...batch("red-b", 5, "red"), unrouted("red-b", 4, commit),
     unrouted("red-b", 4, "ignored", "already unassociated in batch check red-a"),
     ...batch("superseded", 3, "red", "superseded"), ...batch("stopped", 2, "stopped"),
     submit("open", 1), ["open", 0, "batch_outcome", { outcome: "red" }],
@@ -131,6 +131,34 @@ test("red is measured from the first completed batch in the uninterrupted streak
   assert.equal(recovered.posts, 0);
   assert.deepEqual(JSON.parse(readFileSync(cooldownFile, "utf8")), {});
   assert.deepEqual(scan(batch("new-red", 0, "red")).keys, []);
+});
+
+test("red_batch_stalled is not due one millisecond before 20 minutes", () => {
+  assert.deepEqual(scan(batch("red", 20, "red"), { nowMs: now - 1 }).keys, []);
+});
+
+test("latest failed release alerts until a success is recorded later in ledger order", () => {
+  const result = scan([
+    submit("successful", 30, "release"), submit("failed", 20, "release"),
+    ["failed", 10, "failed", { reason: "publication failed" }],
+  ]);
+  assert.deepEqual(result.payload.alerts, [{ key: "release_failed:failed", operationId: "failed" }]);
+  assert.deepEqual(scan([], { nowMs: now + 120 * min - 1 }).payload.suppressed, ["release_failed:failed"]);
+  assert.deepEqual(scan([], { nowMs: now + 120 * min }).keys, ["release_failed:failed"]);
+  assert.deepEqual(scan([["successful", 11, "released"]], { nowMs: now + 240 * min }).keys, []);
+});
+
+test.each([
+  ["Pre-verification of abc passed against 012abc, not 987def", false],
+  ["no pre-verification of abc passed against master 987def", false],
+  ["no pre-verification of abc passed against a readable release base", true],
+  ["superseded by a newer candidate", true],
+])("automatic release ending with %s: alerts = %s", (reason, alerts) => {
+  const result = scan([
+    ["auto", 10, "submitted", { repo, kind: "release", automatic: { setting: "process", value: "development" } }],
+    ["auto", 9, "failed", { reason: `Not promoted automatically: ${reason}` }],
+  ]);
+  assert.deepEqual(result.keys, alerts ? ["release_failed:auto"] : []);
 });
 
 test("only two recent non-passing flaky/infrastructure batches form a burst", () => {

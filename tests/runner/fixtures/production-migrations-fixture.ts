@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { fixture } from "./runner-queue-fixture.ts";
 
 /** A production deploy with migrations, after landing a first migration: non-additive unless `additive`. */
-export async function productionMigrations({ additive = false } = {}) {
-  const f = await fixture(true, true, { minIntervalMs: 0, production: "migrations" });
+export async function productionMigrations({ additive = false, ...options }: { additive?: boolean } & NonNullable<Parameters<typeof fixture>[4]> = {}) {
+  const f = await fixture(true, true, { minIntervalMs: 0, production: "migrations" }, false, options);
   const promote = async (commit: string) => {
     const promotion = f.submitRelease(commit);
     await f.land(promotion);

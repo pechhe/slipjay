@@ -1,18 +1,28 @@
 import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ReleaseAlertPayload } from "../../src/lib/runner/runner-types.ts";
 import { test } from "./fixtures/runner-queue-fixture.ts";
 import { productionMigrations } from "./fixtures/production-migrations-fixture.ts";
 
 test("production migration verification and health failures activate nothing and return the release branch", async () => {
-  const { f, promote, order, first, before } = await productionMigrations();
+  const alerts: ReleaseAlertPayload[] = [];
+  const { f, promote, order, first, before } = await productionMigrations({
+    releaseAlertWebhook: { url: "https://example.test/release" },
+    sendReleaseAlert: async (_url, payload) => { alerts.push(payload); },
+  });
   try {
     await writeFile(join(f.root, "fail-verify"), "");
-    const refused = (await promote(first)).result;
+    const deploy = await promote(first);
+    const refused = deploy.result;
     assert.ok(refused?.type === "failed" && refused.deployment, JSON.stringify(refused));
     assert.deepEqual(refused.deployment.migrations, { artifacts: ["migrations/0001.sql"], status: "verify_failed",
       reason: "verify exited 1: [REDACTED_URL] refused" }, "the database URL never reaches the record");
     assert.match(refused.reason, /^deploy failed: migrations \(verify exited 1: \[REDACTED_URL\] refused\); rolled back: /);
+    assert.deepEqual(alerts.map(({ timestamp: _timestamp, ...alert }) => alert), [{
+      source: "slipjay-runner", repo: "fixture/repo", operationId: deploy.id, headCommitId: first, suites: [],
+      logCommand: `slipjay runner log ${deploy.id}`, event: "production_deploy_failed", reason: refused.reason, rolledBack: true,
+    }]);
     assert.equal(f.releaseRef(), before, "nothing was applied, so the release branch returns");
     assert.deepEqual(await order(), ["health app", "health hq", "health www", "verify"], "nothing applied or activated");
     await rm(join(f.root, "fail-verify"));

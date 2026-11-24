@@ -32,7 +32,23 @@ function interceptReleasePush(intercept: (attempt: number, push: typeof realRun,
 
 afterEach(() => vi.mocked(run).mockReset());
 
-test.each(["quarantine", "already updated", "remote moved", "non-fast-forward", "Permission denied", "persistent quarantine", "fetch failed"])(
+test.each(["transient", "permanent"])("release planning handles a %s fetch failure", async (scenario) => {
+  const f = await releaseProject();
+  try {
+    const candidate = await f.commit({ feature: "new\n" }, "Add feature");
+    let fetches = 0;
+    vi.mocked(run).mockImplementation(async (...args) => {
+      if (args[0] !== "jj" || !args[1].includes("fetch") || !args[1].includes("main")) return realRun(...args);
+      if (++fetches !== 1) return realRun(...args);
+      return failed(scenario === "transient" ? "RPC failed; HTTP 502" : "couldn't find remote ref main");
+    });
+    const result = await confirmRelease(f.repo, { candidate });
+    assert.equal(result.ok, scenario === "transient", JSON.stringify(result));
+    assert.equal(fetches, scenario === "transient" ? 2 : 1);
+  } finally { await f.dispose(); }
+});
+
+test.each(["quarantine", "confirmation fetch transient", "already updated", "remote moved", "non-fast-forward", "Permission denied", "persistent quarantine", "fetch failed"])(
   "release push handles %s", async (scenario) => {
     const f = await releaseProject();
     try {
@@ -53,18 +69,22 @@ test.each(["quarantine", "already updated", "remote moved", "non-fast-forward", 
         if (scenario === "non-fast-forward" || scenario === "Permission denied") return failed(scenario);
         return failed(quarantine);
       });
-      if (scenario === "fetch failed") {
+      let confirmationFetches = 0;
+      if (scenario === "fetch failed" || scenario === "confirmation fetch transient") {
         const intercepted = vi.mocked(run).getMockImplementation()!;
         vi.mocked(run).mockImplementation(async (...args) =>
-          attempts() && args[1].includes("fetch") && args[1].includes("release")
+          attempts() === 1 && args[1].includes("fetch") && args[1].includes("release")
+            && (++confirmationFetches === 1 || scenario === "fetch failed")
             ? failed("Connection reset") : intercepted(...args));
       }
 
       const result = await confirmRelease(f.repo, { candidate });
-      if (scenario === "quarantine" || scenario === "already updated") {
+      if (scenario === "confirmation fetch transient") assert.equal(confirmationFetches, 2);
+      if (scenario === "fetch failed") assert.equal(confirmationFetches, 3);
+      if (["quarantine", "already updated", "confirmation fetch transient"].includes(scenario)) {
         assert.ok(result.ok && result.status === "released", JSON.stringify(result));
         assert.equal(remoteRef(f, "release"), result.merge);
-        assert.equal(attempts(), scenario === "quarantine" ? 2 : 1);
+        assert.equal(attempts(), scenario === "already updated" ? 1 : 2);
         const commands = vi.mocked(run).mock.calls.map(([, args]) => args);
         const firstPush = commands.findIndex((args) => args.includes("push"));
         assert.ok(commands[firstPush + 1]?.includes("fetch"), "fetch confirms an ambiguous push");

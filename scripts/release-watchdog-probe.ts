@@ -12,17 +12,23 @@ import { parseArgs } from "node:util";
 type LedgerRow = { seq: number; operation_id: string; at: string; type: string; data: string };
 type Fact = { seq: number; at: number };
 type Stage = Fact & { name: string };
-type Verdict = Fact & { type: string };
+type Verdict = Fact & { type: string; reason?: string };
 type Batch = Fact & { outcome: string; verified?: boolean };
 type Operation = {
   id: string; kind: string; environment?: string; stage?: Stage; verdict?: Verdict;
-  batch?: Batch; unassociated: string[];
+  batch?: Batch; automatic?: boolean; unassociated: string[];
 };
 /** Operations in submission order, with their latest facts in ledger order. */
 type HealthInput = { runnerActive: boolean; operations: readonly Operation[] };
 type Alert = { key: string; cooldownMs: number; operationId?: string; stage?: string };
 const minute = 60_000;
 const hour = 60 * minute;
+
+// This script ships standalone; match staleAutomaticRelease in runner-queue.ts, including the legacy diagnostic.
+function staleAutomaticRelease(operation: Operation): boolean {
+  return operation.automatic === true && operation.verdict?.type === "failed"
+    && /^Not promoted automatically: (?:no pre-verification of .* passed against (?!a readable release base)|Pre-verification of .* passed against .*?, not [0-9a-f]+$)/i.test(operation.verdict.reason ?? "");
+}
 
 export function evaluateReleaseHealth(input: HealthInput, nowMs: number): Alert[] {
   const { runnerActive, operations } = input;
@@ -44,7 +50,7 @@ export function evaluateReleaseHealth(input: HealthInput, nowMs: number): Alert[
       alerts.push({ key: `unrouted_red_culprit:${shortCommit}`, cooldownMs: 24 * hour, operationId: latest.id });
     const firstNonRed = completed.findIndex(({ outcome }) => outcome !== "red");
     const firstRed = firstNonRed < 0 ? completed.at(-1)! : completed[firstNonRed - 1]!;
-    if (nowMs - firstRed.at >= 45 * minute)
+    if (nowMs - firstRed.at >= 20 * minute)
       alerts.push({ key: "red_batch_stalled", cooldownMs: 2 * hour, operationId: latest.id });
   }
   const recent = completed.slice(0, 2);
@@ -53,6 +59,11 @@ export function evaluateReleaseHealth(input: HealthInput, nowMs: number): Alert[
     alerts.push({ key: "flaky_or_infra_burst", cooldownMs: 2 * hour, operationId: recent[0]!.id });
 
   // Submitted order matters: don't report an old failed attempt as the latest when a successor is running.
+  const releases = operations.filter(({ kind }) => kind === "release");
+  const release = releases.at(-1);
+  if (release?.verdict?.type === "failed" && !staleAutomaticRelease(release)
+    && !releases.some(({ verdict }) => verdict?.type === "released" && verdict.seq > release.verdict!.seq))
+    alerts.push({ key: `release_failed:${release.id}`, cooldownMs: 2 * hour, operationId: release.id });
   const deploys = operations.filter(({ kind, environment }) => kind === "deploy" && environment === "production");
   const deploy = deploys.at(-1);
   if (deploy?.verdict?.type === "failed" && !deploys.some(({ verdict }) => verdict?.type === "deployed" && verdict.seq > deploy.verdict!.seq))
@@ -80,8 +91,8 @@ async function readOperations(path: string, repo: string): Promise<Operation[]> 
     for (const { operation_id: id, seq, at, type, data } of rows) {
       const fact = { seq, at: Date.parse(at) };
       if (type === "submitted") {
-        const { kind, environment } = JSON.parse(data) as { kind: string; environment?: string };
-        operations.set(id, { id, kind, environment, unassociated: [] });
+        const { kind, environment, automatic } = JSON.parse(data) as { kind: string; environment?: string; automatic?: unknown };
+        operations.set(id, { id, kind, environment, automatic: Boolean(automatic), unassociated: [] });
         continue;
       }
       const operation = operations.get(id);
@@ -95,7 +106,10 @@ async function readOperations(path: string, repo: string): Promise<Operation[]> 
       } else if (type === "batch_unrouted") {
         const { reason, commitId } = JSON.parse(data) as { reason: string; commitId: string };
         if (/^batch_culprit_unassociated(?::|$)/.test(reason)) operation.unassociated.push(commitId);
-      } else operation.verdict = { ...fact, type };
+      } else {
+        const reason = operation.kind === "release" && type === "failed" ? (JSON.parse(data) as { reason?: string }).reason : undefined;
+        operation.verdict = { ...fact, type, reason };
+      }
     }
     return [...operations.values()];
   } finally { db.close(); }
