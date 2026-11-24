@@ -378,7 +378,8 @@ and opens `~/.slipjay/runner/operations.sqlite` read-only. It alerts for:
   or a deploy in its stage for more than 20 minutes (2 hours). Queued work is excluded.
 - A fresh unassociated culprit in the newest completed red batch (24 hours per culprit),
   or an unbroken red streak lasting at least 20 minutes (`red_batch_stalled`, 2 hours). Superseded,
-  cancelled and stopped batches are ignored.
+  cancelled and stopped batches are ignored, and a pass on a red head's shorter candidate neither
+  clears the red head nor resets the streak timer.
 - Two non-passing flaky or infrastructure batches in the last 3 hours (2 hours).
 - The latest release if it failed and no success was recorded after it in ledger order
   (`release_failed:<operationId>`, 2 hours). Stale-base automatic refusals do not alert;

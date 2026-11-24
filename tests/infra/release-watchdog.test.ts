@@ -133,6 +133,26 @@ test("red is measured from the first completed batch in the uninterrupted streak
   assert.deepEqual(scan(batch("new-red", 0, "red")).keys, []);
 });
 
+const headBatch = (id: string, ago: number, outcome: string, extra: object): Event[] =>
+  [submit(id, ago + 1), [id, ago, "batch_outcome", { outcome, ...extra }], [id, ago, outcome === "red" ? "failed" : "verified"]];
+
+const fresh = () => { rmSync(cooldownFile, { force: true }); rmSync(db, { force: true }); };
+
+test("a green shorter candidate does not mask a red head or reset the stall timer", () => {
+  const red = (id: string, ago: number, head: string) => headBatch(id, ago, "red", { head, shorterCandidate: "S1" });
+  const stalled = scan([...red("h1", 25, "H1"), ...headBatch("s1", 18, "green", { head: "S1" })]);
+  assert.deepEqual(stalled.keys, ["red_batch_stalled"]);
+  fresh();
+  const later = scan([...red("h1", 65, "H1"), ...headBatch("s1", 58, "green", { head: "S1" }), ...red("h2", 4, "H2")]);
+  assert.deepEqual(later.payload.alerts, [{ key: "red_batch_stalled", operationId: "h2" }]);
+  fresh();
+  const recovered = scan([...red("h1", 30, "H1"), ...headBatch("s1", 22, "green", { head: "S1" }), ...headBatch("h2", 5, "green", { head: "H2" })]);
+  assert.match(recovered.line, /^HEALTHY /);
+  fresh();
+  const flaky = scan([...red("h1", 25, "H1"), ...headBatch("s1", 18, "flaky", { head: "S1", verified: true })]);
+  assert.deepEqual(flaky.keys, ["red_batch_stalled"]);
+});
+
 test("red_batch_stalled is not due one millisecond before 20 minutes", () => {
   assert.deepEqual(scan(batch("red", 20, "red"), { nowMs: now - 1 }).keys, []);
 });

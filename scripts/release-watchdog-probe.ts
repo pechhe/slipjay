@@ -13,7 +13,7 @@ type LedgerRow = { seq: number; operation_id: string; at: string; type: string; 
 type Fact = { seq: number; at: number };
 type Stage = Fact & { name: string };
 type Verdict = Fact & { type: string; reason?: string };
-type Batch = Fact & { outcome: string; verified?: boolean };
+type Batch = Fact & { outcome: string; verified?: boolean; head?: string; shorterCandidate?: string | null };
 type Operation = {
   id: string; kind: string; environment?: string; stage?: Stage; verdict?: Verdict;
   batch?: Batch; automatic?: boolean; unassociated: string[];
@@ -44,12 +44,26 @@ export function evaluateReleaseHealth(input: HealthInput, nowMs: number): Alert[
   const completed = operations.flatMap(({ id, verdict, batch, unassociated }) =>
     verdict && batch && !["superseded", "cancelled"].includes(verdict.type) && batch.outcome !== "stopped"
       ? [{ id, ...batch, ...verdict, unassociated }] : []).sort((a, b) => b.seq - a.seq);
-  const latest = completed[0];
+  // A green on a shorter candidate (the commit before a red head's first culprit) says nothing about the head.
+  const pendingShorterCandidates = new Set<string>();
+  const headCompleted: typeof completed = [];
+  for (const entry of [...completed].reverse()) {
+    if (entry.outcome === "red") {
+      headCompleted.push(entry);
+      if (typeof entry.shorterCandidate === "string" && entry.shorterCandidate) pendingShorterCandidates.add(entry.shorterCandidate);
+    } else if (entry.outcome === "green" || (entry.outcome === "flaky" && entry.verified === true)) {
+      if (entry.head && pendingShorterCandidates.has(entry.head)) continue;
+      headCompleted.push(entry);
+      pendingShorterCandidates.clear();
+    } else headCompleted.push(entry);
+  }
+  headCompleted.reverse();
+  const latest = headCompleted[0];
   if (latest?.outcome === "red") {
     for (const shortCommit of new Set(latest.unassociated.map((commit) => commit.slice(0, 12))))
       alerts.push({ key: `unrouted_red_culprit:${shortCommit}`, cooldownMs: 24 * hour, operationId: latest.id });
-    const firstNonRed = completed.findIndex(({ outcome }) => outcome !== "red");
-    const firstRed = firstNonRed < 0 ? completed.at(-1)! : completed[firstNonRed - 1]!;
+    const firstNonRed = headCompleted.findIndex(({ outcome }) => outcome !== "red");
+    const firstRed = firstNonRed < 0 ? headCompleted.at(-1)! : headCompleted[firstNonRed - 1]!;
     if (nowMs - firstRed.at >= 20 * minute)
       alerts.push({ key: "red_batch_stalled", cooldownMs: 2 * hour, operationId: latest.id });
   }
@@ -100,8 +114,8 @@ async function readOperations(path: string, repo: string): Promise<Operation[]> 
       if (type === "stage") operation.stage = { ...fact, name: (JSON.parse(data) as { stage: string }).stage };
       else if (type === "yielded") delete operation.stage;
       else if (type === "batch_outcome") {
-        const { outcome, verified } = JSON.parse(data) as { outcome: string; verified?: boolean };
-        operation.batch = { ...fact, outcome, verified };
+        const { outcome, verified, head, shorterCandidate } = JSON.parse(data) as Omit<Batch, "at" | "seq">;
+        operation.batch = { ...fact, outcome, verified, head, shorterCandidate };
         operation.unassociated = [];
       } else if (type === "batch_unrouted") {
         const { reason, commitId } = JSON.parse(data) as { reason: string; commitId: string };
