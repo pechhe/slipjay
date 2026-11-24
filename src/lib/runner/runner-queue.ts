@@ -36,7 +36,7 @@ import { describeSchedule, nextPromotionAt } from "../policy/promotion-schedule.
 import { admissionLane, admits, AUDIT_INTERRUPTED_REASON, awaitingReplacement, isLandingSubmission, KILLABLE_STAGES, OWNER_KILL_REASON, RUNNER_CONTROL_ID, RUNNER_DEFAULT_SHORT_LANDING_SECONDS, RUNNER_DEFAULT_WORKERS, RUNNER_DEFAULT_DEPLOY_WORKERS, repositoryKey, repositoryLane, RUNNER_JJ_DEFAULTS, recordOf, servedCommit, servedDeploy } from "./runner-contract.ts";
 import { label, newOperationId } from "./runner-log.ts";
 import type { OperationLogOptions } from "./runner-log.ts";
-import { parseFailureOutput } from "./failure-classification.ts";
+import { checkFailureBlock, isHostResourceExhaustion, parseFailureOutput } from "./failure-classification.ts";
 import { failureProvenance, provenanceSource } from "./failure-provenance.ts";
 import { commandEvidence } from "./command-evidence.ts";
 import { retainCommandArtifact } from "./command-artifact.ts";
@@ -2692,6 +2692,19 @@ export function createRunnerQueue(input: {
           }
           const ran = new Set(runIds);
           const events = log.events({ operationId: operation.id }).map((row) => row.event);
+          const setup = setupMs === undefined ? {} : { setupMs };
+          if (failure && failure.evidence.failures.length > 0) {
+            const finished = new Map(events.flatMap((event) =>
+              event.type === "run_finished" && ran.has(event.runId) ? [[event.runId, event] as const] : []));
+            if (failure.evidence.failures.every((entry) => {
+              if (entry.outcome === "spawn_failure") return true;
+              const ownBlock = checkFailureBlock(failure.message, entry.checkIndex);
+              const ownText = ownBlock || (failure.evidence.failures.length === 1 ? failure.message : "");
+              return isHostResourceExhaustion(ownText, entry.runId ? finished.get(entry.runId) : undefined);
+            })) {
+              return { status: "infrastructure", reason: `release checks at ${commit.slice(0, 12)} hit host resource limits: ${message(failure).slice(0, 1000)}`, ...setup };
+            }
+          }
           const suites: Record<string, SuiteState> = {};
           for (const event of events) if (event.type === "test_report" && ran.has(event.runId) && event.status === "recorded")
             for (const entry of event.outcomes ?? []) if (suites[entry.suite] !== "failed") suites[entry.suite] = entry.outcome;
@@ -2705,7 +2718,6 @@ export function createRunnerQueue(input: {
             }
           }
           const built = await awaitBuild(building, signal);
-          const setup = setupMs === undefined ? {} : { setupMs };
           const checks: Exclude<BatchRun, { status: "infrastructure" }> = failure
             ? { status: "failed", failedChecks: failure.evidence.failures.map((entry) => indexes[entry.checkIndex]!), command: failure.evidence.command,
                 suites, failingTests: boundedTests(events.flatMap((event) => event.type === "run_finished" && ran.has(event.runId) ? event.failingTests ?? [] : [])),

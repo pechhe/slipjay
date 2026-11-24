@@ -61,6 +61,12 @@ test("classifies terminal precedence, rebase conflicts, verification infrastruct
     paused: false, held: false, run: { runId: "r", command: "bun test", host: "runner", startedAt: "now", testBodyRan: true },
   }).cause, "gate");
   assert.equal(classify(failed("verifying", "executor lost connection")).cause, "infrastructure");
+  assert.equal(classify(failed("verifying", "Required verification failed (nonzero_exit)", "'bun run check' hit the 8G memory cap (YARDSMITH_HEAVY_CHECK_MEMORY_MAX); terminating it and its children")).cause, "infrastructure");
+  assert.equal(classify(failed("verifying", "Required verification failed (nonzero_exit)", "heavy-check lock still held by pid 1234 after 1800s; giving up")).cause, "infrastructure");
+  assert.equal(classify(failed("verifying", "Required verification failed (nonzero_exit)", 'release-check resources: {"phase":"finish","oomKills":1}')).cause, "infrastructure");
+  assert.equal(classifyFailure(failed("verifying", "Required verification failed (signal)"), {
+    paused: false, held: false, run: { runId: "r-sigkill", command: "bun test", host: "peach-box", startedAt: "now", signal: "SIGKILL", exitCode: null },
+  }).cause, "gate", "a bare SIGKILL without cgroup/OOM evidence stays a gate failure");
   assert.equal(classify(failed("publishing", "push failed"), { paused: false, held: true }).cause, "held");
   assert.equal(classify(failed("fetching", "fetch failed")).cause, "infrastructure");
 
@@ -207,6 +213,12 @@ test("the runner, a remote or a credential breaking is infrastructure by what th
   assert.equal(infrastructure("executor lost: ssh to machine peach-box (ssh ended by SIGKILL)"), "infrastructure");
   assert.equal(infrastructure("Remote executor unavailable (boat): boat resume: no answer from boat within 30s"), "infrastructure");
   assert.equal(infrastructure("jj --color=never git fetch failed: git@github.com: Permission denied (publickey)."), "infrastructure");
+  assert.equal(infrastructure("Landing gate 912af8081a3a: capacity unavailable: wait limit reached"), "infrastructure");
+  assert.equal(infrastructure("Batch check of 44f99cfcf49c stopped on infrastructure, not a regression: hit the 16G memory cap"), "infrastructure");
+  assert.equal(failureCategory({
+    reason: gateReason("error", "Failure cause: 'bun run test:release:batch' hit the 8G memory cap (YARDSMITH_HEAVY_CHECK_MEMORY_MAX)\nOutput tail (last 1 of 1 lines):\n'bun run test:release:batch' hit the 8G memory cap (YARDSMITH_HEAVY_CHECK_MEMORY_MAX); terminating it and its children"),
+    fact: factOf({ cause: "infrastructure", failureCauses: ["'bun run test:release:batch' hit the 8G memory cap (YARDSMITH_HEAVY_CHECK_MEMORY_MAX)"] }),
+  }).kind, "infrastructure");
   // A failed event in an infrastructure stage that names no breakage decides nothing.
   assert.equal(infrastructure("b5cb02eb8006 is already on master"), "unresolved");
   assert.equal(infrastructure("Invalid reset identity, deadline or interval"), "unresolved");

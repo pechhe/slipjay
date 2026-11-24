@@ -76,6 +76,37 @@ const isExecutorLoss = (event: Extract<OperationEvent, { type: "failed" }>): boo
   /\b(?:spawn(?:ing)?[ _](?:error|failed|failure)|enoent|executor (?:lost|unavailable|disconnected)|connection to executor (?:lost|closed)|worker exited unexpectedly|runner restarted)\b/i
     .test(`${event.reason}\n${event.output ?? ""}`);
 
+const HOST_RESOURCE_EXHAUSTION = new RegExp([
+  "hit the \\S+ memory cap \\(YARDSMITH_HEAVY_CHECK_MEMORY_MAX\\)",
+  "heavy-check lock still held by pid .+ giving up",
+  "lost its parent \\(pid \\d+\\); terminating",
+  "Memory cgroup out of memory",
+  "Failed with result 'oom-kill'",
+  'release-check resources: .*"oomKills":[1-9]',
+  "capacity unavailable: wait limit reached",
+].join("|"), "i");
+
+/** Extract the `Check N (...):` summary section for one 0-based check index from a `RequiredVerificationError` message. */
+export function checkFailureBlock(message: string, checkIndex: number): string {
+  const header = `Check ${checkIndex + 1} (`;
+  const lines = message.split("\n");
+  const start = lines.findIndex((line) => line.startsWith(header));
+  if (start < 0) return "";
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (/^(?:Check \d+ \(|… omitted )/.test(lines[i]!)) { end = i; break; }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+/** Whether a check died from an explicit host cgroup memory ceiling, OOM kill or admission lock exhaustion rather than its source. */
+export const isHostResourceExhaustion = (
+  text: string,
+  run?: { failureCauses?: string[] },
+): boolean =>
+  HOST_RESOURCE_EXHAUSTION.test(text)
+  || Boolean(run?.failureCauses?.some((cause) => HOST_RESOURCE_EXHAUSTION.test(cause)));
+
 /** Classify only facts present in the terminal event and supplied run context. */
 export function classifyFailure(
   event: Extract<OperationEvent, { type: "failed" | "declined" | "cancelled" | "superseded" }>,
@@ -109,7 +140,9 @@ export function classifyFailure(
   if (event.stage === "rebasing")
     return fact(/\bconflict(?:s|ed|ing)?\b/i.test(`${event.reason}\n${event.output ?? ""}`) ? "conflict" : "infrastructure");
   if (verification) {
-    if (isExecutorLoss(event) || (isTimeout(event, context.run) && !(context.run?.testBodyRan === true || parsed.testBodyRan))) return fact("infrastructure");
+    if (isExecutorLoss(event)
+      || isHostResourceExhaustion(`${event.reason}\n${event.output ?? ""}`, context.run)
+      || (isTimeout(event, context.run) && !(context.run?.testBodyRan === true || parsed.testBodyRan))) return fact("infrastructure");
     return fact("gate");
   }
   return fact("infrastructure");
@@ -124,6 +157,7 @@ const INFRASTRUCTURE = new RegExp([
   "git fetch failed", "Could not fetch", "Permission denied \\(publickey\\)", "Push of .+ failed", "Exact-parent publication failed",
   "runner restarted", "Remote executor unavailable", "executor lost", "not installed for this candidate", "database or disk is full", "Rate limit exceeded",
   "timed out after \\d+ ?ms", "Pre-verification timed out", "builder stayed paused", "failed to list workers", "transport .*Unavailable",
+  "capacity unavailable: wait limit reached", "infrastructure, not a regression",
 ].join("|"), "i");
 
 /** What the runner itself wrote about a failure: the reason without the captured-output sections (`Failing tests`, `First error`, `Output tail`...) of each check, which a check's own text fills. */
@@ -171,6 +205,8 @@ export function failureCategory(input: { reason: string; fact: ClassifiedFact; l
   if (fact.cause === "conflict") return is("moved_base", `the rebase onto the moved integration branch conflicted: ${firstLine(reason.split("\n").slice(1).join("\n")) || firstLine(reason)}`);
   if (MOVED_BASE.test(reason)) return is("moved_base", firstLine(reason));
   if (INFRASTRUCTURE.test(runnerText(reason))) return is("infrastructure", firstLine(reason));
+  if (fact.cause === "infrastructure" && isHostResourceExhaustion(reason, fact))
+    return is("infrastructure", fact.failureCauses?.[0] ?? namedError(reason) ?? firstLine(reason));
   if (fact.cause === "gate") {
     const timedOut = /^Failure: [a-z ]*timeout/m.test(reason);
     const tests = fact.failingTests.length;
