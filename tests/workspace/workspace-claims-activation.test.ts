@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, vi } from "vite-plus/test";
 import { project } from "../support/workspace-project.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { activateWorkspaceClaims, requireWorkspaceClaimActivation, workspaceClaimCapability, managedCleanupInventory } from "../../src/lib/workspace/workspace-claim-activation.ts";
+import { stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { claimController } from "../../src/lib/workspace/workspace-claim-identity.ts";
 import { workspaceClaimStatus } from "../../src/lib/workspace/workspace-claims.ts";
 
@@ -59,6 +60,23 @@ test("activation refuses old and unknown managed workers, then succeeds after th
     await requireWorkspaceClaimActivation(ready.activationId, async () => ({ complete: true, pids: [] }));
     await assert.rejects(requireWorkspaceClaimActivation("old-capability", async () => ({ complete: true, pids: [] })), { code: "CLAIM_CAPABILITY_REQUIRED" });
   } finally { old.kill(); const exited = once(foreign, "exit"); foreign.kill(); await exited; await f.dispose(); }
+});
+
+test("activation ignores a cleanup worker's unfinished temp file but still refuses a corrupt record", async () => {
+  const f = await project();
+  try {
+    const workers = join(stateHome(), "managed-cleanup-workers");
+    await mkdir(workers, { recursive: true });
+    const tmp = join(workers, "e8fef072-0000-4000-8000-000000000000.json.b8a87fa1-0000-4000-8000-000000000000.tmp");
+    await writeFile(tmp, "");
+    const none = async () => ({ complete: true, pids: [] });
+    await activateWorkspaceClaims(none, immediate);
+    const corrupt = join(workers, "corrupt.json");
+    await writeFile(corrupt, "");
+    await assert.rejects(activateWorkspaceClaims(none, immediate), { code: "CLAIM_ACTIVATION_UNKNOWN" });
+    await rm(corrupt);
+    await activateWorkspaceClaims(none, immediate);
+  } finally { await f.dispose(); }
 });
 
 test("custody operations let a concurrently starting slipjay command announce instead of refusing it", async () => {

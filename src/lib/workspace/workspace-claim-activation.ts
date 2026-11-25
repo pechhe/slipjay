@@ -88,7 +88,8 @@ function sampledWorkerExited(pid: number): boolean {
 async function announcedControllers(): Promise<ClaimController[]> {
   const announced: ClaimController[] = [];
   try {
-    for (const name of await readdir(workersHome())) {
+    // Only completed records count: writeWorkspaceJson's `<file>.<uuid>.tmp` is in flight or orphaned, never a record.
+    for (const name of (await readdir(workersHome())).filter((entry) => entry.endsWith(".json"))) {
       // A record removed between listing and reading is a worker finishing, not an unreadable one.
       const text = await readFile(join(workersHome(), name), "utf8").catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return null;
