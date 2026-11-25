@@ -59,7 +59,11 @@ export const managedCleanupInventory: CleanupInventoryReader = async () => {
       // ps appends the environment after argv; use its final HOME, never log this output.
       const homes = [...environment.stdout.matchAll(/(?:^|\s)HOME=([^\s]*)/g)];
       const home = homes.at(-1)?.[1];
-      if (home === undefined) return { complete: false, pids };
+      // A candidate that exited after listing can print nothing (exit 0); only a live one with unreadable env is unknown.
+      if (home === undefined) {
+        if (sampledWorkerExited(pid)) continue;
+        return { complete: false, pids };
+      }
       if (home === process.env.HOME) pids.push(pid);
     }
     return { complete: true, pids };
