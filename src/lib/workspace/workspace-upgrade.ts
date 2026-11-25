@@ -303,6 +303,12 @@ async function runnerUnit(): Promise<RunnerUnit> {
 /** Whether the unit's command runs the runner slot's launcher: the only code a runner may run. */
 const runsRunnerSlot = (execStart: string): boolean => execStart.includes(join(runnerSlotPath(), LAUNCHER));
 
+/** Whether this host's runner unit exists and runs the runner slot: the hosts whose hourly pass upgrades it too. */
+export async function hasManagedRunnerInstall(): Promise<boolean> {
+  const unit = await runnerUnit();
+  return unit.state === "unit" && runsRunnerSlot(unit.execStart);
+}
+
 /** What to run when a unit does not run the runner slot, and why it must. */
 const setupRunnerRefusal = (execStart: string): string => `the slipjay-runner unit runs ${execStart}, not the runner install `
   + `(${join(runnerSlotPath(), LAUNCHER)}): run scripts/setup-runner.sh to point the unit at it, then \`slipjay upgrade --runner\``;

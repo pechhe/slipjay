@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, totalmem } from "node:os";
 import { join } from "node:path";
 import { readMachineConfig } from "../policy/machine-config.ts";
 import { CAPACITY_CLASSES, type CapacityClass, type CapacityOwner, type CapacityPolicy, type CapacityReading, type CapacityRequest } from "./host-capacity.ts";
@@ -10,8 +10,26 @@ import type { CapacityObservation } from "./host-capacity-store.ts";
 const GiB = 1024 ** 3;
 export const capacityStorePath = () => join(homedir(), ".slipjay", "host-budget.sqlite");
 
+const LARGE_HOST_BYTES = 96 * GiB;
+/** What a kind of work is expected to hold, unconfigured, on any host. */
+const BASELINE_TYPICAL: Record<CapacityClass, number> = { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 4 * GiB };
+
+/** Unconfigured ceilings: a host of 96 GiB or more can afford larger ones than a small host. */
+export function defaultCapacityProfiles(hostMemoryBytes: number = totalmem()): Record<CapacityClass, number> {
+  return hostMemoryBytes >= LARGE_HOST_BYTES
+    ? { landing: 32 * GiB, release: 32 * GiB, image: 24 * GiB, agent: 32 * GiB, audit: 32 * GiB, preview: 4 * GiB }
+    : { ...BASELINE_TYPICAL };
+}
+
+/** Unconfigured typical sizes: the baseline, never above the ceiling in force. */
+export function defaultCapacityTypical(profiles: Record<CapacityClass, number> = defaultCapacityProfiles(), hostMemoryBytes: number = totalmem()): Record<CapacityClass, number> {
+  const ceilings = profiles ?? defaultCapacityProfiles(hostMemoryBytes);
+  return Object.fromEntries(CAPACITY_CLASSES.map((lane) => [lane, Math.min(BASELINE_TYPICAL[lane], ceilings[lane])])) as Record<CapacityClass, number>;
+}
+
 /** Explicit opt-in, host-owned policy. An invalid configuration is an error, not an unconfigured host. */
-export function readCapacityPolicy(config: Record<string, unknown> = readMachineConfig()): CapacityPolicy | null {
+export function readCapacityPolicy(config: Record<string, unknown> = readMachineConfig(), options: { hostMemoryBytes?: number } = {}): CapacityPolicy | null {
+  const hostMemoryBytes = options.hostMemoryBytes ?? totalmem();
   const raw = config.hostBudget;
   if (raw === undefined) return null;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("hostBudget must be an object");
@@ -34,9 +52,12 @@ export function readCapacityPolicy(config: Record<string, unknown> = readMachine
     }
     return into;
   };
-  const profiles = sizes("profiles", { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 4 * GiB });
-  // Unconfigured, a kind of work counts at its whole ceiling, as before SJ-244.
-  const typical = sizes("typical", { ...profiles });
+  const profiles = sizes("profiles", defaultCapacityProfiles(hostMemoryBytes));
+  // Unconfigured, a kind of work counts at the baseline size, or its ceiling when that is lower. A ceiling the host set itself
+  // is counted whole, as it always was: only the defaults this file raises are kept from raising what work typically holds.
+  const configuredProfiles = input.profiles && typeof input.profiles === "object" ? Object.keys(input.profiles) : [];
+  const baseline = defaultCapacityTypical(profiles, hostMemoryBytes);
+  const typical = sizes("typical", Object.fromEntries(CAPACITY_CLASSES.map((lane) => [lane, configuredProfiles.includes(lane) ? profiles[lane] : baseline[lane]])) as Record<CapacityClass, number>);
   for (const lane of CAPACITY_CLASSES) {
     if (typical[lane] > profiles[lane]) throw new Error(`hostBudget.typical.${lane} must not exceed its profile`);
   }

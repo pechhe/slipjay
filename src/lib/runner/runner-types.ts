@@ -483,7 +483,8 @@ export interface OperationLog {
   releaseState(now?: Date): Pick<QueueSnapshot, "observedAt" | "repositories">;
   latestSeq(): number;
   /** Events after `afterSeq` (exclusive), optionally for one operation, in seq order. */
-  events(options?: { operationId?: string; afterSeq?: number; limit?: number }): StoredEvent[];
+  /** `since` (ISO time) and `repo` keep only operations submitted since then (of that repository), plus operations that never submit. */
+  events(options?: { operationId?: string; afterSeq?: number; limit?: number; since?: string; repo?: string }): StoredEvent[];
   operation(id: string): Operation | null;
   /**
    * A persisted landing request, including terminal operations, scoped to its repository, while the ledger keeps the

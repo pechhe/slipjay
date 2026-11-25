@@ -221,7 +221,8 @@ const gitRoot = (cwd: string): Promise<string> => {
 export async function fetchIntegrationIfMoved(cwd: string, remote: string, branch: string, git?: string): Promise<boolean> {
   // jj's own Git repository and Git: a checkout need not be colocated, and jj may run Git through a wrapper.
   const gitDirectory = await gitRoot(cwd);
-  const listed = await run(git ?? await jjGitExecutable(cwd), ["--git-dir", gitDirectory, "ls-remote", remote, `refs/heads/${branch}`], { cwd });
+  const executable = git ?? await jjGitExecutable(cwd);
+  const listed = await retryRemoteFetch(() => run(executable, ["--git-dir", gitDirectory, "ls-remote", remote, `refs/heads/${branch}`], { cwd }), remotePushRetryDelaysMs);
   const remoteTip = listed.code === 0 ? listed.stdout.trim().split(/\s+/)[0] : undefined;
   const tracked = remoteTip ? await revisionFacts(cwd, `${branch}@${remote}`, { ignoreWorkingCopy: true }).then((facts) => facts.commitId, () => undefined) : undefined;
   if (remoteTip && remoteTip === tracked) return false;

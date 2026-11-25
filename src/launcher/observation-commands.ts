@@ -22,7 +22,8 @@ export async function runMetrics(rest: string[]): Promise<void> {
   if (flags.failures ? !flags.repo || !flags.since || (flags.until !== undefined && first !== undefined) : flags.until !== undefined || first !== undefined) throw new Error(usage);
   const location = runnerLocation();
   if (!location) throw new Error("Metrics requires a runner location");
-  const events = await readMetricsEvents(location);
+  // Failure classes read around a window's edges, so only the plain metrics narrow the read.
+  const events = await readMetricsEvents(location, process.env, flags.failures ? {} : { since: new Date(since).toISOString(), ...flags.repo ? { repo: flags.repo } : {} });
   if (flags.failures) {
     const iso = (value: string) => new Date(value).toISOString();
     const report = landingFailures(events, flags.repo!, { since: iso(since), ...flags.until ? { until: iso(flags.until) } : {}, ...first ? { first } : {} });

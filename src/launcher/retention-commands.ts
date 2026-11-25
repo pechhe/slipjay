@@ -11,7 +11,7 @@ import { hostDisk } from "../lib/host-disk/host-disk.ts";
 import type { HostDiskOutcome } from "../lib/host-disk/host-disk.ts";
 import { diskLines, diskReadBuild } from "./disk-command.ts";
 import { configuredUpgradeSource } from "../lib/policy/machine-config.ts";
-import { upgradeMachine } from "../lib/workspace/workspace-upgrade.ts";
+import { hasManagedRunnerInstall, upgradeMachine } from "../lib/workspace/workspace-upgrade.ts";
 import type { UpgradeOutcome } from "../lib/workspace/workspace-upgrade.ts";
 
 /** What `prune --empty` (with `emptyIdleMs: 0`) or the automatic sweep would do now, changing nothing. */
@@ -183,6 +183,13 @@ export async function runMaintain(rest: string[]): Promise<void> {
     try { upgrade = await upgradeMachine({ waitForInstallLock: false }); }
     catch (error) { upgrade = { slot: "client", from: null, to: null, action: "failed", reason: error instanceof Error ? error.message : String(error), command: null }; }
   }
+  // A host whose runner unit runs the runner slot keeps that slot current too; it never fails the pass either.
+  let runnerUpgrade: UpgradeOutcome | null = null;
+  if (upgrade !== null) {
+    try {
+      if (await hasManagedRunnerInstall()) runnerUpgrade = await upgradeMachine({ slot: "runner", waitForInstallLock: false });
+    } catch (error) { runnerUpgrade = { slot: "runner", from: null, to: null, action: "failed", reason: error instanceof Error ? error.message : String(error), command: null }; }
+  }
   // A retirement whose process died before it destroyed anything left a fence that refuses every
   // claim on that checkout for ever. The hourly pass is where those are proved harmless and released.
   const retirementFences = await releaseAbandonedRetirementFences();
@@ -226,13 +233,14 @@ export async function runMaintain(rest: string[]): Promise<void> {
     try { eviction = (await evictIdleWorkspaces(process.cwd())).outcome; }
     catch (error) { evictionError = error instanceof Error ? error.message : String(error); }
   }
-  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, retirementFences, requests: outcomes, evictions: eviction, ...evictionError === null ? {} : { evictionError }, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError } }, null, 2));
+  if (json) console.log(JSON.stringify({ ...upgrade === null ? {} : { upgrade }, ...runnerUpgrade === null ? {} : { runnerUpgrade }, retirementFences, requests: outcomes, evictions: eviction, ...evictionError === null ? {} : { evictionError }, ...disk === null ? {} : { disk }, ...diskError === null ? {} : { diskError }, ...primaryCheckout === null ? {} : { primaryCheckout }, ...primaryCheckoutError === null ? {} : { primaryCheckoutError } }, null, 2));
   else {
-    if (upgrade) {
+    for (const [label, outcome] of [["upgrade", upgrade], ["runner upgrade", runnerUpgrade]] as const) {
+      if (!outcome) continue;
       // `upgraded` names what it moved between, `current` the install the slot already had.
-      const detail = upgrade.reason ?? (upgrade.action === "upgraded" && upgrade.from && upgrade.to
-        ? `${upgrade.from.slice(0, 12)} → ${upgrade.to.slice(0, 12)}` : upgrade.to?.slice(0, 12) ?? "");
-      (upgrade.action === "failed" ? console.error : console.log)(`upgrade\t${upgrade.action}\t${detail}`);
+      const detail = outcome.reason ?? (outcome.action === "upgraded" && outcome.from && outcome.to
+        ? `${outcome.from.slice(0, 12)} → ${outcome.to.slice(0, 12)}` : outcome.to?.slice(0, 12) ?? "");
+      (outcome.action === "failed" ? console.error : console.log)(`${label}\t${outcome.action}\t${detail}`);
     }
     for (const entry of retirementFences) console.log(`released retirement fence\t${entry.path}\t${entry.reason}`);
     // A request that could not be read has no workspace path to name, so it names the request instead.

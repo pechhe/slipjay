@@ -173,7 +173,11 @@ export function createRunnerHandler(input: {
       const since = Number(raw);
       if (since > input.log.latestSeq()) return json({ error: "Cursor is ahead of runner log" }, 409);
       if (request.headers.get("accept")?.includes("text/event-stream")) return globalEventStream(input.log, since, request.signal);
-      const events = input.log.events({ afterSeq: since, limit: Number(bound) + 1 });
+      // `submittedSince` (ISO) and `repo` narrow the read to a metrics window; a runner without them answers every event.
+      const submittedSince = url.searchParams.get("submittedSince") ?? undefined;
+      const repo = url.searchParams.get("repo") ?? undefined;
+      if (submittedSince !== undefined && !Number.isFinite(Date.parse(submittedSince))) return json({ error: "Invalid submittedSince" }, 400);
+      const events = input.log.events({ afterSeq: since, limit: Number(bound) + 1, ...submittedSince === undefined ? {} : { since: new Date(submittedSince).toISOString() }, ...repo === undefined ? {} : { repo } });
       const hasMore = events.length > Number(bound);
       if (hasMore) events.pop();
       return json({ events, nextSeq: events.at(-1)?.seq ?? since, hasMore });

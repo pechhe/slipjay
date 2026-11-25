@@ -48,6 +48,19 @@ const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEve
   "provenance", "build_admitted", "build_receipt", "evidence_expired", "submission_request",
   "batch_started", "batch_run", "batch_outcome", "batch_routed", "batch_unrouted"]);
 
+/** The read of a metrics window (see `events`); exported so a test can prove its plan. */
+export const metricsWindowSql = (repo: boolean): string => `SELECT seq, operation_id, at, data FROM events
+  WHERE operation_id IN (
+    SELECT operation_id FROM events WHERE type = 'submitted' AND at >= ?${repo ? " AND lower(json_extract(data, '$.repo')) = ?" : ""}
+    UNION SELECT '${RUNNER_CONTROL_ID}'
+    UNION SELECT operation_id FROM events WHERE type = 'client_operation' AND at >= ?${repo ? " AND lower(json_extract(data, '$.repo')) = ?" : ""}
+    UNION SELECT operation_id FROM events WHERE type = 'client' AND at >= ?)
+  AND seq > ? ORDER BY seq LIMIT ?`;
+
+/** Pages one prune hands back, and the free bytes a pre-incremental ledger needs before a VACUUM converts it. */
+const RECLAIM_PAGES_PER_PASS = 4096;
+const CONVERT_FREE_BYTES = 64 * 1024 * 1024;
+
 /**
  * Open the append-only ledger. `projections` are the interpretations its callers report: classification on
  * append, a landing's outcome, snapshot watch timing, Build's delivery state and short-landing classes. The
@@ -56,6 +69,8 @@ const LASTING_EVENTS: ReadonlySet<OperationEvent["type"]> = new Set<OperationEve
  */
 export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKERS, deployWorkers = RUNNER_DEFAULT_DEPLOY_WORKERS, separateDeploys = true, lane = (repo: string) => repo, depth = () => 1, shortLandingP90Ms }: OperationLogOptions = {}, projections: OperationLogProjections = {}): OperationLog {
   const db = new DatabaseSync(path);
+  // Incremental auto-vacuum only takes effect on a database with no tables yet; an existing ledger converts in `pruneHistory`.
+  if (Number((db.prepare("PRAGMA page_count").get() as { page_count: number }).page_count) === 0) db.exec("PRAGMA auto_vacuum = INCREMENTAL");
   if (path !== ":memory:") {
     db.exec("PRAGMA journal_mode = WAL");
     // Another writer, such as a second runner or a client's repair, holds the write lock only briefly;
@@ -72,6 +87,8 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     type TEXT NOT NULL,
     data TEXT NOT NULL
   ); CREATE INDEX IF NOT EXISTS events_operation_id ON events(operation_id); CREATE INDEX IF NOT EXISTS events_type ON events(type); CREATE INDEX IF NOT EXISTS events_at ON events(at);
+    -- The operations submitted since a time, which a metrics window reads instead of the whole ledger.
+    CREATE INDEX IF NOT EXISTS events_type_at ON events(type, at);
     -- One event of one operation, such as the submission a landed event belongs to: keyed by operation alone, each lookup
     -- reads every event of the operation, test reports included, which made a repository's landings 0.3 s (SJ-200). Type
     -- first also answers a scan of one type's operations from the index alone.
@@ -97,9 +114,20 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     WHERE operation_id = ? AND seq > ? ORDER BY seq LIMIT ?`);
   const maxSeq = db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events");
   const latestSeq = () => Number((maxSeq.get() as { seq: number }).seq);
+  // A window keeps whole operations: those submitted since `since` (of `repo`), the runner's own control operation, and the
+  // clients' operations that began or reported since then, which a projection reads beside them. Every source is an index seek,
+  // so the outer read seeks each operation rather than walking the ledger from its first row.
+  const windowed = new Map<string, ReturnType<typeof db.prepare>>();
+  const windowedSelect = (repo: boolean) => {
+    let statement = windowed.get(repo ? "repo" : "all");
+    if (!statement) { statement = db.prepare(metricsWindowSql(repo)); windowed.set(repo ? "repo" : "all", statement); }
+    return statement;
+  };
   const events: OperationLog["events"] = (options = {}) => {
     const after = options.afterSeq ?? 0, limit = options.limit ?? -1;
-    const rows = options.operationId === undefined ? select.all(after, limit) : selectOperation.all(options.operationId, after, limit);
+    const rows = options.operationId === undefined && options.since !== undefined
+      ? options.repo === undefined ? windowedSelect(false).all(options.since, options.since, options.since, after, limit) : windowedSelect(true).all(options.since, options.repo.toLowerCase(), options.since, options.repo.toLowerCase(), options.since, after, limit)
+      : options.operationId === undefined ? select.all(after, limit) : selectOperation.all(options.operationId, after, limit);
     return (rows as EventRow[]).map((row) => ({
       seq: row.seq, operationId: row.operation_id, at: row.at,
       event: JSON.parse(row.data) as OperationEvent,
@@ -499,6 +527,19 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
     return projections.repositories(log, reporting, now);
   }
 
+  /**
+   * Give deleted pages back to the filesystem. An incremental-vacuum ledger frees a bounded slice per pass; a ledger created
+   * before that mode has no way to shrink but a VACUUM, which converts it once it holds enough free pages to be worth one.
+   */
+  function reclaimSpace(): void {
+    if (path === ":memory:") return;
+    const pragma = (name: string) => Number(Object.values(db.prepare(`PRAGMA ${name}`).get() as Record<string, number>)[0]);
+    try {
+      if (pragma("auto_vacuum") === 2) db.exec(`PRAGMA incremental_vacuum(${RECLAIM_PAGES_PER_PASS})`);
+      else if (pragma("freelist_count") * pragma("page_size") >= CONVERT_FREE_BYTES) db.exec("PRAGMA auto_vacuum = INCREMENTAL; VACUUM");
+    } catch { /* a reader or lock holds the file: the next pass retries */ }
+  }
+
   const log: OperationLog = {
     append,
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -591,6 +632,7 @@ export function openOperationLog(path: string, { workers = RUNNER_DEFAULT_WORKER
         events += remove("seq = ?", row.seq);
       }
       if (events) { projection = undefined; for (const entry of cached) entry.clear(); }
+      reclaimSpace();
       return { events, operations };
     },
     // Build's export sends only this, after every few events: it never needs the queue, its timing or the receipts (SJ-200).

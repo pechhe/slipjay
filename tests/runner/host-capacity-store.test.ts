@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "vite-plus/test";
 import { openCapacityStore } from "../../src/lib/runner/host-capacity-store.ts";
 import { requireCappedPreview, stopYieldedPreview } from "../../src/lib/runner/host-capacity-command.ts";
-import { capacityOwnerState, currentCapacityOwner, processStart, readCapacityObservation, readCapacityPolicy, residentBytes } from "../../src/lib/runner/host-capacity-local.ts";
+import { capacityOwnerState, currentCapacityOwner, defaultCapacityProfiles, defaultCapacityTypical, processStart, readCapacityObservation, readCapacityPolicy, residentBytes } from "../../src/lib/runner/host-capacity-local.ts";
 import { decideCapacity, type CapacityClass, type CapacityPolicy, type CapacityRequest } from "../../src/lib/runner/host-capacity.ts";
 
 const policy: CapacityPolicy = {
@@ -117,6 +117,21 @@ test("malformed host policy cannot silently disable enforcement", () => {
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { image: 0 } } }), /integer/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", typical: { gpu: 1 } } }), /unknown/);
   assert.throws(() => readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 4096 }, typical: { preview: 8192 } } }), /exceed/);
+});
+
+test("unconfigured ceilings scale with the host's memory, whatever the machine running the test has", () => {
+  const GiB = 1024 ** 3;
+  const small = readCapacityPolicy({ hostBudget: { mode: "shadow" } }, { hostMemoryBytes: 64 * GiB })!;
+  assert.deepEqual(small.profiles, { landing: 24 * GiB, release: 16 * GiB, image: 16 * GiB, agent: 16 * GiB, audit: 16 * GiB, preview: 4 * GiB });
+  assert.deepEqual(small.typical, small.profiles);
+  const large = readCapacityPolicy({ hostBudget: { mode: "shadow" } }, { hostMemoryBytes: 96 * GiB })!;
+  assert.deepEqual(large.profiles, { landing: 32 * GiB, release: 32 * GiB, image: 24 * GiB, agent: 32 * GiB, audit: 32 * GiB, preview: 4 * GiB });
+  assert.deepEqual(large.typical, small.profiles, "a larger ceiling does not raise what work typically holds");
+  assert.deepEqual(defaultCapacityTypical(defaultCapacityProfiles(96 * GiB), 96 * GiB), large.typical);
+  const lowered = readCapacityPolicy({ hostBudget: { mode: "shadow", profiles: { landing: 8 * GiB } } }, { hostMemoryBytes: 128 * GiB })!;
+  assert.equal(lowered.profiles.landing, 8 * GiB);
+  assert.equal(lowered.typical.landing, 8 * GiB, "typical never exceeds a configured ceiling");
+  assert.equal(lowered.profiles.release, 32 * GiB, "unconfigured lanes still scale");
 });
 
 test("a landing takes room on real memory through the ledger once it has waited the take-room threshold", () => {
@@ -252,7 +267,7 @@ test("each poll records when its owner last asked, and a later poll keeps the or
 });
 
 test("a host with no typical sizes admits exactly as before: every job counts at its whole profile", () => {
-  const legacy = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 } } })!;
+  const legacy = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 } } }, { hostMemoryBytes: 64 * 1024 ** 3 })!;
   assert.deepEqual(legacy.typical, legacy.profiles);
   const GiB = 1024 ** 3;
   const preview = (id: string): CapacityRequest => ({ ...request(id), lane: "preview", bytes: 12 * GiB, admittedAt: 0 });
@@ -266,10 +281,11 @@ test("a host with no typical sizes admits exactly as before: every job counts at
 });
 
 test("an unconfigured typical size counts each kind of work at its whole ceiling", () => {
-  const configured = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 }, typical: { preview: 6 * 1024 ** 3 } } })!;
+  const configured = readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 }, typical: { preview: 6 * 1024 ** 3 } } }, { hostMemoryBytes: 64 * 1024 ** 3 })!;
   assert.equal(configured.typical.preview, 6 * 1024 ** 3);
   assert.equal(configured.profiles.preview, 12 * 1024 ** 3);
   assert.equal(configured.typical.landing, configured.profiles.landing);
+  assert.equal(readCapacityPolicy({ hostBudget: { mode: "enforce", profiles: { preview: 12 * 1024 ** 3 } } }, { hostMemoryBytes: 128 * 1024 ** 3 })!.typical.preview, 12 * 1024 ** 3, "a ceiling the host set is counted whole");
 });
 
 

@@ -1023,14 +1023,16 @@ export async function recordClientFactsInBackground(cwd: string, facts: ClientFa
   }
 }
 
-export async function readMetricsEvents(location: string, env: NodeJS.ProcessEnv = process.env): Promise<StoredEvent[]> {
+/** Every event, or with `since` and `repo` only those of operations submitted in that window (an older runner sends all, which the projection filters again). */
+export async function readMetricsEvents(location: string, env: NodeJS.ProcessEnv = process.env, window: { since?: string; repo?: string } = {}): Promise<StoredEvent[]> {
   const token = await runnerToken(env);
   const connection = await connectRunner(location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
   try {
     const events: StoredEvent[] = [];
     let cursor = 0;
+    const query = `${window.since === undefined ? "" : `&submittedSince=${encodeURIComponent(window.since)}`}${window.repo === undefined ? "" : `&repo=${encodeURIComponent(window.repo)}`}`;
     for (;;) {
-      const response = await request(connection.baseUrl, token, `/v1/metrics/events?since=${cursor}`);
+      const response = await request(connection.baseUrl, token, `/v1/metrics/events?since=${cursor}${query}`);
       if (!response.ok) throw new Error(`Runner metrics failed (${response.status})`);
       const page = await response.json() as { events: StoredEvent[]; nextSeq: number; hasMore: boolean };
       events.push(...page.events);
