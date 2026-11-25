@@ -59,3 +59,31 @@ test.each(["refs/heads/main (reason: failed)", "local file size: 503", "unable t
     expect(isTransientRemotePushFailure(detail)).toBe(false);
   },
 );
+
+test.each([
+  "kex_exchange_identification: read: Connection reset by peer",
+  "Connection closed by remote host",
+  "Connection closed by 140.82.112.4 port 22",
+  "client_loop: send disconnect: Broken pipe",
+  "mux_client_request_session: read from master failed",
+  "ssh: connect to host github.com port 22: Connection refused",
+  "ssh: connect to host github.com port 22: Network is unreachable",
+])("ssh transport failures are transient for fetch and push: %s", (detail) => {
+  expect(isTransientRemoteFetchFailure(detail)).toBe(true);
+  expect(isTransientRemotePushFailure(detail)).toBe(true);
+});
+
+test("a bare 'Could not read from remote repository' is a transient fetch failure", () => {
+  expect(isTransientRemoteFetchFailure("fatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.")).toBe(true);
+});
+
+test.each([
+  "Host key verification failed.",
+  "git@github.com: Permission denied (publickey).",
+  "ERROR: Repository not found.",
+  "fatal: 'x' does not appear to be a git repository",
+  "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+])("permanent ssh/git failures are never retried even with 'Could not read from remote repository': %s", (detail) => {
+  expect(isTransientRemoteFetchFailure(`${detail}\nfatal: Could not read from remote repository.`)).toBe(false);
+  expect(isTransientRemoteFetchFailure(detail)).toBe(false);
+});

@@ -5,6 +5,7 @@ const permanent = [
   /non[- ]fast[- ]forward|stale[- ](?:info|(?:remote )?ref)|fetch first|refs? (?:have|has) changed|refusing to push/i,
   /(?:cannot|could not|unable to|failed to) lock|\.lock\b|lock (?:ref|file|failed)|acquire (?:the )?lock/i,
   /permission denied|authentication failed|access denied|authorization failed|not authorized|protected branch|hook declined|repository rule/i,
+  /host key verification failed|does not appear to be a git repository|could not read username|terminal prompts disabled/i,
   /(?:\bHTTP(?:\/\d+(?:\.\d+)?)?(?: (?:status(?: code)?|error))?[ :]+|\b(?:status code|returned error)[ :\t]+)4\d\d\b/i,
 ];
 const receivePack = /remote:\s*(?:error:\s*unable to write file|fatal:\s*(?:unable to rename temporary|unpack)|(?:error:\s*)?internal server error)|\bunpack failed\b/i;
@@ -12,6 +13,10 @@ const transport = [
   /(?:\bHTTP(?:\/\d+(?:\.\d+)?)?(?: (?:status(?: code)?|error))?[ :]+|\b(?:status code|returned error)[ :\t]+)(?:500|502|503|504)\b/i,
   /connection (?:reset|timed out)|could not resolve host|early EOF|broken pipe|unexpected disconnect|RPC failed|the remote end hung up unexpectedly/i,
   /(?:TLS|SSL)[^\r\n]*handshake|SSL_connect|temporary failure in name resolution/i,
+  /kex_exchange_identification|ssh_exchange_identification|banner exchange/i,
+  /connection closed by (?:remote host|\S+ port \d+)/i,
+  /client_loop: send disconnect|mux_client_|control socket/i,
+  /ssh: connect to host .+ (?:timed out|connection refused|network is unreachable|no route to host|operation timed out)/i,
 ];
 
 /** Retry only known receive-pack/transport failures; explicit rejections take precedence. */
@@ -22,7 +27,7 @@ export function isTransientRemotePushFailure(detail: string): boolean {
 export function isTransientRemoteFetchFailure(detail: string): boolean {
   return !/\bnot found\b|(?:could not|couldn't|cannot) find remote ref/i.test(detail)
     && !permanent.some((pattern) => pattern.test(detail))
-    && (transport.some((pattern) => pattern.test(detail)) || /remote:\s*(?:error:\s*)?internal server error/i.test(detail));
+    && (transport.some((pattern) => pattern.test(detail)) || /could not read from remote repository/i.test(detail) || /remote:\s*(?:error:\s*)?internal server error/i.test(detail));
 }
 
 /** Fetches are safe to repeat; unlike pushes they do not move any remote ref. */

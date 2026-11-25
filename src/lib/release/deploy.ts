@@ -1,4 +1,5 @@
 import path from "node:path";
+import { remotePushRetryDelaysMs, retryRemoteFetch } from "../infra/remote-push.ts";
 import { runBoundedProcess, sanitizedProcessEnv } from "../infra/bounded-process.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import { readExactExecutionPolicy, withFinalizationSource } from "./post-integration-source.ts";
@@ -12,12 +13,40 @@ import { firstError, outputLines } from "../infra/verification-failure.ts";
 const CHANGES_LIMIT = 200;
 const URL_LINE = /^https?:\/\/\S+$/;
 
-async function git(gitDirectory: string, args: string[]): Promise<string> {
-  const result = await runBoundedProcess({ executable: "git", args: ["--git-dir", gitDirectory, ...args], cwd: gitDirectory,
-    env: sanitizedProcessEnv(), timeoutMs: 120_000, maxOutputBytes: 1024 * 1024 });
+const GIT_BOILERPLATE = /^(?:fatal: )?(?:please make sure you have the correct access rights|and the repository exists\.?)$/i;
+
+/** The failure's own lines: Git's generic access-rights boilerplate goes only when a real reason precedes it. */
+function gitFailureReason(output: string): string {
+  const lines = output.split("\n").map((line) => line.trim()).filter(Boolean);
+  const meaningful = lines.filter((line) => !GIT_BOILERPLATE.test(line));
+  return (meaningful.length ? meaningful : lines).join(" ").slice(-500);
+}
+
+function gitEnv(): NodeJS.ProcessEnv {
+  const env = sanitizedProcessEnv();
+  if (process.env.GIT_SSH_COMMAND) env.GIT_SSH_COMMAND = process.env.GIT_SSH_COMMAND;
+  return env;
+}
+
+async function runGit(gitDirectory: string, args: string[]): Promise<BoundedProcessResult> {
+  return runBoundedProcess({ executable: "git", args: ["--git-dir", gitDirectory, ...args], cwd: gitDirectory,
+    env: gitEnv(), timeoutMs: 120_000, maxOutputBytes: 1024 * 1024 });
+}
+
+function gitOutput(args: string[], result: BoundedProcessResult): string {
   if (result.exitCode !== 0 || result.timedOut || result.error || result.signal)
-    throw new Error(`git ${args[0]} failed: ${(result.stderr || result.stdout).trim().split("\n").slice(-2).join(" ")}`);
+    throw new Error(`git ${args[0]} failed: ${gitFailureReason((result.stderr || result.stdout).trim())}`);
   return result.stdout;
+}
+
+async function git(gitDirectory: string, args: string[]): Promise<string> {
+  return gitOutput(args, await runGit(gitDirectory, args));
+}
+
+/** A remote read (`ls-remote`, `fetch`): known transient transport failures are retried, permanent ones are not. */
+async function gitRemote(gitDirectory: string, args: string[], retryDelaysMs: readonly number[]): Promise<string> {
+  const attempt = async () => { const result = await runGit(gitDirectory, args); return { result, code: result.exitCode ?? 1, stderr: result.stderr, stdout: result.stdout }; };
+  return gitOutput(args, (await retryRemoteFetch(attempt, retryDelaysMs)).result);
 }
 
 /**
@@ -25,16 +54,16 @@ async function git(gitDirectory: string, args: string[]): Promise<string> {
  * working copy, which the landing lane owns: a commit landed elsewhere (a direct
  * landing) is fetched by id, objects only.
  */
-export async function ensureDeployCommit(gitDirectory: string, url: string, commitId: string): Promise<void> {
+export async function ensureDeployCommit(gitDirectory: string, url: string, commitId: string, retryDelaysMs: readonly number[] = remotePushRetryDelaysMs): Promise<void> {
   if (await git(gitDirectory, ["cat-file", "-e", `${commitId}^{commit}`]).then(() => true, () => false)) return;
-  await git(gitDirectory, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url, commitId]);
+  await gitRemote(gitDirectory, ["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url, commitId], retryDelaysMs);
 }
 
 /** Refuse a commit that is not on the remote's integration branch: only landed work deploys. */
-export async function ensureOnIntegrationBranch(gitDirectory: string, url: string, branch: string, commitId: string): Promise<void> {
-  const tip = (await git(gitDirectory, ["ls-remote", url, `refs/heads/${branch}`])).split("\t")[0]?.trim();
+export async function ensureOnIntegrationBranch(gitDirectory: string, url: string, branch: string, commitId: string, retryDelaysMs: readonly number[] = remotePushRetryDelaysMs): Promise<void> {
+  const tip = (await gitRemote(gitDirectory, ["ls-remote", url, `refs/heads/${branch}`], retryDelaysMs)).split("\t")[0]?.trim();
   if (!tip || !/^[a-f0-9]{40,64}$/.test(tip)) throw new Error(`Could not read ${branch} on ${url}`);
-  await ensureDeployCommit(gitDirectory, url, tip);
+  await ensureDeployCommit(gitDirectory, url, tip, retryDelaysMs);
   if (!await git(gitDirectory, ["merge-base", "--is-ancestor", commitId, tip]).then(() => true, () => false))
     throw new Error(`${commitId.slice(0, 12)} is not on ${branch}; only landed commits deploy`);
 }

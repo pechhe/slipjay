@@ -350,7 +350,10 @@ on the schema before it: one whose new code reads what the migration adds.
    base. Returning a release uses the same retry limit, requiring the remote to still
    point to the release merge. Release fetches, including that confirmation fetch,
    retry known transient network or remote server errors at most twice (after 1 s and 3 s).
-   Permission, authentication, HTTP 4xx and missing refs are not retried.
+   Permission, authentication, HTTP 4xx and missing refs are not retried. A deploy's
+   `git ls-remote` and `git fetch` share this retry policy (transient SSH disconnects
+   included), use the runner's `GIT_SSH_COMMAND`, and keep the real SSH/Git error line
+   in the failure message rather than only Git's generic access-rights text.
    The runner's operation log records the release.
 
 ## Migration readiness
