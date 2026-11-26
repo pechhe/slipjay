@@ -4,7 +4,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
 import { TEST_SLICE, TEST_SCOPE_MAX_SECONDS } from "../support/executor.ts";
-import { alive, fixture, hanging, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { alive, fixture, hanging, test, until } from "./fixtures/queue-maintenance-fixture.ts";
 import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
 import { holdGate, queueFixture, verified } from "./fixtures/short-landings.ts";
 

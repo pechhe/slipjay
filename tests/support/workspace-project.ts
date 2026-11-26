@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { drainFixtureWorkers } from "./fixture-workers.ts";
 import { machineConfigPath } from "../../src/lib/workspace/workspace-paths.ts";
-import { setFixtureJjSetting } from "./jj-user-config.ts";
+import { fixtureJjConfig, setFixtureJjSetting } from "./jj-user-config.ts";
 
 // Workspace fixtures create checkouts and state under `homedir()`. Under the real
 // HOME they leak into ~/.pi and race live sessions, so a runner that skipped the
@@ -57,7 +57,7 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   await writeFile(join(repo, options.policyPath ?? "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: "main",
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLandingVerification: [{ executable: "node", args: ["-e", options.verify?.(verified) ?? recordCheckout(verified)] }],
+    requiredLandingVerification: [{ executable: "bun", args: ["-e", options.verify?.(verified) ?? recordCheckout(verified)] }],
     ...(options.generatedPaths === undefined ? {} : { generatedPaths: options.generatedPaths }),
     ...(options.postIntegration === undefined ? {} : { postIntegration: options.postIntegration }),
     ...options.policy,
@@ -68,10 +68,8 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   // Plain Git commits in fixture consumers must advance main. JJ clone detaches
   // HEAD, so retain Git clone + JJ init for both normal and shallow checkouts.
   git(["clone", "-q", ...options.shallow ? ["--depth", "1", `file://${remote}`] : [remote], repo], root);
+  fixtureJjConfig();
   jj(repo, ["git", "init", "--colocate"]);
-  // Workspace commands do not see JJ_USER/JJ_EMAIL, so the author lives in repository config.
-  jj(repo, ["config", "set", "--repo", "user.name", "Fixture"]);
-  jj(repo, ["config", "set", "--repo", "user.email", "fixture@example.com"]);
   jj(repo, ["bookmark", "track", "main", "--remote", "origin"]);
   const remoteFile = (path: string) => execFileSync("git", ["--git-dir", remote, "show", `main:${path}`], { encoding: "utf8" });
   return { root, repo, remote, verified, remoteFile, dispose: async () => { await drainFixtureWorkers(root); await stopFixtureProcesses(root); await rm(root, { recursive: true, force: true }); } };
@@ -83,7 +81,21 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
  * processes to exit, and kills what ignores the polite request.
  */
 async function stopFixtureProcesses(root: string): Promise<void> {
+  const uid = process.getuid?.();
   const running = (): number[] => {
+    if (process.platform === "linux") {
+      const found: number[] = [];
+      for (const entry of readdirSync("/proc")) {
+        if (!/^\d+$/.test(entry)) continue;
+        const pid = Number(entry);
+        if (pid === process.pid || pid === process.ppid) continue;
+        try {
+          if (uid !== undefined && statSync(`/proc/${entry}`).uid !== uid) continue;
+          if (readFileSync(`/proc/${entry}/cmdline`, "utf8").includes(root)) found.push(pid);
+        } catch { /* process exited or unreadable */ }
+      }
+      return found;
+    }
     try {
       return execFileSync("pgrep", ["-f", root], { encoding: "utf8" }).split("\n").filter(Boolean).map(Number).filter((pid) => pid !== process.pid);
     } catch { return []; }
@@ -94,7 +106,7 @@ async function stopFixtureProcesses(root: string): Promise<void> {
     if (!processes.length) return;
     for (const pid of processes) stop(pid, signal);
     const deadline = Date.now() + 5_000;
-    while (running().length && Date.now() < deadline) await new Promise((settle) => setTimeout(settle, 50));
+    while (running().length && Date.now() < deadline) await new Promise((settle) => setTimeout(settle, 15));
     if (!running().length) return;
   }
 }

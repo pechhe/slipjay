@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
+import { runnerConfigProblem } from "../../src/lib/runner/runner-config.ts";
 import type { RunnerConfig } from "../../src/lib/runner/runner-types.ts";
 
 const config = (places: unknown): RunnerConfig => ({ jj: { "user.name": "n", "user.email": "e@x" }, repos: {},

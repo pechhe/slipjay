@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { fixture, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, test, until } from "./fixtures/queue-maintenance-fixture.ts";
 
 const REPO = "fixture/repo";
 

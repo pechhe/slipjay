@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle, schedule, batchEvents } from "./fixtures/automatic-promotion.ts";
 import { batchCheck, localRemote, preemptionWaitMs } from "./fixtures/batch-check-fixture.ts";
 
@@ -14,15 +14,14 @@ serialTest("a confirm of a newer commit stops a scheduled batch's in-flight head
       releaseGates: (root) => [`${batchCheck(root)}
 const held = at("hold-head");
 while (fs.existsSync(held) && fs.readFileSync(held, "utf8") === process.env.SLIPJAY_RELEASE_HEAD)
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`],
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);`],
       recordBatchCheck: async () => { routed++; return { kind: "accepted", value: {} }; } });
   try {
     await f.land(f.submit(await f.candidate("zero.txt")));
     await settle(f);
     const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
     clock = promotedAt + 60_000;
-    await f.land(f.submit(await f.candidate("one.txt")));
-    const older = f.main();
+    const older = await f.seedLanded({ "one.txt": "one.txt\n" });
     await writeFile(join(f.root, "hold-head"), older);
 
     clock = promotedAt + 31 * 60_000;
@@ -84,11 +83,9 @@ test("a confirm arriving during the completed probe's remote finish leaves its v
     await f.land(f.submit(await f.candidate("zero.txt")));
     await settle(f);
     clock = Date.parse(f.log.releases(REPO)[0]!.submittedAt) + 60_000;
-    await f.land(f.submit(await f.candidate("break-a")));
-    culprit = f.main();
-    await f.land(f.submit(await f.candidate("second.txt")));
-    const second = f.main();
-    await f.land(f.submit(await f.candidate("third.txt")));
+    culprit = await f.seedLanded({ "break-a": "break-a\n" });
+    const second = await f.seedLanded({ "second.txt": "second.txt\n" });
+    await f.seedLanded({ "third.txt": "third.txt\n" });
     const original = await f.queue.requestBatchCheck(REPO, f.main());
     const signal = await finishing.promise;
     const waiting = await f.queue.requestBatchCheck(REPO, second);

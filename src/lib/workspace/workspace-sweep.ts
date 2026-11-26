@@ -10,7 +10,7 @@ import { inspectWorkspaces, lockOwnerAlive, metadataReadable, readLandingState, 
 import { mapBounded } from "./bounded-map.ts";
 import type { InspectedWorkspace } from "./workspace-state.ts";
 import { cleanupLandedWorkspace, describeRetention, forgetMissingCheckout, STALE_EDITS, landedCleanupChecks, missingCheckoutRefusal, removalRefusal, removeWorkspace, retainedWorkspaceMaterial, unsnapshottedEdits } from "./workspace-lifecycle.ts";
-import { artifactPublished } from "../landing/landing-steps.ts";
+import { artifactPublished } from "../landing/landing-remote.ts";
 import { describeHolders, processWorkingDirectories, within, workspaceHolders } from "./workspace-holders.ts";
 import { pruneWorkspaceState } from "./workspace-state-prune.ts";
 import { findOrphanedCheckouts, retireOrphanedCheckouts } from "./workspace-orphans.ts";

@@ -24,16 +24,16 @@ export async function releaseProject(options: {
       requiredReleaseVerification: [],
       ...(options.migrations ? { migrationFinalization: {
         mode: "late_bound_serialized", triggerPaths: ["schema"], artifactPaths: ["migrations"],
-        generate: { executable: "node", args: ["-e", ""] }, verify: { executable: "node", args: ["-e", ""] } } } : {}),
+        generate: { executable: "bun", args: ["-e", ""] }, verify: { executable: "bun", args: ["-e", ""] } } } : {}),
     },
   });
   const verifiedRelease = join(f.root, "release-verified.log");
   const policyPath = join(f.repo, "slipjay.json");
   const policy = JSON.parse(await readFile(policyPath, "utf8"));
   policy.requiredReleaseVerification = options.checks?.(verifiedRelease)
-    ?? [{ executable: "node", args: ["-e", recordCheckout(verifiedRelease)] }];
+    ?? [{ executable: "bun", args: ["-e", recordCheckout(verifiedRelease)] }];
   if (options.promotes) policy.deployments = { version: 1, environments: { production: { timeoutMs: 30_000,
-    projects: [{ name: "app", command: { executable: "node", args: ["-e", ""] }, activate: { executable: "node", args: ["-e", ""] } }] } } };
+    projects: [{ name: "app", command: { executable: "bun", args: ["-e", ""] }, activate: { executable: "bun", args: ["-e", ""] } }] } } };
   await writeFile(policyPath, JSON.stringify(policy));
   const git = (args: string[]) => execFileSync("git", args, { cwd: f.repo, stdio: "pipe" });
   git(["commit", "-qam", "Declare the release policy"]);

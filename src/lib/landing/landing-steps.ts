@@ -1,7 +1,15 @@
-import { primaryDependencyHost, refreshPrimaryDependencies } from "../workspace/primary-dependencies.ts";
-import type { RevisionFacts, WorkspaceContext } from "../infra/workspace-jj.ts";
 import type { CandidateContext, LandingIO } from "./landing-candidate.ts";
 import type { VerificationEvidence } from "../policy/verification-policy.ts";
+import { finalizePostIntegration } from "../release/post-integration-finalization.ts";
+import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
+import { jj, revisionExists, revisionFacts, run } from "../infra/workspace-jj.ts";
+import { readJsonOptional, statePath } from "../workspace/workspace-state.ts";
+import { isTransientRemotePushFailure, remotePushRetryDelaysMs } from "../infra/remote-push.ts";
+import { artifactPublished, assertSingleVisibleCopy, conflictedPaths, fetchIntegration, fetchIntegrationIfMoved, landingPreview, publicationRemote } from "./landing-remote.ts";
+import { ensureLandingDescription, finishLandedWorkspace, refreshPrimaryCheckoutDependencies, writeLandingState } from "./landing-client-steps.ts";
+
+export { artifactPublished, assertSingleVisibleCopy, conflictedPaths, fetchIntegration, fetchIntegrationIfMoved, landingPreview, publicationRemote } from "./landing-remote.ts";
+export { finishLandedWorkspace } from "./landing-client-steps.ts";
 
 /** Result of the push step that ends every landing. */
 export interface LandingPublication {
@@ -38,91 +46,8 @@ export type LandingRevision = { commitId: string; changeId: string; empty: boole
 /** The runner's seams into a candidate landing: its gate, and (in tests) a stand-in for migration finalization. */
 export type LandingAdapter = {
   finalizeCandidate?: (candidate: LandingRevision, base: LandingRevision) => Promise<LandingRevision>;
-  verify: (identity: { base: string; candidate: string }) => Promise<import("../policy/verification-policy.ts").VerificationEvidence>;
+  verify: (identity: { base: string; candidate: string }) => Promise<VerificationEvidence>;
 };
-
-import { mkdir } from "node:fs/promises";
-import { resolve } from "node:path";
-import { finishLanding } from "./landing-candidate.ts";
-import { finalizePostIntegration } from "../release/post-integration-finalization.ts";
-import { githubRepository, isUndescribed, withIssueTrailer } from "../build/issue-references.ts";
-import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
-import { jj, jjGitExecutable, revisionExists, revisionFacts, run, workspaceContext } from "../infra/workspace-jj.ts";
-import { trackerOf, workItemTitle } from "../build/tracker.ts";
-import type { BuildReader } from "../build/tracker.ts";
-import { stateHome } from "../workspace/workspace-paths.ts";
-import { readJsonOptional, readLandingState, statePath, workspaceMetadata } from "../workspace/workspace-state.ts";
-import { withWorkspaceTransaction, writeWorkspaceJson } from "../infra/workspace-transaction.ts";
-import { isTransientRemotePushFailure, remotePushRetryDelaysMs, retryRemoteFetch } from "../infra/remote-push.ts";
-
-/**
- * The steps a landing is made of, below the land command itself: preview,
- * description, verification, the landing record, post-integration and the push.
- * Workspace housekeeping reuses them to finish a landing whose integration stands.
- */
-
-async function writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string = "landed", operationId?: string): Promise<void> {
-  await mkdir(stateHome(), { recursive: true, mode: 0o700 });
-  const metadata = await workspaceMetadata(context.current.name);
-  const prior = await readLandingState(context.current.name, { readOnly: true });
-  const landedAt = new Date().toISOString();
-  await writeWorkspaceJson(statePath(context.current.name), {
-    version: 1, phase, operationId, cleanupPending: true, workspaceName: context.current.name, workspacePath: context.current.root,
-    integrationRoot: context.integration.root, integrationBranch: context.integrationBranch,
-    artifactCommitId: artifact.commitId, artifactChangeId: artifact.changeId,
-    artifactDescription: artifact.description, verification: verification.status,
-    verificationCommands: verification.passed, verificationEvidence: verification, landedAt,
-    workspaceImplementationChangeId: metadata?.implementationChangeId,
-    ...(prior?.publicationRecovery ? { publicationRecovery: prior.publicationRecovery } : {}),
-    // No archive period: a delivered checkout is eligible for cleanup at landing.
-    cleanupEligibleAt: landedAt,
-    ...(typeof metadata?.issueNumber === "number" ? { issueNumber: metadata.issueNumber } : {}),
-  });
-}
-
-export async function landingPreview(cwd: string = process.cwd(), options: { allowDefaultWorkspace?: boolean } = {}): Promise<{ context: WorkspaceContext; targetRevision: string; target: RevisionFacts; stat: string }> {
-  const context = await workspaceContext(cwd);
-  if (!context) throw new Error("Not inside a Jujutsu repository");
-  if (context.current.name === "default" && !options.allowDefaultWorkspace)
-    throw new Error("Landing requires an isolated jj workspace");
-  const current = await revisionFacts(cwd, "@");
-  const targetRevision = current.empty ? "@-" : "@";
-  const target = await revisionFacts(cwd, targetRevision);
-  if (target.conflict) throw new Error("The landing artifact has conflicts");
-  await assertSingleVisibleCopy(cwd, target);
-  const stat = await jj(cwd, ["diff", "--from", context.integrationBranch, "--to", targetRevision, "--stat"]);
-  return { context, targetRevision, target, stat };
-}
-
-/**
- * Refuses a target whose change has more than one visible commit, before landing describes, rebases or queues it.
- * jj cannot resolve a divergent change id, so a later step would otherwise fail with jj's bare "is divergent".
- * The refusal names each copy, the workspaces and bookmarks that keep it visible, and how to retire the others.
- */
-export async function assertSingleVisibleCopy(cwd: string, target: RevisionFacts): Promise<void> {
-  const names = async (revset: string, template: string) =>
-    (await jj(cwd, ["--ignore-working-copy", "log", "-r", revset, "--no-graph", "-T", `${template} ++ " "`])).split(/\s+/).filter(Boolean);
-  const copies = await names(`change_id(${target.changeId})`, "commit_id");
-  if (copies.length < 2) return;
-  const lines = await Promise.all(copies.map(async (commitId) => {
-    const workspaces = [...new Set(await names(`${commitId}:: & working_copies()`, 'working_copies.map(|w| w.name()).join(" ")'))].sort();
-    const bookmarks = [...new Set(await names(`${commitId}:: & bookmarks()`, 'local_bookmarks.map(|b| b.name()).join(" ")'))].sort();
-    const held = [...workspaces.map((name) => `workspace ${name}`), ...bookmarks.map((name) => `bookmark ${name}`)];
-    const which = commitId === target.commitId ? " (this workspace's candidate)" : "";
-    return `  ${commitId}${which}: kept visible by ${held.length ? held.join(", ") : "no workspace or bookmark (an earlier operation)"}`;
-  }));
-  const others = copies.filter((commitId) => commitId !== target.commitId);
-  throw new Error([
-    `Change ${target.changeId} is divergent: ${copies.length} visible commits share it, and landing needs exactly one.`,
-    ...lines,
-    `Keep ${target.commitId.slice(0, 12)} and retire the other copy: \`jj abandon ${others.join(" ")}\` if it is stale, or \`jj metaedit --update-change-id -r ${others.join(" -r ")}\` to keep it as a separate change. Then land again.`,
-  ].join("\n"));
-}
-
-/** The paths `revision` leaves conflicted, as `jj resolve --list` names them; none when it has no conflict. */
-export async function conflictedPaths(cwd: string, revision: string): Promise<string[]> {
-  return (await jj(cwd, ["resolve", "--list", "-r", revision]).catch(() => "")).split("\n").filter(Boolean).map((line) => line.split(/\s+/)[0]!);
-}
 
 async function assertStackConflictFree(cwd: string, branch: string, changeId: string): Promise<void> {
   const conflicts = await jj(cwd, [
@@ -155,81 +80,6 @@ async function prepareCandidateDependencies(cwd: string, context: CandidateConte
   if ((await revisionFacts(cwd, "@")).commitId === before && !await drift()) return;
   await jj(cwd, ["restore", "--from", candidate.commitId, "--into", "@"]);
   throw new Error("Dependency preparation changed the landing candidate's source; it was restored. Fix the install script and rerun landing");
-}
-
-/** `readBuild` reads a Build-tracked workspace's item title for a missing description. */
-async function ensureLandingDescription(cwd: string, context: CandidateContext, target: LandingRevision, readBuild?: BuildReader, onProgress: (line: string) => void = console.log): Promise<LandingRevision> {
-  const metadata = await workspaceMetadata(context.current.name);
-  const issueNumber = typeof metadata?.issueNumber === "number" ? metadata.issueNumber : null;
-  // The exact text `start` generated is no description: it is replaced, never published.
-  const generated = typeof metadata?.generatedDescription === "string" ? metadata.generatedDescription.trim() : "";
-  if (generated) {
-    const stack = await jj(cwd, ["--ignore-working-copy", "log", "-r", `(${context.integrationBranch}..${target.changeId}) ~ ${target.changeId}`, "--no-graph", "-T",
-      'change_id.short() ++ "\\t" ++ description.first_line() ++ "\\n"']);
-    const stale = stack.split("\n").map((line) => line.split("\t")).find(([, line]) => line?.trim() === generated);
-    if (stale) throw new Error(`Landing needs a real description for commit ${stale[0]}: it still has the generated placeholder "${generated}". Run \`jj describe -r ${stale[0]} -m "<what this change does>"\` and land again`);
-  }
-  // `revisionFacts` carries only the first line; the trailer and body are part of what is compared and rewritten.
-  const fullDescription = (await jj(cwd, ["--ignore-working-copy", "log", "-r", target.commitId, "--no-graph", "-T", "description"])).trim();
-  // A body written under the generated subject is kept; only that subject is replaced.
-  const [subject = "", ...bodyLines] = fullDescription.split("\n");
-  const placeholder = Boolean(generated) && subject.trim() === generated;
-  const body = placeholder ? bodyLines.join("\n").trim() : "";
-  let description = placeholder ? "" : fullDescription;
-  if (isUndescribed(description)) {
-    const issueDescription = issueNumber
-      ? await workItemTitle(context.integration.root, trackerOf(context.configuration), issueNumber, readBuild)
-      : null;
-    const taskDescription = typeof metadata?.task === "string" ? metadata.task.trim() : "";
-    description = (issueDescription?.trim() || taskDescription).slice(0, 500);
-    if (!description)
-      throw new Error(`Landing needs a description of the change: run \`jj describe -r ${target.changeId} -m "<what this change does>"\` and land again`);
-  }
-  if (body) description = `${description}\n\n${body}`;
-  // The landed commit names its Issue itself, so attribution survives machine-local state.
-  const remotes = issueNumber ? await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]).catch(() => "") : "";
-  const described = withIssueTrailer(description, issueNumber, githubRepository(remotes, context.configuration.remote), trackerOf(context.configuration));
-  if (described === fullDescription && fullDescription) return target;
-  await jj(cwd, ["describe", "-r", target.changeId, "-m", described]);
-  const submitted = await revisionFacts(cwd, target.changeId);
-  onProgress(`[description] given ${target.commitId}; submitting ${submitted.commitId} after updating the description`);
-  return submitted;
-}
-
-/** The remote this landing publishes to, or null when the repository declares none. */
-export function publicationRemote(context: { configuration: { remote?: string | null } }): string | null {
-  return context.configuration.remote ?? null;
-}
-
-export const fetchIntegration = (cwd: string, remote: string, branch: string, { ignoreWorkingCopy = false, ...options }: { timeoutMs?: number; ignoreWorkingCopy?: boolean } = {}): ReturnType<typeof import("../infra/workspace-command.ts").runWorkspaceCommand> =>
-  retryRemoteFetch(() => run("jj", ["--color=never", ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []), "git", "fetch", "--remote", remote, "--branch", branch], { ...options, cwd }), remotePushRetryDelaysMs);
-
-/** A checkout's own Git repository never moves, so it is read once per checkout (about 0.4 s a read, SJ-223). */
-const gitRoots = new Map<string, Promise<string>>();
-const gitRoot = (cwd: string): Promise<string> => {
-  let root = gitRoots.get(cwd);
-  if (!root) {
-    gitRoots.set(cwd, root = jj(cwd, ["--ignore-working-copy", "git", "root"]));
-    root.catch(() => gitRoots.delete(cwd));
-  }
-  return root;
-};
-
-/**
- * Fetch `branch` only when the remote's tip differs from the one `cwd` tracks, and say whether it fetched. `git ls-remote`
- * reads the remote as freshly as a fetch would, without jj importing every ref and recording an operation (SJ-200).
- */
-export async function fetchIntegrationIfMoved(cwd: string, remote: string, branch: string, git?: string): Promise<boolean> {
-  // jj's own Git repository and Git: a checkout need not be colocated, and jj may run Git through a wrapper.
-  const gitDirectory = await gitRoot(cwd);
-  const executable = git ?? await jjGitExecutable(cwd);
-  const listed = await retryRemoteFetch(() => run(executable, ["--git-dir", gitDirectory, "ls-remote", remote, `refs/heads/${branch}`], { cwd }), remotePushRetryDelaysMs);
-  const remoteTip = listed.code === 0 ? listed.stdout.trim().split(/\s+/)[0] : undefined;
-  const tracked = remoteTip ? await revisionFacts(cwd, `${branch}@${remote}`, { ignoreWorkingCopy: true }).then((facts) => facts.commitId, () => undefined) : undefined;
-  if (remoteTip && remoteTip === tracked) return false;
-  const fetched = await fetchIntegration(cwd, remote, branch);
-  if (fetched.code !== 0) throw new Error(`jj git fetch failed: ${(fetched.stderr || fetched.stdout).trim()}`);
-  return true;
 }
 
 /** Push the integration bookmark and confirm the remote-tracking bookmark contains the artifact. */
@@ -311,38 +161,10 @@ export async function completeLanding(cwd: string, context: { integrationBranch:
   return { ok: publication.ok, postIntegration, publication, timings: { ...timings, finishedAt: Date.now() } };
 }
 
-/** True when the landed artifact is on the declared remote, or when no publication applies. */
-export async function artifactPublished(cwd: string, context: { integrationBranch: string; configuration: { remote?: string | null } }, state: { artifactCommitId: string }, { fetch = true }: { fetch?: boolean } = {}): Promise<boolean> {
-  const remote = publicationRemote(context);
-  if (!remote) return true;
-  // Without the fetch, the answer is as of the last fetch: published then is published now.
-  if (fetch) await fetchIntegration(cwd, remote, context.integrationBranch);
-  return revisionExists(cwd, `${state.artifactCommitId} & ::${context.integrationBranch}@${remote}`);
-}
-
 /** What the landing candidate (landing-candidate.ts) needs from the land command. */
 export const landingIO: LandingIO = {
   landingPreview, ensureLandingDescription, jj,
   assertStackConflictFree, revisionFacts, prepareCandidateDependencies, writeLandingState,
   readJsonOptional, statePath,
-  refreshPrimaryDependencies: (root) => refreshPrimaryDependencies(root,
-    primaryDependencyHost(async (path) => (await revisionFacts(path, "@")).commitId)),
+  refreshPrimaryDependencies: refreshPrimaryCheckoutDependencies,
 };
-
-/**
- * The client's housekeeping after a landing, or a retry of it. Several sessions'
- * clients move the same primary checkout once their landings return, so this one
- * step is serialized on this machine; the runner's queue needs no lock.
- */
-export async function finishLandedWorkspace(context: WorkspaceContext, state: Record<string, unknown>): Promise<Record<string, unknown>> {
-  try {
-    return await withWorkspaceTransaction(`integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
-      () => finishLanding(context, state, landingIO));
-  } catch (error) {
-    // Only the transaction itself throws here: finishLanding records its own failures.
-    const cleanupError = error instanceof Error ? error.message : String(error);
-    delete state.primaryCheckout;
-    if (context.current.name !== "default") await writeWorkspaceJson(statePath(context.current.name), { ...state, cleanupPending: true, cleanupError });
-    return { cleanupPending: true, cleanupError };
-  }
-}

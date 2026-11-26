@@ -1,7 +1,7 @@
 import { cancelThroughRunner, watchThroughRunner, runnerLocation, recordClientFacts, readMetricsEvents } from "../lib/runner/runner-client.ts";
 import { pipelineMetrics, formatPipelineMetrics } from "../lib/runner/pipeline-metrics.ts";
 import { formatLandingFailures, landingFailures } from "../lib/runner/landing-failures.ts";
-import { workspaceContext } from "../lib/slipjay.ts";
+import { workspaceContext } from "../lib/infra/workspace-jj.ts";
 
 export async function runMetrics(rest: string[]): Promise<void> {
   const usage = "Usage: slipjay metrics [--since <ISO date>] [--repo <owner/name>] [--json]\n       slipjay metrics --failures --repo <owner/name> --since <ISO time> [--until <ISO time> | --first <n>] [--json]";

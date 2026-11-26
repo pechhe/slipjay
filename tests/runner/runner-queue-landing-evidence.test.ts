@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
 import { COMMAND_ARTIFACT_PAGE_BYTES } from "../../src/lib/runner/runner-contract.ts";
-import { gate, test, fixture } from "./fixtures/runner-queue-fixture.ts";
+import { gate, test, fixture } from "./fixtures/queue-release-fixture.ts";
 
 test("gate commands get a temporary directory of their own checkout, emptied at each turn", async () => {
   const f = await fixture(false, true);

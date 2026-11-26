@@ -2,7 +2,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { OperationLog } from "../../../src/lib/runner/runner-types.ts";
 import { newOperationId } from "../../../src/lib/runner/runner-log.ts";
-import { fixture, until } from "./runner-queue-fixture.ts";
+import { fixture, until } from "./queue-maintenance-fixture.ts";
 import { shortRepositories } from "../../../src/lib/runner/pipeline-metrics.ts";
 
 /** What the short-landing queue tests share: ledger samples that make a repository short or long, and a queue whose gates hold on demand. */

@@ -4,7 +4,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OWNER_KILL_REASON } from "../../src/lib/runner/runner-contract.ts";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-release-fixture.ts";
 
 // These drive the runner through checks that fail in turn, so they need the verification core
 // (SJ-51) to keep going after a failed check and to throw one error carrying every failure.

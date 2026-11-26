@@ -3,7 +3,9 @@ import type { ManagedClaimRequest } from "../lib/workspace/workspace-claim-servi
 import { recordClientFactsInBackground } from "../lib/runner/runner-client.ts";
 import { ATTEMPT_ID, readAttempt, releaseAttempt } from "../lib/workspace/workspace-attempts.ts";
 import { hostname } from "node:os";
-import { createWorkspace, setWorkspaceForgeProject, resolveStartBase, startSpareRefill } from "../lib/slipjay.ts";
+import { createWorkspace, resolveStartBase } from "../lib/workspace/workspace-create.ts";
+import { setWorkspaceForgeProject } from "../lib/workspace/workspace-state.ts";
+import { startSpareRefill } from "../lib/workspace/workspace-spares.ts";
 import { startClientUpgradeThrottled } from "../lib/workspace/workspace-upgrade.ts";
 import { writeSync } from "node:fs";
 

@@ -2,7 +2,8 @@ import { landThroughRunner, runnerLocation } from "../lib/runner/runner-client.t
 import { HANDOFF_MAX_BYTES, validSubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import type { SubmissionHandoff } from "../lib/landing/submission-handoff.ts";
 import { open } from "node:fs/promises";
-import { landingPreview, workspaceContext } from "../lib/slipjay.ts";
+import { landingPreview } from "../lib/landing/landing-remote.ts";
+import { workspaceContext } from "../lib/infra/workspace-jj.ts";
 import { retiredFieldsWarning } from "../lib/policy/execution-policy.ts";
 import { landingTimingLine } from "../lib/landing/landing-timing.ts";
 import { repairFailedLanding } from "../lib/landing/repair-workspace.ts";

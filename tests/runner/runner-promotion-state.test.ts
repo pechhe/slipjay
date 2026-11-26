@@ -5,6 +5,7 @@ import type { PromotionState } from "../../src/lib/release/release.ts";
 import { promotionRefusal } from "../../src/lib/release/audit-ledger.ts";
 import type { AuditSummary } from "../../src/lib/release/audit-ledger.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
+import { runnerAuditApi } from "../../src/lib/runner/runner-api-audit.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import type { DeployOperation, OperationEvent, ReleaseOperation, VerificationOperation } from "../../src/lib/runner/runner-types.ts";
 import { promotingProject } from "../release/fixtures/release-fixture.ts";
@@ -17,35 +18,36 @@ const sha = (n: number) => n.toString(16).padStart(40, "0");
 /** A runner with a long history of every kind, every operation carrying run detail the list routes trim. */
 function runner() {
   const log = openOperationLog(":memory:");
-  const handler = createRunnerHandler({ log, token, runnerName: "r", readLog: async () => null, onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: () => () => {} });
+  const handler = createRunnerHandler({ log, token, runnerName: "r", audit: runnerAuditApi, readLog: async () => null, onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: () => () => {} });
   let ids = 0;
   const get = async (route: string): Promise<Response> => handler(new Request(`http://localhost/v1${route}`, { headers: { authorization: `Bearer ${token}` } }));
   const detail = (id: string) => {
     log.append(id, { type: "run_started", runId: "r1", command: "bun run verify", host: "runner" });
     log.append(id, { type: "run_finished", runId: "r1", exitCode: 0, signal: null, timedOut: false, durationMs: 5, diagnostics: Array.from({ length: 20 }, (_, n) => `diagnostic ${n} ${"x".repeat(200)}`) });
   };
-  const open = (event: OperationEvent) => { const id = `op-${String((ids += 1)).padStart(6, "0")}`; log.append(id, event); detail(id); return id; };
+  const summary = "x".repeat(4_000);
+  const open = (event: OperationEvent, withDetail = false) => { const id = `op-${String((ids += 1)).padStart(6, "0")}`; log.append(id, event); if (withDetail) detail(id); return id; };
   return {
     log, get,
-    deploy(commitId: string, green = true) {
-      const id = open({ type: "submitted", kind: "deploy", repo: REPO, environment: "staging", commitId, submittedBy: "runner" });
+    deploy(commitId: string, green = true, withDetail = false) {
+      const id = open({ type: "submitted", kind: "deploy", repo: REPO, environment: "staging", commitId, submittedBy: "runner" }, withDetail);
       log.append(id, green ? { type: "deployed", record: { projects: [] } as never } : { type: "failed", stage: "verifying", reason: "red" });
     },
-    release(commitId: string, outcome: "released" | "failed" | "cancelled" | "open") {
-      const id = open({ type: "submitted", kind: "release", repo: REPO, commitId, migrationsReady: false, submittedBy: "author" });
-      if (outcome === "released") log.append(id, { type: "released", result: { ok: true, status: "released" } as never });
+    release(commitId: string, outcome: "released" | "failed" | "cancelled" | "open", withDetail = false) {
+      const id = open({ type: "submitted", kind: "release", repo: REPO, commitId, migrationsReady: false, submittedBy: "author" }, withDetail);
+      if (outcome === "released") log.append(id, { type: "released", result: { ok: true, status: "released", summary } as never });
       else if (outcome === "failed") log.append(id, { type: "failed", stage: "verifying", reason: "red" });
       else if (outcome === "cancelled") log.append(id, { type: "cancelled", reason: "no" });
     },
-    verification(commitId: string, outcome: "verified" | "failed" | "queued" | "running" | "superseded", checks: unknown[] = [], base = sha(0)) {
-      const id = open({ type: "submitted", kind: "verification", repo: REPO, commitId, submittedBy: "runner" });
+    verification(commitId: string, outcome: "verified" | "failed" | "queued" | "running" | "superseded", checks: unknown[] = [], base = sha(0), withDetail = false) {
+      const id = open({ type: "submitted", kind: "verification", repo: REPO, commitId, submittedBy: "runner" }, withDetail);
       if (outcome === "running") log.append(id, { type: "stage", stage: "verifying" });
       if (outcome === "verified") log.append(id, { type: "verified", base, candidate: commitId, checks: checks as never });
-      if (outcome === "failed") log.append(id, { type: "failed", stage: "verifying", reason: "exited 1", command: "bun run verify:release" });
+      if (outcome === "failed") log.append(id, { type: "failed", stage: "verifying", reason: `exited 1 ${summary}`, command: "bun run verify:release" });
       if (outcome === "superseded") log.append(id, { type: "superseded", by: "someone" });
     },
-    audit(outcome: "green" | "failed") {
-      const id = open({ type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date().toISOString(), submittedBy: "runner:schedule" });
+    audit(outcome: "green" | "failed", withDetail = false) {
+      const id = open({ type: "submitted", kind: "audit", repo: REPO, commitId: "", slot: new Date().toISOString(), submittedBy: "runner:schedule" }, withDetail);
       log.append(id, { type: "stage", stage: "verifying" });
       log.append(id, { type: "audit_head", commit: sha(1) });
       log.append(id, outcome === "green" ? { type: "audited", commit: sha(1), commands: ["test"], passed: ["test"], skipped: [], reused: [] }
@@ -71,15 +73,15 @@ test("the promotion route answers in a size that history does not grow, and plan
   const r = runner();
   try {
     const policy = JSON.parse(await (await import("node:fs/promises")).readFile(`${f.repo}/slipjay.json`, "utf8"));
-    await f.commit({ "slipjay.json": JSON.stringify({ ...policy, audit: { commands: [{ executable: "node", args: ["-e", ""] }] } }) }, "Declare an audit");
+    await f.commit({ "slipjay.json": JSON.stringify({ ...policy, audit: { commands: [{ executable: "bun", args: ["-e", ""] }] } }) }, "Declare an audit");
     const a = await f.commit({ "a.txt": "a\n" }, "Add a");
     const b = await f.commit({ "b.txt": "b\n" }, "Add b");
     const c = await f.commit({ "c.txt": "c\n" }, "Add c");
-    // Years of history before the commits under plan.
-    for (let n = 0; n < 1500; n++) { r.deploy(sha(1000 + n), n % 5 !== 0); r.verification(sha(1000 + n), n % 2 ? "verified" : "failed"); r.audit("green"); }
-    for (let n = 0; n < 1000; n++) r.release(sha(1000 + n), "released");
-    for (const commit of [a, b, c]) r.deploy(commit);
-    r.release(a, "failed"); r.release(b, "cancelled");
+    // Enough history before the commits under plan to push the full lists over 1 MiB.
+    for (let n = 0; n < 200; n++) { r.deploy(sha(1000 + n), n % 5 !== 0, n < 5); r.verification(sha(1000 + n), n % 2 ? "verified" : "failed", [], sha(0), n < 5); r.audit("green", n < 5); }
+    for (let n = 0; n < 200; n++) r.release(sha(1000 + n), "released", n < 5);
+    for (const commit of [a, b, c]) r.deploy(commit, true, true);
+    r.release(a, "failed", true); r.release(b, "cancelled", true);
 
     const plan = async (read: (commits: string[]) => Promise<PromotionState>, candidate?: string) => releaseIntegration(f.repo, { readPromotion: read, ...candidate ? { candidate } : {} });
     const viaRoute = async (commits: string[]): Promise<PromotionState> => {

@@ -7,7 +7,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { commitIssue, githubRepository, isUndescribed } from "../build/issue-references.ts";
-import { publicationRemote } from "./landing-steps.ts";
+import { publicationRemote } from "./landing-remote.ts";
 import { redactMigrationOutput } from "./migration-command-evidence.ts";
 import { downloadSubmissionSource, manageRepairClaim, readBuildThroughRunner, readLandingHandoff, readLandingOutcome, readRepairState, RunnerRequestRefused } from "../runner/runner-client.ts";
 import type { LandingOutcome } from "../runner/runner-types.ts";

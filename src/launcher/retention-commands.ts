@@ -1,11 +1,18 @@
-import type { EvictionOutcome } from "../lib/slipjay.ts";
+import type { EvictionOutcome } from "../lib/workspace/workspace-eviction.ts";
+import { evictIdleWorkspaces, EVICTION_IDLE_MS } from "../lib/workspace/workspace-eviction.ts";
 import { readBuildThroughRunner, runnerLocation } from "../lib/runner/runner-client.ts";
 import type { SweepOptions } from "../lib/workspace/workspace-sweep.ts";
+import { planDisposableWorkspaces, pruneEmptyWorkspaces } from "../lib/workspace/workspace-sweep.ts";
 import { callerPids, workspaceHolders } from "../lib/workspace/workspace-holders.ts";
-import { cleanupLandedWorkspace, planDisposableWorkspaces, pruneEmptyWorkspaces, evictIdleWorkspaces, EVICTION_IDLE_MS, archiveWorkspace, latestArchiveFor, listArchives, restoreArchive, releaseWorkspace, readReleaseResult, latestReleaseFor, listReleaseResults, processArchiveRequests, releaseAbandonedRetirementFences, workspaceContext, describeRetention, removeWorkspace, withWorkspaceTransaction } from "../lib/slipjay.ts";
-import { landingIO } from "../lib/landing/landing-steps.ts";
-import { primaryCheckoutDisposition } from "../lib/landing/landing-candidate.ts";
-import type { PrimaryCheckoutOutcome } from "../lib/landing/landing-candidate.ts";
+import { cleanupLandedWorkspace, describeRetention, removeWorkspace } from "../lib/workspace/workspace-lifecycle.ts";
+import { archiveWorkspace, latestArchiveFor, listArchives, processArchiveRequests, restoreArchive } from "../lib/workspace/workspace-archive.ts";
+import { latestReleaseFor, listReleaseResults, readReleaseResult, releaseWorkspace } from "../lib/workspace/workspace-release.ts";
+import { releaseAbandonedRetirementFences } from "../lib/workspace/workspace-claims.ts";
+import { jj, revisionFacts, workspaceContext } from "../lib/infra/workspace-jj.ts";
+import { withWorkspaceTransaction } from "../lib/infra/workspace-transaction.ts";
+import { refreshPrimaryCheckoutDependencies } from "../lib/landing/landing-client-steps.ts";
+import { primaryCheckoutDisposition } from "../lib/landing/primary-checkout.ts";
+import type { PrimaryCheckoutOutcome } from "../lib/landing/primary-checkout.ts";
 import { resolve } from "node:path";
 import { hostDisk } from "../lib/host-disk/host-disk.ts";
 import type { HostDiskOutcome } from "../lib/host-disk/host-disk.ts";
@@ -212,7 +219,7 @@ export async function runMaintain(rest: string[]): Promise<void> {
       integrationBranch = context.integrationBranch;
       primaryCheckout = await withWorkspaceTransaction(
         `integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
-        () => primaryCheckoutDisposition(primaryContext, landingIO, { carryEdits: false }),
+        () => primaryCheckoutDisposition(primaryContext, { jj, revisionFacts, refreshPrimaryDependencies: refreshPrimaryCheckoutDependencies }, { carryEdits: false }),
         { waitMs: 60_000 },
       );
     }

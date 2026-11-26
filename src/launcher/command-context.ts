@@ -1,4 +1,4 @@
-import { workspaceContext } from "../lib/slipjay.ts";
+import { workspaceContext } from "../lib/infra/workspace-jj.ts";
 
 /** The repository's integration checkout, even when `cwd` is inside one of its workspaces. */
 export async function integrationRoot(cwd: string): Promise<string> {

@@ -1,4 +1,4 @@
-import { test } from "./fixtures/runner-queue-fixture.ts";
+import { test } from "./fixtures/queue-release-fixture.ts";
 import { productionRecovery } from "./fixtures/production-recovery-fixture.ts";
 
 for (const scenario of ["first activation", "failed restore", "forbidden compensation"] as const) {

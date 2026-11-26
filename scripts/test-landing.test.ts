@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
-import { candidateChanges, infrastructureScripts, landingCommands, launcherProcessTests, planCandidate, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
+import { candidateChanges, infrastructureScripts, landingCommands, launcherProcessTests, planCandidate, PROCESS_TEST_ENTRIES, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const CANDIDATE = "a".repeat(40);
@@ -32,22 +32,73 @@ function query(options: { emptyChild?: boolean; parent?: string; conflict?: bool
   return { run, calls };
 }
 
-test("runtime fixture selection includes its reader; source includes every process caller", () => {
+test("runtime fixture selection includes its reader; source includes only process callers that can reach it", () => {
   const fixture = selectLandingTests(["tests/runner/fixtures/pipeline/landed.json"], []);
   assert.equal(fixture.kind, "related");
   if (fixture.kind === "related") assert.deepEqual(fixture.files, ["tests/runner/runner-pipeline-fixtures.test.ts"]);
-  const source = selectLandingTests(["src/lib/runner/runner-log.ts"], []);
-  assert.equal(source.kind, "related");
-  if (source.kind === "related") for (const file of PROCESS_TESTS) assert.ok(source.files.includes(file));
+
+  // Every CLI process caller loads workspace-paths.ts, so changing it reaches every process test.
+  const shared = selectLandingTests(["src/lib/workspace/workspace-paths.ts"], []);
+  assert.equal(shared.kind, "related");
+  if (shared.kind === "related") for (const file of PROCESS_TESTS) assert.ok(shared.files.includes(file), file);
+
+  // Runner-server modules are never loaded by CLI/client process tests.
+  for (const serverFile of ["src/lib/runner/runner-log.ts", "src/lib/release/batch-check.ts"]) {
+    const server = selectLandingTests([serverFile], []);
+    assert.equal(server.kind, "related", serverFile);
+    if (server.kind === "related") assert.deepEqual(server.files, [serverFile], serverFile);
+  }
+
+  // Scoped library modules reach only the process tests whose commands import them.
+  const cutover = selectLandingTests(["src/lib/workspace/cutover.ts"], []);
+  assert.equal(cutover.kind, "related");
+  if (cutover.kind === "related") {
+    assert.ok(cutover.files.includes("tests/workspace/cutover.test.ts"));
+    assert.ok(cutover.files.includes("tests/integration/installed-package.test.ts"));
+    assert.ok(!cutover.files.includes("tests/runner/command-artifact.test.ts"));
+    assert.ok(!cutover.files.includes("tests/landing/repair-workspace.test.ts"));
+  }
 });
 
-test("a launcher change selects every test that runs a launcher, found through its helpers too", () => {
+test("launcher changes scope to their command callers, while dispatcher changes select every launcher test", () => {
   // SJ-262's candidate changed only what src/launcher/workspace.ts prints, and dispatcher.test.ts, which runs it, went unselected.
-  const launcher = selectLandingTests(["src/launcher/workspace.ts"], []);
-  assert.equal(launcher.kind, "related");
-  if (launcher.kind === "related") assert.ok(launcher.files.includes("tests/integration/dispatcher.test.ts"));
+  const dispatcher = selectLandingTests(["src/launcher/workspace.ts"], []);
+  assert.equal(dispatcher.kind, "related");
+  if (dispatcher.kind === "related") {
+    assert.ok(dispatcher.files.includes("tests/integration/dispatcher.test.ts"));
+    for (const file of launcherProcessTests()) assert.ok(dispatcher.files.includes(file), file);
+  }
+
+  // Changing one command handler selects dispatcher + its own command callers, not unrelated CLI suites.
+  const release = selectLandingTests(["src/launcher/release-commands.ts"], []);
+  assert.equal(release.kind, "related");
+  if (release.kind === "related") {
+    assert.ok(release.files.includes("tests/integration/dispatcher.test.ts"));
+    assert.ok(release.files.includes("tests/release/deploy-output.test.ts"));
+    assert.ok(!release.files.includes("tests/workspace/workspace-adopt-selection.test.ts"));
+  }
+
+  // A launcher handler imported by another launcher handler (disk-command -> retention-commands) includes both.
+  const disk = selectLandingTests(["src/launcher/disk-command.ts"], []);
+  assert.equal(disk.kind, "related");
+  if (disk.kind === "related") {
+    assert.ok(disk.files.includes("tests/integration/dispatcher.test.ts"));
+    assert.ok(disk.files.includes("tests/workspace/host-disk-command.test.ts"));
+    assert.ok(disk.files.includes("tests/workspace/workspace-maintain-output.test.ts"));
+  }
+
+  // Changing a detached background launcher selects its spawner module and process tests without pulling unrelated CLI handlers.
+  const refill = selectLandingTests(["src/launcher/spare-refill.ts"], []);
+  assert.equal(refill.kind, "related");
+  if (refill.kind === "related") {
+    assert.ok(refill.files.includes("src/lib/workspace/workspace-spares.ts"));
+    assert.ok(refill.files.includes("tests/integration/installed-package.test.ts"));
+    assert.ok(refill.files.includes("tests/workspace/workspace-spare-dependencies-allocation.test.ts"));
+    assert.ok(!refill.files.includes("tests/integration/dispatcher.test.ts"));
+  }
+
   const library = selectLandingTests(["src/lib/runner/runner-log.ts"], []);
-  if (library.kind === "related") assert.ok(!library.files.includes("tests/integration/dispatcher.test.ts"), "a library change keeps the curated list");
+  if (library.kind === "related") assert.ok(!library.files.includes("tests/integration/dispatcher.test.ts"), "a library change does not run unrelated launcher tests");
 
   const root = mkdtempSync(path.join(tmpdir(), "launcher-callers-"));
   try {
@@ -80,11 +131,11 @@ test("a deleted test file selects nothing; a deleted non-test file still fails c
     }
   }
   const deletedTest = "tests/runner/gone.test.ts";
-  const withSource = selectLandingTests(["src/lib/runner/runner-log.ts", deletedTest], [deletedTest]);
+  const withSource = selectLandingTests(["src/lib/workspace/workspace-paths.ts", deletedTest], [deletedTest]);
   assert.equal(withSource.kind, "related");
   if (withSource.kind === "related") {
     assert.ok(!withSource.files.includes(deletedTest));
-    assert.ok(withSource.files.includes("src/lib/runner/runner-log.ts"));
+    assert.ok(withSource.files.includes("src/lib/workspace/workspace-paths.ts"));
     for (const file of PROCESS_TESTS) assert.ok(withSource.files.includes(file), file);
   }
   assert.equal(selectLandingTests([deletedTest], [deletedTest, "src/gone.ts"]).kind, "complete");
@@ -166,11 +217,16 @@ test("runtime file inventory follows the complete-suite script", () => {
   for (const command of ["bun test", "bun test scripts/*.test.ts", "bun run other", "bun test scripts/a.test.ts --timeout 1000"]) assert.throws(() => runtimeTestFiles(command));
 });
 
-test("every process lane entry is a real test file, and the lane keeps the CLI and installed package", () => {
+test("every process lane entry is a real test file with real src/ entries, and the lane keeps the CLI and installed package", () => {
   assert.equal(new Set(PROCESS_TESTS).size, PROCESS_TESTS.length, "no duplicate entries");
-  for (const file of PROCESS_TESTS) {
+  for (const [file, entries] of Object.entries(PROCESS_TEST_ENTRIES)) {
     assert.match(file, /^tests\/.*\.test\.ts$/, file);
     assert.ok(existsSync(path.join(ROOT, file)), `${file} exists`);
+    assert.ok(entries.length > 0, `${file} names at least one src/ entry`);
+    for (const entry of entries) {
+      assert.match(entry, /^src\/.*\.ts$/, `${file} -> ${entry}`);
+      assert.ok(existsSync(path.join(ROOT, entry)), `${file} -> ${entry} exists`);
+    }
   }
   assert.ok(PROCESS_TESTS.includes("tests/integration/cli.test.ts"));
   assert.ok(PROCESS_TESTS.includes("tests/integration/installed-package.test.ts"));
@@ -179,7 +235,7 @@ test("every process lane entry is a real test file, and the lane keeps the CLI a
 test("Vitest's graph selects fixture reader and process callers, and honors quarantine", async () => {
   const { createVitest } = await import("vite-plus/test/node");
   const fixture = selectLandingTests(["tests/runner/fixtures/pipeline/landed.json"], []);
-  const source = selectLandingTests(["src/lib/runner/runner-log.ts"], []);
+  const source = selectLandingTests(["src/lib/workspace/workspace-paths.ts"], []);
   assert.ok(fixture.kind === "related" && source.kind === "related");
   const ctx = await createVitest({ root: ROOT, watch: false, run: true, exclude: ["tests/integration/cli.test.ts"] });
   try {

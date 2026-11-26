@@ -6,7 +6,7 @@ import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
 import { releaseHeldIntegration } from "../../src/lib/runner/runner-client.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import { test, jj, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, jj, fixture, until } from "./fixtures/queue-maintenance-fixture.ts";
 
 async function releaseServer(f: Awaited<ReturnType<typeof fixture>>) {
   return serveRunner(createRunnerHandler({ log: f.log, token: "fixture-token", runnerName: "fixture",

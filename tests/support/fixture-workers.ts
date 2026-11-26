@@ -9,7 +9,7 @@ export async function waitForExit(pid: number, timeoutMs = 120_000): Promise<voi
   const deadline = Date.now() + timeoutMs;
   while (alive(pid)) {
     if (Date.now() > deadline) throw new Error(`process ${pid} still running after ${timeoutMs}ms`);
-    await new Promise((settle) => setTimeout(settle, 50));
+    await new Promise((settle) => setTimeout(settle, 15));
   }
 }
 

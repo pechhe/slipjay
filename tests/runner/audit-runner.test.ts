@@ -10,6 +10,8 @@ import { AUDIT_INTERRUPTED_REASON, candidateBookmark } from "../../src/lib/runne
 import type { AuditOperation, SubmitRequest } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue } from "../../src/lib/runner/runner-queue.ts";
+import { maintenanceCapability } from "../../src/lib/runner/queue-maintenance-capability.ts";
+import { releaseCapability } from "../../src/lib/runner/queue-release-capability.ts";
 import { directExecutor } from "../support/executor.ts";
 import { fixtureJjConfig } from "../support/jj-user-config.ts";
 
@@ -22,7 +24,7 @@ const REPO = "fixture/repo";
 // `break.txt`, and exits 2 as UNVERIFIABLE when it carries `dirty.txt` (declared inconclusive in the audit policy).
 const auditCheck = (root: string) => `const fs=require("node:fs"),path=require("node:path"),at=(name)=>path.join(${JSON.stringify(root)},name);
 fs.appendFileSync(at("audit-ran.log"), process.cwd()+"\\n");
-while (fs.existsSync(at("hold-audit"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+while (fs.existsSync(at("hold-audit"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
 if (fs.existsSync("exits-2-when-killed.txt")) { process.on("SIGTERM", () => process.exit(2)); fs.writeFileSync(at("audit-holding"), ""); setInterval(() => {}, 50); }
 if (fs.existsSync("dirty.txt")) { process.stderr.write("UNVERIFIABLE: checkout is dirty\\n"); process.exit(2); }
 if (fs.existsSync("break.txt")) { process.stderr.write("FAIL tests/fixture.test.ts > fixture > the suite is broken\\n"); process.exit(3); }`;
@@ -42,12 +44,12 @@ async function fixture({ audit = true }: { audit?: boolean } = {}) {
     version: 1, integrationBranch: "main",
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
     // A candidate carrying `slow.txt` holds its landing gate while `hold-landing` exists.
-    requiredLandingVerification: [{ executable: "node", args: ["-e", `const fs=require("node:fs");
-while (fs.existsSync("slow.txt") && fs.existsSync(${JSON.stringify(join(root, "hold-landing"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`] }],
+    requiredLandingVerification: [{ executable: "bun", args: ["-e", `const fs=require("node:fs");
+while (fs.existsSync("slow.txt") && fs.existsSync(${JSON.stringify(join(root, "hold-landing"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);`] }],
     // Release verification holds while `hold-release` exists.
-    releaseBranch: "release", requiredReleaseVerification: [{ executable: "node", args: ["-e", `const fs=require("node:fs");
-while (fs.existsSync(${JSON.stringify(join(root, "hold-release"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);`] }],
-    ...audit ? { audit: { commands: [{ executable: "node", args: ["-e", "console.log('install')"] }, { executable: "node", args: ["-e", auditCheck(root)], inconclusiveExitCodes: [2] }] } } : {},
+    releaseBranch: "release", requiredReleaseVerification: [{ executable: "bun", args: ["-e", `const fs=require("node:fs");
+while (fs.existsSync(${JSON.stringify(join(root, "hold-release"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);`] }],
+    ...audit ? { audit: { commands: [{ executable: "bun", args: ["-e", "console.log('install')"] }, { executable: "bun", args: ["-e", auditCheck(root)], inconclusiveExitCodes: [2] }] } } : {},
   }));
   jj(seed, ["describe", "-m", "Seed policy"]);
   jj(seed, ["git", "remote", "add", "origin", origin]);
@@ -55,7 +57,7 @@ while (fs.existsSync(${JSON.stringify(join(root, "hold-release"))})) Atomics.wai
   jj(seed, ["git", "push", "--remote", "origin", "--named", "release=main"]);
   jj(root, ["git", "clone", origin, author]);
   const log = openOperationLog(":memory:");
-  const queue = createRunnerQueue({ log, executor: directExecutor("test"), home, config: { repos: { "Fixture/Repo": { url: origin } },
+  const queue = createRunnerQueue({ log, executor: directExecutor("test"), home, capabilities: { maintenance: maintenanceCapability, release: releaseCapability }, config: { repos: { "Fixture/Repo": { url: origin } },
     jj: { "user.name": "Runner Identity", "user.email": "runner@example.com" } } });
   const main = () => execFileSync("git", ["--git-dir", origin, "rev-parse", "main"], { encoding: "utf8" }).trim();
   async function candidate(file: string): Promise<SubmitRequest> {

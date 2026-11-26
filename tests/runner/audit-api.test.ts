@@ -3,6 +3,7 @@ import { test } from "vite-plus/test";
 import { promotionRefusal } from "../../src/lib/release/audit-ledger.ts";
 import type { AuditSummary } from "../../src/lib/release/audit-ledger.ts";
 import { createRunnerHandler } from "../../src/lib/runner/runner-api.ts";
+import { runnerAuditApi } from "../../src/lib/runner/runner-api-audit.ts";
 import { RUNNER_API } from "../../src/lib/runner/runner-contract.ts";
 import type { AuditOperation } from "../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../src/lib/runner/runner-http.ts";
@@ -14,7 +15,7 @@ const sha = (name: string) => name.padEnd(40, "0");
 
 async function fixture() {
   const log = openOperationLog(":memory:");
-  const handler = createRunnerHandler({ log, token, runnerName: "test-runner", readLog: () => Promise.resolve(null), onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: () => () => {} });
+  const handler = createRunnerHandler({ log, token, runnerName: "test-runner", audit: runnerAuditApi, readLog: () => Promise.resolve(null), onSubmitted() {}, kill: () => ({ status: "idle" }), subscribe: () => () => {} });
   const server = await serveRunner(handler, { host: "127.0.0.1", port: 0 });
   const request = (path: string, init: RequestInit = {}) => fetch(`${server.url}${RUNNER_API}${path}`, {
     ...init, headers: { authorization: `Bearer ${token}`, ...init.headers }, signal: init.signal ?? AbortSignal.timeout(10_000) });

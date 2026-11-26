@@ -1,5 +1,6 @@
 import { runnerLocation } from "../lib/runner/runner-client.ts";
-import { workspaceContext, spareAllowance } from "../lib/slipjay.ts";
+import { workspaceContext } from "../lib/infra/workspace-jj.ts";
+import { spareAllowance } from "../lib/workspace/workspace-spares.ts";
 import { machineConfigPath } from "../lib/workspace/workspace-paths.ts";
 import { checkoutIdentity, configuredUpgradeSource, machineSpareLimit, machineSpareLimits, readMachineConfig, runnerSetting, setConfiguredRunner, setConfiguredUpgradeSource, setMachineSpareLimit } from "../lib/policy/machine-config.ts";
 import { setPolicy, showPolicy } from "../lib/policy/policy-command.ts";

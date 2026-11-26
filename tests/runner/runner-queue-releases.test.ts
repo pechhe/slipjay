@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import { test, fixture, until, hanging, started, stagesOf, seqOf } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until, hanging, started, stagesOf, seqOf } from "./fixtures/queue-release-fixture.ts";
 
 test("a release verifies its exact candidate in a checkout of its own while the repository's landings go on, then publishes the release branch", async () => {
   const f = await fixture(false, true);

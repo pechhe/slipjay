@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import type { MachineVerification, OperationEvent, RemoteVerification } from "../../src/lib/runner/runner-types.ts";

@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
-import { ensureRepoConfig, integrationTrunkConfig, legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
+import { ensureRepoConfig, integrationTrunkConfig, jj as runJj, legacyIssueWorkspaceName, parseWorkspaceList, repositoryProjectCode, revisionFacts, run, taskWorkspaceName, wipDescription, workspaceContext, workspaceHasUnintegratedWork } from "../infra/workspace-jj.ts";
 import { metadataHome, startFetchHome, workspaceHome } from "./workspace-paths.ts";
 import {
   assertIssueAvailable,
@@ -18,8 +18,8 @@ import {
   workspaceMetadata,
 } from "./workspace-state.ts";
 import { readIntegrationPolicy, UNDECLARED_POLICY } from "../policy/execution-policy.ts";
-import { fetchIntegration, landingIO, publicationRemote } from "../landing/landing-steps.ts";
-import { primaryCheckoutDisposition } from "../landing/landing-candidate.ts";
+import { fetchIntegration, publicationRemote } from "../landing/landing-remote.ts";
+import { primaryCheckoutDisposition } from "../landing/primary-checkout.ts";
 import { forgetMissingCheckout, missingCheckoutRefusal } from "./workspace-lifecycle.ts";
 import { startHousekeeping } from "./workspace-housekeeping.ts";
 import { beginAttempt, updateAttempt } from "./workspace-attempts.ts";
@@ -575,7 +575,7 @@ async function refreshIntegration(context: WorkspaceContext) {
 async function followIntegration(context: WorkspaceContext) {
   await withWorkspaceTransaction(
     `integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
-    () => primaryCheckoutDisposition(context, { ...landingIO, refreshPrimaryDependencies: undefined }, { carryEdits: false }),
+    () => primaryCheckoutDisposition(context, { jj: runJj, revisionFacts }, { carryEdits: false }),
     { wait: false },
   ).catch(() => undefined);
 }

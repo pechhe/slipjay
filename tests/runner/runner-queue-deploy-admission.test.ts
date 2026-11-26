@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
-import { runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
-import { test, fixture, until, hanging, started } from "./fixtures/runner-queue-fixture.ts";
+import { runnerConfigProblem } from "../../src/lib/runner/runner-config.ts";
+import { test, fixture, until, hanging, started } from "./fixtures/queue-release-fixture.ts";
 
 test("two workers verify beside a deploy, while another deploy of the same repository waits", async () => {
   const f = await fixture(false, false, { minIntervalMs: 3_600_000 }, false, { workers: 2, other: true });

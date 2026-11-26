@@ -3,7 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReleaseAlertPayload } from "../../src/lib/runner/runner-types.ts";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-release-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 
 const queuedAutomatic = (f: Awaited<ReturnType<typeof fixture>>, commitId: string) => {

@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import { test, fixture, until, seqOf } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until, seqOf } from "./fixtures/queue-maintenance-fixture.ts";
 
 for (const recover of [false, true]) {
   for (const first of ["reset", "release"] as const) {

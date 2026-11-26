@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test as serialTest } from "vite-plus/test";
-import { fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, until } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle, schedule, batchEvents } from "./fixtures/automatic-promotion.ts";
 import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
 import type { ReleaseAlertPayload } from "../../src/lib/runner/runner-types.ts";

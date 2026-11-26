@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { runWorkspaceCommand } from "../infra/workspace-command.ts";
 import { withWorkspaceTransaction } from "../infra/workspace-transaction.ts";
 import { revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
-import { fetchIntegration, publicationRemote } from "../landing/landing-steps.ts";
+import { fetchIntegration, publicationRemote } from "../landing/landing-remote.ts";
 import { checkoutIdentity, configuredUpgradeSource } from "../policy/machine-config.ts";
 import { spawnDetached } from "./workspace-background.ts";
 import {

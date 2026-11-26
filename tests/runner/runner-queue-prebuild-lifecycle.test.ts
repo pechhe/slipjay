@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle, schedule } from "./fixtures/automatic-promotion.ts";
 import { nextPromotionAt } from "../../src/lib/policy/promotion-schedule.ts";
 import { stand } from "./fixtures/prebuild-fixture.ts";

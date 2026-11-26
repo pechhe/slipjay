@@ -9,7 +9,7 @@ export async function promotingProject() {
   const f = await releaseProject({ migrations: true, promotes: true });
   const commit = f.commit;
   const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
-  const step = { executable: "node", args: ["-e", ""] };
+  const step = { executable: "bun", args: ["-e", ""] };
   policy.deployments.environments.production.migrations = { verify: step, apply: step };
   await commit({ "slipjay.json": JSON.stringify(policy) }, "Declare production migrations");
   const plan = (stagingGreen: string, approved: string[], verifications: VerificationOperation[] = []) =>

@@ -4,9 +4,10 @@ import { join } from "node:path";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
-import { RUNNER_CONTROL_ID, runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
+import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
+import { runnerConfigProblem } from "../../src/lib/runner/runner-config.ts";
 import type { GatePlacement, RemoteAttempt, RemoteVerification, RunnerConfig } from "../../src/lib/runner/runner-types.ts";
-import { fixture, jj, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, jj, test, until } from "./fixtures/queue-verifier-fixture.ts";
 
 /**
  * SJ-189: a remote-verifying repository with `hostPlaces: 1` gates in the runner host's one gate place when it is free

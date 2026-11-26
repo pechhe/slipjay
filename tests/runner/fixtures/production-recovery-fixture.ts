@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../../src/lib/runner/runner-log.ts";
-import { fixture } from "./runner-queue-fixture.ts";
+import { fixture } from "./queue-release-fixture.ts";
 
 export async function productionRecovery(scenario: "first activation" | "failed restore" | "forbidden compensation" | "missing activation URL" | "failed pointer return") {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });

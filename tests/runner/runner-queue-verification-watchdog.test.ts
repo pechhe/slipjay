@@ -3,7 +3,7 @@ import { vi, test } from "vite-plus/test";
 import * as dependencies from "../../src/lib/workspace/workspace-dependencies.ts";
 import { OWNER_KILL_REASON } from "../../src/lib/runner/runner-contract.ts";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, until } from "./fixtures/queue-release-fixture.ts";
 
 // Serial: the dependency-preparation spy belongs to this fixture only.
 for (const ending of ["kill", "deadline"] as const) {

@@ -2,7 +2,8 @@ import { holdWorkspace } from "./workspace-holder.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { landThroughRunner } from "../../src/lib/runner/runner-client.ts";
-import { startTestRunnerProcess } from "./test-runner-process.ts";
+import { startLandingRunner } from "../../src/lib/runner/landing-runner-service.ts";
+import { directExecutor } from "./executor.ts";
 import { poolRefillLogPath } from "../../src/lib/workspace/workspace-paths.ts";
 import { configureLocalGithubTransport } from "./workspace-project.ts";
 import { drainFixtureWorkers, waitForExit } from "./fixture-workers.ts";
@@ -26,7 +27,7 @@ export async function withTestRunner<T>(f: { root: string; repo: string; remote:
     await mkdir(home, { recursive: true });
     await writeFile(join(home, "config.json"), JSON.stringify({ name: "test-runner", repos: { "fixture/project": { url: transport.github } },
       jj: { "user.name": "Fixture", "user.email": "fixture@example.com" }, ...options.build ? { build: { origin: options.build.origin } } : {} }));
-    const runner = await startTestRunnerProcess({ home,
+    const runner = await startLandingRunner({ home, port: 0, executor: directExecutor("test-runner"),
       env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token", ...options.build ? { YARDSMITH_SLIPJAY_BUILD_TOKEN: options.build.token } : {} } });
     try {
       return await body({ location: runner.url, env: { ...process.env, SLIPJAY_RUNNER: runner.url, SLIPJAY_RUNNER_TOKEN: "test-token" } });

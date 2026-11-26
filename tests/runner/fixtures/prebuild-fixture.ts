@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fixture } from "./runner-queue-fixture.ts";
+import { fixture } from "./queue-batch-fixture.ts";
 import { REPO } from "./automatic-promotion.ts";
 import { runBoundedProcess } from "../../../src/lib/infra/bounded-process.ts";
 import type { LeaseBuildMachine, MachineLease, RemoteVerification } from "../../../src/lib/runner/runner-types.ts";

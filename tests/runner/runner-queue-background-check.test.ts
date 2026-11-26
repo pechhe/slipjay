@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle, batchEvents } from "./fixtures/automatic-promotion.ts";
 import type { BatchCheckRecord } from "../../src/lib/release/batch-check.ts";
 import { workbenchCheck, MINUTE, tenHourSchedule } from "./fixtures/background-check-fixture.ts";

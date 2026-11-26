@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { fixture } from "./runner-queue-fixture.ts";
+import { fixture } from "./queue-release-fixture.ts";
 
 /** A production deploy with migrations, after landing a first migration: non-additive unless `additive`. */
 export async function productionMigrations({ additive = false, ...options }: { additive?: boolean } & NonNullable<Parameters<typeof fixture>[4]> = {}) {

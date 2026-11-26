@@ -15,9 +15,9 @@ import { fileURLToPath } from "node:url";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fetchIntegration, finishLandedWorkspace, landingIO, landingPreview, publicationRemote } from "../landing/landing-steps.ts";
+import { fetchIntegration, landingPreview, publicationRemote } from "../landing/landing-remote.ts";
+import { ensureLandingDescription, finishLandedWorkspace, writeLandingState } from "../landing/landing-client-steps.ts";
 import { readExecutionPolicyAtCommit } from "../policy/execution-policy.ts";
-import { promotionRefusal } from "../release/audit-ledger.ts";
 import type { AuditSummary } from "../release/audit-ledger.ts";
 import { githubRepository } from "../build/issue-references.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
@@ -25,7 +25,6 @@ import { isEarlyFailureLine } from "../landing/required-verification.ts";
 import { candidateBookmark, COMMAND_ARTIFACT_LIMIT_BYTES, COMMAND_ARTIFACT_PAGE_BYTES, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import type { AuditOperation, ClientFact, DeployOperation, Operation, PrioritizeOptions, ReleaseOperation, ResetResponse, StoredEvent, VerificationOperation, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { jj, revisionExists, revisionFacts, workspaceContext } from "../infra/workspace-jj.ts";
-import type { PromotionState } from "../release/release.ts";
 import type { RevisionFacts, WorkspaceContext, WorkspaceMetadata } from "../infra/workspace-jj.ts";
 import { listWorkspaces, metadataPath, readLandingState, statePath, workspaceMetadata } from "../workspace/workspace-state.ts";
 import { poolRefillLogPath, stateHome } from "../workspace/workspace-paths.ts";
@@ -673,7 +672,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
   await fetchIntegration(cwd, remote, context.integrationBranch);
   const integrated = `::(${context.integrationBranch} | remote_bookmarks(exact:${JSON.stringify(context.integrationBranch)}, exact:${JSON.stringify(remote)}))`;
   const landedChange = await revisionExists(cwd, `${preview.commitId} & ${integrated}`) ? await ownChangeId(context) : undefined;
-  const target = landedChange === undefined ? await landingIO.ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env), onLine) : preview;
+  const target = landedChange === undefined ? await ensureLandingDescription(cwd, context, preview, (action, input) => readBuildThroughRunner(action, input, env), onLine) : preview;
   const buildTracked = trackerIsBuild(trackerOf(context.configuration));
   if ((options.session !== undefined || options.tickets?.length) && (options.handoff || !buildTracked))
     throw new Error(options.handoff ? "--session and --ticket shape the handoff land writes; with --handoff, put them in that file" : "--session and --ticket apply only in a Build-tracked repository");
@@ -911,7 +910,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
         const facts = await revisionFacts(cwd, result.commitId, { ignoreWorkingCopy: true });
         let recorded: Record<string, unknown> = { artifactCommitId: result.commitId };
         if (context.current.name !== "default") {
-          await landingIO.writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
+          await writeLandingState(context, facts, { status: "passed", passed: operation.runs.map((run) => run.command), gaps: [], policyDigest: "runner" }, "landed", operation.id);
           recorded = { ...await readLandingState(context.current.name), runner: { location: location, operationId: operation.id } };
           await writeWorkspaceJson(statePath(context.current.name), recorded);
           // Archive the delivery here as well: the runner keeps its own evidence, and this machine's
@@ -1140,46 +1139,6 @@ export async function releaseThroughRunner(cwd: string, options: { candidate: st
     onLine(`[runner ${connection.name}] deploying ${options.candidate.slice(0, 12)} to production`);
     const deploy = await follow(connection.baseUrl, token, queued, connection.name, onLine, env, options.signal) as DeployOperation;
     return { operation, deploy, logUrl: runLogCommand(operation.id) };
-  } finally { connection.close(); }
-}
-
-/**
- * For a promotion plan: what the runner knows of staging, earlier approvals, audits and the pre-verifications of `commits`
- * (ids or prefixes), in one request. A runner without `/v1/promotion` is read from its four lists instead.
- */
-export async function readPromotionState(cwd: string, options: { location: string; commits?: string[]; env?: NodeJS.ProcessEnv }): Promise<PromotionState> {
-  const env = options.env ?? process.env;
-  const context = await workspaceContext(cwd);
-  if (!context) throw new Error(`Not inside a Jujutsu repository: ${cwd}`);
-  const repo = githubRepository(await jj(cwd, ["--ignore-working-copy", "git", "remote", "list"]), publicationRemote(context) ?? "origin");
-  if (!repo) throw new Error("Runner promotions require a GitHub repository on the publication remote");
-  const token = await runnerToken(env);
-  const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
-  const missing = (error: unknown): boolean => error instanceof Error && /HTTP 404$/.test(error.message);
-  try {
-    const query = new URLSearchParams({ repo });
-    for (const commit of options.commits ?? []) query.append("commit", commit);
-    try {
-      return (await (await request(connection.baseUrl, token, `/v1/promotion?${query}`)).json()) as PromotionState;
-    } catch (error) { if (!missing(error)) throw error; }
-    const read = async <T>(route: string, query: Record<string, string>): Promise<T[]> =>
-      ((await (await request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo, ...query })}`)).json()) as { operations: T[] }).operations;
-    const staging = await read<DeployOperation>("/v1/deploys", { environment: "staging" });
-    const releases = await read<ReleaseOperation>("/v1/releases", {});
-    // A runner from before pre-verification has no such route: it has pre-verified nothing.
-    const verifications = await read<VerificationOperation>("/v1/verifications", {})
-      .catch((error: unknown) => { if (missing(error)) return []; throw error; });
-    // A runner from before audits has no such route: it refuses nothing on their account.
-    const audits = await request(connection.baseUrl, token, `/v1/audits?${new URLSearchParams({ repo })}`)
-      .then(async (response) => ((await response.json()) as { summary: AuditSummary }).summary)
-      .catch((error: unknown) => { if (missing(error)) return null; throw error; });
-    return {
-      verifications,
-      ...audits ? { auditRefusal: promotionRefusal(audits) } : {},
-      stagingGreen: staging.find((operation) => operation.result?.type === "deployed")?.commitId ?? null,
-      stagingGreenCommits: [...new Set(staging.filter((operation) => operation.result?.type === "deployed").map((operation) => operation.commitId))],
-      approved: releases.filter((operation) => operation.status !== "cancelled" && operation.status !== "superseded").map((operation) => operation.commitId),
-    };
   } finally { connection.close(); }
 }
 

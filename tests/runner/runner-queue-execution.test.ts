@@ -9,7 +9,7 @@ import { readCommandArtifact } from "../../src/lib/runner/command-artifact.ts";
 import { localExecutor, runContainment } from "../../src/lib/runner/local-executor.ts";
 import { runnerWorkers } from "../../src/lib/runner/runner-queue.ts";
 import { TEST_SLICE, testExecutor } from "../support/executor.ts";
-import { gateFailureOutput, gate, command, test, fixture, until, alive, cgroupOf, hanging, started, systemdTest } from "./fixtures/runner-queue-fixture.ts";
+import { gateFailureOutput, gate, command, test, fixture, until, alive, cgroupOf, hanging, started, systemdTest } from "./fixtures/queue-release-fixture.ts";
 import { assertSystemdOrSkip } from "./fixtures/systemd-gate.ts";
 
 test("candidate Bun runtimes isolate dependency installs, gates and nested commands", async () => {
@@ -67,7 +67,7 @@ test("gate failure preserves main and verbatim evidence; an amended change can l
     const context = f.log.operation(failed)!.runs[0]!.commandEvidence;
     assert.equal(context?.status, "recorded");
     if (context?.status !== "recorded") throw new Error("Expected structured gate command");
-    assert.equal(context.executable, "node");
+    assert.equal(context.executable, "bun");
     assert.deepEqual(context.args, ["-e", gate]);
     assert.equal(context.cwd, ".");
     assert.equal(context.redacted, false);

@@ -1,9 +1,9 @@
 import { auditNight } from "../lib/release/audit-ledger.ts";
-import { readAudits, recordAuditCause, deployThroughRunner, readDeploys, readPromotionState, requestVerificationThroughRunner, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner/runner-client.ts";
+import { readAudits, recordAuditCause, deployThroughRunner, readDeploys, requestVerificationThroughRunner, releaseThroughRunner, resetThroughRunner, runLogCommand, runnerLocation } from "../lib/runner/runner-client.ts";
+import { readPromotionState } from "../lib/runner/runner-promotion-client.ts";
 import type { AutomaticPromotion, Operation } from "../lib/runner/runner-types.ts";
 import { open } from "node:fs/promises";
-import { confirmableCandidate } from "../lib/release/release.ts";
-import { releaseIntegration } from "../lib/slipjay.ts";
+import { confirmableCandidate, releaseIntegration } from "../lib/release/release.ts";
 
 /**
  * `promote [--candidate <commit>] [--confirm <commit>] [--migrations-ready]`: plan a release

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle, schedule } from "./fixtures/automatic-promotion.ts";
 import { stand, started } from "./fixtures/prebuild-fixture.ts";
 

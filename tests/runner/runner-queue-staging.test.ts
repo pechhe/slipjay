@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { test, byProject, fixture, until, stagesOf, deployStep } from "./fixtures/runner-queue-fixture.ts";
+import { test, byProject, fixture, until, stagesOf, deployStep } from "./fixtures/queue-release-fixture.ts";
 
 test("a landing deploys staging from an exact view of the landed commit and records it; the next records the changes since", async () => {
   const f = await fixture(false, false, { minIntervalMs: 0 });
@@ -22,7 +22,7 @@ test("a landing deploys staging from an exact view of the landed commit and reco
     assert.deepEqual(byProject((await f.lines("deploys.jsonl")).map((line) => JSON.parse(line))), ["app", "hq"].map((project) =>
       ({ project, environment: "staging", commit: f.main(), key: "from-runner", head: f.main() })), "each project ran in the exact commit with the declared key");
     assert.deepEqual(first.runs.map((run) => run.exitCode), [0, 0]);
-    const deployCommands = new Set(["app", "hq"].map((name) => ["node", "-e", deployStep(f.root, name)].join(" ")));
+    const deployCommands = new Set(["app", "hq"].map((name) => ["bun", "-e", deployStep(f.root, name)].join(" ")));
     const deployRequests = f.requestedTimeouts.filter((request) => deployCommands.has(request.command));
     assert.equal(deployRequests.length, 2);
     assert.deepEqual(deployRequests.map((request) => request.timeoutMs), [30_000, 30_000]);

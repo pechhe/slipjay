@@ -6,7 +6,7 @@ import { checkPrelude, checkReport } from "./batch-check-fixture.ts";
  * while `hold` exists beside the fixture, so a test can catch it running.
  */
 export const workbenchCheck = (root: string) => `${checkPrelude(root)}
-const wait = Date.now() + 60000; while (fs.existsSync(at("hold")) && Date.now() < wait) { fs.writeFileSync(at("held"), ""); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); }
+const wait = Date.now() + 60000; while (fs.existsSync(at("hold")) && Date.now() < wait) { fs.writeFileSync(at("held"), ""); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15); }
 const broken = fs.existsSync("break-a");
 const outcomes = [{ suite: "workbench", outcome: broken ? "failed" : "passed" }];
 ${checkReport}

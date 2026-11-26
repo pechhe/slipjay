@@ -8,6 +8,7 @@ import { candidateBookmark, TERMINAL_EVENT_TYPES } from "../../../src/lib/runner
 import type { Executor, OperationLogProjections, RunnerConfig, StoredEvent, SubmitRequest } from "../../../src/lib/runner/runner-types.ts";
 import { newOperationId, openOperationLog } from "../../../src/lib/runner/runner-log.ts";
 import { createRunnerQueue, runnerLogOptions } from "../../../src/lib/runner/runner-queue.ts";
+import type { QueueCapabilities } from "../../../src/lib/runner/runner-queue-capabilities.ts";
 import { classifyEvent } from "../../../src/lib/runner/failure-classification.ts";
 import { landingOutcome } from "../../../src/lib/landing/landing-outcome.ts";
 import { TEST_SCOPE_MAX_SECONDS } from "../../support/executor.ts";
@@ -28,13 +29,13 @@ export const gate = `const fs=require("node:fs");if (fs.existsSync("fail")) { pr
   + `const scoped=slice?require("node:child_process").spawn("systemd-run",["--user","--scope","--quiet","--collect","--slice="+slice,"--property=RuntimeMaxSec=${TEST_SCOPE_MAX_SECONDS}","--",process.execPath,"-e","setInterval(()=>{},1000)"],{detached:true,stdio:"ignore"}):null;`
   + 'const record=()=>fs.writeFileSync(fs.readFileSync("hang","utf8").trim(),JSON.stringify([process.pid,child.pid,tool.pid,...scoped?[scoped.pid]:[]]));'
   + 'setTimeout(record,scoped?500:0); setInterval(()=>{},1000); }';
-export const command = `node -e ${gate}`;
+export const command = `bun -e ${gate}`;
 // Late-bound migrations: each generation writes the next numbered file; finalization
 // records which migrations the integrated commit carries, unless `fail-finalize` exists;
 // it waits while `hold-finalize` exists. A committed `schema/drop` makes generated migrations non-additive.
 export const generate = 'const fs=require("node:fs");fs.mkdirSync("migrations",{recursive:true});const n=fs.readdirSync("migrations").length+1;fs.writeFileSync("migrations/"+String(n).padStart(4,"0")+".sql",(fs.existsSync("schema/drop")?"drop table t;\\n":"")+"-- "+n+"\\n");';
 const finalize = (root: string) => `const fs=require("node:fs");
-while (fs.existsSync(${JSON.stringify(join(root, "hold-finalize"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+while (fs.existsSync(${JSON.stringify(join(root, "hold-finalize"))})) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
 if (fs.existsSync(${JSON.stringify(join(root, "fail-finalize"))})) { console.error("development migrate failed"); process.exit(9); }
 fs.appendFileSync(${JSON.stringify(join(root, "development.jsonl"))}, JSON.stringify({ commit: process.env.SLIPJAY_FINALIZATION_COMMIT, migrations: fs.existsSync("migrations") ? fs.readdirSync("migrations").sort() : [] }) + "\\n");`;
 // The release check records where it ran, and its temporary directory with whether an earlier
@@ -46,7 +47,7 @@ const tmp=require("node:os").tmpdir(), left=require("node:path").join(tmp, "left
 fs.appendFileSync(at("release-tmp.jsonl"), JSON.stringify({ tmp, stale: fs.existsSync(left) }) + "\\n"); fs.writeFileSync(left, "");
 if (fs.existsSync(at("fail-release"))) { process.stderr.write("release boom\\n"); process.exit(4); }
 fs.writeFileSync(at("release-started"), "");
-while (fs.existsSync(at("hold-release"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+while (fs.existsSync(at("hold-release"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
 if (fs.existsSync(at("hang-release"))) setInterval(()=>{},1000);`;
 // The reset step records what it was given and the source it ran in, and prints the declared key, which must
 // stay out of the log (the command line itself never names it). It writes `reset-started` and holds while `hold-reset` exists, and fails while `fail-reset` exists,
@@ -54,7 +55,7 @@ if (fs.existsSync(at("hang-release"))) setInterval(()=>{},1000);`;
 // target while `wrong-target` exists.
 const resetStep = (root: string) => `const fs=require("node:fs"); const at=(name)=>require("node:path").join(${JSON.stringify(root)}, name);
 fs.writeFileSync(at("reset-started"), "");
-while (fs.existsSync(at("hold-reset"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+while (fs.existsSync(at("hold-reset"))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
 fs.appendFileSync(at("reset.jsonl"), JSON.stringify({ target: process.env.SLIPJAY_RESET_TARGET, source: process.env.SLIPJAY_RESET_SOURCE, reasonFile: Boolean(process.env.SLIPJAY_RESET_REASON_FILE), key: process.env.FIXTURE_KEY ?? null, head: require("node:child_process").execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim() }) + "\\n");
 console.log("postgres://owner:" + process.env.FIXTURE_KEY + "@db.example/prod restored");
 console.error("Error: private-" + "customer-record-fixture");
@@ -105,7 +106,7 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations"; machine?: string; prebuild?: string; prebuildInconclusive?: number[] }, reset = false,
-  { verificationStageTimeoutMs, buildChecks, postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", screeningLanes, verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {}, remoteVerification, boatProbeMs, boatReadinessMs, promotionSchedule, now, hostPlaces, gateMachine, machineVerifications, machineCheckVerifications, machineBuilds, batchVerification, batchRemote, recordBatchCheck, releaseAlertWebhook, sendReleaseAlert, hostShell }: { machineBuilds?: Parameters<typeof createRunnerQueue>[0]["machineBuilds"]; hostShell?: Parameters<typeof createRunnerQueue>[0]["hostShell"]; gateMachine?: string; machineVerifications?: Parameters<typeof createRunnerQueue>[0]["machineVerifications"]; machineCheckVerifications?: Parameters<typeof createRunnerQueue>[0]["machineCheckVerifications"]; hostPlaces?: 0 | 1; promotionSchedule?: unknown; batchVerification?: unknown; batchRemote?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; recordBatchCheck?: Parameters<typeof createRunnerQueue>[0]["recordBatchCheck"]; releaseAlertWebhook?: RunnerConfig["releaseAlertWebhook"]; sendReleaseAlert?: Parameters<typeof createRunnerQueue>[0]["sendReleaseAlert"]; now?: () => number; verificationStageTimeoutMs?: number; boatProbeMs?: number; boatReadinessMs?: number; remoteVerification?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; buildChecks?: import("../../../src/lib/build/build-check-access.ts").BuildCheckAccess; postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; screeningLanes?: number; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
+  { capabilities, verificationStageTimeoutMs, buildChecks, postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", screeningLanes, verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {}, remoteVerification, boatProbeMs, boatReadinessMs, promotionSchedule, now, hostPlaces, gateMachine, machineVerifications, machineCheckVerifications, machineBuilds, batchVerification, batchRemote, recordBatchCheck, releaseAlertWebhook, sendReleaseAlert, hostShell }: { capabilities?: QueueCapabilities; machineBuilds?: Parameters<typeof createRunnerQueue>[0]["machineBuilds"]; hostShell?: Parameters<typeof createRunnerQueue>[0]["hostShell"]; gateMachine?: string; machineVerifications?: Parameters<typeof createRunnerQueue>[0]["machineVerifications"]; machineCheckVerifications?: Parameters<typeof createRunnerQueue>[0]["machineCheckVerifications"]; hostPlaces?: 0 | 1; promotionSchedule?: unknown; batchVerification?: unknown; batchRemote?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; recordBatchCheck?: Parameters<typeof createRunnerQueue>[0]["recordBatchCheck"]; releaseAlertWebhook?: RunnerConfig["releaseAlertWebhook"]; sendReleaseAlert?: Parameters<typeof createRunnerQueue>[0]["sendReleaseAlert"]; now?: () => number; verificationStageTimeoutMs?: number; boatProbeMs?: number; boatReadinessMs?: number; remoteVerification?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; buildChecks?: import("../../../src/lib/build/build-check-access.ts").BuildCheckAccess; postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; screeningLanes?: number; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -113,80 +114,79 @@ export async function fixture(migrations = false, release = false, deployments?:
   const home = join(root, "runner");
   await mkdir(seed);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
-  git(["init", "--bare", "-b", branch, origin]);
-  // The seed only supplies origin's first commit, so an ordinary Git commit avoids a throwaway
-  // jj initialisation and snapshot. The author clone and everything the runner operates on are
-  // still real jj repositories.
-  const commitSeed = (dir: string, remote: string, seedBranch = branch) => {
-    git(["-C", dir, "add", "."]);
+  git(["init", "-q", "--bare", "-b", branch, origin]);
+  // Seed the bare origin directly instead of initializing a throwaway checkout and pushing.
+  const commitSeed = (dir: string, remote: string) => {
+    git(["--git-dir", remote, "--work-tree", dir, "add", "."]);
     // A host without a global Git identity must not fail the seed commit.
-    git(["-C", dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "Seed policy"]);
-    git(["-C", dir, "remote", "add", "origin", remote]);
-    git(["-C", dir, "push", "-q", "origin", seedBranch]);
+    git(["--git-dir", remote, "--work-tree", dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "Seed policy"]);
+  };
+  const cloneAuthor = (remote: string, dir: string, trackBranch: string) => {
+    git(["clone", "-q", remote, dir]);
+    jj(dir, ["git", "init", "--colocate"]);
+    jj(dir, ["bookmark", "track", trackBranch, "--remote", "origin"]);
   };
   // Both clone and later bounded jj commands read the private fixture identity, never the developer's jj config.
   fixtureJjConfig();
-  git(["init", "-q", "-b", branch, seed]);
   await writeFile(join(seed, "slipjay.json"), JSON.stringify({
     version: 1, integrationBranch: branch,
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLandingVerification: (gates?.(root) ?? [prefixGate?.(root) ?? gate]).map((script) => ({ executable: "node", args: ["-e", script] })),
+    requiredLandingVerification: (gates?.(root) ?? [prefixGate?.(root) ?? gate]).map((script) => ({ executable: "bun", args: ["-e", script] })),
     unattendedMergeToIntegration: true,
     ...(processLevel ? { process: processLevel } : {}),
     ...(promotionSchedule ? { promotionSchedule } : {}),
     ...(batchVerification ? { batchVerification } : {}),
-    ...(failingAudit ? { audit: { commands: [{ executable: "node", args: ["-e", "process.exit(1)"] }] } } : {}),
+    ...(failingAudit ? { audit: { commands: [{ executable: "bun", args: ["-e", "process.exit(1)"] }] } } : {}),
     ...(migrations ? {
       migrationFinalization: {
         mode: "late_bound_serialized", triggerPaths: ["schema"], artifactPaths: ["migrations"],
-        generate: { executable: "node", args: ["-e", generate] },
-        verify: { executable: "node", args: ["-e", ""] },
+        generate: { executable: "bun", args: ["-e", generate] },
+        verify: { executable: "bun", args: ["-e", ""] },
       },
       postIntegration: {
         ...(postIntegrationReadByGate === undefined ? {} : { readByGate: postIntegrationReadByGate }),
         version: 1, target: "fixture-development-db", idempotency: "artifact-key", approvalMode: "automatic-development", timeoutMs: 30_000,
-        command: { executable: "node", args: ["-e", finalize(root)] },
-        targetProbe: { executable: "node", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
+        command: { executable: "bun", args: ["-e", finalize(root)] },
+        targetProbe: { executable: "bun", args: ["-e", "console.log(JSON.stringify({ target: \"fixture-development-db\" }))"] },
       },
     } : {}),
     ...(deployments ? {
       deployments: { version: 1, environments: {
         staging: { minIntervalMs: deployments.minIntervalMs, timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY"],
-          projects: ["app", "hq"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] } })) },
+          projects: ["app", "hq"].map((name) => ({ name, command: { executable: "bun", args: ["-e", deployStep(root, name)] } })) },
         ...(deployments.production ? { production: { timeoutMs: 30_000, environmentKeys: ["FIXTURE_KEY", "SLIPJAY_DEPLOY_ROLLBACK_ALLOWED"],
-          ...deployments.machine ? { machine: deployments.machine } : {}, ...deployments.prebuild ? { prebuild: { executable: "node", args: ["-e", deployments.prebuild], ...deployments.prebuildInconclusive ? { inconclusiveExitCodes: deployments.prebuildInconclusive } : {} } } : {},
-          projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "node", args: ["-e", deployStep(root, name)] },
-            healthCheck: { executable: "node", args: ["-e", productionStep(root, name, "health")] },
-            activate: { executable: "node", args: ["-e", productionStep(root, name, "activate")] } })),
-          ...(deployments.production === "migrations" ? { migrations: { verify: { executable: "node", args: ["-e", migrationStep(root, "verify")] },
-            apply: { executable: "node", args: ["-e", migrationStep(root, "apply")] } } } : {}) } } : {}),
+          ...deployments.machine ? { machine: deployments.machine } : {}, ...deployments.prebuild ? { prebuild: { executable: "bun", args: ["-e", deployments.prebuild], ...deployments.prebuildInconclusive ? { inconclusiveExitCodes: deployments.prebuildInconclusive } : {} } } : {},
+          projects: ["app", "hq", "www"].map((name) => ({ name, command: { executable: "bun", args: ["-e", deployStep(root, name)] },
+            healthCheck: { executable: "bun", args: ["-e", productionStep(root, name, "health")] },
+            activate: { executable: "bun", args: ["-e", productionStep(root, name, "activate")] } })),
+          ...(deployments.production === "migrations" ? { migrations: { verify: { executable: "bun", args: ["-e", migrationStep(root, "verify")] },
+            apply: { executable: "bun", args: ["-e", migrationStep(root, "apply")] } } } : {}) } } : {}),
       } },
     } : {}),
     ...(release ? {
       releaseBranch: "release",
-      requiredReleaseVerification: [releaseCheck(root), ...releaseGates?.(root) ?? []].map((script) => ({ executable: "node", args: ["-e", script] })),
+      requiredReleaseVerification: [releaseCheck(root), ...releaseGates?.(root) ?? []].map((script) => ({ executable: "bun", args: ["-e", script] })),
     } : {}),
     ...(reset ? {
       reset: {
         version: 1, target: "fixture-development-db", timeoutMs: 30_000, intervalMs: 3_600_000, environmentKeys: ["FIXTURE_KEY"],
-        command: { executable: "node", args: ["-e", resetStep(root)] },
-        targetProbe: { executable: "node", args: ["-e", resetProbe(root)] },
+        command: { executable: "bun", args: ["-e", resetStep(root)] },
+        targetProbe: { executable: "bun", args: ["-e", resetProbe(root)] },
       },
     } : {}),
   }));
   commitSeed(seed, origin);
-  if (release) git(["-C", seed, "push", "-q", "origin", `${branch}:refs/heads/release`]);
-  jj(root, ["git", "clone", origin, author]);
+  if (release) git(["--git-dir", origin, "branch", "release", branch]);
+  cloneAuthor(origin, author, branch);
   const otherOrigin = join(root, "other.git");
   const otherAuthor = join(root, "other-author");
   async function seedRepository(name: string, repositoryOrigin: string, repositoryAuthor: string) {
     const repositorySeed = join(root, `${name}-seed`);
     await mkdir(repositorySeed);
-    git(["init", "--bare", "-b", "main", repositoryOrigin]);
-    git(["init", "-q", "-b", "main", repositorySeed]);
+    git(["init", "-q", "--bare", "-b", "main", repositoryOrigin]);
     await writeFile(join(repositorySeed, "slipjay.json"), await readFile(join(seed, "slipjay.json"), "utf8"));
-    commitSeed(repositorySeed, repositoryOrigin, "main");
-    jj(root, ["git", "clone", repositoryOrigin, repositoryAuthor]);
+    commitSeed(repositorySeed, repositoryOrigin);
+    cloneAuthor(repositoryOrigin, repositoryAuthor, "main");
   }
   if (other) await seedRepository("other", otherOrigin, otherAuthor);
   const authors: Record<string, string> = {};
@@ -229,7 +229,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     if (operation?.kind === "landing" && TERMINAL_EVENT_TYPES.includes(event.event.type as never))
       candidateAtVerdict.set(event.operationId, Boolean(git(["--git-dir", origin, "for-each-ref", `refs/heads/${operation.bookmark}`])));
   });
-  const queue = createRunnerQueue({ ...hostShell ? { hostShell, hostBudgetPollMs: 5 } : {}, machineVerifications, ...machineCheckVerifications ? { machineCheckVerifications } : {}, ...machineBuilds ? { machineBuilds } : {}, log, executor, home, config, buildChecks, boatProbeMs, boatReadinessMs, sendReleaseAlert, verificationStageTimeoutMs, ...now ? { now } : {}, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs }, ...remoteVerification ?? batchRemote ? { remoteVerification: remoteVerification ?? batchRemote } : {}, ...recordBatchCheck ? { recordBatchCheck, batchRouteRetryMs: 3_600_000 } : {},
+  const queue = createRunnerQueue({ ...capabilities ? { capabilities } : {}, ...hostShell ? { hostShell, hostBudgetPollMs: 5 } : {}, machineVerifications, ...machineCheckVerifications ? { machineCheckVerifications } : {}, ...machineBuilds ? { machineBuilds } : {}, log, executor, home, config, buildChecks, boatProbeMs, boatReadinessMs, sendReleaseAlert, verificationStageTimeoutMs, ...now ? { now } : {}, ...recoveryRetryMs === undefined ? {} : { recoveryRetryMs }, ...remoteVerification ?? batchRemote ? { remoteVerification: remoteVerification ?? batchRemote } : {}, ...recordBatchCheck ? { recordBatchCheck, batchRouteRetryMs: 3_600_000 } : {},
     environment: () => ({ ...process.env, FIXTURE_KEY: "from-runner", SLIPJAY_DEPLOY_ROLLBACK_ALLOWED: "spoofed-environment-value" }) });
   const main = () => git(["--git-dir", origin, "rev-parse", branch]);
   const releaseRef = () => git(["--git-dir", origin, "rev-parse", "release"]);
@@ -274,6 +274,17 @@ export async function fixture(migrations = false, release = false, deployments?:
     }
     return commit;
   }
+  /** Seed a prerequisite commit on origin and record it landed in the ledger, bypassing jj/gate setup no assertion reads. */
+  async function seedLanded(files: Record<string, string>, message = `Add ${Object.keys(files).join(", ")}`): Promise<string> {
+    const base = main();
+    const commitId = await seedMain(files, message);
+    jj(join(home, "repos", "fixture/repo"), ["git", "fetch", "--remote", "origin"]);
+    const id = newOperationId();
+    const changeId = `seed${id.slice(-12)}`;
+    log.append(id, { type: "submitted", repo: "fixture/repo", changeId, commitId, bookmark: candidateBookmark(changeId), submittedBy: "test" });
+    log.append(id, { type: "landed", base, commitId, branch, remote: "origin" });
+    return commitId;
+  }
   const parents = (commit: string) => git(["--git-dir", origin, "log", "-1", "--format=%P", commit]).split(" ");
   const remoteFile = (file: string) => git(["--git-dir", origin, "show", `main:${file}`]);
   const authorRoot = author;
@@ -295,7 +306,10 @@ export async function fixture(migrations = false, release = false, deployments?:
     jj(author, ["new", "-m", `Add ${file}`, `${branch}@origin`]);
     await mkdir(join(author, file, ".."), { recursive: true });
     await writeFile(join(author, file), `${file}\n`);
-    return push(author, repo);
+    const [changeId = "", commitId = ""] = jj(author, ["log", "-r", "@", "--no-graph", "-T", 'change_id ++ " " ++ commit_id']).split(" ");
+    const bookmark = candidateBookmark(changeId);
+    jj(author, ["git", "push", "--remote", "origin", "--named", `${bookmark}=@`]);
+    return { repo, changeId, commitId, bookmark, submittedBy: "test" };
   }
   function submit(request: SubmitRequest) {
     const id = newOperationId();
@@ -325,7 +339,7 @@ export async function fixture(migrations = false, release = false, deployments?:
     return id;
   }
   const otherMain = () => git(["--git-dir", otherOrigin, "rev-parse", "main"]);
-  return { root, logPath, authors, requestedEnvironments, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, updateRelease, parents, remoteFile, seedMain, push, candidate, submit, submitRelease, submitReset, lines, result,
+  return { root, logPath, authors, requestedEnvironments, requestedTimeouts, candidateAtVerdict, development, land, deploy, origin, author, otherAuthor, otherMain, home, log, queue, executor, published, main, releaseRef, updateRelease, parents, remoteFile, seedMain, seedLanded, push, candidate, submit, submitRelease, submitReset, lines, result,
     async dispose() {
       queue.close(); await queue.idle(); unsubscribe();
       const capture = process.env.SLIPJAY_CAPTURE_PIPELINE_FIXTURES;
@@ -341,13 +355,18 @@ export async function fixture(migrations = false, release = false, deployments?:
     } };
 }
 
+export function fixtureWith(defaults: QueueCapabilities): typeof fixture {
+  return (migrations, release, deployments, reset, options = {}) =>
+    fixture(migrations, release, deployments, reset, { ...options, capabilities: { ...defaults, ...options.capabilities } });
+}
+
 export async function until<T>(check: () => Promise<T | undefined> | T | undefined, timeoutMs = 60_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = await check();
     if (value !== undefined) return value;
     if (Date.now() > deadline) throw new Error("condition not reached");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 15));
   }
 }
 export const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -364,7 +383,7 @@ export async function hanging(f: Awaited<ReturnType<typeof fixture>>, pids: stri
 export const started = (pids: string) => until(async () => await readFile(pids, "utf8").then((text) => text ? true : undefined, () => undefined));
 
 export const generations = (f: Awaited<ReturnType<typeof fixture>>, ids: string[]) =>
-  ids.flatMap((id) => f.log.operation(id)!.runs).filter((run) => run.command.startsWith("node -e const fs=require(\"node:fs\");fs.mkdirSync")).length;
+  ids.flatMap((id) => f.log.operation(id)!.runs).filter((run) => run.command.startsWith("bun -e const fs=require(\"node:fs\");fs.mkdirSync")).length;
 
 export const stagesOf = (f: Awaited<ReturnType<typeof fixture>>, id: string) =>
   f.log.events({ operationId: id }).flatMap((stored) => stored.event.type === "stage" ? [stored.event.stage] : []);

@@ -8,13 +8,15 @@ import { submissionProbe } from "../landing/submission-probe.ts";
 import { readCommandArtifact } from "./command-artifact.ts";
 import { pruneRetainedEvidence } from "./evidence-retention.ts";
 import { createRunnerHandler } from "./runner-api.ts";
+import { runnerAuditApi } from "./runner-api-audit.ts";
 import { BUILD_TOKEN_ENV, buildAdmitter, buildReader, buildRoute } from "../build/build-admission.ts";
 import { createBuildCheckAccess } from "../build/build-check-access.ts";
 import { createPipelineRelay, localPipelineReader } from "../build/build-pipeline-relay.ts";
 import { createReceiptDrain, deliveryState, receiptsOwedTo } from "../build/build-receipts.ts";
 import { landingOutcome } from "../landing/landing-outcome.ts";
 import { RUNNER_DEFAULT_PORT, RUNNER_TOKEN_ENV } from "./runner-env.ts";
-import { RUNNER_JJ_DEFAULTS, runnerConfigProblem } from "./runner-contract.ts";
+import { RUNNER_JJ_DEFAULTS } from "./runner-contract.ts";
+import { runnerConfigProblem } from "./runner-config.ts";
 import type { Executor, RunnerConfig } from "./runner-types.ts";
 import { serveRunner } from "./runner-http.ts";
 import { openOperationLog } from "./runner-log.ts";
@@ -25,6 +27,11 @@ import { shortRepositories } from "./pipeline-metrics.ts";
 import { boatVerification } from "./boat-verifier.ts";
 import { localExecutor } from "./local-executor.ts";
 import { createRunnerQueue, runnerLogOptions } from "./runner-queue.ts";
+import { deployCapability } from "./queue-deploy-capability.ts";
+import { releaseCapability } from "./queue-release-capability.ts";
+import { batchCapability } from "./queue-batch-capability.ts";
+import { maintenanceCapability } from "./queue-maintenance-capability.ts";
+import { verifierCapability } from "./queue-verifier-capability.ts";
 import { hostShell } from "./host-budget.ts";
 import { machineConnections, machineSshArgs } from "./machine-verifier.ts";
 import { createRetention } from "./retention-loop.ts";
@@ -77,6 +84,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
   const buildChecks = build ? createBuildCheckAccess() : undefined;
   const queue = createRunnerQueue({
     log, home, config, executor,
+    capabilities: { deploy: deployCapability, release: releaseCapability, batch: batchCapability, maintenance: maintenanceCapability, verifiers: verifierCapability },
     environment: () => env,
     // An operator's switch, and what keeps a runner a test starts from reading the real host's budget under its own suite's load.
     ...process.env.SLIPJAY_HOST_BUDGET === "off" ? {} : { hostShell: (machine: string | null) => hostShell(machine ? machineSshArgs(config.machines![machine]!, machineConnections(home, machine, "host")) : undefined) },
@@ -92,7 +100,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     return repository.url;
   };
   const server = await serveRunner(createRunnerHandler({
-    log, token, runnerName: config.name ?? hostname(), readLog: queue.readLog, requestBatchCheck: queue.requestBatchCheck, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled, prioritize: queue.prioritize, recoverHeld: queue.recoverHeld, releaseHeld: queue.releaseHeld,
+    log, token, runnerName: config.name ?? hostname(), audit: runnerAuditApi, readLog: queue.readLog, requestBatchCheck: queue.requestBatchCheck, onSubmitted: queue.wake, kill: queue.kill, onCancelled: queue.cancelled, prioritize: queue.prioritize, recoverHeld: queue.recoverHeld, releaseHeld: queue.releaseHeld,
     subscribe: log.subscribe,
     // Without both, Build-bound submissions are refused, never queued unadmitted.
     ...build ? { admitBuild: buildAdmitter(build), onAdmissionUnresolved: () => receipts?.wake(), readBuild: build, buildChecks } : {},

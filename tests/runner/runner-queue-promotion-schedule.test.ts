@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test, fixture } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture } from "./fixtures/queue-release-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 
 test("a promotionSchedule batches development promotions and a confirmed promotion is never held", async () => {

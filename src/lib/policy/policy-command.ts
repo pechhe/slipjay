@@ -11,7 +11,7 @@ import { applyPolicyPatch, parsePolicyPatch, POLICY_BASE_TRAILER, policyDigest }
 import type { PolicyPatch } from "./policy-settings.ts";
 import type { ProcessLevel, TimeBudgets } from "./execution-policy.ts";
 import { LandingNotSubmitted, landThroughRunner } from "../runner/runner-client.ts";
-import { publicationRemote } from "../landing/landing-steps.ts";
+import { publicationRemote } from "../landing/landing-remote.ts";
 import { createWorkspace } from "../workspace/workspace-create.ts";
 import { run, workspaceContext } from "../infra/workspace-jj.ts";
 import { removeWorkspace } from "../workspace/workspace-lifecycle.ts";

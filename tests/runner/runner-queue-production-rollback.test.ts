@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { test, fixture } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture } from "./fixtures/queue-release-fixture.ts";
 
 test("a promotion that fails its health check activates nothing and returns the release branch; one whose activation fails moves the activated projects back", async () => {
   const f = await fixture(false, true, { minIntervalMs: 0, production: true });

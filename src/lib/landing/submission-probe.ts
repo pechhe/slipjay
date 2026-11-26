@@ -7,7 +7,7 @@ import { repositoryKey } from "../runner/runner-contract.ts";
 import type { SubmitRequest } from "../runner/runner-types.ts";
 import { duplicateLandingSource } from "./landing-artifact.ts";
 import { rebaseOntoIntegration } from "./landing-candidate.ts";
-import { conflictedPaths } from "./landing-steps.ts";
+import { conflictedPaths } from "./landing-remote.ts";
 import { importSubmissionSource } from "./submission-source.ts";
 import type { RetainedSubmission } from "./submission-source.ts";
 import { assertRenameSafety, LandingRenameConflict } from "./rename-safety.ts";

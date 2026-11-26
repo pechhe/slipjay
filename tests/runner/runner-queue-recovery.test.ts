@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RUNNER_CONTROL_ID, TERMINAL_EVENT_TYPES, recoveryKey } from "../../src/lib/runner/runner-contract.ts";
-import { test, jj, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, jj, fixture, until } from "./fixtures/queue-release-fixture.ts";
 
 test("a restart returns a gating and a queued landing to the queue, and both land with no resubmission", async () => {
   const f = await fixture();

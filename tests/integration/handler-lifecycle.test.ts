@@ -7,7 +7,10 @@ vi.mock("../../src/lib/runner/runner-client.ts", () => ({
   landThroughRunner: calls.land,
   releaseThroughRunner: calls.release,
 }));
-vi.mock("../../src/lib/slipjay.ts", () => ({ workspaceContext: async () => null }));
+vi.mock("../../src/lib/infra/workspace-jj.ts", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../src/lib/infra/workspace-jj.ts")>(),
+  workspaceContext: async () => null,
+}));
 vi.mock("../../src/lib/release/release.ts", () => ({
   confirmableCandidate: async () => ({ status: "confirmable", candidate: "candidate", remote: "origin" }),
 }));

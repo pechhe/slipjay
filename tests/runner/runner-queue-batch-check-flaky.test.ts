@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test, fixture } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture } from "./fixtures/queue-batch-fixture.ts";
 import { REPO, settle, schedule, batchEvents } from "./fixtures/automatic-promotion.ts";
 import { batchCheck, localRemote } from "./fixtures/batch-check-fixture.ts";
 

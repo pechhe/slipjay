@@ -1,5 +1,5 @@
 import { jj, project } from "../support/workspace-project.ts";
-import { landThroughTestRunner } from "../support/test-runner.ts";
+import { landOnTestRunner, withTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
@@ -44,43 +44,31 @@ test("start describes an empty change with its task and Issue, for new, claimed 
   }
 }, 180_000);
 
-test("landing never publishes the wip placeholder: it falls back to the task, as an undescribed change always did", async () => {
+test("landing replaces the generated wip placeholder with the task, keeps a hand-written wip: description, and refuses a placeholder lower in a stack", async () => {
   const f = await project();
   try {
-    const workspace = await createWorkspace("Add widgets", f.repo);
-    await writeFile(join(workspace.workspacePath, "widgets.txt"), "w\n");
-    assert.equal(description(workspace.workspacePath).trim(), "wip: Add widgets");
-    const landed = await landThroughTestRunner(f, workspace.workspacePath);
-    assert.equal(landed.ok, true);
-    assert.equal(remoteMessage(f.remote), "Add widgets");
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
+    await withTestRunner(f, async (runner) => {
+      const generated = await createWorkspace("Add widgets", f.repo);
+      await writeFile(join(generated.workspacePath, "widgets.txt"), "w\n");
+      assert.equal(description(generated.workspacePath).trim(), "wip: Add widgets");
+      const landed = await landOnTestRunner(runner, generated.workspacePath);
+      assert.equal(landed.ok, true);
+      assert.equal(remoteMessage(f.remote), "Add widgets");
 
-test("only the generated placeholder is replaced: a hand-written wip: description lands as written", async () => {
-  const f = await project();
-  try {
-    const workspace = await createWorkspace("Add widgets", f.repo);
-    await writeFile(join(workspace.workspacePath, "widgets.txt"), "w\n");
-    jj(workspace.workspacePath, ["describe", "-m", "wip: spike the widget cache"]);
-    const landed = await landThroughTestRunner(f, workspace.workspacePath);
-    assert.equal(landed.ok, true);
-    assert.equal(remoteMessage(f.remote), "wip: spike the widget cache");
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
+      const manual = await createWorkspace("Add gadgets", f.repo);
+      await writeFile(join(manual.workspacePath, "gadgets.txt"), "g\n");
+      jj(manual.workspacePath, ["describe", "-m", "wip: spike the widget cache"]);
+      const manualLanded = await landOnTestRunner(runner, manual.workspacePath);
+      assert.equal(manualLanded.ok, true);
+      assert.equal(remoteMessage(f.remote), "wip: spike the widget cache");
 
-test("landing refuses a stack whose lower commit still has the generated placeholder", async () => {
-  const f = await project();
-  try {
-    const workspace = await createWorkspace("Add widgets", f.repo);
-    await writeFile(join(workspace.workspacePath, "a.txt"), "a\n");
-    jj(workspace.workspacePath, ["new"]);
-    await writeFile(join(workspace.workspacePath, "b.txt"), "b\n");
-    jj(workspace.workspacePath, ["describe", "-m", "Add b"]);
-    await assert.rejects(landThroughTestRunner(f, workspace.workspacePath), /real description for commit \w+.*jj describe -r/s);
+      const stacked = await createWorkspace("Add stack", f.repo);
+      await writeFile(join(stacked.workspacePath, "a.txt"), "a\n");
+      jj(stacked.workspacePath, ["new"]);
+      await writeFile(join(stacked.workspacePath, "b.txt"), "b\n");
+      jj(stacked.workspacePath, ["describe", "-m", "Add b"]);
+      await assert.rejects(landOnTestRunner(runner, stacked.workspacePath), /real description for commit \w+.*jj describe -r/s);
+    });
   } finally {
     await f.dispose();
   }

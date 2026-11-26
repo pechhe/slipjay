@@ -1,5 +1,4 @@
 import { releaseHeldIntegration, controlRunner, prioritizeOperation, resendReceipts, readRunLog, readRunArtifact, readLandingOutcome, readLandingHandoff, downloadSubmissionSource, manageRepairClaim, runnerLocation, operationRunnerLocation } from "../lib/runner/runner-client.ts";
-import { startRunner } from "../lib/runner/runner-service.ts";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -64,6 +63,7 @@ export async function runRunner(rest: string[]): Promise<void> {
     console.log(outcome.line);
     if (!outcome.ok) process.exitCode = 1;
   } else if (rest.join(" ") === "serve") {
+    const { startRunner } = await import("../lib/runner/runner-service.ts");
     const runner = await startRunner();
     console.error(`SlipJay runner listening on ${runner.url}`);
     // systemd stops the unit with SIGTERM. A restart, such as an upgrade's, waits for an operation that is integrating,

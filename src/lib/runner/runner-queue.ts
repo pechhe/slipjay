@@ -10,16 +10,11 @@ import type { PreparedLandingCandidate } from "../landing/landing-candidate.ts";
 import { importSubmissionSource } from "../landing/submission-source.ts";
 import { duplicateLandingSource, retainLandingSource, retainLandingArtifact, importLandingArtifact, RETAINED_ARTIFACT_REVISIONS } from "../landing/landing-artifact.ts";
 import type { LandingArtifact } from "../landing/landing-artifact.ts";
-import { completeLanding, conflictedPaths, fetchIntegration, fetchIntegrationIfMoved, landingIO } from "../landing/landing-steps.ts";
-import { createDeployScheduler } from "../release/deploy-scheduler.ts";
-import { createResetScheduler } from "../release/reset-scheduler.ts";
-import { auditInconclusive, auditSummary, promotionRefusal } from "../release/audit-ledger.ts";
-import { createAuditScheduler } from "../release/audit-scheduler.ts";
-import { runReset } from "../release/reset.ts";
-import { ensureDeployCommit, ensureOnIntegrationBranch, prebuildRelease, runDeploy, schemaMayHaveChanged, type PrebuildResult } from "../release/deploy.ts";
+import { completeLanding, landingIO } from "../landing/landing-steps.ts";
+import { conflictedPaths, fetchIntegration, fetchIntegrationIfMoved } from "../landing/landing-remote.ts";
+import type { PrebuildResult } from "../release/deploy.ts";
 import { readExactExecutionPolicy } from "../release/post-integration-source.ts";
-import { confirmRelease, passedVerification, planRelease, returnRelease, unverifiedCandidateReason, verifyRelease } from "../release/release.ts";
-import { boundedKeys, boundedOutput, boundedTests, flakyVerifies, PREBUILD_KEY, runBatchCheck, type BatchCheckRecord, type BatchLanding, type BatchRun, type BatchRunRecord, type BatchScope, type SuiteState } from "../release/batch-check.ts";
+import type { BatchCheckRecord, BatchLanding, BatchRun, BatchRunRecord, BatchScope, SuiteState } from "../release/batch-check.ts";
 import { RELEASE_BASE_ENV, RELEASE_ENV_KEYS, RELEASE_HEAD_ENV, RELEASE_SUITES_ENV, type BatchVerification } from "../policy/batch-verification.ts";
 import { prepareWorkspaceDependencies } from "../workspace/workspace-dependencies.ts";
 import type { BuildRouteAnswer } from "../build/build-admission.ts";
@@ -44,11 +39,9 @@ import { truncateUtf8 } from "../infra/utf8.ts";
 import { redactVerificationOutput } from "../infra/verification-failure.ts";
 import { redactMigrationOutput } from "../landing/migration-command-evidence.ts";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import { machineBuildLease, machineConnections, machineVerification } from "./machine-verifier.ts";
 import { machinePlaceHolds } from "./machine-place-holds.ts";
-import { hostMachine, openHostAttempt } from "./host-verifier.ts";
 import { awaitHostBudget, stampHostStart, type HostBudgetClass, type HostShell } from "./host-budget.ts";
-import { HostCapacityUnavailable } from "./host-capacity-remote.ts";
+import type { QueueCapabilities } from "./runner-queue-capabilities.ts";
 import type { AuditOperation, CompletedRelease, DeployOperation, DeployRecord, Executor, KillOutcome, LeaseBuildMachine, MachineVerification, PromotionFacts, PromotionHold, LandingOperation, Operation, OperationEvent, OperationLog, PrioritizeOptions, PrioritizeOutcome, RemoteAttempt, RemoteOpenFailure, RemoteVerification, GatePlacement, RunnerConfig, RuntimeIdentity, RunnerHealth, RunnerStage, ReleaseAlertDetails, ReleaseAlertPayload, ReleaseOperation, RecoveryOperation, ResetOperation, RunPurpose, VerificationOperation, VerificationResponse } from "./runner-types.ts";
 
 /** Whether a commit's policy promotes: production deploys from its release branch, which declares its checks. */
@@ -207,6 +200,8 @@ export function createRunnerQueue(input: {
   /** How long after Forge could not be reached a culprit is sent again. */
   batchRouteRetryMs?: number;
   sendReleaseAlert?: (url: string, payload: ReleaseAlertPayload, timeoutMs: number) => Promise<void>;
+  /** Optional subsystems (deploy, release, batch, maintenance, verifiers); `runner-service.ts` supplies all five. */
+  capabilities?: QueueCapabilities;
 }): {
   wake(): void; recover(): Promise<void>; idle(): Promise<void>;
   /** A confirm's batch check of a commit under `batchVerification`; null for a repository that does not batch. */
@@ -238,7 +233,12 @@ export function createRunnerQueue(input: {
   kill(operationId?: string): KillOutcome;
   logPath(operationId: string): string; readLog(operationId: string): Promise<string | null>;
 } {
-  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification, boatProbeMs = 5000, verificationStageTimeoutMs } = input;
+  const { log, executor, home, config, environment, readBuild, buildChecks, recoveryRetryMs = RECOVERY_RETRY_MS, remoteVerification, boatProbeMs = 5000, verificationStageTimeoutMs, capabilities = {} } = input;
+  const need = <K extends keyof QueueCapabilities>(key: K): NonNullable<QueueCapabilities[K]> => {
+    const cap = capabilities[key];
+    if (!cap) throw new Error(`Runner queue ${String(key)} capability is not configured`);
+    return cap;
+  };
   if (Object.values(config.repos).some((repo) => repo.verifier) && !remoteVerification) throw new Error("A repository names a remote verifier, but the runner has none");
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && !repo.verifier) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
@@ -316,8 +316,12 @@ export function createRunnerQueue(input: {
   /** Named places are shared by every repository that names the same machine. */
   const machinePlaces: Record<string, readonly MachineVerification[]> = input.machineVerifications
     ? Object.fromEntries(Object.entries(input.machineVerifications).map(([name, places]) => [name, Array.isArray(places) ? places : [places]]))
-    : Object.fromEntries(Object.entries(config.machines ?? {}).map(([name, entry]) =>
-      [name, Array.from({ length: entry.places ?? 1 }, (_, place) => machineVerification(name, entry, { scratch: join(home, "scratch"), connections: machineConnections(home, name, place), place }))]));
+    : Object.entries(config.machines ?? {}).length
+      ? Object.fromEntries(Object.entries(config.machines ?? {}).map(([name, entry]) => {
+        const verifiers = need("verifiers");
+        return [name, Array.from({ length: entry.places ?? 1 }, (_, place) => verifiers.machineVerification(name, entry, { scratch: join(home, "scratch"), connections: verifiers.machineConnections(home, name, place), place }))];
+      }))
+      : {};
   const machineGates = machinePlaceHolds();
   /**
    * The release-check places (SJ-202), by the boat pool each serves, with the machine it is on: gates never use one, and
@@ -325,12 +329,18 @@ export function createRunnerQueue(input: {
    */
   const machineChecks: Record<string, { machine: string; place: MachineVerification }> = input.machineCheckVerifications
     ? Object.fromEntries(Object.entries(input.machineCheckVerifications).map(([pool, place]) => [pool, { machine: pool, place }]))
-    : Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.checkPlace
-      ? [[entry.checkPlace, { machine: name, place: machineVerification(name, entry, { scratch: join(home, "scratch"), connections: machineConnections(home, name, "check"), check: true }) }]] : []));
+    : Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => {
+      if (!entry.checkPlace) return [];
+      const verifiers = need("verifiers");
+      return [[entry.checkPlace, { machine: name, place: verifiers.machineVerification(name, entry, { scratch: join(home, "scratch"), connections: verifiers.machineConnections(home, name, "check"), check: true }) }]];
+    }));
   const machineCheckHolds = machinePlaceHolds();
   /** The fixed machines that build for a pool, tried before boat (`buildPool`). */
-  const machineBuilds = input.machineBuilds ?? Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => entry.buildPool
-    ? [[entry.buildPool, { machine: name, lease: machineBuildLease(name, entry, { scratch: join(home, "scratch"), connections: machineConnections(home, name, "build") }) }]] : []));
+  const machineBuilds = input.machineBuilds ?? Object.fromEntries(Object.entries(config.machines ?? {}).flatMap(([name, entry]) => {
+    if (!entry.buildPool) return [];
+    const verifiers = need("verifiers");
+    return [[entry.buildPool, { machine: name, lease: verifiers.machineBuildLease(name, entry, { scratch: join(home, "scratch"), connections: verifiers.machineConnections(home, name, "build") }) }]];
+  }));
   /**
    * Builds of a commit's production images, by repository and commit: a release check's, or one ahead of a scheduled
    * promotion. They outlive what started them, and a runner shutting down stops them.
@@ -370,7 +380,7 @@ export function createRunnerQueue(input: {
     const label = `[prebuild] ${repo} ${commitId.slice(0, 12)}`;
     note(`[prebuild] building ${commitId.slice(0, 12)} on ${served.machine} ${why}`);
     const pool = policy.machine;
-    const building: Promise<PrebuildResult> = prebuildRelease({ gitDirectory, commitId, policy: { ...policy, prebuild: policy.prebuild },
+    const building: Promise<PrebuildResult> = need("deploy").prebuildRelease({ gitDirectory, commitId, policy: { ...policy, prebuild: policy.prebuild },
       readEnvironment: environment ?? (() => process.env), abortSignal: signal, run: (request) => executor.run(request),
       lease: () => served.lease({ repo, pool, gitDirectory, commitId, lifetimeS: 2 * Math.ceil(policy.timeoutMs / 1000), signal }) })
       .then((result) => {
@@ -690,34 +700,40 @@ export function createRunnerQueue(input: {
     const landed = log.lastLanded(repo);
     if (landed) await schedule(repo, landed.commitId).catch((error: unknown) => progress(`Could not schedule deploys and resets: ${message(error)}`));
   }
-  const resetScheduler = createResetScheduler({
-    log,
-    submit(repo) {
-      const landed = log.lastLanded(repo);
-      if (!landed) return;
-      log.append(newOperationId(), { type: "submitted", kind: "reset", repo, commitId: landed.commitId, submittedBy: `${executor.host}:schedule` });
-      wakeMain();
-    },
-  });
-  const auditScheduler = createAuditScheduler({
-    log,
-    submit(repo, slot) {
-      const known = log.lastLanded(repo)?.commitId ?? knownHeads.get(repo) ?? log.audits(repo)[0]?.head ?? "";
-      log.append(newOperationId(), { type: "submitted", kind: "audit", repo, commitId: known, slot: new Date(slot).toISOString(), submittedBy: `${executor.host}:schedule` });
-      wakeMain();
-    },
-  });
+  const resetScheduler = capabilities.maintenance
+    ? capabilities.maintenance.createResetScheduler({
+      log,
+      submit(repo) {
+        const landed = log.lastLanded(repo);
+        if (!landed) return;
+        log.append(newOperationId(), { type: "submitted", kind: "reset", repo, commitId: landed.commitId, submittedBy: `${executor.host}:schedule` });
+        wakeMain();
+      },
+    })
+    : { consider() {}, close() {} };
+  const auditScheduler = capabilities.maintenance
+    ? capabilities.maintenance.createAuditScheduler({
+      log,
+      submit(repo, slot) {
+        const known = log.lastLanded(repo)?.commitId ?? knownHeads.get(repo) ?? log.audits(repo)[0]?.head ?? "";
+        log.append(newOperationId(), { type: "submitted", kind: "audit", repo, commitId: known, slot: new Date(slot).toISOString(), submittedBy: `${executor.host}:schedule` });
+        wakeMain();
+      },
+    })
+    : { consider() {}, reconsider() {}, close() {} };
   const auditDiscovery = new Map<string, ReturnType<typeof setTimeout>>();
   /** The integration head discovery last saw, which labels an audit of a repository that never landed here. */
   const knownHeads = new Map<string, string>();
   const discoveries = new Set<Promise<void>>();
-  const scheduler = createDeployScheduler({
-    log,
-    submit(repo, environment, commitId) {
-      log.append(newOperationId(), { type: "submitted", kind: "deploy", repo, environment, commitId, submittedBy: `${executor.host}:schedule` });
-      wakeDeploys();
-    },
-  });
+  const scheduler = capabilities.deploy
+    ? capabilities.deploy.createDeployScheduler({
+      log,
+      submit(repo, environment, commitId) {
+        log.append(newOperationId(), { type: "submitted", kind: "deploy", repo, environment, commitId, submittedBy: `${executor.host}:schedule` });
+        wakeDeploys();
+      },
+    })
+    : { consider() {}, close() {} };
   let deploying: Promise<void> = Promise.resolve();
   let deployPending = false;
   function wakeDeploys(): void {
@@ -768,13 +784,14 @@ export function createRunnerQueue(input: {
       const gitDirectory = join(checkoutPath(operation), ".git");
       if (!await stat(gitDirectory).then(() => true, () => false))
         throw new Error(`The runner has no checkout of ${operation.repo} yet; it makes one at its first landing`);
-      await ensureDeployCommit(gitDirectory, repository.url, operation.commitId);
+      const deployCap = need("deploy");
+      await deployCap.ensureDeployCommit(gitDirectory, repository.url, operation.commitId);
       const exact = await readExactExecutionPolicy(gitDirectory, operation.commitId);
       // The branch comes from the last commit this runner landed, not from the commit asking to deploy.
       const landed = log.lastLanded(operation.repo);
       const branch = (landed ? (await readExactExecutionPolicy(gitDirectory, landed.commitId)).configuration : exact.configuration)?.integrationBranch;
       if (!branch) throw new Error(`${operation.repo} declares no integrationBranch to deploy from`);
-      await ensureOnIntegrationBranch(gitDirectory, repository.url, branch, operation.commitId);
+      await deployCap.ensureOnIntegrationBranch(gitDirectory, repository.url, branch, operation.commitId);
       const policy = exact.configuration?.deployments?.environments[operation.environment];
       if (!policy) throw new Error(`${operation.commitId.slice(0, 12)} declares no ${operation.environment} deployment`);
       promotes = promotesFrom(exact.configuration);
@@ -793,7 +810,7 @@ export function createRunnerQueue(input: {
       // A closed deploy of this commit with no record (a restart or crash cut it short) may have applied them too: nothing says it did not.
       const earlierSchemaChange = earlier.some(({ entry, record }) => entry.commitId === operation.commitId && entry.result
         && (!record || record.migrations?.status === "applied" || record.migrations?.status === "apply_failed"));
-      const record = await runDeploy({
+      const record = await deployCap.runDeploy({
         gitDirectory: exact.gitDirectory, environment: operation.environment, commitId: operation.commitId, previous, policy, redeploy: !operation.promotion,
         previousUrls, nonAdditive: manual.length > 0, earlierSchemaChange, migrationArtifacts: operation.promotion?.migrationArtifacts ?? [],
         readEnvironment: environment ?? (() => process.env), onProgress: progress,
@@ -863,14 +880,14 @@ export function createRunnerQueue(input: {
     if (record.migrations?.status === "apply_failed") return { automatic: false,
       reason: "not rolled back automatically, because applying the migrations failed and the database may be partly migrated: the owner decides" };
     // A deploy that stopped before the migrations, or whose first verify refused, changed no schema (and no earlier deploy of the commit did): the code before the promotion still fits.
-    if (manual.length && schemaMayHaveChanged(declaresMigrations, record.migrations, earlierSchemaChange)) return { automatic: false,
+    if (manual.length && need("deploy").schemaMayHaveChanged(declaresMigrations, record.migrations, earlierSchemaChange)) return { automatic: false,
       reason: `not rolled back automatically, because the promotion carries non-additive migrations (${manual.join(", ")}): the owner decides` };
     const unrecovered = record.projects.filter((project) => project.activated);
     if (unrecovered.length) return { automatic: false,
       reason: `rollback incomplete: ${unrecovered.map((project) => project.activated === "unknown"
         ? `${project.name} activation or recovery outcome is unknown (${project.reason ?? "no earlier deployment"})`
         : `${project.name} still serves the promotion (${project.reason ?? "no earlier deployment"})`).join(", ")}; the release branch stays on the release` };
-    const returned = await serially(operation.repo, () => returnRelease(repoCheckout(operation.repo), { merge, candidate: operation.commitId }));
+    const returned = await serially(operation.repo, () => need("release").returnRelease(repoCheckout(operation.repo), { merge, candidate: operation.commitId }));
     return returned.returned
       ? { automatic: true, releaseBranch: returned.releaseBranch, reason: `rolled back: production serves what it served before, and the release branch is back on ${returned.releaseBranch.slice(0, 12)}` }
       : { automatic: false, reason: `rollback incomplete: production serves what it served before, but the release branch still holds the release: ${returned.reason}` };
@@ -1101,7 +1118,7 @@ export function createRunnerQueue(input: {
     }
     const migrations = migrationsWithheld(verified);
     if (migrations) return withheld(migrations);
-    const refusal = base.audit ? promotionRefusal(auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
+    const refusal = base.audit ? need("maintenance").promotionRefusal(need("maintenance").auditSummary({ audits: log.audits(repo), landings: log.landings(repo) }, new Date())) : null;
     if (refusal) return busy(refusal);
     // Asked again after the reads above, which let a newer candidate pass and a release or a production deploy begin.
     const current = promotionCandidate(repo, releaseBase);
@@ -1660,7 +1677,7 @@ export function createRunnerQueue(input: {
             machineGates.release(name, place);
             signal.throwIfAborted();
             // Capacity denial says nothing about machine health and must never spill into an unaccounted Boat job.
-            if (error instanceof HostCapacityUnavailable) throw error;
+            if (capabilities.verifiers?.isHostCapacityUnavailable(error)) throw error;
             reason = message(error).slice(0, 2000);
             const remote = (error as RemoteOpenFailure)?.remote;
             if (remote) append(operation.id, { type: "remote_verification", phase: "failed", ...remote, placement: `machine:${name}`, setupMs: Date.now() - started, infrastructure: true, reason });
@@ -1692,11 +1709,12 @@ export function createRunnerQueue(input: {
       const screening = prefix?.screenSlot !== undefined && prefix.screen?.phase !== "authoritative";
       const slot = screening ? prefix!.screenSlot! : prefix?.slot ?? 0;
       progress(`[verify] the runner host's gate place is free: the gate runs here, in ${checkout}`);
-      const attempt = await openHostAttempt({ executor, checkout, candidate,
+      const verifiers = need("verifiers");
+      const attempt = await verifiers.openHostAttempt({ executor, checkout, candidate,
         install: async () => landingIO.prepareCandidateDependencies(checkout, context, await revisionFacts(checkout, candidate), progress,
           (request) => run(request, "dependencies")) })
         .catch((error: unknown) => {
-          append(operation.id, { type: "remote_verification", phase: "failed", machine: hostMachine(executor.host),
+          append(operation.id, { type: "remote_verification", phase: "failed", machine: verifiers.hostMachine(executor.host),
             reason: message(error).slice(0, 2000), usageBefore: null, usage: null });
           throw error;
         });
@@ -2400,7 +2418,7 @@ export function createRunnerQueue(input: {
           // Every failure a declared could-not-judge exit: the audit could not judge the suite, recorded as such on
           // its terminal event now, from the policy that ran. Anything else is an ordinary failure, as before, and a
           // kill stays a kill whatever its stopping commands exit with.
-          if (!controller.signal.aborted && error instanceof RequiredVerificationError && auditInconclusive(error.evidence.failures, auditPolicy.commands))
+          if (!controller.signal.aborted && error instanceof RequiredVerificationError && need("maintenance").auditInconclusive(error.evidence.failures, auditPolicy.commands))
             return { type: "failed", stage, reason: error.message, inconclusive: true, ...failedVerification(error.evidence) };
           throw error;
         }
@@ -2427,7 +2445,7 @@ export function createRunnerQueue(input: {
       if (!policy) return { type: "failed", stage, reason: `${source.slice(0, 12)} declares no reset` };
       setStage("resetting");
       progress(`Resetting ${policy.target} from ${source.slice(0, 12)}`);
-      const reason = await runReset({ gitDirectory, source, policy, run, abortSignal: controller.signal,
+      const reason = await need("maintenance").runReset({ gitDirectory, source, policy, run, abortSignal: controller.signal,
         outputPath: join(home, "logs", `${operation.id}.reset-output`), reasonPath: join(home, "logs", `${operation.id}.reset-reason`),
         readEnvironment: environment ?? (() => process.env) });
       // A killed probe or command comes back as a signalled result: it ends cancelled, not failed.
@@ -2468,7 +2486,7 @@ export function createRunnerQueue(input: {
       }
       // A repository that audits promotes only while its latest audit is not an unexplained failure.
       // Asked again under the publication lane: an audit can fail while the release verifies.
-      const unexplainedAudit = () => configuration?.audit ? promotionRefusal(auditSummary({ audits: log.audits(operation.repo), landings: log.landings(operation.repo) }, new Date())) : null;
+      const unexplainedAudit = () => configuration?.audit ? need("maintenance").promotionRefusal(need("maintenance").auditSummary({ audits: log.audits(operation.repo), landings: log.landings(operation.repo) }, new Date())) : null;
       const unexplained = unexplainedAudit();
       if (unexplained) {
         append(operation.id, { type: "failed", stage, reason: unexplained });
@@ -2481,16 +2499,17 @@ export function createRunnerQueue(input: {
         append(operation.id, { type: "failed", stage, reason: `Staging is not green on ${operation.commitId.slice(0, 12)}: production promotes only a commit staging deployed` });
         return;
       }
-      const result = await confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
+      const releaseCap = need("release");
+      const result = await releaseCap.confirmRelease(checkout, { candidate: operation.commitId, migrationsReady: operation.migrationsReady,
         onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(await servedBase(operation.repo, checkout), operation.commitId), abortSignal: controller.signal,
         preverified: (plan) => {
           const verifications = log.verifications(operation.repo);
-          const passed = passedVerification(plan, verifications)?.id ?? null;
+          const passed = releaseCap.passedVerification(plan, verifications)?.id ?? null;
           // No human approved an automatic promotion: it publishes only what a pre-verification passed against this release base,
           // and never migrations that are not known to be additive.
-          if (operation.automatic && !passed) throw new Error(`Not promoted automatically: ${unverifiedCandidateReason(plan, verifications)}`);
+          if (operation.automatic && !passed) throw new Error(`Not promoted automatically: ${releaseCap.unverifiedCandidateReason(plan, verifications)}`);
           // An owner-confirmed promotion in development mode skips staging, so a passed pre-verification stands in for it.
-          if (development && !passed) throw new Error(`Not promoted: ${unverifiedCandidateReason(plan, verifications)}`);
+          if (development && !passed) throw new Error(`Not promoted: ${releaseCap.unverifiedCandidateReason(plan, verifications)}`);
           if (operation.automatic && plan.nonAdditiveMigrations.length) throw new Error(`Not promoted automatically: it carries non-additive migrations (${plan.nonAdditiveMigrations.join(", ")}): the owner decides`);
           return passed;
         },
@@ -2520,7 +2539,7 @@ export function createRunnerQueue(input: {
       const base = await servedBase(operation.repo, checkout);
       // A batching release branch checks the batch on its own machine and diagnoses a failure (SJ-192).
       if (releaseBase?.process === "development" && releaseBase.batchVerification && base) return batchVerify(releaseBase.batchVerification, base);
-      const result = await verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(base, operation.commitId), abortSignal: controller.signal });
+      const result = await need("release").verifyRelease(checkout, { candidate: operation.commitId, onProgress: progress, onStage: setStage, run, environment: releaseEnvironment(base, operation.commitId), abortSignal: controller.signal });
       // A kill stops its commands, which then read as failures.
       if (controller.signal.aborted) throw new OwnerKill();
       if (result.ok) return { type: "verified", base: result.base, candidate: result.candidate, checks: result.checks, nonAdditiveMigrations: result.nonAdditiveMigrations };
@@ -2535,7 +2554,8 @@ export function createRunnerQueue(input: {
      * check of the exact head verifies it; anything else fails it, saying how, and a red batch routes its culprits.
      */
     async function batchVerify({ machine, promoteFlaky }: BatchVerification, base: string): Promise<OperationEvent> {
-      const plan = await planRelease(checkout, { candidate: operation.commitId }).catch((error: unknown) => error as Error);
+      const { boundedKeys, boundedOutput, boundedTests, flakyVerifies, PREBUILD_KEY, runBatchCheck } = need("batch");
+      const plan = await need("release").planRelease(checkout, { candidate: operation.commitId }).catch((error: unknown) => error as Error);
       if (plan instanceof Error) return { type: "failed", stage, reason: message(plan) };
       if (!plan.commits.length) return { type: "failed", stage, reason: `${plan.candidate.slice(0, 12)} is already on ${plan.releaseBranch}` };
       const head = plan.candidate;
@@ -2996,7 +3016,7 @@ export function createRunnerQueue(input: {
           const unassociated = answer.code === "batch_culprit_unassociated";
           append(operationId, { type: "batch_unrouted", ...reference, ...unassociated ? { keys: fresh } : {}, reason: `${answer.code}${answer.message ? `: ${answer.message}` : ""}` });
           if (unassociated) releaseAlert(operation, outcome.head, fresh, { event: "batch_culprit_unassociated",
-            culprit: reference, failingTests: boundedTests(culprit.failingTests).slice(0, 30), command: culprit.command, output: culprit.output.slice(-4_000) });
+            culprit: reference, failingTests: need("batch").boundedTests(culprit.failingTests).slice(0, 30), command: culprit.command, output: culprit.output.slice(-4_000) });
         } else retry = true;
       } catch (error) {
         retry = true;

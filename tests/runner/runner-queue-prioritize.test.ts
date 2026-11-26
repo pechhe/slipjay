@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import { fixture, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, test, until } from "./fixtures/queue-maintenance-fixture.ts";
 
 test("priority preserves the running landing, then takes queued fixes in priority-request order", async () => {
   const f = await fixture(false, false, undefined, false, { workers: 1, gates: (root) => [

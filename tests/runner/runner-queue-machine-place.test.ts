@@ -6,10 +6,10 @@ import { join } from "node:path";
 import { runBoundedProcess } from "../../src/lib/infra/bounded-process.ts";
 import { admitMachineCapacity } from "../../src/lib/runner/host-capacity-remote.ts";
 import { machineVerification } from "../../src/lib/runner/machine-verifier.ts";
-import { runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
+import { runnerConfigProblem } from "../../src/lib/runner/runner-config.ts";
 import { pipelineMetrics } from "../../src/lib/runner/pipeline-metrics.ts";
 import type { GatePlacement, MachineVerification, RemoteAttempt, RemoteVerification, RunnerConfig } from "../../src/lib/runner/runner-types.ts";
-import { fixture, test, until } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, test, until } from "./fixtures/queue-verifier-fixture.ts";
 
 function places() {
   let occupied = false;

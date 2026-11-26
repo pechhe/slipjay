@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { newOperationId } from "../../src/lib/runner/runner-log.ts";
-import { test, fixture, jj } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, jj } from "./fixtures/queue-maintenance-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 
 test("process development promotes a green, pre-verified commit by itself and records why", async () => {

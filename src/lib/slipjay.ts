@@ -40,7 +40,7 @@ export { cutover } from "./workspace/cutover.ts";
 export { cutoverPending } from "./workspace/workspace-paths.ts";
 
 // Landing and its verification (CLI, extension, desktop delivery).
-export { landingPreview } from "./landing/landing-steps.ts";
+export { landingPreview } from "./landing/landing-remote.ts";
 export { planRelease, releaseIntegration } from "./release/release.ts";
 export type { ReleasePlan, ReleaseResult, ReleaseSummary } from "./release/release.ts";
 export { RequiredVerificationError, runRequiredVerification } from "./landing/required-verification.ts";

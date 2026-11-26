@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { admits, RUNNER_CONTROL_ID, runnerConfigProblem } from "../../src/lib/runner/runner-contract.ts";
+import { admits, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
+import { runnerConfigProblem } from "../../src/lib/runner/runner-config.ts";
 import { newOperationId, openOperationLog } from "../../src/lib/runner/runner-log.ts";
 import { shortRepositories } from "../../src/lib/runner/pipeline-metrics.ts";
 import { runnerLogOptions } from "../../src/lib/runner/runner-queue.ts";
-import { test, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, until } from "./fixtures/queue-maintenance-fixture.ts";
 import { landing, queueFixture, SHORT_MS, verified, waiting } from "./fixtures/short-landings.ts";
 
 // The admission rule, the short class and the places a short landing may take (Build #3010); the lifecycle around them is in -lifecycle.

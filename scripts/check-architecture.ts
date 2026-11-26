@@ -31,7 +31,7 @@ export const RUNNER_PROJECTIONS = new Set([
 
 /** Transport and wire contracts may compose primitives, never delivery implementations, even through erased imports. */
 export const RUNNER_NEUTRAL_MODULES = new Set([
-  "src/lib/runner/runner-transport.ts", "src/lib/runner/runner-contract.ts", "src/lib/runner/runner-types.ts",
+  "src/lib/runner/runner-transport.ts", "src/lib/runner/runner-contract.ts", "src/lib/runner/runner-config.ts", "src/lib/runner/runner-types.ts",
   "src/lib/release/release-types.ts",
 ]);
 const sharedPrimitives = new Set(["src/lib/workspace/start-steps.ts", "src/lib/release/release-types.ts"]);

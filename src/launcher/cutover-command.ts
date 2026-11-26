@@ -1,4 +1,4 @@
-import { cutover } from "../lib/slipjay.ts";
+import { cutover } from "../lib/workspace/cutover.ts";
 
 /** `cutover [--check]`: move Slipway's state from ~/.slipway to ~/.slipjay once, or only report whether it would. */
 export async function runCutover(args: string[]): Promise<number> {

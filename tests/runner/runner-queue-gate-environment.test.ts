@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createBuildCheckAccess } from "../../src/lib/build/build-check-access.ts";
-import { fixture, test } from "./fixtures/runner-queue-fixture.ts";
+import { fixture, test } from "./fixtures/queue-maintenance-fixture.ts";
 
 test("command evidence records execution environments for gates, installs, migrations, finalization and resets", async () => {
   const buildChecks = createBuildCheckAccess();

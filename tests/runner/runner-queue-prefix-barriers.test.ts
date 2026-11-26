@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test, fixture, until, exactPrefixGate, seqOf, jj } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until, exactPrefixGate, seqOf, jj } from "./fixtures/queue-release-fixture.ts";
 
 for (const scenario of ["overlap", "rebased-overlap", "migration", "rename-out", "policy", "read-by-gate", "unmarked"] as const) {
   test(`depth-two prepared predecessor barrier: ${scenario}`, async () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { test, fixture, until } from "./fixtures/runner-queue-fixture.ts";
+import { test, fixture, until } from "./fixtures/queue-release-fixture.ts";
 import { REPO, settle } from "./fixtures/automatic-promotion.ts";
 
 test("a green pre-verification that is not the newest candidate says on its own log why it did not promote", async () => {

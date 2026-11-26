@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ReleaseAlertPayload } from "../../src/lib/runner/runner-types.ts";
-import { test, byProject, fixture } from "./fixtures/runner-queue-fixture.ts";
+import { test, byProject, fixture } from "./fixtures/queue-release-fixture.ts";
 
 test("a promotion releases only a commit staging deployed, then deploys production from exactly it; a rerun confirm reuses that deploy", async () => {
   const alerts: ReleaseAlertPayload[] = [];

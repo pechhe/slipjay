@@ -2,11 +2,10 @@ import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "../landin
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "../landing/repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, servedCommit, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import { attributedCause, auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
+import type { RunnerAuditApi } from "./runner-api-audit.ts";
 import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, PrioritizeOptions, PrioritizeOutcome, ReleaseRequest, RunRecord, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
-import { promotionState } from "./runner-promotion.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
 import { requeueParked } from "../build/build-receipts.ts";
 import type { BuildAdmitter, BuildRoute } from "../build/build-admission.ts";
@@ -66,6 +65,8 @@ export function createRunnerHandler(input: {
   readBuild?: BuildRoute;
   /** Tokens granted to landing checks, which reach only the Build read route. */
   buildChecks?: Pick<BuildCheckAccess, "admits">;
+  /** Audit and promotion routes; absent on a landing-only runner. */
+  audit?: RunnerAuditApi;
 }): RunnerHandler {
   let landingAdmission = Promise.resolve();
   const credential = Buffer.from(`Bearer ${input.token}`);
@@ -447,14 +448,16 @@ export function createRunnerHandler(input: {
       return json({ operations: input.log.resets(repositoryKey(repo)) });
     }
     if (request.method === "GET" && path === `${RUNNER_API}/audits`) {
+      if (!input.audit) return json({ error: "Not found" }, 404);
       const repo = url.searchParams.get("repo");
       if (!repo)
         return json({ error: "repo is required" }, 400);
       const key = repositoryKey(repo);
       const operations = input.log.audits(key);
-      return json({ operations: operations.map(leanOperation), summary: auditSummary({ audits: operations, landings: input.log.landings(key) }, new Date()) });
+      return json({ operations: operations.map(leanOperation), summary: input.audit.auditSummary({ audits: operations, landings: input.log.landings(key) }, new Date()) });
     }
     if (request.method === "POST" && path === `${RUNNER_API}/audits/cause`) {
+      if (!input.audit) return json({ error: "Not found" }, 404);
       let body: unknown;
       try {
         body = await request.json();
@@ -467,25 +470,25 @@ export function createRunnerHandler(input: {
         return json({ error: "Invalid audit cause" }, 400);
       const key = repositoryKey(body.repo);
       const audits = input.log.audits(key), landings = input.log.landings(key);
-      const summaryBefore = auditSummary({ audits, landings }, new Date());
-      const target = auditToExplain(audits, summaryBefore, body.audit);
+      const summaryBefore = input.audit.auditSummary({ audits, landings }, new Date());
+      const target = input.audit.auditToExplain(audits, summaryBefore, body.audit);
       if (!target.ok)
         return json({ error: target.reason }, 400);
-      const recorded = attributedCause(audits, target.audit.id);
+      const recorded = input.audit.attributedCause(audits, target.audit.id);
       if (recorded && body.replace !== true) {
         const what = recorded.cause.kind === "culprits" ? `culprits ${recorded.cause.landings.map((commit) => commit.slice(0, 12)).join(", ")}` : recorded.cause.kind;
         return json({ error: `${target.audit.id} already has a recorded cause: ${what}, recorded by ${recorded.by} at ${recorded.at}${recorded.note ? ` with the note: ${recorded.note}` : " with no note"}. Pass --replace to change it.` }, 409);
       }
       let cause: AuditCause;
       if (body.landings) {
-        const culprits = resolveCulprits(body.landings, landings);
+        const culprits = input.audit.resolveCulprits(body.landings, landings);
         if (!culprits.ok)
           return json({ error: culprits.reason }, 400);
         cause = { kind: "culprits", landings: culprits.commits };
       } else cause = { kind: body.kind! };
       input.log.append(target.audit.id, { type: "audit_cause", cause, by: body.by, note: body.note });
       const after = input.log.audits(key);
-      return json({ operation: after.find((operation) => operation.id === target.audit.id), summary: auditSummary({ audits: after, landings }, new Date()) });
+      return json({ operation: after.find((operation) => operation.id === target.audit.id), summary: input.audit.auditSummary({ audits: after, landings }, new Date()) });
     }
     if (request.method === "GET" && path === `${RUNNER_API}/deploys`) {
       const repo = url.searchParams.get("repo");
@@ -529,13 +532,14 @@ export function createRunnerHandler(input: {
       return json({ operations: input.log.verifications(repositoryKey(repo)).map(leanOperation) });
     }
     if (request.method === "GET" && path === `${RUNNER_API}/promotion`) {
+      if (!input.audit) return json({ error: "Not found" }, 404);
       const repo = url.searchParams.get("repo");
       if (!repo)
         return json({ error: "repo is required" }, 400);
       const commits = url.searchParams.getAll("commit");
       if (commits.some((commit) => !/^[0-9a-f]{12,64}$/i.test(commit)))
         return json({ error: "commit must be a commit id or a prefix of at least 12 hex characters" }, 400);
-      return json(promotionState(input.log, repositoryKey(repo), commits.map((commit) => commit.toLowerCase())));
+      return json(input.audit.promotionState(input.log, repositoryKey(repo), commits.map((commit) => commit.toLowerCase())));
     }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {

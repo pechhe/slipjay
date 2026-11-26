@@ -1,6 +1,9 @@
 import { adoptWorkspace } from "../lib/workspace/workspace-adopt.ts";
-import { attachWorkspaceIssue, setWorkspaceForgeProject, inspectWorkspaces, readWorkspaceMode, workspaceContext, writeWorkspaceMode, refillPool, readySpares, spareAllowance, describeRetention, retainedWorkspaceMaterial, readLandedRecord, readLandingState } from "../lib/slipjay.ts";
-import { workspaceMetadata } from "../lib/workspace/workspace-state.ts";
+import { workspaceContext } from "../lib/infra/workspace-jj.ts";
+import { attachWorkspaceIssue, inspectWorkspaces, readLandedRecord, readLandingState, readWorkspaceMode, setWorkspaceForgeProject, workspaceMetadata, writeWorkspaceMode } from "../lib/workspace/workspace-state.ts";
+import { readySpares, refillPool } from "../lib/workspace/workspace-pool.ts";
+import { spareAllowance } from "../lib/workspace/workspace-spares.ts";
+import { describeRetention, retainedWorkspaceMaterial } from "../lib/workspace/workspace-lifecycle.ts";
 import { FORGE_PROJECT_KEY } from "../lib/landing/submission-handoff.ts";
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";

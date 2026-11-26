@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { OWNER_KILL_REASON, RUNNER_CONTROL_ID } from "../../src/lib/runner/runner-contract.ts";
-import { test, jj, fixture, until, generations, stagesOf, seqOf, exactPrefixGate } from "./fixtures/runner-queue-fixture.ts";
+import { test, jj, fixture, until, generations, stagesOf, seqOf, exactPrefixGate } from "./fixtures/queue-maintenance-fixture.ts";
 
 test("a migration-bearing change lands with one generated migration, finalized before publication", async () => {
   const f = await fixture(true);

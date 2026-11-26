@@ -1,0 +1,59 @@
+import { RUNNER_DEFAULT_LIMITS } from "./runner-contract.ts";
+import type { RunnerConfig } from "./runner-types.ts";
+
+/** Why the runner refuses to start with `config`; null when it can. */
+export const runnerConfigProblem = (config: RunnerConfig): string | null => {
+  const alert = config.releaseAlertWebhook;
+  if (alert !== undefined) {
+    if (typeof alert?.url !== "string" || !/^https?:\/\/[^/\\\s][^\\\s]*$/i.test(alert.url) || !URL.canParse(alert.url))
+      return `The runner config's "releaseAlertWebhook.url" must be an HTTP or HTTPS URL`;
+    if (alert.timeoutMs !== undefined && !(Number.isSafeInteger(alert.timeoutMs) && alert.timeoutMs >= 1_000 && alert.timeoutMs <= 60_000))
+      return `The runner config's "releaseAlertWebhook.timeoutMs" must be a whole number from 1000 to 60000`;
+  }
+  const missing = ["user.name", "user.email"].filter((key) => !config.jj?.[key]?.trim());
+  if (missing.length) return `The runner config sets no ${missing.join(" or ")} under "jj": the runner commits as that identity`;
+  if (config.workers !== undefined && !(Number.isSafeInteger(config.workers) && config.workers >= 1)) return `The runner config's "workers" must be a whole number of at least 1`;
+  if (config.deployWorkers !== undefined && !(Number.isSafeInteger(config.deployWorkers) && config.deployWorkers >= 1)) return `The runner config's "deployWorkers" must be a whole number of at least 1`;
+  if (config.shortLandingP90Seconds !== undefined && !(typeof config.shortLandingP90Seconds === "number" && Number.isFinite(config.shortLandingP90Seconds) && config.shortLandingP90Seconds > 0))
+    return `The runner config's "shortLandingP90Seconds" must be a number of seconds above 0`;
+  for (const [name, machine] of Object.entries(config.machines ?? {})) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name) || !machine || typeof machine.ssh !== "string" || !machine.ssh.trim() || machine.ssh.startsWith("-") || /[@\s]/.test(machine.ssh)
+      || typeof machine.root !== "string" || !/^\/[a-zA-Z0-9_./-]+$/.test(machine.root) || machine.root === "/" || machine.root.split("/").some((part) => part === "..")
+      || typeof machine.account !== "string" || !/^[a-z_][a-z0-9_-]*$/.test(machine.account)) return `The runner config's machine "${name}" needs an SSH host or alias (account is separate), an absolute dedicated root and an account`;
+    if (machine.places !== undefined && !(Number.isSafeInteger(machine.places) && machine.places >= 1 && machine.places <= 8))
+      return `The runner config's machine "${name}" sets "places" to a whole number from 1 to 8`;
+    if (machine.checkPlace !== undefined && (typeof machine.checkPlace !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(machine.checkPlace)))
+      return `The runner config's machine "${name}" sets "checkPlace" to the name of the boat pool its release-check place serves`;
+    if (machine.buildPool !== undefined && (typeof machine.buildPool !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(machine.buildPool)))
+      return `The runner config's machine "${name}" sets "buildPool" to the name of the build machine pool it builds for`;
+  }
+  const served = Object.entries(config.machines ?? {}).flatMap(([name, machine]) => machine?.checkPlace ? [[machine.checkPlace, name] as const] : []);
+  const twice = served.find(([pool], index) => served.findIndex(([other]) => other === pool) !== index);
+  if (twice) return `The runner config's machines name the release-check pool "${twice[0]}" more than once`;
+  const builders = Object.values(config.machines ?? {}).flatMap((machine) => machine?.buildPool ? [machine.buildPool] : []);
+  const built = builders.find((pool, index) => builders.indexOf(pool) !== index);
+  if (built) return `The runner config's machines name the build pool "${built}" more than once`;
+  for (const repo of Object.values(config.repos)) {
+    if (repo.gateMachine === undefined) continue;
+    if (typeof repo.gateMachine !== "string" || !Object.hasOwn(config.machines ?? {}, repo.gateMachine)) return `A repository's "gateMachine" names an unknown machine`;
+    if (repo.hostPlaces === 1) return `A repository's "gateMachine" cannot be combined with "hostPlaces": 1`;
+    if (!repo.verifier) return `A repository's "gateMachine" needs a "verifier"`;
+  }
+  const limits = Object.entries(config.limits ?? {});
+  if (limits.some(([key, value]) => !(key in RUNNER_DEFAULT_LIMITS) || (key === "tasksMax" ? !(Number.isSafeInteger(value) && Number(value) >= 1) : typeof value !== "string" || !/^[0-9]+(?:\.[0-9]+)?[KMGT%]?$/.test(value))))
+    return `The runner config's "limits" takes memoryHigh and memoryMax (such as "40G"), cpuQuota (such as "1400%") and tasksMax (a whole number)`;
+  if (Object.values(config.repos).some((repo) => repo.lane !== undefined && (typeof repo.lane !== "string" || !repo.lane.trim()))) return `A repository's "lane" in the runner config must be a non-empty name`;
+  if (Object.values(config.repos).some((repo) => repo.verificationDepth !== undefined && repo.verificationDepth !== 1 && repo.verificationDepth !== 2)) return `A repository's "verificationDepth" must be 1 or 2`;
+  if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && repo.lane !== undefined)) return `Depth-two verification requires an isolated repository lane`;
+  if (Object.values(config.repos).some((repo) => repo.screeningLanes !== undefined && !(Number.isSafeInteger(repo.screeningLanes) && repo.screeningLanes >= 0))) return `A repository's "screeningLanes" must be a whole number of at least 0`;
+  if (Object.values(config.repos).some((repo) => repo.screeningLanes && (!repo.verifier || repo.lane !== undefined))) return `Screening lanes require a remote verifier and an isolated repository lane`;
+  if (Object.values(config.repos).some((repo) => repo.verifier !== undefined && repo.verifier !== "boat")) return `A repository's "verifier" can only be "boat"`;
+  if (Object.values(config.repos).some((repo) => repo.hostPlaces !== undefined && repo.hostPlaces !== 0 && repo.hostPlaces !== 1)) return `A repository's "hostPlaces" must be 0 or 1`;
+  if (Object.values(config.repos).some((repo) => repo.hostPlaces && !repo.verifier)) return `A repository's "hostPlaces" needs a "verifier": without one, every gate already runs on this host`;
+  if (Object.values(config.repos).some((repo) => repo.verifier === "boat") && !config.boat?.image?.trim()) return `A repository verifies on boat, but the runner config's "boat.image" names no saved snapshot`;
+  if (config.boat?.image !== undefined && /^bx_[a-z0-9]+$/i.test(config.boat.image.trim()))
+    return `The runner config's "boat.image" names the sandbox ${config.boat.image.trim()}, which boat deletes 14 days after it stops; save it with "boat snapshot ${config.boat.image.trim()} <name>" and name that saved snapshot`;
+  if (config.build !== undefined && !/^(?:https:\/\/[^/\s]+|http:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?)\/?$/.test(config.build?.origin ?? ""))
+    return `The runner config's "build.origin" must be an https origin, such as "https://hq.example.com", or a loopback http one`;
+  return null;
+};
