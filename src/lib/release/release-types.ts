@@ -1,4 +1,4 @@
-import type { VerificationOperation } from "../runner/runner-types.ts";
+import type { PromotionVerification, VerificationOperation } from "../runner/runner-types.ts";
 import type { RequiredVerificationFailureEvidence } from "../infra/verification-evidence.ts";
 
 /**
@@ -17,7 +17,7 @@ export type PromotionDelta = {
  * What the runner knows of a promotion: the newest commit staging is green on, the
  * candidates approved before, and its pre-verifications, each newest first.
  */
-export type PromotionState = { stagingGreen: string | null; approved: string[]; verifications: VerificationOperation[];
+export type PromotionState = { stagingGreen: string | null; approved: string[]; verifications: PromotionVerification[];
   /** Every commit staging recorded a green deploy of, newest first; absent from a runner that does not list them (then only `stagingGreen`). */
   stagingGreenCommits?: string[];
   /** Why the audits refuse a promotion (see `promotionRefusal`), or null; absent from a runner that does not audit. */

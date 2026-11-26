@@ -24,7 +24,7 @@ import { jj, run, workspaceContext } from "../infra/workspace-jj.ts";
 import { isTransientRemotePushFailure, remotePushRetryDelaysMs, retryRemoteFetch } from "../infra/remote-push.ts";
 
 import type { BoundedProcessRequest, BoundedProcessResult } from "../infra/bounded-process.ts";
-import type { RunnerStage, VerificationOperation } from "../runner/runner-types.ts";
+import type { PromotionVerification, RunnerStage } from "../runner/runner-types.ts";
 import type { VerificationDeclaration } from "../policy/verification-policy.ts";
 import type { WorkspaceCommandResult } from "../infra/workspace-command.ts";
 
@@ -470,18 +470,18 @@ export async function approvalCoverage(plan: ReleasePlan, approved: string[]): P
 }
 
 /** The candidate's newest pre-verification that was not superseded or cancelled. */
-const currentVerification = (plan: ReleasePlan, operations: VerificationOperation[]): VerificationOperation | undefined =>
+const currentVerification = (plan: ReleasePlan, operations: PromotionVerification[]): PromotionVerification | undefined =>
   operations.find((operation) => operation.commitId === plan.candidate && operation.status !== "superseded" && operation.status !== "cancelled");
 
 /** The candidate's current pre-verification, when it passed against the plan's base with the plan's checks: what a confirm may reuse. */
-export function passedVerification(plan: ReleasePlan, operations: VerificationOperation[]): VerificationOperation | undefined {
+export function passedVerification(plan: ReleasePlan, operations: PromotionVerification[]): PromotionVerification | undefined {
   const current = currentVerification(plan, operations);
   return current?.result?.type === "verified" && current.result.base === plan.base
     && JSON.stringify(current.result.checks) === JSON.stringify(plan.checks) ? current : undefined;
 }
 
 /** See `ReleaseVerificationState`. */
-export function verificationState(plan: ReleasePlan, operations: VerificationOperation[]): ReleaseVerificationState {
+export function verificationState(plan: ReleasePlan, operations: PromotionVerification[]): ReleaseVerificationState {
   const current = currentVerification(plan, operations);
   const state = (status: ReleaseVerificationState["status"]): ReleaseVerificationState => ({ status, commit: plan.candidate, operationId: status === "none" ? null : current!.id });
   if (!current) return state("none");
@@ -492,7 +492,7 @@ export function verificationState(plan: ReleasePlan, operations: VerificationOpe
 }
 
 /** Why `plan.candidate` has no reusable passed pre-verification in `operations`. */
-export function unverifiedCandidateReason(plan: ReleasePlan, operations: VerificationOperation[]): string {
+export function unverifiedCandidateReason(plan: ReleasePlan, operations: PromotionVerification[]): string {
   const current = currentVerification(plan, operations);
   if (current) {
     if (current.status === "queued" || current.status === "running")
@@ -704,7 +704,8 @@ const refusalOf = (error: unknown): ReleaseResult => {
  * repository's plan is refused while its latest audit failed with no recorded cause.
  */
 export async function releaseIntegration(cwd = process.cwd(), { readPromotion, candidate: requested, requestVerification }: {
-  readPromotion?: () => Promise<PromotionState>;
+  /** Reads the runner's promotion state, with the pre-verifications of `commits` (ids or 12+ character prefixes) among it. */
+  readPromotion?: (commits: string[]) => Promise<PromotionState>;
   /** A staging-green commit (id or 12+ character prefix) to release instead of the newest one. */
   candidate?: string;
   /** Asks the runner to pre-verify a requested commit that has no pre-verification; the plan then reads the state again. */
@@ -717,20 +718,26 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
       refuse(`--candidate chooses among the commits staging is green on, and ${plan.releaseBranch} does not ship by promotion (no production deployment in slipjay.json): drop --candidate`);
     if (plan.promotes) {
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} ships by promotion, which reads staging from the runner: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
-      let state = await readPromotion();
+      // The runner answers about the commits named here; the candidate may move to one not named, which is read again.
+      const covered = requested !== undefined && COMMIT_PREFIX.test(requested) ? [plan.candidate, requested] : [plan.candidate];
+      let state = await readPromotion(covered);
       // In development mode there is no staging to be green: the integration branch, or the requested commit, is the candidate.
       const green = plan.skipsStaging ? [] : greenCommits(state);
       if (!plan.skipsStaging && !green.length) refuse("Staging is green on no commit yet: production promotes only a commit staging deployed." + DEVELOPMENT_HINT);
       let candidateSource: NonNullable<PromotionPlan["candidateSource"]> = plan.skipsStaging ? "integration" : "newest_green";
       if (requested === undefined) {
-        if (!plan.skipsStaging && green[0] !== plan.candidate) plan = await planRelease(cwd, { candidate: green[0] });
+        if (!plan.skipsStaging && green[0] !== plan.candidate) {
+          plan = await planRelease(cwd, { candidate: green[0] });
+          state = await readPromotion([plan.candidate]);
+        }
       } else {
         plan = await planRelease(cwd, { candidate: plan.skipsStaging ? requested : requestedGreen(green, requested, Boolean(state.stagingGreenCommits)) });
         await requireReleasePrefix(plan);
+        if (!covered.some((commit) => plan.candidate.startsWith(commit))) state = await readPromotion([plan.candidate]);
         candidateSource = "requested";
         if (plan.commits.length && requestVerification && !state.verifications.some((operation) => operation.commitId === plan.candidate)) {
           await requestVerification(plan.candidate);
-          state = await readPromotion();
+          state = await readPromotion([plan.candidate]);
         }
       }
       const { approved, verifications, auditRefusal } = state;
@@ -751,7 +758,7 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
     } else if (plan.audits) {
       // The audit ledger lives on the runner, so an audited release plans only against it.
       if (!readPromotion) refuse(`${plan.candidate.slice(0, 12)} is audited on the runner, which a promotion plan reads: set SLIPJAY_RUNNER or "runner" in ~/.slipjay/config.json`);
-      const { auditRefusal } = await readPromotion();
+      const { auditRefusal } = await readPromotion([plan.candidate]);
       if (auditRefusal) refuse(auditRefusal);
     }
     const summary = { ...describePlan(plan), ...promotion };
@@ -771,7 +778,7 @@ export async function releaseIntegration(cwd = process.cwd(), { readPromotion, c
  * On the author's machine, before a confirm goes to the runner: the full id of the
  * approved candidate, or the refusal the runner would return for it.
  */
-export async function confirmableCandidate(cwd: string, confirm: string, migrationsReady: boolean, readPromotion?: () => Promise<PromotionState>,
+export async function confirmableCandidate(cwd: string, confirm: string, migrationsReady: boolean, readPromotion?: (commits: string[]) => Promise<PromotionState>,
   /** Under `batchVerification`, runs the candidate's batch check on the runner (or follows the one already open) to its end. */
   batchCheck?: (candidate: string) => Promise<void>): Promise<{ ok: true; status: "confirmable"; candidate: string; remote: string } | ReleaseResult> {
   try {
@@ -779,11 +786,11 @@ export async function confirmableCandidate(cwd: string, confirm: string, migrati
     if (plan.commits.length && plan.promotes && readPromotion) {
       // Any commit staging is green on may be confirmed, not only the newest; the runner refuses the rest too, but later.
       // In development mode a passed pre-verification against the release base stands in for staging.
-      let state = await readPromotion();
+      let state = await readPromotion([plan.candidate]);
       // A batching repository checks a candidate only when its promotion is due; a confirm asks for that check now and waits for it.
       if (plan.skipsStaging && plan.batchesChecks && batchCheck && !passedVerification(plan, state.verifications)) {
         await batchCheck(plan.candidate);
-        state = await readPromotion();
+        state = await readPromotion([plan.candidate]);
       }
       if (plan.skipsStaging) {
         if (!passedVerification(plan, state.verifications)) refuse(unverifiedCandidateReason(plan, state.verifications));

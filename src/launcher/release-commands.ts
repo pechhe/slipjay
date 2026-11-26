@@ -24,7 +24,7 @@ export async function runPromote(args: string[]): Promise<number> {
   if (options.confirm === undefined) {
     const plan = await releaseIntegration(process.cwd(), {
       ...options.candidate !== undefined ? { candidate: options.candidate } : {},
-      ...location ? { readPromotion: () => readPromotionState(process.cwd(), { location }),
+      ...location ? { readPromotion: (commits) => readPromotionState(process.cwd(), { location, commits }),
         requestVerification: async (commit: string) => { await requestVerificationThroughRunner(process.cwd(), { commit, location }); } } : {} });
     console.log(JSON.stringify(plan, null, 2));
     return plan.ok ? 0 : 1;
@@ -35,7 +35,7 @@ export async function runPromote(args: string[]): Promise<number> {
   process.once("SIGINT", stopFollowing);
   let confirmable: Awaited<ReturnType<typeof confirmableCandidate>>;
   try {
-    confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady, () => readPromotionState(process.cwd(), { location }),
+    confirmable = await confirmableCandidate(process.cwd(), options.confirm, options.migrationsReady, (commits) => readPromotionState(process.cwd(), { location, commits }),
       async (commit) => { await requestVerificationThroughRunner(process.cwd(), { commit, location, follow: { onLine: (line) => console.error(line), signal: following.signal } }); });
   } finally { process.removeListener("SIGINT", stopFollowing); }
   if (confirmable.status !== "confirmable") {

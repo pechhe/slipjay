@@ -7,10 +7,10 @@ import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { project } from "../support/workspace-project.ts";
 import { fixture } from "./fixtures/runner-client-fixture.ts";
 
-test("a promotion plan reads no pre-verifications from a runner older than them, and any other failure still fails it", async () => {
+test("a promotion plan falls back to the lists on a runner without the promotion route, reads no pre-verifications from one older than them, and any other failure still fails it", async () => {
   const f = await fixture();
   try {
-    const older = (status: number) => serveRunner(async (request) => new URL(request.url).pathname.endsWith("/verifications")
+    const older = (status: number) => serveRunner(async (request) => /\/(verifications|promotion)$/.test(new URL(request.url).pathname)
       ? Response.json({ error: "not found" }, { status }) : Response.json({ operations: [] }), { host: "127.0.0.1", port: 0 });
     const missing = await older(404);
     try {

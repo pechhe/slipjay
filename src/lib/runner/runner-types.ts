@@ -440,6 +440,15 @@ export type ReleaseOperation = OperationFields & { kind: "release"; migrationsRe
  */
 export type VerificationOperation = OperationFields & { kind: "verification" };
 
+/**
+ * A pre-verification as `GET /v1/promotion` returns it: only what a promotion plan reads (see `release.ts`),
+ * the verdict reduced to its type and the fields the plan quotes.
+ */
+export type PromotionVerification = Pick<VerificationOperation, "id" | "commitId" | "status" | "submittedAt" | "finishedAt"> & {
+  result?: { type: "verified"; base: string; checks: VerificationDeclaration[] } | { type: "failed"; reason: string; command?: string }
+    | { type: "superseded"; by: string } | { type: "cancelled"; reason: string; by?: string }
+    | { type: Exclude<(typeof TERMINAL_EVENT_TYPES)[number], "verified" | "failed" | "superseded" | "cancelled"> } };
+
 /** Deploys take turns in their own lane, so a slow deploy never holds a landing. */
 export type DeployOperation = OperationFields & { kind: "deploy"; environment: string; promotion?: PromotionFacts };
 
@@ -621,6 +630,15 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first, runs lean
  * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first, runs lean
  * - GET  /v1/verifications?repo=<owner/name>   → `{ operations: VerificationOperation[] }` newest first, runs lean
+ * - GET  /v1/promotion?repo=<owner/name>[&commit=<id or 12+ character prefix>]... → `PromotionState` (400 for a malformed commit), what
+ *                                                 a promotion plan reads in one answer whose size does not grow with history. `commit`
+ *                                                 repeats for the candidates the plan cares about. `verifications` are `PromotionVerification`s,
+ *                                                 newest first: every one of a named commit, every open one, and the newest three finished
+ *                                                 (failed/verified) of others. `approved` is the release candidates (not cancelled or
+ *                                                 superseded) newest first, cut at the newest release that shipped (inclusive): the
+ *                                                 integration branch is linear, so an older approval is an ancestor of it and counts as shipped.
+ *                                                 `stagingGreenCommits` is the newest 20 commits staging is green on, extended through the
+ *                                                 newest named commit. `auditRefusal` is `promotionRefusal` of the repository's audits.
  * - GET  /v1/operations/:id/source              → authenticated bounded Git bundle (no mutation)
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,

@@ -6,6 +6,7 @@ import { attributedCause, auditSummary, auditToExplain, resolveCulprits } from "
 import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, PrioritizeOptions, PrioritizeOutcome, ReleaseRequest, RunRecord, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
+import { promotionState } from "./runner-promotion.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
 import { requeueParked } from "../build/build-receipts.ts";
 import type { BuildAdmitter, BuildRoute } from "../build/build-admission.ts";
@@ -526,6 +527,15 @@ export function createRunnerHandler(input: {
       if (!repo)
         return json({ error: "repo is required" }, 400);
       return json({ operations: input.log.verifications(repositoryKey(repo)).map(leanOperation) });
+    }
+    if (request.method === "GET" && path === `${RUNNER_API}/promotion`) {
+      const repo = url.searchParams.get("repo");
+      if (!repo)
+        return json({ error: "repo is required" }, 400);
+      const commits = url.searchParams.getAll("commit");
+      if (commits.some((commit) => !/^[0-9a-f]{12,64}$/i.test(commit)))
+        return json({ error: "commit must be a commit id or a prefix of at least 12 hex characters" }, 400);
+      return json(promotionState(input.log, repositoryKey(repo), commits.map((commit) => commit.toLowerCase())));
     }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {
