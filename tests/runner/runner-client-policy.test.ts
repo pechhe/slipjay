@@ -7,15 +7,17 @@ import { fixture, waitFor } from "./fixtures/runner-client-fixture.ts";
 
 test("policy set rerun after a failure after integration reports it again and submits nothing new", async () => {
   const f = await fixture();
+  let running: Promise<unknown> = Promise.resolve();
   try {
     const { revision } = await showPolicy(f.repo);
     const options = { base: revision, patch: { spares: 2 }, location: f.options.location, env: f.options.env, onLine: (line: string) => { f.lines.push(line); } };
-    const running = setPolicy(f.repo, options);
+    const first = setPolicy(f.repo, options);
+    running = first.catch(() => {});
     await waitFor(() => f.lines.some((line) => line.includes("queued")));
     const operation = f.log.openOperations()[0]!;
     f.append(operation.id, { type: "integrated", base: "fixture-base", commitId: "f".repeat(40) });
     f.append(operation.id, { type: "failed", stage: "publishing", reason: "remote unavailable" });
-    assert.equal((await running).phase, "failed-after-integration");
+    assert.equal((await first).phase, "failed-after-integration");
     const rerun = await setPolicy(f.repo, options);
     assert.equal(rerun.phase, "failed-after-integration", JSON.stringify(rerun));
     assert.equal(rerun.phase === "failed-after-integration" ? rerun.operationId : "", operation.id);
@@ -28,7 +30,11 @@ test("policy set rerun after a failure after integration reports it again and su
       assert.equal(reached, 0);
     } finally { await other.close(); }
     assert.equal(f.log.events().filter((stored) => stored.event.type === "submitted").length, 1);
-  } finally { await f.dispose(); }
+  } finally {
+    // A call still in flight must not outlive the repository it reads.
+    await running;
+    await f.dispose();
+  }
 });
 
 test("policy set the runner refuses is reported refused and leaves no attempt behind", async () => {
@@ -62,14 +68,16 @@ test("policy set after a lost submission response reconciles the same request in
 
 test("policy set reports a failure after integration apart from a refusal before it", async () => {
   const f = await fixture();
+  let settled: Promise<unknown> = Promise.resolve();
   try {
     const { revision } = await showPolicy(f.repo);
     const running = setPolicy(f.repo, { base: revision, patch: { spares: 2 }, location: f.options.location, env: f.options.env, onLine: (line) => { f.lines.push(line); } });
+    settled = running.catch(() => {});
     await waitFor(() => f.lines.some((line) => line.includes("queued")));
     const operation = f.log.openOperations()[0]!;
     f.append(operation.id, { type: "integrated", base: "fixture-base", commitId: "f".repeat(40) });
     f.append(operation.id, { type: "failed", stage: "publishing", reason: "remote unavailable" });
     const result = await running;
     assert.equal(result.phase, "failed-after-integration", JSON.stringify(result));
-  } finally { await f.dispose(); }
+  } finally { await settled; await f.dispose(); }
 });

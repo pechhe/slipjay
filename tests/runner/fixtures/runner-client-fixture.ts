@@ -103,6 +103,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
   }
 }
 
-export const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 10_000, interval: 20 });
+// Generous because a runner-client step spawns jj, which takes tens of seconds on a loaded host; it returns as soon as the condition holds.
+export const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 90_000, interval: 20 });
 /** The landing releases its checkout after its verdict, in a detached child: wait until it is gone. */
 export const released = (path: string) => vi.waitFor(() => assert.rejects(access(path), { code: "ENOENT" }), { timeout: 120_000, interval: 100 });
