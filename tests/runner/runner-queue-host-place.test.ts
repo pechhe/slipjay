@@ -258,7 +258,7 @@ test("with hostPlaces 0 every attempt of YardSmith's shape gates on boat; a bad 
     assert.deepEqual(placements(f), ["boat", "boat"]);
   } finally { await f.dispose(); }
 
-  const config = (entry: RunnerConfig["repos"][string]): RunnerConfig => ({ repos: { "pechhe/yardsmith": entry }, boat: { image: "bx_image" }, jj: { "user.name": "Runner", "user.email": "runner@example.com" } });
+  const config = (entry: RunnerConfig["repos"][string]): RunnerConfig => ({ repos: { "pechhe/yardsmith": entry }, boat: { image: "gate-image" }, jj: { "user.name": "Runner", "user.email": "runner@example.com" } });
   assert.equal(runnerConfigProblem(config({ url: "u", verifier: "boat", screeningLanes: 3, hostPlaces: 1 })), null);
   assert.equal(runnerConfigProblem(config({ url: "u", verifier: "boat", screeningLanes: 3, hostPlaces: 0 })), null);
   assert.match(runnerConfigProblem(config({ url: "u", verifier: "boat", hostPlaces: 2 as 1 })) ?? "", /"hostPlaces" must be 0 or 1/);

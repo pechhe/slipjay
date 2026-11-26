@@ -81,7 +81,7 @@ export async function startRunner(options: { home?: string; env?: NodeJS.Process
     // An operator's switch, and what keeps a runner a test starts from reading the real host's budget under its own suite's load.
     ...process.env.SLIPJAY_HOST_BUDGET === "off" ? {} : { hostShell: (machine: string | null) => hostShell(machine ? machineSshArgs(config.machines![machine]!, machineConnections(home, machine, "host")) : undefined) },
     ...build ? { readBuild: buildReader(build), buildChecks, recordBatchCheck: (record) => build("recordBatchCheck", record) } : {},
-    ...config.boat ? { remoteVerification: boatVerification({ ...config.boat, scratch: join(home, "scratch"), pending: join(home, "boat-pending-forks") }) } : {},
+    ...config.boat ? { remoteVerification: boatVerification({ ...config.boat, scratch: join(home, "scratch") }) } : {},
   });
   // Receipts go from the ledger to Build on their own schedule: publication never waits on HQ.
   // Admissions Build never answered are settled there too, and each answer may let queued work start.

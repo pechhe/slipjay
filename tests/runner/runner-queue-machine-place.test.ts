@@ -180,6 +180,15 @@ test("machine configuration rejects unknown, host-combined and verifier-less pla
   assert.match(runnerConfigProblem(config)!, /needs a "verifier"/);
 });
 
+test("boat's starting image is a saved snapshot's name, never a sandbox boat deletes 14 days after it stops", () => {
+  const config: RunnerConfig = { jj: { "user.name": "Runner", "user.email": "runner@example.com" }, boat: { image: "slipjay-gate-image", size: "large" }, repos: { repo: { url: "url", verifier: "boat" } } };
+  assert.equal(runnerConfigProblem(config), null);
+  config.boat!.image = "bx_ktc7fqjb";
+  assert.match(runnerConfigProblem(config)!, /names the sandbox bx_ktc7fqjb, which boat deletes 14 days after it stops; save it with "boat snapshot bx_ktc7fqjb <name>"/);
+  config.boat!.image = " ";
+  assert.match(runnerConfigProblem(config)!, /names no saved snapshot/);
+});
+
 
 test("failed repair of the real machine verifier's corrupt checkout falls back to boat as infrastructure", async () => {
   const p = places();

@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../infra/bounded-process.ts";
@@ -11,8 +11,10 @@ import type { MachineLease, RemoteAttempt, RemoteMachine, RemoteOpenFailure, Rem
 
 /**
  * Gates on boat.dev VMs (SJ-138). Each repository verifying on boat has a pool of long-lived VMs, one per verification
- * place (`slot`), named `slipjay-<owner>-<name>-<slot>` and forked from the stopped starting sandbox `image` when missing
- * (Decision #5738: the trial allows 75 creations a day). An attempt has its VM to itself: before the gate the VM's one
+ * place (`slot`), named `slipjay-<owner>-<name>-<slot>` and created from the saved snapshot `image` when missing
+ * (Decision #5738: the trial allows 75 creations a day). A saved snapshot, unlike a stopped sandbox, outlives boat's
+ * 14 days for stopped sandboxes (SJ-307: one was still ready after 28 days), so nobody has to refresh the image inside
+ * that window; `readiness` reads that it is still there. An attempt has its VM to itself: before the gate the VM's one
  * checkout is cleaned, moved to the runner checkout's own path, given the exact candidate over SSH as a Git bundle and
  * installed against the candidate's lockfile; each gate command then runs over SSH in a systemd scope of its own, which
  * `close` stops. Nothing here falls back to the VPS: every failure to supply or reach a VM throws, naming boat.
@@ -22,7 +24,7 @@ const USER_HOME = "/home/user";
 /** The VM's PATH: its own bun and jj, never the runner host's toolchain paths. */
 const REMOTE_PATH = `${USER_HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin`;
 /**
- * How long a gate slot's disk may take to restore before the slot is forked afresh. Measured 2 Nov 2026: a fresh fork of
+ * How long a gate slot's disk may take to restore before the slot is created afresh. Measured 2 Nov 2026: a fresh fork of
  * the image was ready in six to eleven minutes, while resuming a slot whose disk had grown (some 450,000 files) was still
  * restoring after fifty, so a slow slot is replaced rather than waited for (3.47.1 tried waiting fifteen minutes and every
  * screen landing then failed as infrastructure).
@@ -31,7 +33,7 @@ const READY_TIMEOUT_MS = 300_000;
 /**
  * A build machine's disk holds its warm Docker build cache (a 3-minute build against 20+ cold), and a resumed disk that
  * large can take longer than a gate slot's wait to restore. So a build machine waits this long and is not replaced while
- * its restore is merely slow: a fresh fork would throw away the cache the wait protects. Boat reports a restore that is
+ * its restore is merely slow: a fresh VM would throw away the cache the wait protects. Boat reports a restore that is
  * stuck instead of slow as `degraded`, which waiting cannot cure, so that machine is replaced like a slot. The wait also
  * bounds a replacement's own restore, which builds the whole of that large disk from the image: one took 21 minutes on
  * 31 Oct 2026, so twenty minutes failed a deploy 45 s before its disk was ready and a retry on the same VM succeeded.
@@ -39,6 +41,11 @@ const READY_TIMEOUT_MS = 300_000;
 const BUILD_READY_TIMEOUT_MS = 30 * 60_000;
 /** Bound one boat API call; opening retries share a separate budget. */
 const BOAT_TIMEOUT_MS = 30_000;
+/**
+ * `boat new` answers once the VM is ready to run, not within one API call's bound. A fresh VM from the image was ready
+ * in six to eleven minutes (2 Nov 2026, READY_TIMEOUT_MS), so this allows fifteen.
+ */
+const CREATE_TIMEOUT_MS = 15 * 60_000;
 const CONTROL_TIMEOUT_MS = 120_000;
 /**
  * Boat stops a VM when its lifetime runs out, snapshotting its disk for a later resume, so the lifetime is the idle
@@ -104,8 +111,6 @@ export type BoatVerifierOptions = NonNullable<RunnerConfig["boat"]> & {
   run?: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>;
   /** Where local scratch (bundles) goes. */
   scratch?: string;
-  /** A directory holding one file per VM forked but not yet named into its pool, so a restart can delete it. */
-  pending?: string;
   /** How long recovery retries; tests shorten it. */
   recoveryMs?: number;
   /** Total API retry budget while opening a VM, and initial backoff; tests shorten them. */
@@ -160,11 +165,11 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
   }
 
   /**
-   * The pool VM for `repo`'s `slot`, running and reachable: forked from `image` when missing, resumed when stopped, and
+   * The pool VM for `repo`'s `slot`, running and reachable: created from `image` when missing, resumed when stopped, and
    * given `lifetimeS` to live, after which boat stops it.
    */
   /**
-   * Each build machine's acquisitions, one at a time: two acquisitions of a missing VM at once would fork it twice. A later
+   * Each build machine's acquisitions, one at a time: two acquisitions of a missing VM at once would create it twice. A later
    * one waits for the first, then finds the VM running and only extends it.
    */
   const buildTurns = new Map<string, Promise<unknown>>();
@@ -177,49 +182,54 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
 
   async function machine(repo: string, slot: number | string, signal: AbortSignal | undefined, lifetimeS = ATTEMPT_LIFETIME_S, retry = false, build = false, reuseOnly = false): Promise<Vm> {
     // Only API failures before setup are retried. The budget spans all calls in this open, with each call bounded
-    // by the remaining time. Retrying an ambiguous fork could create a second VM, so a timed-out fork goes to the hold.
+    // by the remaining time. Retrying an ambiguous create could make a second VM, so a timed-out create goes to the hold;
+    // the VM it may have made already carries the slot's name, so the next opening finds it.
     let retryDeadline: number | undefined;
     let failures = 0;
-    const api = async (args: string[], callSignal?: AbortSignal): Promise<unknown> => {
+    const api = async (args: string[], callSignal?: AbortSignal, timeoutMs = BOAT_TIMEOUT_MS): Promise<unknown> => {
       let retrying = false;
       for (;;) {
         callSignal?.throwIfAborted();
-        try { return await boat(args, callSignal, !retrying || retryDeadline === undefined ? BOAT_TIMEOUT_MS : Math.max(1, Math.min(BOAT_TIMEOUT_MS, retryDeadline - Date.now()))); }
+        try { return await boat(args, callSignal, !retrying || retryDeadline === undefined ? timeoutMs : Math.max(1, Math.min(timeoutMs, retryDeadline - Date.now()))); }
         catch (error) {
           callSignal?.throwIfAborted();
           if (!retry || !(error as RemoteOpenFailure)?.boatUnavailable) throw error;
           retrying = true;
           retryDeadline ??= Date.now() + (options.openRetryMs ?? 180_000);
           const left = retryDeadline - Date.now();
-          if (left <= 0 || args[0] === "fork" && /no answer from boat/.test(String(error))) throw error;
+          if (left <= 0 || args[0] === "new" && /no answer from boat/.test(String(error))) throw error;
           await delay(Math.min(left, 30_000, (options.openRetryDelayMs ?? 2000) * 2 ** Math.min(failures++, 16)), undefined, { signal: callSignal });
           if (Date.now() >= retryDeadline) throw error;
         }
       }
     };
     const name = poolName(repo, slot);
+    /** The VMs boat lists under the slot's name, every state included, but `broken`. */
+    const slotVms = async (broken?: string): Promise<Vm[]> => {
+      // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
+      // created again under the same name.
+      const listed = await api(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
+      return (listed?.sandboxes ?? []).map(vmOf).filter((entry) => entry.name === name && entry.id !== broken);
+    };
     /**
-     * The slot's VM, resumed when boat stopped it and forked from the image when missing. `broken` is a VM that will no
-     * longer serve the slot: it is left out even while boat still lists it, so a fresh fork takes the slot's name.
+     * The slot's VM, resumed when boat stopped it and created from the image when missing. `broken` is a VM that will no
+     * longer serve the slot: it is left out even while boat still lists it, so a fresh VM takes the slot's name.
      */
     const acquire = async (broken?: string): Promise<Vm> => {
-      // `--all`: boat lists only running sandboxes by default, and a pool VM boat stopped when idle must be resumed, not
-      // forked again under the same name.
-      const listed = await api(["list", "--all"], signal) as { sandboxes?: unknown[] } | null;
-      const named = (listed?.sandboxes ?? []).map(vmOf).filter((entry) => entry.name === name && entry.id !== broken);
+      const named = await slotVms(broken);
       let found = named.find((entry) => !STOPPED.includes(entry.state)) ?? named[0];
-      // A second VM under the slot's name is a leftover fork; only one may hold the slot.
+      // A second VM under the slot's name is a leftover; only one may hold the slot.
       for (const extra of named) if (extra !== found) await api(["delete", extra.id, "--yes"], signal).catch(() => undefined);
-      // A landing's retry spends no boat start beyond resuming: forking the slot afresh is the first attempt's alone.
-      if (!found && reuseOnly) fail(`${name} not reachable`, "no VM holds the slot, and a retry forks none");
+      // A landing's retry spends no boat start beyond resuming: creating the slot afresh is the first attempt's alone.
+      if (!found && reuseOnly) fail(`${name} not reachable`, "no VM holds the slot, and a retry creates none");
       if (!found) {
-        found = vmOf(await api(["fork", options.image, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal));
-        // Until it carries its pool name, only this file says the VM is ours: a restart in between deletes it.
-        const record = options.pending ? join(options.pending, found.id) : undefined;
-        if (record) { await mkdir(options.pending!, { recursive: true }); await writeFile(record, name); }
-        await api(["rename", found.id, name], signal);
-        if (record) await unlink(record).catch(() => undefined);
-        found = { ...found, name };
+        // Named as it is created, so a runner that stops before `new` answers leaves a VM the next opening takes as the
+        // slot's, never an orphan. Boat's answer is not read for the VM: the list is the record of what holds the name.
+        await api(["new", "--from", options.image, "--name", name, "--no-env", "--no-monitoring", "--ttl", String(lifetimeS), "--type", size], signal, CREATE_TIMEOUT_MS);
+        const created = await slotVms(broken);
+        found = created.find((entry) => !STOPPED.includes(entry.state)) ?? created[0];
+        if (!found) return fail(`new --from ${options.image}`, `boat created no VM named ${name}`);
+        for (const extra of created) if (extra !== found) await api(["delete", extra.id, "--yes"], signal).catch(() => undefined);
       } else if (STOPPED.includes(found.state)) {
         await api(["resume", found.id], signal);
       }
@@ -244,9 +254,9 @@ export function boatVerification(options: BoatVerifierOptions): RemoteVerificati
       if (stalled || Date.now() >= deadline) {
         const health = stalled ? `, health ${vm.health}${vm.healthReason ? ` (${vm.healthReason})` : ""}` : "";
         const detail = `state ${vm.state}${health}${vm.hydrated ? "" : ", disk still restoring"}${stalled ? "" : ` after ${readyMs / 1000}s`}`;
-        // A slot whose disk boat never restores is broken, not merely slow: delete it and fork the image afresh once, so
+        // A slot whose disk boat never restores is broken, not merely slow: delete it and create one from the image afresh once, so
         // every later landing on the lane does not wait on the same dead disk. A replacement that also will not restore
-        // fails as infrastructure rather than forking again, since boat starts are rationed. A build machine is replaced
+        // fails as infrastructure rather than creating another, since boat starts are rationed. A build machine is replaced
         // only when boat reports it degraded: while its restore is merely slow it waits BUILD_READY_TIMEOUT_MS and then
         // fails, keeping the disk its warm build cache is on.
         // Marked: boat supplied no machine for want of a restore, which a landing retries (only by waiting on the same VM,
@@ -332,7 +342,7 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
     },
     async open({ repo, slot: inputSlot, pool, screening, retrying, checkout, base, candidate, integrationBranch, signal }): Promise<RemoteAttempt> {
       const slot = pool ?? (screening ? `${inputSlot}-screen` : inputSlot);
-      // A named pool (a batch check's VM, SJ-192) takes turns as a build machine does, and is never forked afresh while it is merely slow.
+      // A named pool (a batch check's VM, SJ-192) takes turns as a build machine does, and is never created afresh while it is merely slow.
       const vm = pool ? await buildMachine(repo, pool, signal, ATTEMPT_LIFETIME_S) : await machine(repo, slot, signal, ATTEMPT_LIFETIME_S, true, false, retrying === true);
       const machineInfo: RemoteMachine = { verifier: "boat", id: vm.id, name: vm.name, size: vm.size, image: options.image };
       // Read before setup, so the attempt's spend includes the time spent preparing the VM.
@@ -438,10 +448,9 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
       }
     },
     async recover(repos) {
-      // Each pool VM still running is cleaned, and a VM forked but never named into its pool, the runner's and no one
-      // else's, is deleted, its record kept until boat confirms or no longer lists it. Both are retried, every call bounded
-      // by what is left of four minutes, and every attempt cleans its VM first in any case, so nothing an earlier process
-      // started can reach a later gate.
+      // Each pool VM still running is cleaned, retried with every call bounded by what is left of four minutes, and every
+      // attempt cleans its VM first in any case, so nothing an earlier process started can reach a later gate. A VM is
+      // named for its slot as boat creates it, so a restart leaves no unnamed VM to find.
       const deadline = Date.now() + (options.recoveryMs ?? RECOVERY_MS);
       const left = (cap: number) => Math.max(1, Math.min(cap, deadline - Date.now()));
       const dirty = new Set<string>();
@@ -456,17 +465,23 @@ repo=$(cat ~/.slipjay-repo 2>/dev/null || echo ~/repo); [ -d "$repo" ] && { git 
           for (const vm of running) {
             if (deadline <= Date.now() || !await control(vm, "clean", cleanScript, { timeoutMs: left(CONTROL_TIMEOUT_MS) }).then(() => true, () => false)) dirty.add(vm.name);
           }
-          for (const id of options.pending ? await readdir(options.pending).catch(() => [] as string[]) : []) {
-            const gone = !sandboxes.some((vm) => vm.id === id)
-              || (deadline > Date.now() && await boat(["delete", id, "--yes"], undefined, left(BOAT_TIMEOUT_MS)).then(() => true, () => false));
-            if (gone) await unlink(join(options.pending!, id)).catch(() => undefined);
-            else dirty.add(id);
-          }
           if (!dirty.size) return;
         }
         if (Date.now() >= deadline) break;
       }
-      throw new Error(`Remote executor unavailable (boat): could not ${dirty.size ? `delete or clean ${[...dirty].join(", ")}` : "list the pool VMs"} after a restart`);
+      throw new Error(`Remote executor unavailable (boat): could not ${dirty.size ? `clean ${[...dirty].join(", ")}` : "list the pool VMs"} after a restart`);
+    },
+    async readiness(signal) {
+      // Two reads, no start: whether the scope may start a VM at all (a depleted plan or wallet refuses even a resume), and
+      // whether the saved snapshot a missing slot is created from is there and ready.
+      const limits = await boat(["limits"], signal) as { canStart?: unknown; blockedReason?: unknown; startBlockedReason?: unknown } | null;
+      if (limits?.canStart === false)
+        return `boat refuses to start VMs in this scope (${String(limits.blockedReason ?? limits.startBlockedReason ?? "no reason given")}): no stopped pool VM can resume and no missing one can be created`;
+      const listed = await boat(["snapshots", "--limit", "1"], signal) as { named?: { name?: unknown; status?: unknown }[] } | null;
+      const image = (listed?.named ?? []).find((entry) => entry.name === options.image);
+      if (!image) return `boat holds no saved snapshot named ${options.image}: a missing pool VM cannot be created`;
+      if (image.status !== "ready") return `boat's saved snapshot ${options.image} is ${String(image.status)}, not ready: a missing pool VM cannot be created`;
+      return null;
     },
   };
 }

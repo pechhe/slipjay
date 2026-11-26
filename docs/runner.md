@@ -459,28 +459,30 @@ A runner repository entry can set `verifier: "boat"` to run its gate on boat.dev
 instead of this host (SJ-138). The runner still fetches, rebases, installs, generates
 migrations, integrates and publishes in its own checkouts; only the commands in
 `requiredLandingVerification` move. The runner config's `boat` names the starting image
-(`image`: a sandbox kept stopped, holding the repository, `node_modules`, the pinned Bun and
-jj, a stopped `keep-*` container for each Docker image the gate uses, since boat drops
-unused images from snapshots, and any service container the gate expects under a fixed name,
-labelled `slipjay.keep=true`), and optionally the boat CLI (`cli`, default
+(`image`: the name of a saved snapshot, `boat snapshot <id> <name>`, never a sandbox id; see
+[Keeping the starting image](#keeping-the-starting-image)). The image holds the repository,
+`node_modules`, the pinned Bun and jj, a stopped `keep-*` container for each Docker image the gate
+uses, since boat drops unused images from snapshots, and any service container the gate expects
+under a fixed name, labelled `slipjay.keep=true`. The config also names, optionally, the boat CLI (`cli`, default
 `~/.ascii/bin/boat`), the SSH key boat authorises on its VMs (`sshKey`) and the VM `size`
 (default `default`, 4 vCPU and 8 GB). The CLI authenticates with `BOAT_API_KEY` from the
 runner's environment, which the unit's `bws run` supplies from Bitwarden.
 
 Each repository has a pool of VMs, one per verification place, named
-`slipjay-<owner>-<name>-<slot>`, forked from the image when missing and resumed when
+`slipjay-<owner>-<name>-<slot>`, created from the image (`boat new --from <image> --name <slot's name>`) when missing and resumed when
 stopped. Boat stops a VM when its lifetime runs out, snapshotting its disk for the next resume, so
 the lifetime is the pool's idle timer: three hours while an attempt runs, fifteen minutes once it
 closes, and a runner restart loses no timer. A resumed VM takes one to two and a half minutes to restore its disk
 and answer, so fifteen minutes keeps the pool warm through a burst of landings while a quiet gap stops billing. The runner lists the pool in every state (boat's
-`list` shows only running sandboxes unless asked), so a stopped VM is resumed rather than forked
+`list` shows only running sandboxes unless asked), so a stopped VM is resumed rather than created
 again, and a second VM under a slot's name is deleted. A resumed VM answers ssh about a minute before boat has
 restored its disk, and finishing the restore swaps the filesystem under any running command, so the runner sets a VM up
 only once boat reports it `hydrated` (about 65 s after a resume, measured 29 Oct 2026). A slot boat has not restored and
-answered ssh on within five minutes is broken, not slow: the runner deletes that VM and forks the image afresh under the
+answered ssh on within five minutes is broken, not slow: the runner deletes that VM and creates one from the image afresh under the
 slot's name once, so later landings on the lane do not wait on the same dead disk. A replacement that also will not
-restore fails as infrastructure rather than forking again, since boat starts are rationed. Each VM forked but not yet named into its pool is recorded in `boat-pending-forks/` under
-the runner home, and a restart deletes it, keeping the record until boat confirms. An attempt has its VM to itself. Before the gate the runner stops every scope and
+restore fails as infrastructure rather than creating another, since boat starts are rationed. A VM carries its slot's name from the
+moment boat creates it, so a runner that stops, or gives up waiting, before `boat new` answers leaves the slot its VM, which the
+next opening takes, never an orphan. An attempt has its VM to itself. Before the gate the runner stops every scope and
 container an earlier attempt left (all but the image's `keep-*` and `slipjay.keep=true` ones), moves the VM's one checkout to the runner checkout's own
 path, sends the candidate and its base as a Git bundle of only what the VM lacks, sets the
 integration bookmark to the base, `jj edit`s the candidate, cleans untracked files and
@@ -510,18 +512,66 @@ case.
 
 The image changes only by hand, when a gate needs something it lacks: a new Bun pin (setup fails
 naming the version), a Docker image or browser the gate starts, or a dependency tree far from the
-image's. Resume the image sandbox, update it in its checkout (`git fetch` and check out the
-integration branch, `bun install`, `docker pull` and recreate the matching stopped `keep-*`
-container, `bun x playwright install --with-deps chromium` in the app that pins Playwright), then
-`boat stop` it and `boat snapshot <id> <name>` under the image's one saved name (reusing a name replaces
-it), which keeps it past boat's 14 days for stopped sandboxes. Pool VMs keep the disk they were forked
-with: make the same change on each idle pool VM in place, which needs no pause, or delete them (paused
-admission, nothing running) for the next attempts to fork the new image.
+image's. Create a VM from the image (`boat new --from <image> --name slipjay-image-build --type large`),
+update it in its checkout (`git fetch` and check out the integration branch, `bun install`, `docker pull` and
+recreate the matching stopped `keep-*` container, `bun x playwright install --with-deps chromium` in the app
+that pins Playwright), then `boat stop` it, `boat snapshot <id> <image>` under the image's one saved name
+(reusing a name replaces it) and `boat delete` the VM. Pool VMs keep the disk they were created with: make the
+same change on each idle pool VM in place, which needs no pause, or delete them (paused admission, nothing
+running) for the next attempts to create them from the new image.
+
+#### Keeping the starting image
+
+Boat deletes a stopped sandbox's data 14 days after it stops, and `boat fork <id>` forks a sandbox's
+latest snapshot, so an image named by sandbox id lapses unless someone restarts and stops it inside
+every 14 days. A saved snapshot outlasts that window: `slipjay-yardsmith-image`, saved from
+`bx_ktc7fqjb` on 29 Oct 2026, was still listed `ready` on 26 Nov 2026, 28 days later, while every
+`boat fork bx_ktc7fqjb` had failed since 12 Nov with "This sandbox's data was deleted after it was
+stopped for at least 14 days" (SJ-307). Saving a snapshot of the sandbox, the step this section once
+prescribed, therefore never kept `boat fork <id>` working: a saved snapshot is reached only through
+`boat new --from <name>`. Boat's own help says a saved snapshot keeps data "longer", lists no expiry
+for one, and bills saved snapshots beyond the plan's ten by the day; one observation of 28 days is
+all that is measured, so the runner does not take indefinite retention on trust and reads the image
+as below. So `boat.image` names the saved snapshot, the runner creates pool VMs from it, and the
+runner refuses a config whose `boat.image` is a sandbox id (`bx_…`). A name also moves with the
+snapshot: another boat account needs the same name saved there, and a new key.
+
+The runner refuses to start with a sandbox id in `boat.image`, and a runner from before SJ-307
+forks `boat.image` as a sandbox id, so a host moving across that change sets `boat.image` to the
+saved snapshot's name immediately before `slipjay upgrade --runner`, and back to a sandbox id
+before `slipjay upgrade --runner --rollback`.
+
+The runner reads, without starting a VM, whether boat could start a gate VM: at startup and every
+half hour it asks boat whether the scope may start VMs at all (`boat limits`: a depleted plan or
+wallet refuses even a resume of a stopped pool VM) and whether the saved snapshot `boat.image` names
+is listed and `ready` (`boat snapshots`). While either fails, gates that need a boat VM not already
+running fail, so it is never quiet:
+
+- the runner logs `[runner] boat cannot start a gate VM: <why>` at every reading;
+- a `boat_readiness` event on the runner's own record marks the change (`blocked`, then `ready` when a
+  reading passes again);
+- every landing of a repository verifying on boat prints `warning: boat cannot start a gate VM (<why>)`
+  before its gate is placed, including one a machine place will serve, so the problem shows before
+  the day that place is down.
+
+A reading boat does not answer changes nothing. When it reports a problem:
+
+- *refuses to start VMs in this scope*: the scope's plan hours or wallet are spent (`boat limits`
+  says which). Topping up or changing the plan is the owner's decision; never switch on extra starts.
+- *holds no saved snapshot* or *is not ready*: rebuild the image as above (from a fresh `boat new` set
+  up with the contents this section lists when no saved snapshot is left), check `boat snapshots`
+  lists it `ready`, and leave the runner to read it again.
+
+A reading proves only that the snapshot is listed and ready, not that its contents still match the
+gate's pins: a stale Bun still fails setup, naming the version.
+
+#### Opening a VM when boat does not answer
 
 Nothing falls back to this host, except through its one gate place (below). While opening a VM, transient boat API failures (an unreachable
 API, timeouts or service errors) retry with exponential backoff from two seconds up to thirty
-seconds, within a three-minute retry budget shared across that opening. A timed-out fork is
-not retried in that opening, since boat may already have created the VM. Cancellation interrupts both API
+seconds, within a three-minute retry budget shared across that opening. A timed-out create is
+not retried in that opening, since boat may already have created the VM; it carries the slot's name, so a later
+opening takes it. Cancellation interrupts both API
 calls and backoff; pausing during admission returns the landing to the queue.
 
 If boat remains unreachable, the runner opens a circuit for that repository: its landings stay
@@ -537,7 +587,7 @@ unavailable (boat): …` and boat's own error. A slot VM that never becomes read
 restoring, SSH not answering) fails the attempt the same way, but a landing does not end on it:
 that attempt ran none of the candidate's gate commands, so it returns to the queue and runs again,
 at most twice per landing, with a `[verify]` progress line naming why. A retry waits on the slot's
-existing VM and never deletes or forks one, so it costs no boat start beyond a resume. The attempt
+existing VM and never deletes or creates one, so it costs no boat start beyond a resume. The attempt
 past that bound, and any failure once a gate command has started, fails the landing as before. A
 fault in the image or setup on a VM boat supplied fails at once as `Remote executor unavailable
 (setup): …`; an SSH connection lost during a command fails it as `executor lost`. Moving a repository back to local
@@ -593,7 +643,7 @@ With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlac
   "repos": {
     "pechhe/yardsmith": { "url": "git@github.com:pechhe/yardsmith.git", "verifier": "boat", "gateMachine": "peach-box", "screeningLanes": 3 }
   },
-  "boat": { "image": "bx_starting_image" }
+  "boat": { "image": "slipjay-gate-image" }
 }
 ```
 

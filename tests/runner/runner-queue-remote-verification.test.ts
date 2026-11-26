@@ -74,12 +74,12 @@ test("a repository verifying remotely runs only its gate on the remote machine a
 }, 120_000);
 
 test("a remote verifier that refuses a machine fails the landing at once as infrastructure, naming it, and runs no gate", async () => {
-  const fake = fakeRemote("Remote executor unavailable (boat): boat fork: Start the $20/month Boat plan to create sandboxes");
+  const fake = fakeRemote("Remote executor unavailable (boat): boat new: Start the $20/month Boat plan to create sandboxes");
   const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote });
   try {
     const failed = await terminal(f, f.submit(await f.candidate("remote.txt")));
     assert.equal(failed?.type, "failed", JSON.stringify(failed));
-    assert.match(failed?.type === "failed" ? failed.reason : "", /Remote executor unavailable \(boat\): boat fork/);
+    assert.match(failed?.type === "failed" ? failed.reason : "", /Remote executor unavailable \(boat\): boat new/);
     const events = f.log.events().map(({ event }) => event);
     assert.equal(events.filter((event) => event.type === "verification_base").length, 1, "a refusal is not retried");
     assert.ok(!events.some((event) => event.type === "yielded"));
@@ -87,6 +87,36 @@ test("a remote verifier that refuses a machine fails the landing at once as infr
     const classified = events.find((event) => event.type === "classified");
     assert.equal(classified?.type === "classified" && classified.cause, "infrastructure");
   } finally { await f.dispose(); }
+}, 120_000);
+
+test("boat unable to start a gate VM is said before any landing needs it, recorded once, and repeated in every landing of the repository", async () => {
+  const fake = fakeRemote();
+  const readings = ["boat holds no saved snapshot named gate-image: a missing pool VM cannot be created"] as (string | null)[];
+  let reads = 0;
+  fake.remote.readiness = async () => { reads += 1; return readings.at(-1)!; };
+  const logged: string[] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => { logged.push(args.join(" ")); };
+  const f = await fixture(false, false, undefined, false, { remoteVerification: fake.remote, boatReadinessMs: 20 });
+  try {
+    const readiness = () => f.log.events({ operationId: RUNNER_CONTROL_ID }).flatMap(({ event }) => event.type === "boat_readiness" ? [`${event.state}: ${event.reason}`] : []);
+    await until(() => readiness().length === 1 && reads > 2 || undefined);
+    assert.deepEqual(readiness(), ["blocked: boat holds no saved snapshot named gate-image: a missing pool VM cannot be created"], "recorded once, not at every reading");
+    assert.ok(logged.some((line) => line.startsWith("[runner] boat cannot start a gate VM: boat holds no saved snapshot named gate-image")), logged.join("\n"));
+
+    // The landing still runs (a running VM or another place may serve it), but says what boat cannot do.
+    const id = f.submit(await f.candidate("remote.txt"));
+    assert.equal((await f.land(id))?.type, "landed");
+    const lines = f.log.events({ operationId: id }).flatMap(({ event }) => event.type === "progress" ? [event.line] : []);
+    assert.ok(lines.some((line) => line.startsWith("warning: boat cannot start a gate VM (boat holds no saved snapshot named gate-image")), lines.join("\n"));
+
+    readings.push(null);
+    await until(() => readiness().length === 2 || undefined);
+    assert.equal(readiness()[1], "ready: boat can start gate VMs again");
+    const next = f.submit(await f.candidate("remote-2.txt"));
+    assert.equal((await f.land(next))?.type, "landed");
+    assert.ok(!f.log.events({ operationId: next }).some(({ event }) => event.type === "progress" && event.line.startsWith("warning: boat cannot")), "a ready boat warns no landing");
+  } finally { console.error = consoleError; await f.dispose(); }
 }, 120_000);
 
 test("a gate that changes the candidate's files on the remote machine is no evidence: the landing fails", async () => {

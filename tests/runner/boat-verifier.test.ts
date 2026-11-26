@@ -68,13 +68,15 @@ test("pool names are stable per repository and slot, and a named machine is neve
 /** A boat CLI and ssh stand-in: `sandboxes` is what `boat list` reports; every call is recorded. */
 function stand(sandboxes: Record<string, unknown>[], ssh: (args: readonly string[]) => BoundedProcessResult = () => result("")) {
   const calls: string[][] = [];
+  sandboxes = [...sandboxes];
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
     calls.push([request.executable, ...request.args]);
     if (request.executable === "ssh") return ssh(request.args);
     const [command, id] = request.args;
     // Like boat, a plain `list` shows only running sandboxes; `--all` shows every state.
     if (command === "list") return result(JSON.stringify({ sandboxes: request.args.includes("--all") ? sandboxes : sandboxes.filter((vm) => vm.state !== "stopped") }));
-    if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } }));
+    // Like boat, `new` creates the VM under the name it is given; what it prints is not relied on.
+    if (command === "new") { sandboxes.push({ id: "bx_new", name: request.args[request.args.indexOf("--name") + 1], state: "provisioned", type: "default" }); return result(""); }
     if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "", state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: true } }));
     return result(JSON.stringify({ ok: true }));
   };
@@ -83,13 +85,13 @@ function stand(sandboxes: Record<string, unknown>[], ssh: (args: readonly string
 const open = (verification: ReturnType<typeof boatVerification>, slot = 0) => verification.open({ repo: "pechhe/yardsmith", slot, checkout: "/nonexistent",
   base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
 
-test("a missing pool VM is forked from the image, named for its slot and renewed; a stopped one is resumed", async () => {
+test("a missing pool VM is created from the saved snapshot under its slot's name and renewed; a stopped one is resumed", async () => {
   const missing = stand([], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: missing.run }), 1), /Remote executor unavailable \(setup\): clean/);
-  assert.deepEqual(missing.boat().slice(0, 4), ["list --all", "fork bx_image --no-env --no-monitoring --ttl 10800 --type default", "rename bx_new slipjay-pechhe-yardsmith-1", "extend bx_new --ttl 10800"]);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: missing.run }), 1), /Remote executor unavailable \(setup\): clean/);
+  assert.deepEqual(missing.boat().slice(0, 4), ["list --all", "new --from gate-image --name slipjay-pechhe-yardsmith-1 --no-env --no-monitoring --ttl 10800 --type default", "list --all", "extend bx_new --ttl 10800"]);
 
   const stopped = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: stopped.run })));
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: stopped.run })));
   assert.deepEqual(stopped.boat().slice(0, 3), ["list --all", "resume bx_old", "extend bx_old --ttl 10800"]);
 });
 
@@ -106,11 +108,11 @@ test("a resumed VM is not set up until boat has restored its disk", async () => 
     if (request.executable === "ssh") events.push("ssh");
     return stopped.run(request);
   };
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run })));
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run })));
   assert.deepEqual(events.slice(0, 3), ["restoring", "restored", "ssh"]);
 });
 
-test("a slot boat never restores is deleted and forked afresh from the image", async () => {
+test("a slot boat never restores is deleted and created afresh from the image", async () => {
   const calls: string[][] = [];
   let slot = "bx_stuck";
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
@@ -118,20 +120,19 @@ test("a slot boat never restores is deleted and forked afresh from the image", a
     if (request.executable === "ssh") return request.args.at(-1) === "true" ? result("") : result("", 1, "stop here");
     const [command, id] = request.args;
     if (command === "list") return result(JSON.stringify({ sandboxes: slot ? [{ id: slot, name: "slipjay-pechhe-yardsmith-0", state: "idle" }] : [] }));
-    if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } }));
+    if (command === "new") { slot = "bx_new"; return result(""); }
     if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: id !== "bx_stuck" } }));
     if (command === "delete") slot = "";
     return result(JSON.stringify({ ok: true }));
   };
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs: 0 })), /Remote executor unavailable \(setup\): clean on slipjay-pechhe-yardsmith-0/);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run, readyTimeoutMs: 0 })), /Remote executor unavailable \(setup\): clean on slipjay-pechhe-yardsmith-0/);
   const boat = () => calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" "));
   assert.ok(boat().includes("delete bx_stuck --yes"), `a slot whose disk never restores is deleted: ${boat().join(", ")}`);
-  assert.ok(boat().indexOf("delete bx_stuck --yes") < boat().indexOf("fork bx_image --no-env --no-monitoring --ttl 10800 --type default"), "the image is forked again after it");
-  assert.ok(boat().includes("rename bx_new slipjay-pechhe-yardsmith-0"), "the fresh VM takes the slot's name");
+  assert.ok(boat().indexOf("delete bx_stuck --yes") < boat().indexOf("new --from gate-image --name slipjay-pechhe-yardsmith-0 --no-env --no-monitoring --ttl 10800 --type default"), "the fresh VM is created after it, under the slot's name");
   assert.ok(!boat().some((call) => call.startsWith("resume bx_stuck")), "the dead slot is never resumed again");
 });
 
-test("a replacement slot that also never restores fails as infrastructure, forking only once", async () => {
+test("a replacement slot that also never restores fails as infrastructure, creating only once", async () => {
   const calls: string[][] = [];
   let slot = "bx_stuck";
   const run = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
@@ -139,13 +140,13 @@ test("a replacement slot that also never restores fails as infrastructure, forki
     if (request.executable === "ssh") return result("", 1, "no answer");
     const [command, id] = request.args;
     if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: slot, name: "slipjay-pechhe-yardsmith-0", state: "idle" }] }));
-    if (command === "fork") { slot = "bx_new"; return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } })); }
+    if (command === "new") { slot = "bx_new"; return result(""); }
     if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: false } }));
     return result(JSON.stringify({ ok: true }));
   };
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs: 0 })), /slipjay-pechhe-yardsmith-0 not reachable: state idle, disk still restoring/);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run, readyTimeoutMs: 0 })), /slipjay-pechhe-yardsmith-0 not reachable: state idle, disk still restoring/);
   const boat = calls.filter(([executable]) => executable === "boat").map(([, command, ...rest]) => [command, ...rest.filter((arg) => !arg.startsWith("--json") && arg !== "--no-update")].join(" "));
-  assert.equal(boat.filter((call) => call.startsWith("fork")).length, 1, "one replacement fork, never a loop");
+  assert.equal(boat.filter((call) => call.startsWith("new")).length, 1, "one replacement, never a loop");
   assert.equal(boat.filter((call) => call.startsWith("delete")).length, 1, "only the first broken slot is deleted");
 });
 
@@ -155,42 +156,42 @@ test("a machine boat never supplied is marked unavailable, so the runner retries
     if (request.executable === "ssh") return result("", 1, "no answer");
     const [command, id] = request.args;
     if (command === "list") return result(JSON.stringify({ sandboxes: [{ id: slot, name: "slipjay-pechhe-yardsmith-0", state: "idle" }] }));
-    if (command === "fork") { slot = "bx_new"; return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "default" } })); }
+    if (command === "new") { slot = "bx_new"; return result(""); }
     if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "default", sshEndpoint: "198.51.100.1:19000", hydrated: false } }));
     return result(JSON.stringify({ ok: true }));
   };
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: stalled, readyTimeoutMs: 0 })), (error: unknown) =>
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: stalled, readyTimeoutMs: 0 })), (error: unknown) =>
     /not reachable/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === true);
 
-  // A retry waits on the slot's VM again: it neither deletes the unrestored VM nor forks a replacement.
+  // A retry waits on the slot's VM again: it neither deletes the unrestored VM nor creates a replacement.
   const calls: string[] = [];
   slot = "bx_stuck";
   const retried = async (request: BoundedProcessRequest) => { if (request.executable !== "ssh") calls.push(request.args[0]!); return stalled(request); };
   const retryOpen = (verification: ReturnType<typeof boatVerification>) => verification.open({ repo: "pechhe/yardsmith", slot: 0, retrying: true, checkout: "/nonexistent",
     base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal });
-  await assert.rejects(retryOpen(boatVerification({ image: "bx_image", cli: "boat", run: retried, readyTimeoutMs: 0 })),
+  await assert.rejects(retryOpen(boatVerification({ image: "gate-image", cli: "boat", run: retried, readyTimeoutMs: 0 })),
     (error: unknown) => /not reachable/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === true);
-  assert.ok(!calls.includes("fork") && !calls.includes("delete"), calls.join(" "));
+  assert.ok(!calls.includes("new") && !calls.includes("delete"), calls.join(" "));
 
-  // A retry that finds no VM in the slot forks none, and fails at once (unmarked) rather than spend a start.
+  // A retry that finds no VM in the slot creates none, and fails at once (unmarked) rather than spend a start.
   calls.length = 0;
   const empty = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> => {
     if (request.executable !== "ssh") calls.push(request.args[0]!);
     return request.args[0] === "list" ? result(JSON.stringify({ sandboxes: [] })) : result(JSON.stringify({ ok: true }));
   };
-  await assert.rejects(retryOpen(boatVerification({ image: "bx_image", cli: "boat", run: empty })),
-    (error: unknown) => /a retry forks none/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === undefined);
-  assert.ok(!calls.includes("fork"), calls.join(" "));
+  await assert.rejects(retryOpen(boatVerification({ image: "gate-image", cli: "boat", run: empty })),
+    (error: unknown) => /a retry creates none/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === undefined);
+  assert.ok(!calls.includes("new"), calls.join(" "));
 
   // A refusal is not marked: a plan limit fails the landing at once.
   const refused = async (request: BoundedProcessRequest): Promise<BoundedProcessResult> =>
     request.args[0] === "list" ? result(JSON.stringify({ sandboxes: [] }))
-      : request.args[0] === "fork" ? result(JSON.stringify({ error: "Start the $20/month Boat plan to create sandboxes" }), 1) : result(JSON.stringify({ ok: true }));
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: refused })), (error: unknown) =>
+      : request.args[0] === "new" ? result(JSON.stringify({ error: "Start the $20/month Boat plan to create sandboxes" }), 1) : result(JSON.stringify({ ok: true }));
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: refused })), (error: unknown) =>
     /Boat plan/.test(String(error)) && (error as { machineUnavailable?: boolean }).machineUnavailable === undefined);
 
   const supplied = stand([{ id: "bx_ok", name: "slipjay-pechhe-yardsmith-0", state: "idle" }], (args) => args.at(-1) === "true" ? result("") : result("", 1, "no answer"));
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: supplied.run })), (error: unknown) =>
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: supplied.run })), (error: unknown) =>
     (error as { machineUnavailable?: boolean }).machineUnavailable === undefined
       && (error as { remote?: { machine: { id: string } } }).remote?.machine.id === "bx_ok");
 });
@@ -205,10 +206,10 @@ test("a build machine whose disk does not restore fails without being replaced, 
     if (command === "info") return result(JSON.stringify({ sandbox: { id, state: "idle", type: "large", sshEndpoint: "198.51.100.1:19000", hydrated: false } }));
     return result(JSON.stringify({ ok: true }));
   };
-  const lease = boatVerification({ image: "bx_image", cli: "boat", run, readyTimeoutMs: 0 }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
+  const lease = boatVerification({ image: "gate-image", cli: "boat", run, readyTimeoutMs: 0 }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
   await assert.rejects(lease, /slipjay-pechhe-yardsmith-images not reachable: state idle, disk still restoring/);
   const boat = calls.filter(([executable]) => executable === "boat").map(([, command]) => command);
-  assert.ok(!boat.includes("delete") && !boat.includes("fork"), "the build machine is neither deleted nor forked again");
+  assert.ok(!boat.includes("delete") && !boat.includes("new"), "the build machine is neither deleted nor created again");
 });
 
 /** A boat CLI whose one pool VM is `live`, reporting the given `info` sandbox fields for each id. */
@@ -219,8 +220,8 @@ function degradedBuildMachine(info: (id: string) => Record<string, unknown>) {
     calls.push([request.executable, ...request.args]);
     if (request.executable === "ssh") return request.args.at(-1) === "true" ? result("") : result("", 1, "stop here");
     const [command, id] = request.args;
-    if (command === "list") return result(JSON.stringify({ sandboxes: live ? [{ id: live, name: "slipjay-pechhe-yardsmith-images", state: "idle", health: "degraded", hydrated: false }] : [] }));
-    if (command === "fork") return result(JSON.stringify({ id: "bx_new", sandbox: { id: "bx_new", state: "provisioned", type: "large" } }));
+    if (command === "list") return result(JSON.stringify({ sandboxes: live ? [{ id: live, name: "slipjay-pechhe-yardsmith-images", state: "idle" }] : [] }));
+    if (command === "new") { live = "bx_new"; return result(""); }
     if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "slipjay-pechhe-yardsmith-images", state: "idle", type: "large", sshEndpoint: "198.51.100.1:19000", ...info(id ?? "") } }));
     if (command === "delete") live = "";
     return result(JSON.stringify({ ok: true }));
@@ -229,7 +230,7 @@ function degradedBuildMachine(info: (id: string) => Record<string, unknown>) {
   return { run, boat };
 }
 const leaseImages = (run: (request: BoundedProcessRequest) => Promise<BoundedProcessResult>, readyTimeoutMs?: number) =>
-  boatVerification({ image: "bx_image", cli: "boat", run, ...readyTimeoutMs === undefined ? {} : { readyTimeoutMs } })
+  boatVerification({ image: "gate-image", cli: "boat", run, ...readyTimeoutMs === undefined ? {} : { readyTimeoutMs } })
     .lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
 
 test("a build machine whose restore outlasts twenty minutes is still waited for, not failed", async () => {
@@ -262,36 +263,35 @@ test("a build machine boat reports degraded with its disk unrestored is replaced
   const machine = degradedBuildMachine((id) => id === "bx_images" ? stuck : { hydrated: true });
   await assert.rejects(leaseImages(machine.run, 60_000), /Remote executor unavailable \(setup\)/);
   assert.ok(machine.boat().includes("delete bx_images --yes"), `a degraded build machine is deleted: ${machine.boat().join(", ")}`);
-  assert.ok(machine.boat().includes("fork bx_image --no-env --no-monitoring --ttl 960 --type default"), "a fresh image is forked with the command's time and idle lifetime");
-  assert.ok(machine.boat().includes("rename bx_new slipjay-pechhe-yardsmith-images"), "the fresh VM takes the machine's name");
+  assert.ok(machine.boat().includes("new --from gate-image --name slipjay-pechhe-yardsmith-images --no-env --no-monitoring --ttl 960 --type default"), "a fresh VM is created under the machine's name with the command's time and idle lifetime");
 });
 
-test("a replacement build machine that is also degraded fails naming its health and reason, forking only once", async () => {
+test("a replacement build machine that is also degraded fails naming its health and reason, creating only once", async () => {
   const stuck = { hydrated: false, health: "degraded", healthReason: "hydration stuck: dvol-hydrated: 4 path(s) under '__dockervol__/' still owed" };
   const machine = degradedBuildMachine(() => stuck);
   await assert.rejects(leaseImages(machine.run, 60_000), /slipjay-pechhe-yardsmith-images not reachable: state idle, health degraded \(hydration stuck: dvol-hydrated: 4 path\(s\) under '__dockervol__\/' still owed\), disk still restoring/);
-  assert.equal(machine.boat().filter((call) => call.startsWith("fork")).length, 1, "one replacement fork, never a loop");
+  assert.equal(machine.boat().filter((call) => call.startsWith("new")).length, 1, "one replacement, never a loop");
   assert.equal(machine.boat().filter((call) => call.startsWith("delete")).length, 1, "only the first degraded machine is deleted");
 });
 
 test("a slot with two VMs under its name keeps the running one and deletes the other", async () => {
   const twice = stand([{ id: "bx_stale", name: "slipjay-pechhe-yardsmith-0", state: "stopped" }, { id: "bx_live", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: twice.run })));
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: twice.run })));
   assert.deepEqual(twice.boat().slice(0, 3), ["list --all", "delete bx_stale --yes", "extend bx_live --ttl 10800"]);
 });
 
 test("boat refusing a VM names boat and its error, so it is never mistaken for a gate failure", async () => {
   const refused = stand([]);
-  const run = async (request: BoundedProcessRequest) => request.args[0] === "fork"
+  const run = async (request: BoundedProcessRequest) => request.args[0] === "new"
     ? result(JSON.stringify({ code: "billing_required", error: "Start the $20/month Boat plan to create sandboxes" }), 1) : refused.run(request);
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run })), /^Error: Remote executor unavailable \(boat\): boat fork: Start the \$20\/month Boat plan/);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run })), /^Error: Remote executor unavailable \(boat\): boat new: Start the \$20\/month Boat plan/);
 });
 
 test("an ssh connection failure during setup names boat, not our setup", async () => {
   const lost = stand([{ id: "bx_old", name: "slipjay-pechhe-yardsmith-0", state: "idle" }],
     (args) => args.at(-1) === "true" ? result("") : result("", 255, "ssh: connect to host 198.51.100.1 port 19000: Connection refused"));
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run: lost.run })), /Remote executor unavailable \(boat\): clean on slipjay-pechhe-yardsmith-0/);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run: lost.run })), /Remote executor unavailable \(boat\): clean on slipjay-pechhe-yardsmith-0/);
   assert.ok(lost.boat().includes("extend bx_old --ttl 900"), "a failed setup leaves its VM fifteen minutes, not the attempt's three hours");
 });
 
@@ -302,36 +302,54 @@ test("boat API retries are bounded by the opening budget and report an availabil
     return { ...result(""), exitCode: null, timedOut: true };
   };
   const started = Date.now();
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, openRetryMs: 30, openRetryDelayMs: 1 })),
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run, openRetryMs: 30, openRetryDelayMs: 1 })),
     (error: unknown) => Boolean((error as { boatUnavailable?: boolean }).boatUnavailable));
   assert.ok(timeouts.length > 1, "retried before giving up");
   assert.ok(Date.now() - started < 60_000);
   assert.ok(timeouts.every((ms) => ms <= 30_000), String(timeouts));
 });
 
-test("a VM forked but never named into its pool is deleted at recovery, retried until boat confirms, and recovery fails if it cannot", async () => {
-  const pending = join(await mkdtemp(join(tmpdir(), "boat-pending-")), "forks");
-  const interrupted = stand([], () => result(""));
-  const run = async (request: BoundedProcessRequest) => request.args[0] === "rename" ? result(JSON.stringify({ error: "lost" }), 1) : interrupted.run(request);
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, pending })), /boat rename/);
-  await writeFile(join(pending, "bx_other"), "slipjay-pechhe-yardsmith-1");
-  assert.deepEqual((await readdir(pending)).sort(), ["bx_new", "bx_other"], "each slot's fork has its own record");
+test("a VM is named as boat creates it, so an opening whose create went unanswered leaves the slot its VM, never an orphan", async () => {
+  // Boat creates the VM but the runner gives up waiting for it: the next opening finds it under the slot's name and
+  // takes it, creating no second one.
+  const fake = stand([], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
+  let creates = 0;
+  const run = async (request: BoundedProcessRequest) => {
+    if (request.args[0] === "new" && creates++ === 0) { await fake.run(request); return { ...result(""), timedOut: true, exitCode: null }; }
+    return fake.run(request);
+  };
+  const verification = boatVerification({ image: "gate-image", cli: "boat", run });
+  await assert.rejects(open(verification), /no answer from boat/);
+  await assert.rejects(open(verification), /Remote executor unavailable \(setup\): clean on slipjay-pechhe-yardsmith-0/);
+  assert.equal(creates, 1, fake.boat().join("\n"));
+  assert.ok(fake.boat().includes("extend bx_new --ttl 10800"), "the VM the unanswered create made serves the slot");
+});
 
-  // Boat refuses bx_other's delete once, then takes it; bx_new is no longer listed at all.
-  const refusing = stand([{ id: "bx_other", name: "", state: "idle" }]);
-  let refusals = 0;
-  const refuse = async (request: BoundedProcessRequest) => request.args[0] === "delete" && request.args[1] === "bx_other" && refusals++ === 0
-    ? result("", 1, "busy") : refusing.run(request);
-  await boatVerification({ image: "bx_image", cli: "boat", run: refuse, pending, recoveryMs: 2000 }).recover!(["pechhe/yardsmith"]);
-  assert.ok(!refusing.boat().includes("delete bx_new --yes"), "a VM boat no longer lists only loses its record");
-  assert.equal(refusals, 2, "a refused delete is retried within the same recovery");
-  assert.deepEqual(await readdir(pending), []);
+test("a create boat answers without making the slot's VM fails naming boat, never taking another VM", async () => {
+  const fake = stand([{ id: "bx_other", name: "slipjay-pechhe-yardsmith-1", state: "idle" }]);
+  const run = async (request: BoundedProcessRequest) => request.args[0] === "new" ? result("") : fake.run(request);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run })), /Remote executor unavailable \(boat\): new --from gate-image: boat created no VM named slipjay-pechhe-yardsmith-0/);
+});
 
-  await writeFile(join(pending, "bx_stuck"), "slipjay-pechhe-yardsmith-2");
-  const stuck = stand([{ id: "bx_stuck", name: "", state: "idle" }]);
-  const never = async (request: BoundedProcessRequest) => request.args[0] === "delete" ? result("", 1, "busy") : stuck.run(request);
-  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run: never, pending, recoveryMs: 500 }).recover!(["pechhe/yardsmith"]), /could not delete or clean bx_stuck/);
-  assert.deepEqual(await readdir(pending), ["bx_stuck"], "an orphan boat would not delete keeps its record");
+test("readiness reads, without starting a VM, whether the scope may start one and whether the saved snapshot is ready", async () => {
+  const signal = new AbortController().signal;
+  const readiness = (limits: unknown, named: unknown[]) => {
+    const calls: string[] = [];
+    const run = async (request: BoundedProcessRequest) => {
+      calls.push(request.args.filter((arg) => arg !== "--json" && arg !== "--no-update").join(" "));
+      return result(JSON.stringify(request.args[0] === "limits" ? limits : { named, snapshots: [] }));
+    };
+    return { calls, ready: () => boatVerification({ image: "gate-image", cli: "boat", run }).readiness!(signal) };
+  };
+  const ready = readiness({ canStart: true }, [{ name: "gate-image", status: "ready" }]);
+  assert.equal(await ready.ready(), null);
+  assert.deepEqual(ready.calls, ["limits", "snapshots --limit 1"], "only reads: no new, fork, resume or snapshot");
+  assert.match(await readiness({ canStart: false, blockedReason: "usage_depleted" }, [{ name: "gate-image", status: "ready" }]).ready() ?? "",
+    /boat refuses to start VMs in this scope \(usage_depleted\)/);
+  assert.match(await readiness({ canStart: true }, [{ name: "other", status: "ready" }]).ready() ?? "", /boat holds no saved snapshot named gate-image/);
+  assert.match(await readiness({ canStart: true }, [{ name: "gate-image", status: "deleting" }]).ready() ?? "", /saved snapshot gate-image is deleting, not ready/);
+  const unreachable = boatVerification({ image: "gate-image", cli: "boat", run: async () => result("", 1, "could not reach the Boat API") });
+  await assert.rejects(unreachable.readiness!(signal), /could not reach/, "an unanswered read is no verdict");
 });
 
 test("the lease's fence ends an earlier lease's sessions, kills one that ignores its terminate, and refuses the machine while one stays open", async () => {
@@ -440,7 +458,7 @@ test("concurrent gate commands reaching Build share one tunnel per attempt", asy
   const run = async (request: BoundedProcessRequest) => request.executable === "git" ? result(request.args[0] === "rev-parse" ? "e".repeat(40) : "", request.args[0] === "bundle" ? 128 : 0, request.args[0] === "bundle" ? "Refusing to create empty bundle." : "")
     : request.executable === "bash" ? (ready.calls.push(["bash", ...request.args]), result("")) : ready.run(request);
   const scratch = await mkdtemp(join(tmpdir(), "boat-scratch-"));
-  const attempt = await open(boatVerification({ image: "bx_image", cli: "boat", run, scratch }));
+  const attempt = await open(boatVerification({ image: "gate-image", cli: "boat", run, scratch }));
   const command = { executable: "bun", args: ["run", "check"], cwd: "/repo", timeoutMs: 1000, maxOutputBytes: 1024, env: { SLIPJAY_BUILD_READ_URL: "http://127.0.0.1:41234/v1" } };
   await Promise.all([attempt.executor.run(command), attempt.executor.run(command)]);
   assert.equal(ready.calls.filter(([executable]) => executable === "bash").length, 1, "one SSH master");
@@ -475,7 +493,7 @@ test("a build machine is leased under its pool's name with the command's lifetim
     return request.args[0] === "usage" ? result(JSON.stringify({ seconds: billed, dollars: billed / 100_000 })) : machine.run(request);
   };
   const scratch = await mkdtemp(join(tmpdir(), "boat-scratch-"));
-  const lease = await boatVerification({ image: "bx_image", cli: "boat", run, scratch }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory, commitId, lifetimeS: 1500 });
+  const lease = await boatVerification({ image: "gate-image", cli: "boat", run, scratch }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory, commitId, lifetimeS: 1500 });
   assert.deepEqual(machine.boat().slice(0, 3), ["list --all", "resume bx_images", "extend bx_images --ttl 2400"], "the command's time plus the idle lifetime");
   assert.equal(lease.machine.name, "slipjay-pechhe-yardsmith-images");
   const fence = scripts.findIndex((script) => script.includes("loginctl terminate-session"));
@@ -492,9 +510,9 @@ test("a build machine is leased under its pool's name with the command's lifetim
 
 test("a build machine boat cannot supply fails naming boat", async () => {
   const refused = stand([]);
-  const run = async (request: BoundedProcessRequest) => request.args[0] === "fork" ? result(JSON.stringify({ error: "out of starts" }), 1) : refused.run(request);
-  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "c".repeat(40), lifetimeS: 60 }),
-    /^Error: Remote executor unavailable \(boat\): boat fork: out of starts/);
+  const run = async (request: BoundedProcessRequest) => request.args[0] === "new" ? result(JSON.stringify({ error: "out of starts" }), 1) : refused.run(request);
+  await assert.rejects(boatVerification({ image: "gate-image", cli: "boat", run }).lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "c".repeat(40), lifetimeS: 60 }),
+    /^Error: Remote executor unavailable \(boat\): boat new: out of starts/);
 });
 
 test("restart recovery cleans the gate's slot VMs and never a build machine", async () => {
@@ -503,21 +521,21 @@ test("restart recovery cleans the gate's slot VMs and never a build machine", as
   const run = async (request: BoundedProcessRequest) => request.args[0] === "list" ? result(JSON.stringify({ sandboxes: [
     { id: "bx_0", name: "slipjay-pechhe-yardsmith-0", state: "idle", sshEndpoint: "198.51.100.1:19000" },
     { id: "bx_images", name: "slipjay-pechhe-yardsmith-images", state: "idle", sshEndpoint: "198.51.100.2:19000" }] })) : pool.run(request);
-  await boatVerification({ image: "bx_image", cli: "boat", run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
+  await boatVerification({ image: "gate-image", cli: "boat", run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
   const cleaned = pool.calls.filter(([executable]) => executable === "ssh").map((args) => args.find((arg) => arg.startsWith("user@")));
   assert.deepEqual(cleaned, ["user@198.51.100.1"]);
 });
 
 test("screen slots are separate from authoritative slots and recovery cleans every screen slot", async () => {
   const missing = stand([], (args) => args.at(-1) === "true" ? result("") : result("", 1, "stop here"));
-  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run: missing.run }).open({
+  await assert.rejects(boatVerification({ image: "gate-image", cli: "boat", run: missing.run }).open({
     repo: "pechhe/yardsmith", slot: 2, screening: true, checkout: "/nonexistent", base: "b".repeat(40),
     candidate: "c".repeat(40), integrationBranch: "develop", signal: new AbortController().signal,
   }));
-  assert.ok(missing.boat().includes("rename bx_new slipjay-pechhe-yardsmith-2-screen"));
+  assert.ok(missing.boat().includes("new --from gate-image --name slipjay-pechhe-yardsmith-2-screen --no-env --no-monitoring --ttl 10800 --type default"));
   const pool = stand(Array.from({ length: 3 }, (_, i) => ({ id: `bx_${i}`, name: `slipjay-pechhe-yardsmith-${i}-screen`,
     state: "idle", sshEndpoint: `198.51.100.${i + 1}:19000` })));
-  await boatVerification({ image: "bx_image", cli: "boat", run: pool.run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
+  await boatVerification({ image: "gate-image", cli: "boat", run: pool.run, recoveryMs: 1000 }).recover!(["pechhe/yardsmith"]);
   assert.equal(pool.calls.filter(([executable]) => executable === "ssh").length, 3);
 });
 
@@ -563,7 +581,7 @@ test("a short boat API outage retries opening and succeeds without repeating a g
   };
   const scratch = await mkdtemp(join(tmpdir(), "boat-retry-"));
   try {
-    const attempt = await open(boatVerification({ image: "bx_image", cli: "boat", run, scratch, openRetryMs: 1000, openRetryDelayMs: 1 }));
+    const attempt = await open(boatVerification({ image: "gate-image", cli: "boat", run, scratch, openRetryMs: 1000, openRetryDelayMs: 1 }));
     assert.equal(lists, 3);
     await attempt.close();
   } finally { await rm(scratch, { recursive: true, force: true }); }
@@ -573,7 +591,7 @@ test("a kill interrupts the opening backoff promptly", async () => {
   const controller = new AbortController();
   let failed!: () => void;
   const failure = new Promise<void>((resolve) => { failed = resolve; });
-  const verification = boatVerification({ image: "bx_image", cli: "boat", openRetryDelayMs: 30_000,
+  const verification = boatVerification({ image: "gate-image", cli: "boat", openRetryDelayMs: 30_000,
     run: async () => { failed(); return result("", 1, "could not reach the Boat API"); } });
   const opening = verification.open({ repo: "pechhe/yardsmith", slot: 0, checkout: "/nonexistent", base: "b".repeat(40), candidate: "c".repeat(40), integrationBranch: "main", signal: controller.signal });
   await failure;
@@ -583,28 +601,28 @@ test("a kill interrupts the opening backoff promptly", async () => {
   assert.ok(Date.now() - started < 1000);
 });
 
-test("a timed-out fork is not repeated because boat may already have created it", async () => {
+test("a timed-out create is not repeated because boat may already have created it", async () => {
   const fake = stand([]);
-  let forks = 0;
+  let creates = 0;
   const run = async (request: BoundedProcessRequest) => {
-    if (request.args[0] === "fork") { forks++; return { ...result(""), timedOut: true, exitCode: null }; }
+    if (request.args[0] === "new") { creates++; return { ...result(""), timedOut: true, exitCode: null }; }
     return fake.run(request);
   };
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run })), /no answer from boat/);
-  assert.equal(forks, 1);
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run })), /no answer from boat/);
+  assert.equal(creates, 1);
 });
 
 
 test("an availability probe accepts an API refusal but keeps holding when the API is unreachable", async () => {
   const signal = new AbortController().signal;
-  await boatVerification({ image: "bx_image", cli: "boat", run: async () => result(JSON.stringify({ error: "unauthorized" }), 1) }).probe!(signal);
-  await assert.rejects(boatVerification({ image: "bx_image", cli: "boat", run: async () => result("", 1, "could not reach the Boat API") }).probe!(signal), /could not reach/);
+  await boatVerification({ image: "gate-image", cli: "boat", run: async () => result(JSON.stringify({ error: "unauthorized" }), 1) }).probe!(signal);
+  await assert.rejects(boatVerification({ image: "gate-image", cli: "boat", run: async () => result("", 1, "could not reach the Boat API") }).probe!(signal), /could not reach/);
 });
 
 test("boat's rate limit is an availability failure, retried and held like an outage", async () => {
   let calls = 0;
   const run = async (): Promise<BoundedProcessResult> => { calls += 1; return result(JSON.stringify({ error: "Rate limit exceeded: 10000 requests per minute" }), 1); };
-  await assert.rejects(open(boatVerification({ image: "bx_image", cli: "boat", run, openRetryMs: 30, openRetryDelayMs: 1 })),
+  await assert.rejects(open(boatVerification({ image: "gate-image", cli: "boat", run, openRetryMs: 30, openRetryDelayMs: 1 })),
     (error: unknown) => Boolean((error as { boatUnavailable?: boolean }).boatUnavailable));
   assert.ok(calls > 1, "retried before giving up");
 });
@@ -621,13 +639,13 @@ test("a lease resumes a stopped build machine once, for its command and fifteen 
     if (command === "info") return result(JSON.stringify({ sandbox: { id, name: "slipjay-pechhe-yardsmith-images", state, type: "large", sshEndpoint: "198.51.100.1:19000", hydrated: state === "idle" } }));
     return result(JSON.stringify({ ok: true }));
   };
-  const verification = boatVerification({ image: "bx_image", cli: "boat", run });
+  const verification = boatVerification({ image: "gate-image", cli: "boat", run });
   const lease = () => verification.lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
   // Each lease goes on to set the machine up, which this fake refuses: only how it acquired the machine matters here.
   // Both are observed at once: awaiting them in turn leaves the second unobserved, an unhandled rejection if it fails first.
   await Promise.all([lease(), lease()].map((leased) => assert.rejects(leased, /Remote executor unavailable \(setup\)/)));
   assert.equal(boatCalls.filter((call) => call.startsWith("resume")).length, 1, boatCalls.join("\n"));
-  assert.equal(boatCalls.filter((call) => call.startsWith("fork")).length, 0);
+  assert.equal(boatCalls.filter((call) => call.startsWith("new")).length, 0);
   assert.ok(boatCalls.some((call) => call.startsWith("extend") && /--ttl 960/.test(call)), boatCalls.join("\n"));
   assert.ok(boatCalls.filter((call) => call.startsWith("extend")).at(-1)?.includes("--ttl 900"), "a closed lease leaves the machine fifteen idle minutes");
 });

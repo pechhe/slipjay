@@ -105,7 +105,7 @@ builds each landing's container images this way, with a `minIntervalMs` of 0.
   `~/.slipjay-builds/slipjay-<owner>-<name>-<pool>.git` and bills nothing. When it cannot be reached the deploy says
   so and leases from the runner's remote
   verifier (see [Remote verification on boat](runner.md#remote-verification-on-boat)): the boat VM
-  `slipjay-<owner>-<name>-<pool>`, forked from the gate's image when missing and resumed when
+  `slipjay-<owner>-<name>-<pool>`, created from the gate's image when missing and resumed when
   stopped, living for twice the environment's `timeoutMs` until its deploy ends and then fifteen idle minutes,
   after which boat stops it and keeps its disk, Docker build cache included. The runner first sends it the deployed commit as a Git bundle of
   what it lacks, into its own bare repository, and gives every command of the deploy

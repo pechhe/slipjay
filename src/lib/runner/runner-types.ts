@@ -344,6 +344,8 @@ export type OperationEvent =
   /** `hostPlace`: the repository has a runner-host gate place, which still takes a gate while boat is held. */
   /** A machine gate place went down (a gate then used boat) or recovered (SJ-200). */
   | { type: "machine_place"; name: string; state: "down" | "up"; reason: string }
+  /** Whether boat could start a gate VM, read periodically without starting one (SJ-307); recorded when it changes. */
+  | { type: "boat_readiness"; state: "blocked" | "ready"; reason: string }
   | { type: "boat_circuit"; repo: string; state: "open" | "closed"; reason: string; hostPlace?: true }
   | { type: "integration_held"; repo: string; commitId: string; reason: string; targetReached?: boolean; branch?: string; remote?: string }
   | { type: "integration_recovered"; repo: string; commitId: string; retried?: boolean }
@@ -681,6 +683,11 @@ export interface RemoteVerification {
     onCapacityWait?: (line: string, waitedMs: number, finished: boolean) => void }): Promise<RemoteAttempt>;
   /** Read-only API availability check; never opens or starts a VM. */
   probe?(signal: AbortSignal): Promise<void>;
+  /**
+   * Whether the verifier could start a gate VM now, read without starting one (SJ-307): null when it could, otherwise why
+   * not, such as a starting image that is gone or a scope that refuses starts. Throws when it cannot tell.
+   */
+  readiness?(signal: AbortSignal): Promise<string | null>;
   /** Stop whatever an earlier runner process left running on the pools of `repos`; best effort. */
   recover?(repos: readonly string[]): Promise<void>;
   lease?: LeaseBuildMachine;
@@ -802,8 +809,9 @@ export type RunnerConfig = {
     /** One shared SSH place replaces the runner-host place; otherwise use verifier. */
     gateMachine?: string }>;
   /**
-   * boat.dev VMs for repositories whose `verifier` is `boat`: one per verification place, forked from `image` (a sandbox
-   * kept stopped as the starting image) and reached over SSH with `sshKey`. `cli` is the boat CLI, which authenticates
+   * boat.dev VMs for repositories whose `verifier` is `boat`: one per verification place, created from `image` (the name
+   * of a saved snapshot, `boat snapshot <id> <name>`, which boat keeps past its 14 days for stopped sandboxes) and reached
+   * over SSH with `sshKey`. `cli` is the boat CLI, which authenticates
    * with `BOAT_API_KEY` from the runner's environment.
    */
   machines?: Record<string, GateMachineConfig>;

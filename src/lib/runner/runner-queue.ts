@@ -193,6 +193,8 @@ export function createRunnerQueue(input: {
   machineBuilds?: Record<string, { machine: string; lease: LeaseBuildMachine }>;
   /** First availability probe after a boat outage; doubles up to one minute. */
   boatProbeMs?: number;
+  /** How often the runner reads whether boat could start a gate VM (SJ-307); half an hour when absent. */
+  boatReadinessMs?: number;
   /** Override pre-verification stage deadlines (milliseconds), for embedded runners and tests. */
   verificationStageTimeoutMs?: number;
   /** The clock a `promotionSchedule` is read against; `Date.now` when absent. */
@@ -404,6 +406,38 @@ export function createRunnerQueue(input: {
         void place.recover?.([]).then(() => { if (place.available()) { machinePlaceUp(machine); wakeMain(); } }).catch(() => undefined);
   }, 5000) : undefined;
   machineRecovery?.unref?.();
+  /**
+   * Why boat could not start a gate VM at the last reading, read at startup and every half hour without starting one
+   * (SJ-307). A gate that falls back to boat, or a slot whose VM is missing, fails while it cannot, so the runner says so
+   * before any landing needs it: in its log at every reading, on its own record when it changes, and in every landing
+   * of a repository verifying on boat.
+   */
+  let boatBlocked = ((last) => last?.type === "boat_readiness" && last.state === "blocked" ? last.reason : undefined)(
+    log.events({ operationId: RUNNER_CONTROL_ID }).findLast((row) => row.event.type === "boat_readiness")?.event);
+  let readinessCheck: AbortController | undefined;
+  function checkBoatReadiness(): void {
+    if (!remoteVerification?.readiness || readinessCheck || closed) return;
+    const controller = new AbortController();
+    readinessCheck = controller;
+    void remoteVerification.readiness(controller.signal).then((reason) => {
+      if (controller.signal.aborted) return;
+      if (reason) {
+        if (reason !== boatBlocked) append(RUNNER_CONTROL_ID, { type: "boat_readiness", state: "blocked", reason });
+        console.error(`[runner] boat cannot start a gate VM: ${reason}. A gate that falls back to boat, or a slot whose VM is missing, fails until this is fixed (docs/runner.md, "Keeping the starting image")`);
+      } else if (boatBlocked) {
+        append(RUNNER_CONTROL_ID, { type: "boat_readiness", state: "ready", reason: "boat can start gate VMs again" });
+        console.error("[runner] boat can start gate VMs again");
+      }
+      boatBlocked = reason ?? undefined;
+    }, (error: unknown) => {
+      // An unanswered read proves nothing either way: the last reading stands, and the next one tries again.
+      if (!controller.signal.aborted) console.error(`[runner] could not read whether boat can start a gate VM: ${message(error)}`);
+    }).finally(() => { if (readinessCheck === controller) readinessCheck = undefined; });
+  }
+  const boatReadiness = remoteVerification?.readiness && Object.values(config.repos).some((repo) => repo.verifier === "boat")
+    ? setInterval(checkBoatReadiness, input.boatReadinessMs ?? 30 * 60_000) : undefined;
+  boatReadiness?.unref?.();
+  if (boatReadiness) checkBoatReadiness();
   const machinePlaceFree = (repo: string) => {
     const name = configuredRepository(config, repo)?.gateMachine;
     return Boolean(name && machinePlaces[name]?.some((place, index) => !machineGates.holds(name, index) && place.available()));
@@ -1577,6 +1611,8 @@ export function createRunnerQueue(input: {
      */
     async function openGate(base: string, candidate: string, integrationBranch: string, context: NonNullable<Awaited<ReturnType<typeof workspaceContext>>>, signal: AbortSignal): Promise<GateAttempt> {
       const key = repositoryKey(operation.repo);
+      if (boatBlocked && configuredRepository(config, operation.repo)?.verifier === "boat")
+        progress(`warning: boat cannot start a gate VM (${boatBlocked}); this gate fails if it needs a boat VM that is not already running`);
       const name = configuredRepository(config, operation.repo)?.gateMachine;
       if (name) {
         const places = machinePlaces[name] ?? [];
@@ -3192,6 +3228,8 @@ export function createRunnerQueue(input: {
   /** Stop whatever would start work on its own: the interval schedulers that submit deploys, resets, audits and recoveries. */
   function stopScheduling(): void {
     clearInterval(machineRecovery);
+    clearInterval(boatReadiness);
+    readinessCheck?.abort();
     scheduler.close(); resetScheduler.close(); auditScheduler.close();
     for (const hold of boatHolds.values()) { clearTimeout(hold.timer); hold.controller?.abort(); }
     for (const retry of auditDiscovery.values()) clearTimeout(retry);
