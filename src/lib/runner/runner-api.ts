@@ -2,7 +2,7 @@ import { validSubmissionHandoff, handoffDigest, isBuildBinding } from "../landin
 import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim, repairTokenHash, validRepairProof } from "../landing/repair-claim.ts";
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, servedCommit, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
-import { auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
+import { attributedCause, auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
 import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, PrioritizeOptions, PrioritizeOutcome, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
@@ -452,13 +452,21 @@ export function createRunnerHandler(input: {
       } catch {
         return json({ error: "Invalid JSON body" }, 400);
       }
+      if (typeof body === "object" && body !== null && !(typeof (body as { note?: unknown }).note === "string" && (body as { note: string }).note.trim()))
+        return json({ error: "A cause must say why: pass a note (slipjay audit cause ... --note <why>). `slipjay audit status` is the read-only view of the audits and their causes." }, 400);
       if (!validAuditCause(body))
         return json({ error: "Invalid audit cause" }, 400);
       const key = repositoryKey(body.repo);
       const audits = input.log.audits(key), landings = input.log.landings(key);
-      const target = auditToExplain(audits, auditSummary({ audits, landings }, new Date()), body.audit);
+      const summaryBefore = auditSummary({ audits, landings }, new Date());
+      const target = auditToExplain(audits, summaryBefore, body.audit);
       if (!target.ok)
         return json({ error: target.reason }, 400);
+      const recorded = attributedCause(audits, target.audit.id);
+      if (recorded && body.replace !== true) {
+        const what = recorded.cause.kind === "culprits" ? `culprits ${recorded.cause.landings.map((commit) => commit.slice(0, 12)).join(", ")}` : recorded.cause.kind;
+        return json({ error: `${target.audit.id} already has a recorded cause: ${what}, recorded by ${recorded.by} at ${recorded.at}${recorded.note ? ` with the note: ${recorded.note}` : " with no note"}. Pass --replace to change it.` }, 409);
+      }
       let cause: AuditCause;
       if (body.landings) {
         const culprits = resolveCulprits(body.landings, landings);
@@ -466,7 +474,7 @@ export function createRunnerHandler(input: {
           return json({ error: culprits.reason }, 400);
         cause = { kind: "culprits", landings: culprits.commits };
       } else cause = { kind: body.kind! };
-      input.log.append(target.audit.id, { type: "audit_cause", cause, by: body.by, ...body.note ? { note: body.note } : {} });
+      input.log.append(target.audit.id, { type: "audit_cause", cause, by: body.by, note: body.note });
       const after = input.log.audits(key);
       return json({ operation: after.find((operation) => operation.id === target.audit.id), summary: auditSummary({ audits: after, landings }, new Date()) });
     }
@@ -694,7 +702,8 @@ function validAuditCause(body: unknown): body is AuditCauseRequest {
   const text = (field: unknown, limit: number) => typeof field === "string" && field.trim().length > 0 && field.length <= limit;
   if (!text(value.repo, 200) || !text(value.by, 200)) return false;
   if (value.audit !== undefined && !(typeof value.audit === "string" && /^op_[0-9a-z]+_[0-9a-f]+$/.test(value.audit))) return false;
-  if (value.note !== undefined && !text(value.note, 1_000)) return false;
+  if (!text(value.note, 1_000)) return false;
+  if (value.replace !== undefined && value.replace !== true) return false;
   if (value.landings !== undefined)
     return value.kind === undefined && Array.isArray(value.landings) && value.landings.length >= 1 && value.landings.length <= 50 && value.landings.every((landing) => text(landing, 100));
   return value.kind === "flake" || value.kind === "infrastructure" || value.kind === "unresolved";

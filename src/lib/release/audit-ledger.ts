@@ -190,7 +190,7 @@ export function promotionRefusal(summary: AuditSummary): string | null {
   if (failure && !failure.cause) {
     const suspects = failure.suspects.length ? ` Suspects: ${failure.suspects.slice(-5).map((commit) => commit.slice(0, 12)).join(", ")}${failure.suspects.length > 5 ? ` and ${failure.suspects.length - 5} earlier` : ""}.` : "";
     return `The latest audit failed${failure.commit ? ` at ${failure.commit.slice(0, 12)}` : ""} and no cause is recorded.${suspects} `
-      + `Record one with slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> before promoting.`;
+      + `Record one with slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> --note <why> before promoting.`;
   }
   const run = summary.inconclusive?.audits ?? [];
   if (run.length < 2) return null;
@@ -200,7 +200,34 @@ export function promotionRefusal(summary: AuditSummary): string | null {
     : summary.lastGreen ? `The last audit to judge the repository was green at ${summary.lastGreen.commit.slice(0, 12)}`
     : "No audit has judged the repository yet";
   return `The latest ${run.length === 2 ? "two" : run.length} audits were inconclusive (${run.join(", ")}) and no cause is recorded for them. ${judged}; inconclusive audits do not judge it. `
-    + `Record one with slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> before promoting.`;
+    + `Record one with slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> --note <why> before promoting.`;
+}
+
+/**
+ * The recorded cause the ledger attributes to audit `id`, or null. A failed audit shares its failure's newest cause,
+ * open or closed; an inconclusive audit has the newest cause on its run of inconclusive audits recorded at or after it
+ * ended. The cause command reads this to refuse a silent replacement, so it and `auditSummary` agree.
+ */
+export function attributedCause(audits: readonly AuditRecord[], id: string): NonNullable<AuditRecord["cause"]> | null {
+  const verdicts = audits.flatMap((operation) => verdictOf(operation) ?? [])
+    .sort((a, b) => a.finishedAt === b.finishedAt ? a.operation.id.localeCompare(b.operation.id) : Date.parse(a.finishedAt) - Date.parse(b.finishedAt));
+  const newest = (group: Verdicted[]) => group.flatMap(({ operation }) => operation.cause ? [operation.cause] : [])
+    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1) ?? null;
+  let cluster: Verdicted[] = [], run: Verdicted[] = [];
+  const settle = (group: Verdicted[]) => group.find(({ operation }) => operation.id === id);
+  for (const verdict of verdicts) {
+    if (verdict.verdict === "inconclusive") { run.push(verdict); continue; }
+    if (verdict.verdict === "green") {
+      if (settle(cluster)) return newest(cluster);
+      cluster = [];
+    } else cluster.push(verdict);
+    const own = settle(run);
+    if (own) return newest(run.filter(({ operation }) => operation.cause && Date.parse(operation.cause.at) >= Date.parse(own.finishedAt)));
+    run = [];
+  }
+  if (settle(cluster)) return newest(cluster);
+  const own = settle(run);
+  return own ? newest(run.filter(({ operation }) => operation.cause && Date.parse(operation.cause.at) >= Date.parse(own.finishedAt))) : null;
 }
 
 /**

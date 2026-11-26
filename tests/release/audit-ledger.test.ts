@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
-import { AUDIT_OVERDUE_AFTER_MS, auditInconclusive, auditSummariesFromEvents, auditSummary, auditToExplain, promotionRefusal, resolveCulprits } from "../../src/lib/release/audit-ledger.ts";
+import { AUDIT_OVERDUE_AFTER_MS, auditInconclusive, attributedCause, auditSummariesFromEvents, auditSummary, auditToExplain, promotionRefusal, resolveCulprits } from "../../src/lib/release/audit-ledger.ts";
 import { AUDIT_INTERRUPTED_REASON } from "../../src/lib/runner/runner-contract.ts";
 import type { AuditCause } from "../../src/lib/runner/runner-types.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
@@ -607,5 +607,34 @@ test("each failing night is its own: its failing tests and category, recorded or
     assert.deepEqual(failure.nights.map((entry) => entry.recorded), [false, false, false, true]);
     assert.equal(failure.nights[0]!.firstError, "AssertionError: boom");
     assert.match(failure.nights[1]!.category.evidence, /load 43\.0 on 14 CPUs/);
+  } finally { l.log.close(); }
+});
+
+test("attributedCause is the newest cause of the audit's own failure, open or closed, and of the run that covers an inconclusive audit", async () => {
+  const l = ledger();
+  try {
+    l.landing("t1");
+    const f1 = l.audit("failed");
+    const f2 = l.audit("failed");
+    await sleep();
+    l.cause(f2, { kind: "flake" });
+    const closedBy = l.audit("green");
+    const audits = () => l.log.audits(REPO);
+    assert.deepEqual(attributedCause(audits(), f1)?.cause, { kind: "flake" }, "a closed failure's audits share its cause");
+    assert.deepEqual(attributedCause(audits(), f2)?.cause, { kind: "flake" });
+    assert.equal(attributedCause(audits(), closedBy), null, "a green audit has none");
+    const g1 = l.audit("failed");
+    assert.equal(attributedCause(audits(), g1), null, "the next failure is another one");
+    const i1 = l.audit("inconclusive");
+    await sleep();
+    const i2 = l.audit("inconclusive");
+    await sleep();
+    l.cause(i1, { kind: "infrastructure" });
+    await sleep();
+    const i3 = l.audit("inconclusive");
+    assert.deepEqual(attributedCause(audits(), i1)?.cause, { kind: "infrastructure" });
+    assert.deepEqual(attributedCause(audits(), i2)?.cause, { kind: "infrastructure" }, "covered by a cause on a sibling");
+    assert.equal(attributedCause(audits(), i3), null, "a later audit is uncovered");
+    assert.equal(attributedCause(audits(), "nope"), null);
   } finally { l.log.close(); }
 });

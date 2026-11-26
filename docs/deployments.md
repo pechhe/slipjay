@@ -248,15 +248,18 @@ before, and an older runner ignores the field, safely leaving those exits as fai
   between the last green audit's commit and the failing one, or all of them when none was green
   (or the green one is not an ancestor, when only the landings the two share are left out). Failing
   audits with no green one between are one open failure. Anyone then records its cause with
-  `slipjay audit cause`. Only a culprit whose landing passed the landing checks is an **escape**
-  (a settings landing, whose checks did not run, is not); escapes are counted per repository, once each.
+  `slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> --note <why>`. A cause needs
+  a note, and replacing one already recorded needs `--replace` (without it the runner refuses and shows
+  the recorded cause), so look with `slipjay audit status` and record only to say something. Only a
+  culprit whose landing passed the landing checks is an **escape** (a settings landing, whose checks did
+  not run, is not); escapes are counted per repository, once each.
   Nothing bisects automatically.
 - **Promotion.** While the latest audit failed and its failure has no recorded cause (a culprit,
   `flake`, `infrastructure` or `unresolved`), `slipjay promote` refuses at planning, which for an
   audited repository always reads the runner, and the runner fails a confirmed release, asking
   again just before it publishes in case an audit failed while the release verified. A cause lasts until a green audit closes the failure.
-  Two inconclusive audits in a row refuse promotion the same way. `slipjay audit cause` accepts any of its cause
-  kinds for that refusal too: the cause covers the inconclusive audits up to when it was recorded and the count then
+  Two inconclusive audits in a row refuse promotion the same way. `slipjay audit cause` (always with
+  `--note <why>`) accepts any of its cause kinds for that refusal too: the cause covers the inconclusive audits up to when it was recorded and the count then
   restarts, so one command cannot switch the bound off, and a green audit also clears it. With an open failure as
   well, the failure is answered first and the two are lifted separately. A lifted refusal takes effect at the next
   promotion trigger, including the promotion schedule; nothing new wakes promotion when an audit ends or a cause is

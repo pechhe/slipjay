@@ -588,7 +588,7 @@ export type ResetResponse = { operation: ResetOperation; reattached: boolean };
  * repository's open failure); `landings` are culprit landings, by operation id or by commit id (12 or more hex digits).
  * Exactly one of `landings` (one or more) and `kind` (the other causes) is given.
  */
-export type AuditCauseRequest = { repo: string; by: string; audit?: string; note?: string } & ({ landings: string[]; kind?: undefined } | { kind: "flake" | "infrastructure" | "unresolved"; landings?: undefined });
+export type AuditCauseRequest = { repo: string; by: string; audit?: string; note: string; replace?: true } & ({ landings: string[]; kind?: undefined } | { kind: "flake" | "infrastructure" | "unresolved"; landings?: undefined });
 
 /**
  * POST /v1/operations response.
@@ -611,7 +611,7 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - POST /v1/resets                             ResetRequest → ResetResponse (400 until the repository has landed here)
  * - GET  /v1/resets?repo=<owner/name>           → `{ operations: ResetOperation[] }` newest first
  * - GET  /v1/audits?repo=<owner/name>           → `{ operations: AuditOperation[], summary: AuditSummary }` newest first
- * - POST /v1/audits/cause                       AuditCauseRequest → `{ operation: AuditOperation, summary: AuditSummary }` (400 when it names no failing audit or an unknown landing)
+ * - POST /v1/audits/cause                       AuditCauseRequest → `{ operation: AuditOperation, summary: AuditSummary }` (400 when it has no note, names no failing audit or an unknown landing; 409 when the audit has a recorded cause and `replace` is not true)
  * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
  * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first
  * - GET  /v1/operations/:id/source              → authenticated bounded Git bundle (no mutation)

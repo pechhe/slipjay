@@ -1283,10 +1283,10 @@ export async function readAudits(cwd: string, options: { location: string; env?:
  * Record why the repository's failing audit failed: culprit `landings`, or one of the other causes. `audit` names the
  * failing audit when it is not the open failure's.
  */
-export async function recordAuditCause(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv; audit?: string; note?: string; by?: string }
+export async function recordAuditCause(cwd: string, options: { location: string; env?: NodeJS.ProcessEnv; audit?: string; note: string; replace?: boolean; by?: string }
   & ({ landings: string[]; kind?: undefined } | { kind: "flake" | "infrastructure" | "unresolved"; landings?: undefined })): Promise<{ operation: AuditOperation; summary: AuditSummary }> {
   return withAuditRoute(cwd, options, (call, repo) => call("/v1/audits/cause", {
-    repo, by: options.by ?? `${hostname()}:${cwd}`, ...options.audit ? { audit: options.audit } : {}, ...options.note ? { note: options.note } : {},
+    repo, by: options.by ?? `${hostname()}:${cwd}`, ...options.audit ? { audit: options.audit } : {}, note: options.note, ...options.replace ? { replace: true } : {},
     ...options.landings ? { landings: options.landings } : { kind: options.kind },
   }));
 }
@@ -1300,9 +1300,14 @@ async function withAuditRoute<T>(cwd: string, options: { location: string; env?:
   const token = await runnerToken(env);
   const connection = await connectRunner(options.location, { ...env, SLIPJAY_RUNNER_TOKEN: token });
   try {
-    return await work(async (route, body) => (await (await (body === undefined
-      ? request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo })}`)
-      : request(connection.baseUrl, token, route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }))).json()) as T, repo);
+    return await work(async (route, body) => {
+      const response = await (body === undefined
+        ? request(connection.baseUrl, token, `${route}?${new URLSearchParams({ repo })}`)
+        : request(connection.baseUrl, token, route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }));
+      // `request` passes a 409 through; on the audit routes it is a refusal that names why (a cause already recorded).
+      if (response.status === 409) throw new RunnerRequestRefused(409, ((await response.json().catch(() => null)) as { error?: string } | null)?.error ?? "Runner request refused: HTTP 409");
+      return await response.json() as T;
+    }, repo);
   } finally { connection.close(); }
 }
 

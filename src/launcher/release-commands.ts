@@ -108,10 +108,10 @@ export async function runReset(args: string[]): Promise<number> {
 /**
  * `audit [status]` shows the repository's nightly audits and what they say; `audit cause` records why its failing
  * audit failed, which lifts the promotion refusal: culprit landings (operation ids or published commits), or exactly
- * one of `--flake`, `--infrastructure`, `--unresolved`.
+ * one of `--flake`, `--infrastructure`, `--unresolved`, always with `--note <why>`; replacing a recorded cause takes `--replace`.
  */
 export async function runAudit(args: string[]): Promise<number> {
-  const usage = "Usage: slipjay audit [status] | slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> [--audit <id>] [--note <text>]";
+  const usage = "Usage: slipjay audit [status] | slipjay audit cause <landing...|--flake|--infrastructure|--unresolved> --note <why> [--audit <id>] [--replace]\n`audit cause` records a cause; `slipjay audit status` is how to look at the audits.";
   const location = runnerLocation();
   if (!location) throw new Error("slipjay audit runs on the runner: set SLIPJAY_RUNNER or \"runner\" in ~/.slipjay/config.json");
   if (!args.length || (args.length === 1 && args[0] === "status")) {
@@ -129,17 +129,19 @@ export async function runAudit(args: string[]): Promise<number> {
   }
   if (args[0] !== "cause") throw new Error(usage);
   const landings: string[] = [], kinds: ("flake" | "infrastructure" | "unresolved")[] = [];
-  let audit: string | undefined, note: string | undefined;
+  let audit: string | undefined, note: string | undefined, replace = false;
   for (let index = 1; index < args.length; index += 1) {
     const arg = args[index]!;
     if (arg === "--flake" || arg === "--infrastructure" || arg === "--unresolved") kinds.push(arg.slice(2) as "flake" | "infrastructure" | "unresolved");
     else if (arg === "--audit" && args[index + 1]) audit = args[++index];
     else if (arg === "--note" && args[index + 1]) note = args[++index];
+    else if (arg === "--replace") replace = true;
     else if (!arg.startsWith("-")) landings.push(arg);
     else throw new Error(usage);
   }
   if (kinds.length + (landings.length ? 1 : 0) !== 1) throw new Error(`Name the cause exactly once: culprit landings, or one of --flake, --infrastructure, --unresolved\n${usage}`);
-  const { operation, summary } = await recordAuditCause(process.cwd(), { location, ...audit ? { audit } : {}, ...note ? { note } : {},
+  if (!note?.trim()) throw new Error(`A cause must say why: pass --note <why>. \`slipjay audit cause\` records a cause; \`slipjay audit status\` is the read-only view.\n${usage}`);
+  const { operation, summary } = await recordAuditCause(process.cwd(), { location, ...audit ? { audit } : {}, note, ...replace ? { replace } : {},
     ...landings.length ? { landings } : { kind: kinds[0]! } });
   console.log(JSON.stringify({ ok: true, audit: operation.id, cause: operation.cause?.cause, openFailure: summary.openFailure, escapes: summary.escapes }, null, 2));
   return 0;

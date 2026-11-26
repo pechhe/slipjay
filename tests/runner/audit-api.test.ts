@@ -9,6 +9,7 @@ import { serveRunner } from "../../src/lib/runner/runner-http.ts";
 import { openOperationLog } from "../../src/lib/runner/runner-log.ts";
 
 const token = "test-secret";
+const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
 const sha = (name: string) => name.padEnd(40, "0");
 
 async function fixture() {
@@ -17,7 +18,7 @@ async function fixture() {
   const server = await serveRunner(handler, { host: "127.0.0.1", port: 0 });
   const request = (path: string, init: RequestInit = {}) => fetch(`${server.url}${RUNNER_API}${path}`, {
     ...init, headers: { authorization: `Bearer ${token}`, ...init.headers }, signal: init.signal ?? AbortSignal.timeout(10_000) });
-  const cause = (body: Record<string, unknown>) => request("/audits/cause", { method: "POST", body: JSON.stringify({ repo: "Owner/Repo", by: "henry", ...body }) });
+  const cause = (body: Record<string, unknown>) => request("/audits/cause", { method: "POST", body: JSON.stringify({ repo: "Owner/Repo", by: "henry", note: "why", ...body }) });
   let landings = 0, audits = 0, previous = sha("base");
   return {
     log, cause, request,
@@ -134,10 +135,77 @@ test("each of the other causes is recorded, and a failing audit named by id is e
       assert.equal(response.summary?.openFailure?.cause?.kind, kind);
       assert.equal(response.summary?.escapes, 0);
       f.audit("green");
-      const late = await read(await f.cause({ audit: failed, landings: ["landing-1"] }));
+      const late = await read(await f.cause({ audit: failed, landings: ["landing-1"], replace: true }));
       assert.deepEqual(late.operation?.cause?.cause, { kind: "culprits", landings: [sha("d1")] });
       assert.equal(late.summary?.escapes, 1);
       assert.equal(late.summary?.openFailure, null);
     } finally { await f.close(); }
   }
+});
+
+test("a cause needs a note, and replacing a recorded cause needs replace", async () => {
+  const f = await fixture();
+  try {
+    f.landing("n1");
+    const failed = f.audit("failed");
+    const events = () => f.log.events({ operationId: failed }).length;
+    const count = events();
+    for (const note of [undefined, "", "   "]) {
+      const refused = await f.cause({ kind: "flake", note });
+      assert.equal(refused.status, 400);
+      assert.match((await read(refused)).error ?? "", /--note <why>.*audit status/s);
+    }
+    assert.equal(events(), count, "a refused cause appends nothing");
+    assert.equal((await f.cause({ kind: "unresolved", note: "checked the logs" })).status, 200);
+    const second = await f.cause({ kind: "flake", note: "again" });
+    assert.equal(second.status, 409);
+    const message = (await read(second)).error ?? "";
+    assert.match(message, /unresolved.*henry.*checked the logs.*--replace/s);
+    const kept = (await read(await f.request("/audits?repo=owner/repo"))).operations?.find((operation) => operation.id === failed);
+    assert.deepEqual(kept?.cause?.cause, { kind: "unresolved" });
+    assert.equal(kept?.cause?.note, "checked the logs");
+    const replaced = await read(await f.cause({ kind: "flake", note: "again", replace: true }));
+    assert.deepEqual(replaced.operation?.cause?.cause, { kind: "flake" });
+    assert.equal(replaced.operation?.cause?.note, "again");
+    assert.equal((await f.cause({ kind: "flake", replace: false })).status, 400);
+  } finally { await f.close(); }
+});
+
+test("a newly uncovered inconclusive audit takes a cause without replace, an earlier cause on the run notwithstanding", async () => {
+  const f = await fixture();
+  try {
+    f.landing("m1");
+    f.audit("green");
+    f.audit("inconclusive");
+    f.audit("inconclusive");
+    assert.equal((await f.cause({ kind: "flake" })).status, 200);
+    await tick();
+    f.audit("inconclusive");
+    f.audit("inconclusive");
+    assert.equal((await f.cause({ kind: "infrastructure" })).status, 200, "the newest audit has no cause of its own");
+  } finally { await f.close(); }
+});
+
+test("a cause on a sibling audit of a closed failure or of a covering inconclusive run is not replaced without replace", async () => {
+  const f = await fixture();
+  try {
+    f.landing("s1");
+    const first = f.audit("failed");
+    const second = f.audit("failed");
+    assert.equal((await f.cause({ audit: second, kind: "unresolved", note: "evidenced" })).status, 200);
+    f.audit("green");
+    const closed = await f.cause({ audit: first, kind: "flake" });
+    assert.equal(closed.status, 409);
+    assert.match((await read(closed)).error ?? "", /unresolved.*evidenced.*--replace/s);
+    assert.equal((await f.cause({ audit: first, kind: "flake", replace: true })).status, 200);
+    await tick();
+    const early = f.audit("inconclusive");
+    await tick();
+    f.audit("inconclusive");
+    await tick();
+    assert.equal((await f.cause({ kind: "infrastructure", note: "run" })).status, 200);
+    const covered = await f.cause({ audit: early, kind: "flake" });
+    assert.equal(covered.status, 409);
+    assert.match((await read(covered)).error ?? "", /infrastructure.*run.*--replace/s);
+  } finally { await f.close(); }
 });
