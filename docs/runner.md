@@ -579,6 +579,9 @@ needs `verifier`; 0 or omitted is boat only, and the place does not count agains
 
 ### Named SSH gate places
 
+A machine place's commands get the remote account's own `XDG_RUNTIME_DIR` (and `DBUS_SESSION_BUS_ADDRESS` when its bus
+socket exists), computed on the machine and never copied from the runner. Boat commands are unchanged.
+
 With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlaces: 1` (SJ-199):
 
 ```json

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vite-plus/test";
 import type { BoundedProcessRequest, BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +22,29 @@ test("a remote command keeps the command's environment but never the runner host
   assert.match(script, /'TOKEN=a b'/);
   assert.match(script, /'check:it'\\''s'/);
   assert.match(script, /^printf '%s\\n' '\/tmp\/s' '\/tmp\/s\/r' >> ~\/.slipjay-scratch && /, "the attempt's remote scratch is listed for cleaning");
+});
+
+test("a machine place's command reaches its own account's user manager, never the runner's", () => {
+  const request = { executable: "bun", args: ["x"], cwd: "/w", env: { XDG_RUNTIME_DIR: "/run/user/9999", DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/9999/bus", TOKEN: "t" } };
+  const machine = remoteCommand(request, "u", { home: "/home/a", account: "a", slice: "s.slice" });
+  assert.doesNotMatch(machine, /9999/);
+  assert.match(machine, /runtime=\/run\/user\/\$\(id -u\) && if \[ -S "\$runtime\/bus" \]; then bus="unix:path=\$runtime\/bus"; else bus=; fi && exec systemd-run/);
+  assert.match(machine, /XDG_RUNTIME_DIR="\$runtime" \$\{bus:\+DBUS_SESSION_BUS_ADDRESS="\$bus"\} 'bun'/);
+  const boat = remoteCommand(request, "u");
+  assert.doesNotMatch(boat, /XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|runtime=/);
+  // Run locally with env standing in for systemd-run, the variables resolve to this uid's directory (the bus only if it exists).
+  const dir = mkdtempSync(join(tmpdir(), "remote-command-scratch-"));
+  try {
+    writeFileSync(join(dir, "systemd-run"), '#!/bin/sh\nwhile [ "${1#--}" != "$1" ]; do shift; done\nexec "$@"\n', { mode: 0o755 });
+    const probe = remoteCommand({ executable: "sh", args: ["-c", 'echo "$XDG_RUNTIME_DIR|${DBUS_SESSION_BUS_ADDRESS-unset}"'], cwd: dir }, "u", { home: "/home/a", account: "a", slice: "s.slice" });
+    const out = spawnSync("sh", ["-c", probe], { encoding: "utf8", env: { PATH: `${dir}:${process.env.PATH}`, XDG_RUNTIME_DIR: "/leak", DBUS_SESSION_BUS_ADDRESS: "leak" } });
+    const runtime = `/run/user/${process.getuid!()}`;
+    const missing = remoteCommand({ executable: "sh", args: ["-c", "echo RAN"], cwd: join(dir, "missing") }, "u", { home: "/home/a", account: "a", slice: "s.slice" });
+    const failed = spawnSync("sh", ["-c", missing], { encoding: "utf8", env: { PATH: `${dir}:${process.env.PATH}` } });
+    assert.notEqual(failed.status, 0, "a failed cd stops the script");
+    assert.doesNotMatch(failed.stdout, /RAN/);
+    assert.equal(out.stdout.trim(), `${runtime}|${existsSync(`${runtime}/bus`) ? `unix:path=${runtime}/bus` : "unset"}`, out.stderr);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("a loopback Build URL is reached through a tunnel on the same port; any other URL is not", () => {
@@ -600,8 +624,8 @@ test("a lease resumes a stopped build machine once, for its command and fifteen 
   const verification = boatVerification({ image: "bx_image", cli: "boat", run });
   const lease = () => verification.lease!({ repo: "pechhe/yardsmith", pool: "images", gitDirectory: "/nonexistent", commitId: "0".repeat(40), lifetimeS: 60 });
   // Each lease goes on to set the machine up, which this fake refuses: only how it acquired the machine matters here.
-  const leases = [lease(), lease()];
-  for (const leased of leases) await assert.rejects(leased, /Remote executor unavailable \(setup\)/);
+  // Both are observed at once: awaiting them in turn leaves the second unobserved, an unhandled rejection if it fails first.
+  await Promise.all([lease(), lease()].map((leased) => assert.rejects(leased, /Remote executor unavailable \(setup\)/)));
   assert.equal(boatCalls.filter((call) => call.startsWith("resume")).length, 1, boatCalls.join("\n"));
   assert.equal(boatCalls.filter((call) => call.startsWith("fork")).length, 0);
   assert.ok(boatCalls.some((call) => call.startsWith("extend") && /--ttl 960/.test(call)), boatCalls.join("\n"));

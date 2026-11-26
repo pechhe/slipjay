@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "bun:test";
-import { candidateChanges, landingCommands, launcherProcessTests, planCandidate, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
+import { candidateChanges, infrastructureScripts, landingCommands, launcherProcessTests, planCandidate, PROCESS_TESTS, readQuarantine, RUNTIME_TESTS, runtimeTestFiles, selectLandingTests, versionOnlyChange, type JjQuery } from "./test-landing.ts";
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const CANDIDATE = "a".repeat(40);
@@ -236,4 +236,81 @@ test("gate writes opt-in manifest, tolerates missing reports and preserves test 
     assert.ok(!audit[0]!.includes("--exclude"), "quarantined tests stay in the audit");
     assert.ok(audit[0]!.includes("--reporter=json") && audit[1]!.includes("--reporter=junit"));
   } finally { rmSync(scratch, { recursive: true, force: true }); }
+});
+
+test("a scripts/ change selects only the tests that can observe it", () => {
+  const root = mkdtempSync(path.join(tmpdir(), "scripts-selection-"));
+  try {
+    const write = (file: string, text: string) => { mkdirSync(path.dirname(path.join(root, file)), { recursive: true }); writeFileSync(path.join(root, file), text); };
+    write("vite.config.ts", 'const setup = new URL("./scripts/my-setup.ts", import.meta.url); export default { setupFiles: [setup] };');
+    write("tests/named.test.ts", 'const sh = new URL("../scripts/named.sh", import.meta.url);');
+    write("tests/support/run.ts", 'export const sh = "../../scripts/helped.sh";');
+    write("tests/helped.test.ts", 'import { sh } from "./support/run.ts";');
+    write("tests/lib.test.ts", 'import { lib } from "../scripts/lib.ts";');
+    write("scripts/lib.ts", 'import { deep } from "./deep.ts"; export const lib = deep;');
+    write("scripts/deep.ts", "export const deep = 1;");
+    write("scripts/orphan.ts", "export const orphan = 1;");
+    write("tests/joined.test.ts", 'const sh = join(root, "scripts", "joined.sh");');
+    write("scripts/install-outer.sh", 'cp "$DIR/inner.sh" /usr/local/bin/');
+    write("scripts/install-outermost.sh", 'bash "$DIR/install-outer.sh"');
+    write("scripts/inner.sh", "echo inner");
+    write("tests/outermost.test.ts", 'const sh = join(root, "scripts", "install-outermost.sh");');
+    write("tests/unrelated.test.ts", 'const sh = join(root, "scripts", "other-inner.sh.bak");');
+    write("src/mod.ts", 'export const path = "scripts/srcnamed.sh";');
+    write("tests/mod.test.ts", 'import { path } from "../src/mod.ts";');
+    const select = (file: string) => selectLandingTests([file], [], root);
+    const related = (file: string) => { const plan = select(file); assert.equal(plan.kind, "related", file); return plan.kind === "related" ? plan.files : []; };
+
+    // Infrastructure fails closed, including the setup file read from the vite config.
+    for (const file of ["scripts/my-setup.ts", "scripts/hermetic-home-guard.ts", "scripts/with-hermetic-home.ts", "scripts/fixture-scratch.ts", "scripts/fixture-new-helper.ts", "scripts/test-landing.ts", "scripts/test-file-cost.ts"]) {
+      const plan = select(file);
+      assert.equal(plan.kind, "complete", file);
+      if (plan.kind === "complete") assert.match(plan.reason, /infrastructure/);
+    }
+    assert.ok(infrastructureScripts(ROOT).test("scripts/vitest-hermetic-env.ts"), "the real config's setup file is derived");
+    // The runtime lane always runs its own files, so a change to one selects no Vitest file.
+    assert.equal(select(RUNTIME_TESTS.find((file) => !/test-landing|test-file-cost|with-hermetic-home|fixture-/.test(file))!).kind, "none");
+    assert.equal(select("scripts/test-landing.test.ts").kind, "none");
+    // Code that tests import follows the graph, including transitive imports.
+    assert.deepEqual(related("scripts/lib.ts"), ["scripts/lib.ts", "tests/lib.test.ts"]);
+    assert.deepEqual(related("scripts/deep.ts"), ["scripts/deep.ts", "tests/lib.test.ts"]);
+    // A script named by path selects the tests that name it, directly or through a helper.
+    assert.deepEqual(related("scripts/named.sh"), ["tests/named.test.ts"]);
+    assert.deepEqual(related("scripts/helped.sh"), ["tests/helped.test.ts"]);
+    // Tests join the path, so the basename is the name; a script that names another is reached through it, transitively.
+    assert.deepEqual(related("scripts/joined.sh"), ["tests/joined.test.ts"]);
+    assert.deepEqual(related("scripts/inner.sh"), ["tests/outermost.test.ts"]);
+    // A script named by a src module selects that module's graph and the process tests.
+    const viaSource = related("scripts/srcnamed.sh");
+    assert.ok(viaSource.includes("src/mod.ts"));
+    for (const file of PROCESS_TESTS) assert.ok(viaSource.includes(file), file);
+    // Anything no rule maps, or that is not a runtime-lane test, runs the complete suite with its reason.
+    for (const file of ["scripts/orphan.ts", "scripts/unknown.sh", "scripts/stray.test.ts"]) {
+      const plan = select(file);
+      assert.equal(plan.kind, "complete", file);
+      if (plan.kind === "complete") assert.match(plan.reason, /no known dependency mapping/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the real scripts that tests name select tests rather than the complete suite", () => {
+  for (const file of ["scripts/setup-runner.sh", "scripts/install-release-watchdog.sh", "scripts/release-watchdog-probe.ts", "scripts/disk-rescue.sh"]) assert.equal(selectLandingTests([file], []).kind, "related", file);
+});
+
+test("the real scripts select every test that runs them, directly or through the script that installs them", () => {
+  const files = (file: string) => { const plan = selectLandingTests([file], []); assert.equal(plan.kind, "related", file); return plan.kind === "related" ? plan.files : []; };
+  const setup = files("scripts/setup-runner.sh");
+  for (const test of ["tests/runner/setup-runner.test.ts", "tests/infra/disk-rescue.test.ts"]) assert.ok(setup.includes(test), test);
+  assert.ok(files("scripts/disk-rescue.sh").includes("tests/infra/disk-rescue.test.ts"));
+  assert.ok(files("scripts/install-disk-guard.sh").includes("tests/infra/disk-rescue.test.ts"));
+  assert.ok(files("scripts/maintain.sh").includes("tests/workspace/disk-guard-installer.test.ts"));
+  assert.ok(files("scripts/release-watchdog-probe.ts").includes("tests/infra/release-watchdog.test.ts"));
+});
+
+test("a test that reads every script's text is selected by any scripts/ change", () => {
+  for (const file of ["scripts/check-architecture.ts", "scripts/release-watchdog-probe.ts"]) {
+    const plan = selectLandingTests([file], []);
+    assert.equal(plan.kind, "related", file);
+    if (plan.kind === "related") assert.ok(plan.files.includes("tests/infra/test-config-guard.test.ts"), file);
+  }
 });

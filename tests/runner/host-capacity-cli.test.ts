@@ -78,7 +78,7 @@ test("explicit smaller bounds fail before execution when unconfigured, malformed
     assert.notEqual(unconfigured.status, 0);
     assert.match(unconfigured.stderr, /requires configured/);
     assert.equal(unconfigured.stdout, "");
-    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "enforce" } }));
+    writeFileSync(join(home, ".slipjay/config.json"), JSON.stringify({ hostBudget: { mode: "enforce", profiles: { agent: 16 * 1024 ** 3 } } })); // the agent ceiling is set, not derived from this host's memory
     for (const args of [["--memory-max", "17G"], ["--memory-max", "off"], ["--memory-max", "4097"], ["--class", "release", "--memory-max", "2G"], ["--memory-max", "2G", "--memory-max", "1G"]]) {
       const result = run(home, ["run", ...args, ...command]);
       assert.notEqual(result.status, 0, result.stderr);

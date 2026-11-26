@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SHA = /^[0-9a-f]{40}$/;
 const CODE = /\.[cm]?[jt]sx?$/;
-const GLOBAL = /^(?:package\.json|bun\.lockb?|bunfig\.toml|tsconfig[^/]*\.json|vite[^/]*\.[cm]?[jt]s|slipjay\.json|tests\/quarantine\.json|scripts\/)/;
+const GLOBAL = /^(?:package\.json|bun\.lockb?|bunfig\.toml|tsconfig[^/]*\.json|vite[^/]*\.[cm]?[jt]s|slipjay\.json|tests\/quarantine\.json)/;
 const HARMLESS = /^(?:docs\/|(?:README|CHANGELOG|GLOSSARY|AGENTS)\.md$|\.gitignore$)/;
 const TEST_FILE = /^(?:tests|scripts)\/.*\.test\.ts$/;
 const validPath = (file: string) => !!file && !path.isAbsolute(file) && !file.split("/").includes("..") && !/[\n\r\t]/.test(file);
@@ -41,24 +41,93 @@ export const PROCESS_TESTS = [
 // their own source or in a tests/ helper they import, so a new one is selected without being listed.
 const LAUNCHER_PATH = /\bsrc\/launcher\/[\w.-]+\.ts\b/;
 const IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*)["'](\.{1,2}\/[^"']+)["']/g;
-export function launcherProcessTests(root: string = ROOT): string[] {
-  const walk = (dir: string): string[] => readdirSync(path.join(root, dir), { withFileTypes: true })
-    .flatMap((entry) => entry.isDirectory() ? walk(`${dir}/${entry.name}`) : CODE.test(entry.name) ? [`${dir}/${entry.name}`] : []);
-  const sources = new Map(walk("tests").map((file) => [file, readFileSync(path.join(root, file), "utf8")]));
+const walkCode = (root: string, dir: string): string[] => {
+  try {
+    return readdirSync(path.join(root, dir), { withFileTypes: true })
+      .flatMap((entry) => entry.isDirectory() ? walkCode(root, `${dir}/${entry.name}`) : CODE.test(entry.name) ? [`${dir}/${entry.name}`] : []);
+  } catch { return []; }
+};
+const readSources = (root: string, dirs: string[]) => new Map(dirs.flatMap((dir) => walkCode(root, dir)).map((file) => [file, readFileSync(path.join(root, file), "utf8")]));
+const resolveImport = (file: string, spec: string) => path.posix.normalize(path.posix.join(path.posix.dirname(file), spec));
+// Test files whose own source, or a tests/ helper they import, matches `name`.
+function testsNaming(root: string, name: RegExp): string[] {
+  const sources = readSources(root, ["tests"]);
   const names = new Map<string, boolean>();
   const reaches = (file: string, seen: Set<string>): boolean => {
     if (names.has(file)) return names.get(file)!;
     if (seen.has(file)) return false;
     seen.add(file);
     const text = sources.get(file) ?? "";
-    const found = LAUNCHER_PATH.test(text) || [...text.matchAll(IMPORT)].some(([, spec]) => {
-      const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), spec!));
+    const found = name.test(text) || [...text.matchAll(IMPORT)].some(([, spec]) => {
+      const target = resolveImport(file, spec!);
       return sources.has(target) && !TEST_FILE.test(target) && reaches(target, seen);
     });
     names.set(file, found);
     return found;
   };
   return [...sources.keys()].filter((file) => TEST_FILE.test(file) && reaches(file, new Set())).sort();
+}
+export function launcherProcessTests(root: string = ROOT): string[] { return testsNaming(root, LAUNCHER_PATH); }
+// Test infrastructure every test depends on: it selects the complete suite. The vitest setup files are read from the
+// vite config; the rest is the hermetic-HOME and fixture helpers and the selection tooling itself.
+export function infrastructureScripts(root: string = ROOT): RegExp {
+  const setup = new Set<string>();
+  for (const config of readdirSync(root).filter((file) => /^vite[^/]*\.[cm]?[jt]s$/.test(file))) {
+    for (const [, file] of readFileSync(path.join(root, config), "utf8").matchAll(/["'`]\.\/(scripts\/[\w./-]+)["'`]/g)) setup.add(file!);
+  }
+  const escaped = [...setup].map((file) => file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^(?:${[...escaped, "scripts/hermetic-home-guard\\.ts", "scripts/with-hermetic-home\\.ts", "scripts/fixture-[^/]*", "scripts/test-landing\\.ts", "scripts/test-file-cost\\.ts"].join("|")})$`);
+}
+// A test that walks the scripts directory (a quoted "scripts" segment and a readdir in its source or a tests/ helper's)
+// reads every script's text, so every scripts/ change reaches it (test-config-guard scans them for global config writes).
+const SCRIPTS_READER = /^(?=[\s\S]*["'`]scripts["'`])(?=[\s\S]*\breaddir(?:Sync)?\b)/;
+// What a changed scripts/ file can reach: tests that import it (through the graph), or that name it, in themselves, a
+// tests/ helper or a src/ module (then the module's tests and the process tests). Tests join paths
+// (`join(root, "scripts", "x.sh")`), so a script is named by its basename as a token, not by a `scripts/` path. A script
+// another script names (an installer of a script) is reached through that script, transitively.
+// Undefined: unmapped.
+function scriptSelection(file: string, root: string): { files: string[]; process: boolean; reason: string } | undefined {
+  if (RUNTIME_TESTS.includes(file)) return { files: [], process: false, reason: "runtime lane runs it" };
+  if (TEST_FILE.test(file)) return undefined; // a bun test outside the runtime lane is never run
+  const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const tokenFor = (script: string) => new RegExp(`(?<![\\w.-])${escape(path.posix.basename(script))}(?![\\w-])`);
+  const scripts = new Map<string, string>();
+  try {
+    for (const entry of readdirSync(path.join(root, "scripts"), { withFileTypes: true })) {
+      if (entry.isFile() && !TEST_FILE.test(`scripts/${entry.name}`)) scripts.set(`scripts/${entry.name}`, readFileSync(path.join(root, "scripts", entry.name), "utf8"));
+    }
+  } catch { /* no scripts directory: nothing names it */ }
+  const family = [file]; // the script and every script that names it, transitively
+  for (let index = 0; index < family.length; index++) {
+    const token = tokenFor(family[index]!);
+    for (const [name, text] of scripts) if (!family.includes(name) && token.test(text)) family.push(name);
+  }
+  const files = new Set<string>();
+  const found: string[] = [];
+  const sources = readSources(root, ["src"]);
+  for (const script of family) {
+    const token = tokenFor(script);
+    const tests = testsNaming(root, token);
+    tests.forEach((test) => files.add(test));
+    const modules = [...sources].filter(([, text]) => token.test(text)).map(([name]) => name);
+    modules.forEach((module) => files.add(module));
+    if (tests.length || modules.length) found.push(`${script === file ? "named" : `${script} names it and is named`} by ${[...tests, ...modules].join(", ")}`);
+  }
+  const readers = testsNaming(root, SCRIPTS_READER);
+  readers.forEach((test) => files.add(test));
+  if (readers.length) found.push(`scripts/ is read as text by ${readers.join(", ")}`);
+  const process = [...files].some((name) => name.startsWith("src/"));
+  if (CODE.test(file)) {
+    const code = readSources(root, ["scripts", "tests"]);
+    const reachable = (from: string, seen: Set<string>): boolean => {
+      if (from === file) return true;
+      if (seen.has(from)) return false;
+      seen.add(from);
+      return [...(code.get(from) ?? "").matchAll(IMPORT)].some(([, spec]) => reachable(resolveImport(from, spec!), seen));
+    };
+    if ([...code.keys()].some((name) => name !== file && (name.startsWith("tests/") || TEST_FILE.test(name)) && reachable(name, new Set()))) { files.add(file); found.push("imported by tests"); }
+  }
+  return found.length ? { files: [...files], process, reason: found.join("; ") } : undefined;
 }
 // package.json is the single inventory for both complete and landing runtime runs.
 export function runtimeTestFiles(command: string): string[] {
@@ -68,16 +137,28 @@ export function runtimeTestFiles(command: string): string[] {
 }
 export const RUNTIME_TESTS = runtimeTestFiles((JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts["test:runtimes"] ?? "");
 export type LandingTests = { kind: "complete"; reason: string } | { kind: "related"; files: string[]; reasons: string[] } | { kind: "none" };
-export function selectLandingTests(changed: string[], deleted: string[]): LandingTests {
+export function selectLandingTests(changed: string[], deleted: string[], root: string = ROOT): LandingTests {
   // Nothing may import a test file, so a deleted test's own tests are the only thing it contributed.
   const deletedTests = new Set(deleted.filter(deletedTestFile));
   const otherDeletion = deleted.find((file) => !deletedTests.has(file));
   if (otherDeletion) return { kind: "complete", reason: `${otherDeletion} was deleted; dependency edges are unavailable` };
   const files = new Set<string>();
   const reasons: string[] = [];
+  let infrastructure: RegExp | undefined;
+  let namedBySource = false;
   for (const file of changed) {
     if (deletedTests.has(file)) continue;
     if (!validPath(file) || GLOBAL.test(file)) return { kind: "complete", reason: `${file} can affect every test` };
+    if (file.startsWith("scripts/")) {
+      infrastructure ??= infrastructureScripts(root);
+      if (infrastructure.test(file)) return { kind: "complete", reason: `${file} is test infrastructure every test depends on` };
+      const script = scriptSelection(file, root);
+      if (!script) return { kind: "complete", reason: `${file} has no known dependency mapping` };
+      script.files.forEach((test) => files.add(test));
+      namedBySource ||= script.process;
+      reasons.push(`${file}: ${script.reason}`);
+      continue;
+    }
     const fixture = Object.entries(FIXTURE_READERS).find(([prefix]) => file.startsWith(prefix));
     if (fixture) {
       fixture[1].forEach((test) => files.add(test));
@@ -87,9 +168,9 @@ export function selectLandingTests(changed: string[], deleted: string[]): Landin
       reasons.push(`${file}: import graph`);
     } else if (!HARMLESS.test(file)) return { kind: "complete", reason: `${file} has no known dependency mapping` };
   }
-  if (changed.some((file) => file.startsWith("src/"))) {
+  if (namedBySource || changed.some((file) => file.startsWith("src/"))) {
     PROCESS_TESTS.forEach((test) => files.add(test));
-    reasons.push("src/** changed: source CLI/subprocess callers");
+    reasons.push("src/** changed or names a changed script: source CLI/subprocess callers");
   }
   if (changed.some((file) => file.startsWith("src/launcher/"))) {
     launcherProcessTests().forEach((test) => files.add(test));

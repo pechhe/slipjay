@@ -701,10 +701,14 @@ including retries that started on an empty continuation child.
   `bun run check` (Oxlint and the closure boundary), `bun run typecheck` and the
   affected tests (`bun run test:landing`) concurrently. The selector validates the exact
   rebased JJ candidate and its single integration parent, then uses `vp test related`
-  plus explicit runtime fixture readers and source CLI/subprocess callers. Toolchain,
-  lockfile, test setup, deletions of anything other than a `tests/**` or `scripts/**`
-  `*.test.ts`, unknown paths and unreadable/ambiguous candidates run the complete
-  landing suite. A deleted test file selects nothing: its tests are gone, and a guard
+  plus explicit runtime fixture readers and source CLI/subprocess callers. A `scripts/`
+  change selects the tests that import it or name it (directly, through a `tests/`
+  helper, a `src/` module or an installing script) and any test that reads every
+  script's text; runtime-lane tests run in their own lane. Toolchain,
+  lockfile, test setup, test infrastructure (Vitest setup files, hermetic-home and fixture
+  helpers, the selection tooling), unmapped scripts, deletions of anything other than a
+  `tests/**` or `scripts/**` `*.test.ts`, unknown paths and unreadable/ambiguous candidates
+  run the complete landing suite. A deleted test file selects nothing: its tests are gone, and a guard
   test keeps it true that nothing imports one. Only an explicit harmless list (docs, README,
   CHANGELOG, GLOSSARY, AGENTS and .gitignore) can skip Vitest; runtime tests always run.
   Command output records the candidate, changed paths, selection and reasons.

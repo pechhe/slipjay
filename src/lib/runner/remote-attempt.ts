@@ -54,8 +54,11 @@ export function remoteCommand(request: Pick<BoundedProcessRequest, "executable" 
   return [
     ...directories.length ? [...!machine ? [`printf '%s\\n' ${directories.map(shellWord).join(" ")} >> ${SCRATCH_LIST}`] : [], `mkdir -p ${directories.map(shellWord).join(" ")}`] : [],
     `cd ${shellWord(request.cwd)}`,
+    // A machine's account has its own user manager; reach it by the account's runtime directory, never the runner's.
+    ...machine ? ['runtime=/run/user/$(id -u)', 'if [ -S "$runtime/bus" ]; then bus="unix:path=$runtime/bus"; else bus=; fi'] : [],
     ["exec systemd-run --user --scope --quiet --collect", `--unit=${shellWord(unit)}`, ...machine ? [`--slice=${shellWord(machine.slice)}`] : [], "env -i",
       ...[["HOME", machine?.home ?? USER_HOME], ["USER", machine?.account ?? "user"], ["PATH", machine ? `${machine.home}/.bun/bin:/usr/local/bin:/usr/bin:/bin` : REMOTE_PATH], ...env, ...machine ? [[SYSTEMD_SLICE_ENV, machine.slice]] : []].map(([key, value]) => shellWord(`${key}=${value}`)),
+      ...machine ? ['XDG_RUNTIME_DIR="$runtime"', '${bus:+DBUS_SESSION_BUS_ADDRESS="$bus"}'] : [],
       shellWord(request.executable), ...request.args.map(shellWord)].join(" "),
   ].join(" && ");
 }
