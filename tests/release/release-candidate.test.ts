@@ -204,6 +204,36 @@ test("under batchVerification a confirm without a passed check asks the runner f
   } finally { await f.dispose(); }
 });
 
+test("a batch check that outlasts a release is judged against the release branch as it then stands, and re-run at most once", async () => {
+  const f = await promotingProject();
+  try {
+    const policy = JSON.parse(await readFile(join(f.repo, "slipjay.json"), "utf8"));
+    await f.commit({ "slipjay.json": JSON.stringify({ ...policy, process: "development", batchVerification: { machine: "release-check" } }) }, "Batch in development mode");
+    execFileSync("git", ["push", "-q", "origin", "main:refs/heads/release"], { cwd: f.repo, stdio: "pipe" });
+    const oldBase = remoteRef(f, "release");
+    const released = await f.commit({ "a.txt": "a\n" }, "Add a");
+    const candidate = await f.commit({ "b.txt": "b\n" }, "Add b");
+    const passedAgainst = (base: string) => verificationOf(candidate, "verified", { type: "verified", base, candidate, checks: f.checks } as OperationEvent);
+    const advance = () => execFileSync("git", ["push", "-q", "origin", `${released}:refs/heads/release`], { cwd: f.repo, stdio: "pipe" });
+    let verifications: PromotionState["verifications"] = [];
+    const read = async (): Promise<PromotionState> => ({ stagingGreen: null, stagingGreenCommits: [], approved: [], verifications });
+
+    // The release lands during the check, which ran against the new head: confirmable, checked once.
+    let asked = 0;
+    const moved = await confirmableCandidate(f.repo, candidate, false, read, async () => { asked++; advance(); verifications = [passedAgainst(released)]; });
+    assert.ok(moved.ok && moved.status === "confirmable", JSON.stringify(moved));
+    assert.equal(asked, 1);
+
+    // The check ran against the old head: it is run once more, then refused with the existing reason.
+    execFileSync("git", ["push", "-q", "-f", "origin", `${oldBase}:refs/heads/release`], { cwd: f.repo, stdio: "pipe" });
+    verifications = [];
+    asked = 0;
+    const stale = await confirmableCandidate(f.repo, candidate, false, read, async () => { asked++; if (asked === 1) advance(); verifications = [passedAgainst(oldBase)]; });
+    assert.equal(asked, 2);
+    assert.ok(!stale.ok && stale.reason.includes(`passed against release ${oldBase.slice(0, 12)}, not ${released.slice(0, 12)}`), JSON.stringify(stale));
+  } finally { await f.dispose(); }
+});
+
 test("in development mode confirmableCandidate explains why a candidate has no usable pre-verification", async () => {
   const f = await promotingProject();
   try {

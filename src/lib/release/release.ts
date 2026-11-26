@@ -782,7 +782,7 @@ export async function confirmableCandidate(cwd: string, confirm: string, migrati
   /** Under `batchVerification`, runs the candidate's batch check on the runner (or follows the one already open) to its end. */
   batchCheck?: (candidate: string) => Promise<void>): Promise<{ ok: true; status: "confirmable"; candidate: string; remote: string } | ReleaseResult> {
   try {
-    const plan = await planRelease(cwd, { candidate: confirm });
+    let plan = await planRelease(cwd, { candidate: confirm });
     if (plan.commits.length && plan.promotes && readPromotion) {
       // Any commit staging is green on may be confirmed, not only the newest; the runner refuses the rest too, but later.
       // In development mode a passed pre-verification against the release base stands in for staging.
@@ -790,7 +790,16 @@ export async function confirmableCandidate(cwd: string, confirm: string, migrati
       // A batching repository checks a candidate only when its promotion is due; a confirm asks for that check now and waits for it.
       if (plan.skipsStaging && plan.batchesChecks && batchCheck && !passedVerification(plan, state.verifications)) {
         await batchCheck(plan.candidate);
+        // The check can outlast a release: decide against the release branch as it is now, not as it was when the wait began.
+        const waitedOn = plan.base;
+        plan = await planRelease(cwd, { candidate: confirm });
         state = await readPromotion([plan.candidate]);
+        // The check ran against the older head; check once more against the new one, never further.
+        if (plan.commits.length && plan.base !== waitedOn && !passedVerification(plan, state.verifications)) {
+          await batchCheck(plan.candidate);
+          plan = await planRelease(cwd, { candidate: confirm });
+          state = await readPromotion([plan.candidate]);
+        }
       }
       if (plan.skipsStaging) {
         if (!passedVerification(plan, state.verifications)) refuse(unverifiedCandidateReason(plan, state.verifications));
