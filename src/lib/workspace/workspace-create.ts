@@ -568,12 +568,14 @@ async function refreshIntegration(context: WorkspaceContext) {
  * hourly `maintain` does, so a machine nobody lands from runs landed code (its tools run
  * from that checkout) within a start rather than an hour. Only a checkout with nothing of
  * its own moves; edits, unlanded commits and conflicts stay put. It never waits: a landing
- * holding the integration lock moves the checkout itself. Best effort, like the fetch.
+ * holding the integration lock moves the checkout itself. Best effort, like the fetch. A start
+ * never installs in the primary checkout (landings and `maintain` do), so it passes no
+ * `refreshPrimaryDependencies`.
  */
 async function followIntegration(context: WorkspaceContext) {
   await withWorkspaceTransaction(
     `integrate:${resolve(context.integration.root)}:${context.integrationBranch}`,
-    () => primaryCheckoutDisposition(context, landingIO, { carryEdits: false }),
+    () => primaryCheckoutDisposition(context, { ...landingIO, refreshPrimaryDependencies: undefined }, { carryEdits: false }),
     { wait: false },
   ).catch(() => undefined);
 }

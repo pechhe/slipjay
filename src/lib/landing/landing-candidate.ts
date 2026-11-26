@@ -21,6 +21,8 @@ export type PrimaryCheckoutOutcome = {
   /** Something the primary checkout's owner should resolve, such as a conflict. */
   warning?: string;
 };
+/** Dependencies of the primary checkout after a move; resolves to a warning, never rejects. */
+export type PrimaryDependencies = (root: string) => Promise<string | undefined>;
 /** Internal adapters and progress callbacks for candidate integration. */
 export type CandidateOptions = {
   adapter: LandingAdapter;
@@ -49,6 +51,8 @@ export type LandingIO = {
   writeLandingState(context: CandidateContext, artifact: LandingRevision, verification: VerificationEvidence, phase: string, operationId?: string): Promise<unknown>;
   readJsonOptional(path: string): Promise<Record<string, unknown> | null>;
   statePath(name: string): string;
+  /** Install the primary checkout's dependencies when its install inputs differ from its last install. */
+  refreshPrimaryDependencies?: PrimaryDependencies;
 };
 
 /** The runner's landing candidate transition: rebase, finalize, verify, integrate. */
@@ -192,6 +196,21 @@ export async function integrateLandingCandidate(cwd: string, options: CandidateO
  */
 export async function primaryCheckoutDisposition(
   context: Pick<CandidateContext, "integration" | "integrationBranch">,
+  io: Pick<LandingIO, "revisionFacts" | "jj" | "refreshPrimaryDependencies">,
+  options: { carryEdits?: boolean } = {},
+): Promise<PrimaryCheckoutOutcome> {
+  return withPrimaryDependencies(await movedPrimaryCheckout(context, io, options), context.integration.root, io);
+}
+
+/** After a move or when already current, install what the new source needs; a failure is only a warning. */
+async function withPrimaryDependencies(outcome: PrimaryCheckoutOutcome, root: string, io: Pick<LandingIO, "refreshPrimaryDependencies">): Promise<PrimaryCheckoutOutcome> {
+  if (outcome.action === "left" || !io.refreshPrimaryDependencies) return outcome;
+  const warning = await io.refreshPrimaryDependencies(root);
+  return warning ? { ...outcome, warning } : outcome;
+}
+
+async function movedPrimaryCheckout(
+  context: Pick<CandidateContext, "integration" | "integrationBranch">,
   io: Pick<LandingIO, "revisionFacts" | "jj">,
   { carryEdits = true }: { carryEdits?: boolean } = {},
 ): Promise<PrimaryCheckoutOutcome> {
@@ -229,7 +248,7 @@ export async function finishLanding(context: WorkspaceContext | CandidateContext
     const currentDefault = context.current.name === "default" ? await revisionFacts(context.integration.root, "@") : null;
     if (currentDefault && currentDefault.commitId === state.artifactCommitId) {
       await jj(context.integration.root, ["new", context.integrationBranch]);
-      state.primaryCheckout = { action: "moved" };
+      state.primaryCheckout = await withPrimaryDependencies({ action: "moved" }, context.integration.root, io);
     } else {
       state.primaryCheckout = await primaryCheckoutDisposition(context, io);
     }

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
 import { createWorkspace, resolveStartBase } from "../../src/lib/workspace/workspace-create.ts";
 import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
-import { startFetchHome } from "../../src/lib/workspace/workspace-paths.ts";
+import { startFetchHome, stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { withWorkspaceTransaction } from "../../src/lib/infra/workspace-transaction.ts";
 
 /** Land a commit on `origin/main` from another clone, as another machine would. */
@@ -191,5 +191,15 @@ test("a start moves a primary checkout with nothing of its own onto what it fetc
     await createWorkspace("second", f.repo);
     assert.equal(parentOf(f.repo), landed, "a checkout someone is editing stays where it is");
     assert.equal(await readFile(join(f.repo, "local-edit.txt"), "utf8"), "mine\n");
+  } finally { await f.dispose(); }
+});
+
+test("a start moves the primary checkout without installing dependencies there", async () => {
+  const f = await project();
+  try {
+    const landed = landElsewhere(f, "elsewhere.txt");
+    await createWorkspace("task", f.repo);
+    assert.equal(parentOf(f.repo), landed, "the start moved the primary checkout");
+    assert.equal(existsSync(join(stateHome(), "primary-installs")), false, "no primary install was recorded");
   } finally { await f.dispose(); }
 });

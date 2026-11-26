@@ -1,3 +1,4 @@
+import { primaryDependencyHost, refreshPrimaryDependencies } from "../workspace/primary-dependencies.ts";
 import type { RevisionFacts, WorkspaceContext } from "../infra/workspace-jj.ts";
 import type { CandidateContext, LandingIO } from "./landing-candidate.ts";
 import type { VerificationEvidence } from "../policy/verification-policy.ts";
@@ -324,6 +325,8 @@ export const landingIO: LandingIO = {
   landingPreview, ensureLandingDescription, jj,
   assertStackConflictFree, revisionFacts, prepareCandidateDependencies, writeLandingState,
   readJsonOptional, statePath,
+  refreshPrimaryDependencies: (root) => refreshPrimaryDependencies(root,
+    primaryDependencyHost(async (path) => (await revisionFacts(path, "@")).commitId)),
 };
 
 /**
