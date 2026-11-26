@@ -512,7 +512,7 @@ case.
 
 The image changes only by hand, when a gate needs something it lacks: a new Bun pin (setup fails
 naming the version), a Docker image or browser the gate starts, or a dependency tree far from the
-image's. Create a VM from the image (`boat new --from <image> --name slipjay-image-build --type large`),
+image's. Create a VM from the image (`boat new --from <image> --name slipjay-image-build --type large`, `default` on a trial account),
 update it in its checkout (`git fetch` and check out the integration branch, `bun install`, `docker pull` and
 recreate the matching stopped `keep-*` container, `bun x playwright install --with-deps chromium` in the app
 that pins Playwright), then `boat stop` it, `boat snapshot <id> <image>` under the image's one saved name
@@ -560,7 +560,11 @@ A reading boat does not answer changes nothing. When it reports a problem:
   says which). Topping up or changing the plan is the owner's decision; never switch on extra starts.
 - *holds no saved snapshot* or *is not ready*: rebuild the image as above (from a fresh `boat new` set
   up with the contents this section lists when no saved snapshot is left), check `boat snapshots`
-  lists it `ready`, and leave the runner to read it again.
+  lists it `ready`, and leave the runner to read it again. A boat account still on its free trial
+  refuses to save one (`trial_saved_snapshots_not_allowed`) and to start a `large` VM until the
+  trial ends (its first payment or its end date), and the runner reports the missing snapshot at
+  every reading meanwhile: leave the rebuilt VM stopped (its data lasts 14 days), set `boat.size` to
+  `default` meanwhile, and save the snapshot once the trial ends (SJ-307 met this on 26 Nov 2026).
 
 A reading proves only that the snapshot is listed and ready, not that its contents still match the
 gate's pins: a stale Bun still fails setup, naming the version.
