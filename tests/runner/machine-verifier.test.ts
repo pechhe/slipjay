@@ -7,7 +7,7 @@ import { test } from "vite-plus/test";
 import { runBoundedProcess, type BoundedProcessRequest, type BoundedProcessResult } from "../../src/lib/infra/bounded-process.ts";
 import { machineConnections, machineSshArgs, machineVerification } from "../../src/lib/runner/machine-verifier.ts";
 import { HostCapacityUnavailable } from "../../src/lib/runner/host-capacity-remote.ts";
-import { shellWord } from "../../src/lib/runner/remote-attempt.ts";
+import { cleanExclusions, shellWord, worktreeTree } from "../../src/lib/runner/remote-attempt.ts";
 
 const tree = "e".repeat(40);
 const result = (stdout = "", exitCode = 0, stderr = ""): BoundedProcessResult => ({ stdout, stderr, stdoutTruncated: false, stderrTruncated: false, finishedAt: new Date().toISOString(), exitCode, signal: null, timedOut: false, cancelled: false, outputSha256: "" });
@@ -466,4 +466,21 @@ test("a configured attempt has the host ledger read its slice's final peak befor
   const machine = unconfigured.make(); await machine.recover!([]);
   await (await open(machine)).close();
   assert.ok(!unconfigured.scripts.some((script) => script.includes("\nslipjay host-budget recover")));
+});
+
+test("a place's clean keeps node_modules directories but not a symlink another repository left under that name", () => {
+  const repo = mkdtempSync(join(tmpdir(), "clean-exclusions-"));
+  try {
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", ...args], { encoding: "utf8" }).trim();
+    const sh = (script: string) => execFileSync("bash", ["-c", `cd ${shellWord(repo)} && ${script}`]);
+    git("init", "-q");
+    sh("printf 'node_modules/\\n' > .gitignore && echo a > a.txt");
+    git("add", "-A"); git("commit", "-qm", "c");
+    const tree = git("rev-parse", "HEAD^{tree}");
+    sh("mkdir -p apps/x/node_modules/dep apps/y/.svelte-check/0 && echo d > apps/x/node_modules/dep/i.js && ln -s /tmp apps/y/.svelte-check/0/node_modules");
+    sh(`git clean -ffdxq ${cleanExclusions()}`);
+    sh("test -f apps/x/node_modules/dep/i.js && ! test -e apps/y/.svelte-check/0/node_modules");
+    const observed = execFileSync("bash", ["-c", `set -euo pipefail\ncd ${shellWord(repo)}\n${worktreeTree(tree)}`], { encoding: "utf8" }).trim();
+    assert.equal(observed, tree, "what the clean leaves reads as the candidate");
+  } finally { rmSync(repo, { recursive: true, force: true }); }
 });

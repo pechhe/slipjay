@@ -139,9 +139,13 @@ git --git-dir=${dir} cat-file -e ${shellWord(`${commitId}^{commit}`)}`, { input,
 /**
  * `git clean`'s exclusions: always `node_modules` and `.jj`, plus `retain`, the untracked paths a fixed place keeps
  * between gates (`placeRetainedPaths`, read from the integration branch's policy, never the candidate's).
+ *
+ * `node_modules/` keeps directories only, as an ignore rule written that way does. A bare `node_modules` also kept a
+ * symlink of that name (svelte-check leaves some), which such a rule does not ignore: when a place switched
+ * repositories, the other repository's leftover symlinks entered the next gate's tree and failed its tree check.
  */
 export const cleanExclusions = (retain: readonly string[] = []) =>
-  ["node_modules", ".jj", ...retain].map((pattern) => `-e ${shellWord(pattern)}`).join(" ");
+  ["node_modules/", ".jj", ...retain].map((pattern) => `-e ${shellWord(pattern)}`).join(" ");
 
 /** Receive the bundle on stdin and expose precisely the candidate and base to colocated jj. Cwd is the checkout. */
 export function receiveCandidate(input: { bundle: string; ref: string; candidate: string; base: string; integrationBranch: string; bookmarkPrefix: string; retain?: readonly string[]; workingCopy?: "candidate" | "child" }): string {
