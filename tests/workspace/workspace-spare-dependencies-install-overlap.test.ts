@@ -54,6 +54,10 @@ test("a claim that must install never waits for a refill's install", async () =>
   const f = await bunProject({ spares: 2 });
   const spans = join(f.root, "spans.jsonl");
   const started = join(f.root, "started.log");
+  const hold = join(f.root, "release-installs");
+  let release: NodeJS.Timeout | undefined;
+  let refilling: Promise<unknown> = Promise.resolve();
+  const startedCount = async () => (await readFile(started, "utf8").catch(() => "")).split("\n").filter(Boolean).length;
   try {
     await refill(f.repo);
     await write(f.repo, { "packages/x/package.json": JSON.stringify({ name: "x", version: "1.0.0", engines: { node: ">=18" } }) });
@@ -61,20 +65,32 @@ test("a claim that must install never waits for a refill's install", async () =>
     await rm(join(f.repo, "node_modules"), { recursive: true, force: true });
     process.env.FIXTURE_INSTALL_SPANS = spans;
     process.env.FIXTURE_INSTALL_STARTED = started;
-    process.env.FIXTURE_INSTALL_DELAY_MS = "4000";
+    process.env.FIXTURE_INSTALL_HOLD = hold;
     // The refill refreshes one stale spare at a time; claim the other once its install is under way.
-    const refilling = refill(f.repo);
-    while (!(await readFile(started, "utf8").catch(() => ""))) await new Promise((done) => setTimeout(done, 25));
-    const created = await createWorkspace("task", f.repo);
+    // Both installs are held open until released, so they overlap exactly when the claim starts its install
+    // while the refill's is still running, however late the host lets it start. Should the claim wait for the
+    // refill after all, release them so the test fails below instead of hanging.
+    refilling = refill(f.repo);
+    while ((await startedCount()) < 1) await new Promise((done) => setTimeout(done, 25));
+    release = setTimeout(() => void writeFile(hold, ""), 60_000);
+    const claiming = createWorkspace("task", f.repo);
+    while ((await startedCount()) < 2 && !(await readFile(hold, "utf8").then(() => true, () => false))) await new Promise((done) => setTimeout(done, 25));
+    const overlapped = (await startedCount()) >= 2;
+    await writeFile(hold, "");
+    const created = await claiming;
+    assert.ok(overlapped, "the claim's install did not start while the refill's install was running");
     assert.equal(created.pooled, true, "the claim took the spare the refill had not reserved");
     await refilling;
     const installs = (await readFile(spans, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as [number, number]).sort((x, y) => x[0] - y[0]);
     assert.ok(installs.length >= 2, `the refill and the claim both installed: ${JSON.stringify(installs)}`);
     assert.ok(installs[1]![0] < installs[0]![1], `the claim's install ran beside the refill's: ${JSON.stringify(installs)}`);
   } finally {
+    clearTimeout(release);
+    await writeFile(hold, "");
+    await Promise.allSettled([refilling]);
+    delete process.env.FIXTURE_INSTALL_HOLD;
     delete process.env.FIXTURE_INSTALL_SPANS;
     delete process.env.FIXTURE_INSTALL_STARTED;
-    delete process.env.FIXTURE_INSTALL_DELAY_MS;
     await f.dispose();
   }
 }, 300_000);
