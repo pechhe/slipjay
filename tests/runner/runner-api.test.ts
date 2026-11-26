@@ -876,3 +876,28 @@ test("release controls require authentication and a requester, and preserve the 
     assert.deepEqual(calls, [{ repo: "owner/repo", by: "agent" }, { repo: "owner/repo", by: "agent" }]);
   } finally { log.close(); }
 });
+
+test("list routes return operations without run detail while the operation route keeps it", async () => {
+  const f = await fixture();
+  try {
+    const commitId = "c".repeat(40);
+    const queued = await (await f.request("/deploys", { method: "POST", body: JSON.stringify({ repo: "Owner/Repo", environment: "staging", commitId, submittedBy: "author" }) })).json() as DeployResponse;
+    const id = queued.operation.id;
+    f.append(id, { type: "run_started", runId: "r1", command: "bun test", host: "fixture" });
+    f.append(id, { type: "run_finished", runId: "r1", exitCode: 0, signal: null, timedOut: false, durationMs: 5, diagnostics: ["noise"] });
+    f.append(id, { type: "test_report", runId: "r1", files: Array.from({ length: 500 }, (_, index) => ({ file: `tests/f${index}.test.ts`, durationMs: index })) } as never);
+    f.append(id, { type: "deployed", record: { projects: [] } as never });
+    const full = await (await f.request(`/operations/${id}`)).json() as { operation: { runs: { testReport?: unknown }[] } };
+    assert.ok(full.operation.runs[0]?.testReport, "the operation route keeps the test report");
+    const listRoute = await f.request("/deploys?repo=owner/repo&environment=staging");
+    const text = await listRoute.text();
+    const listed = (JSON.parse(text) as { operations: { id: string; commitId: string; result?: { type: string }; runs: { runId: string; exitCode?: number; testReport?: unknown; diagnostics?: unknown }[] }[] }).operations;
+    assert.equal(listed[0]?.commitId, commitId);
+    assert.equal(listed[0]?.result?.type, "deployed", "planning still reads the result");
+    assert.equal(listed[0]?.runs[0]?.runId, "r1");
+    assert.equal(listed[0]?.runs[0]?.exitCode, 0);
+    assert.equal(listed[0]?.runs[0]?.testReport, undefined);
+    assert.equal(listed[0]?.runs[0]?.diagnostics, undefined);
+    assert.ok(text.length < JSON.stringify(full).length / 2, "the list response is much smaller than the full operation");
+  } finally { await f.close(); }
+});

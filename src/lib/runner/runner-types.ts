@@ -605,6 +605,10 @@ export type AuditCauseRequest = { repo: string; by: string; audit?: string; note
 export type SubmitResponse = { requestId?: string; operation: Operation; reattached: boolean; superseded?: string };
 
 /**
+ * List routes (verifications, releases, deploys, audits) return lean operations: each run keeps its identity, timing and
+ * outcome but not `testReport`, `commandEvidence`, `diagnostics` or `artifact`, which make a long history hundreds of MB;
+ * `GET /v1/operations/:id` returns them. A client reads `result` and the operation fields from a list, and tolerates either shape.
+ *
  * Routes (all require `Authorization: Bearer <token>`; anything else is 401):
  * - POST /v1/operations                         SubmitRequest → SubmitResponse (200, or 409 `{ operation }`)
  * - POST /v1/releases                           ReleaseRequest → ReleaseResponse
@@ -612,10 +616,11 @@ export type SubmitResponse = { requestId?: string; operation: Operation; reattac
  * - POST /v1/verifications                      VerificationRequest → VerificationResponse
  * - POST /v1/resets                             ResetRequest → ResetResponse (400 until the repository has landed here)
  * - GET  /v1/resets?repo=<owner/name>           → `{ operations: ResetOperation[] }` newest first
- * - GET  /v1/audits?repo=<owner/name>           → `{ operations: AuditOperation[], summary: AuditSummary }` newest first
+ * - GET  /v1/audits?repo=<owner/name>           → `{ operations: AuditOperation[], summary: AuditSummary }` newest first; each operation's runs are lean (see below)
  * - POST /v1/audits/cause                       AuditCauseRequest → `{ operation: AuditOperation, summary: AuditSummary }` (400 when it has no note, names no failing audit or an unknown landing; 409 when the audit has a recorded cause and `replace` is not true)
- * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first
- * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first
+ * - GET  /v1/deploys?repo=<owner/name>[&environment=<name>] → `{ operations: DeployOperation[] }` newest first, runs lean
+ * - GET  /v1/releases?repo=<owner/name>         → `{ operations: ReleaseOperation[] }` newest first, runs lean
+ * - GET  /v1/verifications?repo=<owner/name>   → `{ operations: VerificationOperation[] }` newest first, runs lean
  * - GET  /v1/operations/:id/source              → authenticated bounded Git bundle (no mutation)
  * - GET  /v1/operations/:id                     → `{ operation }` (404 when unknown)
  * - GET  /v1/operations/:id/events?after=<seq>  → `text/event-stream`, one `data: <StoredEvent JSON>` per event,

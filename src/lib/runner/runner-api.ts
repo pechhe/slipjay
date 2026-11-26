@@ -3,7 +3,7 @@ import { repairAuthority, repairEligibility, repairAdmission, publicRepairClaim,
 import { timingSafeEqual, randomUUID } from "node:crypto";
 import { isScreeningLanding, candidateBookmark, COMMAND_ARTIFACT_PAGE_BYTES, repositoryKey, RUNNER_API, RUNNER_CONTROL_ID, servedCommit, TERMINAL_EVENT_TYPES } from "./runner-contract.ts";
 import { attributedCause, auditSummary, auditToExplain, resolveCulprits } from "../release/audit-ledger.ts";
-import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, PrioritizeOptions, PrioritizeOutcome, ReleaseRequest, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
+import type { ArtifactChunk, AuditCause, AuditCauseRequest, CommandArtifact, ClientFact, DeployRequest, KillOutcome, Operation, OperationLog, PrioritizeOptions, PrioritizeOutcome, ReleaseRequest, RunRecord, ResetRequest, RunnerControlRequest, RunnerHandler, StoredEvent, SubmitRequest, VerificationRequest, VerificationResponse } from "./runner-types.ts";
 import { START_STEPS } from "../workspace/start-steps.ts";
 import { newOperationId } from "./runner-log.ts";
 import { admissionRecord, BUILD_TOKEN_ENV, settleAdmission } from "../build/build-admission.ts";
@@ -19,6 +19,14 @@ import type { QueuedLanding, SubmissionConflict } from "../landing/submission-pr
 export const QUEUE_SNAPSHOT_MIN_AGE_MS = 2_000;
 /** Events that report a running command's detail and change no operation's stage or outcome. */
 const RUN_DETAIL_EVENTS: ReadonlySet<string> = new Set(["progress", "run_started", "run_finished", "test_report", "stage_detail", "change_shape", "remote_verification"]);
+
+/**
+ * An operation as the list routes return it: every field and the `result`, with each run's heavy detail (per-file
+ * `testReport`, `commandEvidence`, `diagnostics`, `artifact`) left out. `GET /v1/operations/:id` keeps it all.
+ */
+function leanOperation<T extends { runs: RunRecord[] }>(operation: T): T {
+  return { ...operation, runs: operation.runs.map(({ testReport: _report, commandEvidence: _evidence, diagnostics: _diagnostics, artifact: _artifact, ...run }) => run) };
+}
 
 export function createRunnerHandler(input: {
   log: OperationLog;
@@ -443,7 +451,7 @@ export function createRunnerHandler(input: {
         return json({ error: "repo is required" }, 400);
       const key = repositoryKey(repo);
       const operations = input.log.audits(key);
-      return json({ operations, summary: auditSummary({ audits: operations, landings: input.log.landings(key) }, new Date()) });
+      return json({ operations: operations.map(leanOperation), summary: auditSummary({ audits: operations, landings: input.log.landings(key) }, new Date()) });
     }
     if (request.method === "POST" && path === `${RUNNER_API}/audits/cause`) {
       let body: unknown;
@@ -482,13 +490,13 @@ export function createRunnerHandler(input: {
       const repo = url.searchParams.get("repo");
       if (!repo)
         return json({ error: "repo is required" }, 400);
-      return json({ operations: input.log.deployments(repositoryKey(repo), url.searchParams.get("environment") ?? undefined) });
+      return json({ operations: input.log.deployments(repositoryKey(repo), url.searchParams.get("environment") ?? undefined).map(leanOperation) });
     }
     if (request.method === "GET" && path === `${RUNNER_API}/releases`) {
       const repo = url.searchParams.get("repo");
       if (!repo)
         return json({ error: "repo is required" }, 400);
-      return json({ operations: input.log.releases(repositoryKey(repo)) });
+      return json({ operations: input.log.releases(repositoryKey(repo)).map(leanOperation) });
     }
     if (request.method === "POST" && path === `${RUNNER_API}/verifications`) {
       let body: unknown;
@@ -517,7 +525,7 @@ export function createRunnerHandler(input: {
       const repo = url.searchParams.get("repo");
       if (!repo)
         return json({ error: "repo is required" }, 400);
-      return json({ operations: input.log.verifications(repositoryKey(repo)) });
+      return json({ operations: input.log.verifications(repositoryKey(repo)).map(leanOperation) });
     }
     const change = path.match(new RegExp(`^${RUNNER_API}/changes/([^/]+)$`));
     if (request.method === "GET" && change) {
