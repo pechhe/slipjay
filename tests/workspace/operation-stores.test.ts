@@ -21,7 +21,7 @@ test("maintain's disk pass reports op-store pressure in its heartbeat without ch
     const config = defaultDiskConfig();
     config.floor = { bytes: 0, percent: 0 }; config.ballast.bytes = 0; config.scratchRoots = []; config.regenerable = [];
     const outcome = await hostDisk({ maintain: true, config, integrationRoots: async () => [f.repo], readUsage: async () => ({ percent: 1, freeBytes: 100 }),
-      host: { workspaceRows: async () => [], readDir: async () => [], sizeOf: async () => OP_STORE_WARN_BYTES },
+      host: { dockerVolumes: async () => [], loopImages: async () => [], workspaceRows: async () => [], readDir: async () => [], sizeOf: async () => OP_STORE_WARN_BYTES },
     });
     assert.ok(outcome.state === "applied");
     assert.match(outcome.notes.join("\n"), /JJ operation store.*5.0 GiB/);

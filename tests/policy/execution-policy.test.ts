@@ -1,4 +1,4 @@
-import { jj, project } from "../support/workspace-project.ts";
+import { jj, project, recordCheckout } from "../support/workspace-project.ts";
 import { landThroughTestRunner } from "../support/test-runner.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -294,7 +294,7 @@ test("a malformed working hint recovers through the remote default's committed p
 }, 60_000);
 
 test("landing verifies with the integration bookmark's policy and ignores an uncommitted edit in the primary checkout", async () => {
-  const f = await project();
+  const f = await project({ verify: recordCheckout });
   try {
     // A Direct landing of the primary checkout, whose candidate edits the policy.
     const primaryPolicy = join(f.repo, "slipjay.json");

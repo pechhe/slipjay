@@ -10,22 +10,18 @@ import { provisionSpare } from "../../src/lib/workspace/workspace-pool.ts";
 import { startFetchHome, stateHome } from "../../src/lib/workspace/workspace-paths.ts";
 import { withWorkspaceTransaction } from "../../src/lib/infra/workspace-transaction.ts";
 
-/** Land a commit on `origin/main` from another clone, as another machine would. */
+/** Land a commit on `origin/main` directly in the bare remote, as another machine would. */
 function landElsewhere(f: { root: string; remote: string }, file: string) {
-  const other = join(f.root, "other");
-  const git = (args: string[], cwd = other) => execFileSync("git", args, { cwd, stdio: "pipe" });
-  // A second landing from the same machine reuses its clone.
-  if (existsSync(other)) git(["pull", "-q", "origin", "main"]);
-  else {
-    git(["clone", "-q", f.remote, other], f.root);
-    git(["config", "user.name", "Fixture"]);
-    git(["config", "user.email", "fixture@example.com"]);
-  }
-  execFileSync("node", ["-e", `require("node:fs").writeFileSync(${JSON.stringify(join(other, file))}, "elsewhere\\n")`]);
-  git(["add", "."]);
-  git(["commit", "-qm", "Landed elsewhere"]);
-  git(["push", "-q", "origin", "main"]);
-  return git(["rev-parse", "HEAD"]).toString().trim();
+  const git = (args: string[], input?: string) => execFileSync("git", ["--git-dir", f.remote, ...args], {
+    encoding: "utf8", input, env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.com", GIT_INDEX_FILE: join(f.root, "elsewhere-index") },
+  }).trim();
+  const head = git(["rev-parse", "refs/heads/main"]);
+  git(["read-tree", head]);
+  const blob = git(["hash-object", "-w", "--stdin"], "elsewhere\n");
+  git(["update-index", "--add", "--cacheinfo", `100644,${blob},${file}`]);
+  const commit = git(["commit-tree", git(["write-tree"]), "-p", head, "-m", "Landed elsewhere"]);
+  git(["update-ref", "refs/heads/main", commit, head]);
+  return commit;
 }
 
 const parentOf = (workspacePath: string) => jj(workspacePath, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]);

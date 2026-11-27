@@ -20,9 +20,9 @@ test("a background check starts on its interval only when something new landed, 
 
     // A landing inside the interval waits for it.
     clock = promotedAt + MINUTE;
-    await f.land(f.submit(await f.candidate("one.txt")));
+    const one = await f.seedLanded({ "one.txt": "one.txt\n" }, "Add one.txt");
+    await f.queue.recover();
     await settle(f);
-    const one = f.main();
     assert.equal(checks().length, 1, "the interval has not passed");
 
     clock = promotedAt + 4 * MINUTE;
@@ -50,7 +50,9 @@ test("a background check starts on its interval only when something new landed, 
 
     // Two landings inside the next interval, the first breaking `workbench`.
     clock = greenAt + 5 * MINUTE;
-    for (const file of ["break-a", "two.txt"]) { await f.land(f.submit(await f.candidate(file))); await settle(f); }
+    for (const file of ["break-a", "two.txt"]) await f.seedLanded({ [file]: `${file}\n` }, `Add ${file}`);
+    await f.queue.recover();
+    await settle(f);
     const [breaking, two] = f.log.landings(REPO).slice(-2);
     assert.equal(checks().length, 2, "landings inside the interval start nothing");
     clock = greenAt + 21 * MINUTE;
@@ -77,14 +79,14 @@ test("a background check starts on its interval only when something new landed, 
     // A new head waits through recovery, but not through the full green cadence.
     const recoveryAt = Date.parse(red.finishedAt!) + 3 * MINUTE;
     clock = recoveryAt - MINUTE;
-    await f.land(f.submit(await f.candidate("three.txt")));
+    const three = await f.seedLanded({ "three.txt": "three.txt\n" }, "Add three.txt");
+    await f.queue.recover();
     await settle(f);
     assert.equal(checks().length, 3);
     clock = recoveryAt;
     await f.queue.recover();
     await settle(f);
     // It names the same culprit for the same suite, which is not routed again.
-    const three = f.main();
     const again = checks().find((entry) => entry.commitId === three)!;
     assert.equal(again.status, "failed");
     await until(() => batchEvents(f, again.id, "batch_unrouted").length || undefined);

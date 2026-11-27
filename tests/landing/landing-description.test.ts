@@ -25,26 +25,73 @@ async function ensure(cwd: string) {
 
 const full = (cwd: string) => jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "description"]);
 
-test("landing appends Build to the trailer block and keeps the body and Co-Authored-By", async () => {
+test("Build workspace descriptions keep body, Co-Authored-By, existing trailers, and replace only placeholder subjects", async () => {
   const f = await project({ policy: { tracker: "build" } });
   try {
-    const workspace = await buildWorkspace(f, 4431, BODY);
-    await ensure(workspace.workspacePath);
-    assert.equal(full(workspace.workspacePath), `${BODY}\nBuild: #4431`);
+    const appended = await buildWorkspace(f, 4431, BODY);
+    await ensure(appended.workspacePath);
+    assert.equal(full(appended.workspacePath), `${BODY}\nBuild: #4431`);
+
+    const reviewed = await buildWorkspace(f, 4430, "Reviewed description");
+    assert.ok(full(reviewed.workspacePath).endsWith("Build: #4430"), full(reviewed.workspacePath));
+    const reviewedBefore = jj(reviewed.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    assert.equal((await ensure(reviewed.workspacePath)).commitId, reviewedBefore);
+
+    const existing = await buildWorkspace(f, 4432, `${BODY}\nBuild: #4432`);
+    const existingBefore = jj(existing.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    assert.equal((await ensure(existing.workspacePath)).commitId, existingBefore);
+    assert.equal(jj(existing.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]), existingBefore);
+
+    const placeholderWs = await createWorkspace("desc-4433", f.repo, { issueNumber: 4433 });
+    const placeholder = full(placeholderWs.workspacePath).trim().split("\n")[0]!;
+    assert.match(placeholder, /^wip: /);
+    const body = "First paragraph of the body.\n\nCo-Authored-By: Pair <pair@example.com>";
+    await writeFile(join(placeholderWs.workspacePath, "file.txt"), "x\n");
+    jj(placeholderWs.workspacePath, ["describe", "-m", `${placeholder}\n\n${body}`]);
+    await ensure(placeholderWs.workspacePath);
+    const [subject = "", ...rest] = full(placeholderWs.workspacePath).split("\n");
+    assert.notEqual(subject, placeholder);
+    assert.ok(subject.trim());
+    assert.equal(rest.join("\n"), `\n${body}\nBuild: #4433`);
+
+    const editorWs = await createWorkspace("editor-deleted-trailer", f.repo, { issueNumber: 4436 });
+    const editor = join(f.root, "delete-trailer.cjs");
+    await writeFile(editor, 'require("node:fs").writeFileSync(process.argv[2], "Editor deleted the trailer\\n");');
+    await writeFile(join(editorWs.workspacePath, "file.txt"), "work\n");
+    jj(editorWs.workspacePath, ["--config", `ui.editor=${JSON.stringify(["bun", editor])}`, "describe"]);
+    assert.equal(full(editorWs.workspacePath), "Editor deleted the trailer");
+    const preview = await landingIO.landingPreview(editorWs.workspacePath);
+    const lines: string[] = [];
+    const target = await landingIO.ensureLandingDescription(editorWs.workspacePath, preview.context, preview.target, undefined, (line) => lines.push(line));
+    assert.notEqual(target.commitId, preview.target.commitId);
+    assert.equal(full(editorWs.workspacePath), "Editor deleted the trailer\n\nBuild: #4436");
+    assert.ok(lines.some((line) => line.includes(preview.target.commitId) && line.includes(target.commitId)), lines.join("\n"));
   } finally {
     await f.dispose();
   }
 }, 120_000);
 
-test.each(["build", "forge"] as const)("%s workspace descriptions already carry the item and landing keeps the reviewed commit", async (tracker) => {
-  const f = await project({ policy: { tracker } });
+test("Forge workspace descriptions keep reviewed commits, recover trailer-only descriptions, and add missing trailers", async () => {
+  const f = await project({ policy: { tracker: "forge" } });
   try {
-    const item = { build: 4430, forge: 4434 }[tracker];
-    const workspace = await buildWorkspace(f, item, "Reviewed description");
-    const trailer = `${tracker === "build" ? "Build" : "Forge"}: #${item}`;
-    assert.ok(full(workspace.workspacePath).endsWith(trailer), full(workspace.workspacePath));
-    const before = jj(workspace.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
-    assert.equal((await ensure(workspace.workspacePath)).commitId, before);
+    const reviewed = await buildWorkspace(f, 4434, "Reviewed description");
+    assert.ok(full(reviewed.workspacePath).endsWith("Forge: #4434"), full(reviewed.workspacePath));
+    const before = jj(reviewed.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+    assert.equal((await ensure(reviewed.workspacePath)).commitId, before);
+
+    const trailerOnly = await createWorkspace("Explain the actual work", f.repo, { issueNumber: 4438 });
+    await writeFile(join(trailerOnly.workspacePath, "file.txt"), "work\n");
+    jj(trailerOnly.workspacePath, ["--config", 'templates.commit_trailers=\'""\'', "describe", "-m", "Forge: #4438"]);
+    assert.equal(full(trailerOnly.workspacePath), "Forge: #4438");
+    await ensure(trailerOnly.workspacePath);
+    assert.equal(full(trailerOnly.workspacePath), "Explain the actual work\n\nForge: #4438");
+
+    const missingConfig = await createWorkspace("old-jj-trailer", f.repo, { issueNumber: 4437 });
+    jj(missingConfig.workspacePath, ["config", "unset", "--workspace", "templates.commit_trailers"]);
+    await writeFile(join(missingConfig.workspacePath, "file.txt"), "work\n");
+    jj(missingConfig.workspacePath, ["describe", "-m", "Old jj"]);
+    await ensure(missingConfig.workspacePath);
+    assert.equal(full(missingConfig.workspacePath), "Old jj\n\nForge: #4437");
   } finally {
     await f.dispose();
   }
@@ -75,78 +122,4 @@ test("the runner receives the exact reviewed Forge source and publishes its desc
     assert.equal(publishedDescription, reviewedDescription);
     assert.equal(result.lines.some((line) => line.startsWith("[description]")), false);
   } finally { await fake.close(); await f.dispose(); }
-}, 120_000);
-
-test("landing restores a trailer deleted in the editor and reports the given and submitted commits", async () => {
-  const f = await project({ policy: { tracker: "build" } });
-  try {
-    const workspace = await createWorkspace("editor-deleted-trailer", f.repo, { issueNumber: 4436 });
-    const editor = join(f.root, "delete-trailer.cjs");
-    await writeFile(editor, 'require("node:fs").writeFileSync(process.argv[2], "Editor deleted the trailer\\n");');
-    await writeFile(join(workspace.workspacePath, "file.txt"), "work\n");
-    jj(workspace.workspacePath, ["--config", `ui.editor=${JSON.stringify(["node", editor])}`, "describe"]);
-    assert.equal(full(workspace.workspacePath), "Editor deleted the trailer");
-    const preview = await landingIO.landingPreview(workspace.workspacePath);
-    const lines: string[] = [];
-    const target = await landingIO.ensureLandingDescription(workspace.workspacePath, preview.context, preview.target, undefined, (line) => lines.push(line));
-    assert.notEqual(target.commitId, preview.target.commitId);
-    assert.equal(full(workspace.workspacePath), "Editor deleted the trailer\n\nBuild: #4436");
-    assert.ok(lines.some((line) => line.includes(preview.target.commitId) && line.includes(target.commitId)), lines.join("\n"));
-  } finally { await f.dispose(); }
-}, 120_000);
-
-test("a trailer-only description on work still falls back to the task plus its item", async () => {
-  const f = await project({ policy: { tracker: "forge" } });
-  try {
-    const workspace = await createWorkspace("Explain the actual work", f.repo, { issueNumber: 4438 });
-    await writeFile(join(workspace.workspacePath, "file.txt"), "work\n");
-    jj(workspace.workspacePath, ["--config", 'templates.commit_trailers=\'""\'', "describe", "-m", "Forge: #4438"]);
-    assert.equal(full(workspace.workspacePath), "Forge: #4438");
-    await ensure(workspace.workspacePath);
-    assert.equal(full(workspace.workspacePath), "Explain the actual work\n\nForge: #4438");
-  } finally { await f.dispose(); }
-}, 120_000);
-
-test("landing still adds a missing trailer without workspace config", async () => {
-  const f = await project({ policy: { tracker: "forge" } });
-  try {
-    const workspace = await createWorkspace("old-jj-trailer", f.repo, { issueNumber: 4437 });
-    jj(workspace.workspacePath, ["config", "unset", "--workspace", "templates.commit_trailers"]);
-    await writeFile(join(workspace.workspacePath, "file.txt"), "work\n");
-    jj(workspace.workspacePath, ["describe", "-m", "Old jj"]);
-    await ensure(workspace.workspacePath);
-    assert.equal(full(workspace.workspacePath), "Old jj\n\nForge: #4437");
-  } finally { await f.dispose(); }
-}, 120_000);
-
-test("a commit already carrying its Build trailer is not re-described", async () => {
-  const f = await project({ policy: { tracker: "build" } });
-  try {
-    const workspace = await buildWorkspace(f, 4432, `${BODY}\nBuild: #4432`);
-    const before = jj(workspace.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
-    const target = await ensure(workspace.workspacePath);
-    assert.equal(target.commitId, before);
-    assert.equal(jj(workspace.workspacePath, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]), before);
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
-
-test("a body written under the generated subject is kept; only the placeholder subject is replaced", async () => {
-  const f = await project({ policy: { tracker: "build" } });
-  try {
-    const workspace = await createWorkspace("desc-4433", f.repo, { issueNumber: 4433 });
-    const placeholder = full(workspace.workspacePath).trim().split("\n")[0]!;
-    assert.match(placeholder, /^wip: /);
-    const body = "First paragraph of the body.\n\nCo-Authored-By: Pair <pair@example.com>";
-    await writeFile(join(workspace.workspacePath, "file.txt"), "x\n");
-    jj(workspace.workspacePath, ["describe", "-m", `${placeholder}\n\n${body}`]);
-    await ensure(workspace.workspacePath);
-    const [subject = "", ...rest] = full(workspace.workspacePath).split("\n");
-    assert.notEqual(subject, placeholder);
-    assert.ok(subject.trim());
-    assert.equal(rest.join("\n"), `\n${body}\nBuild: #4433`);
-  } finally {
-    await f.dispose();
-  }
 }, 120_000);

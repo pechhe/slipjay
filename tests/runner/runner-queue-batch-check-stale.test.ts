@@ -15,15 +15,11 @@ for (const refresh of ["background", "batch"] as const) {
       await settle(f);
       const first = f.log.releases(REPO)[0]!;
       clock = Date.parse(first.submittedAt) + minute;
-      await f.land(f.submit(await f.candidate("one.txt")));
-      await settle(f);
-      const one = f.main();
+      const one = await f.seedLanded({ "one.txt": "one.txt\n" }, "Add one.txt");
       await f.queue.requestBatchCheck(REPO, one);
       await settle(f);
 
-      await f.land(f.submit(await f.candidate("two.txt")));
-      await settle(f);
-      const two = f.main();
+      const two = await f.seedLanded({ "two.txt": "two.txt\n" }, "Add two.txt");
       clock = Date.parse(f.log.verifications(REPO)[0]!.submittedAt) + 6 * minute;
       await f.queue.recover();
       await settle(f);

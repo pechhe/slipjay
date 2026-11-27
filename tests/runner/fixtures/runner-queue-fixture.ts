@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { cpSync, writeFileSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test as serialTest } from "vite-plus/test";
 import { candidateBookmark, TERMINAL_EVENT_TYPES } from "../../../src/lib/runner/runner-contract.ts";
@@ -105,6 +105,9 @@ export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=
 /** Projects deploy and check side by side, so their log lines arrive in any order. */
 export const byProject = (entries: { project: string }[]) => entries.sort((a, b) => a.project.localeCompare(b.project));
 
+type QueueRepoTemplate = { origin: string; author: string };
+const queueRepoTemplates = new Map<string, Promise<QueueRepoTemplate>>();
+
 export async function fixture(migrations = false, release = false, deployments?: { minIntervalMs: number; production?: boolean | "migrations"; machine?: string; prebuild?: string; prebuildInconclusive?: number[] }, reset = false,
   { capabilities, verificationStageTimeoutMs, buildChecks, postIntegrationReadByGate, workers, deployWorkers, other = false, extra = [], lane, branch = "main", screeningLanes, verificationDepth, prefixGate, gates, releaseGates, durable = false, combinedLimits = true, recoveryRetryMs, scopes = false, process: processLevel, failingAudit = false, observeCandidateAtVerdict = false, projections = {}, remoteVerification, boatProbeMs, boatReadinessMs, promotionSchedule, now, hostPlaces, gateMachine, machineVerifications, machineCheckVerifications, machineBuilds, batchVerification, batchRemote, recordBatchCheck, releaseAlertWebhook, sendReleaseAlert, hostShell }: { capabilities?: QueueCapabilities; machineBuilds?: Parameters<typeof createRunnerQueue>[0]["machineBuilds"]; hostShell?: Parameters<typeof createRunnerQueue>[0]["hostShell"]; gateMachine?: string; machineVerifications?: Parameters<typeof createRunnerQueue>[0]["machineVerifications"]; machineCheckVerifications?: Parameters<typeof createRunnerQueue>[0]["machineCheckVerifications"]; hostPlaces?: 0 | 1; promotionSchedule?: unknown; batchVerification?: unknown; batchRemote?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; recordBatchCheck?: Parameters<typeof createRunnerQueue>[0]["recordBatchCheck"]; releaseAlertWebhook?: RunnerConfig["releaseAlertWebhook"]; sendReleaseAlert?: Parameters<typeof createRunnerQueue>[0]["sendReleaseAlert"]; now?: () => number; verificationStageTimeoutMs?: number; boatProbeMs?: number; boatReadinessMs?: number; remoteVerification?: import("../../../src/lib/runner/runner-types.ts").RemoteVerification; buildChecks?: import("../../../src/lib/build/build-check-access.ts").BuildCheckAccess; postIntegrationReadByGate?: boolean; process?: string; failingAudit?: boolean; recoveryRetryMs?: number; workers?: number; deployWorkers?: number; other?: boolean; extra?: string[]; lane?: string; branch?: string; verificationDepth?: 1 | 2; screeningLanes?: number; prefixGate?: (root: string) => string; gates?: (root: string) => string[]; releaseGates?: (root: string) => string[]; durable?: boolean; combinedLimits?: boolean; scopes?: boolean; observeCandidateAtVerdict?: boolean; projections?: OperationLogProjections } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "runner-queue-")));
@@ -112,23 +115,28 @@ export async function fixture(migrations = false, release = false, deployments?:
   const seed = join(root, "seed");
   const author = join(root, "author");
   const home = join(root, "runner");
-  await mkdir(seed);
   const git = (args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: "pipe" }).trim();
-  git(["init", "-q", "--bare", "-b", branch, origin]);
-  // Seed the bare origin directly instead of initializing a throwaway checkout and pushing.
-  const commitSeed = (dir: string, remote: string) => {
-    git(["--git-dir", remote, "--work-tree", dir, "add", "."]);
-    // A host without a global Git identity must not fail the seed commit.
-    git(["--git-dir", remote, "--work-tree", dir, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "Seed policy"]);
+  const buildRepo = async (targetOrigin: string, targetAuthor: string, targetSeed: string, targetBranch: string, policyText: string, withReleaseBranch: boolean) => {
+    await mkdir(targetSeed, { recursive: true });
+    execFileSync("git", ["init", "-q", "--bare", "-b", targetBranch, targetOrigin], { encoding: "utf8", stdio: "pipe" });
+    await writeFile(join(targetSeed, "slipjay.json"), policyText);
+    execFileSync("git", ["--git-dir", targetOrigin, "--work-tree", targetSeed, "add", "."], { encoding: "utf8", stdio: "pipe" });
+    execFileSync("git", ["--git-dir", targetOrigin, "--work-tree", targetSeed, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "-qm", "Seed policy"], { encoding: "utf8", stdio: "pipe" });
+    if (withReleaseBranch) execFileSync("git", ["--git-dir", targetOrigin, "branch", "release", targetBranch], { encoding: "utf8", stdio: "pipe" });
+    execFileSync("git", ["clone", "-q", targetOrigin, targetAuthor], { encoding: "utf8", stdio: "pipe" });
+    jj(targetAuthor, ["git", "init", "--colocate"]);
+    jj(targetAuthor, ["bookmark", "track", targetBranch, "--remote", "origin"]);
   };
-  const cloneAuthor = (remote: string, dir: string, trackBranch: string) => {
-    git(["clone", "-q", remote, dir]);
-    jj(dir, ["git", "init", "--colocate"]);
-    jj(dir, ["bookmark", "track", trackBranch, "--remote", "origin"]);
+  const copyRepo = async (from: QueueRepoTemplate, targetOrigin: string, targetAuthor: string) => {
+    cpSync(from.origin, targetOrigin, { recursive: true });
+    cpSync(from.author, targetAuthor, { recursive: true });
+    await rm(join(targetAuthor, ".jj", "repo", "config-id"), { force: true });
+    const configPath = join(targetAuthor, ".git", "config");
+    await writeFile(configPath, (await readFile(configPath, "utf8")).replaceAll(from.origin, targetOrigin));
   };
   // Both clone and later bounded jj commands read the private fixture identity, never the developer's jj config.
   fixtureJjConfig();
-  await writeFile(join(seed, "slipjay.json"), JSON.stringify({
+  const policyText = JSON.stringify({
     version: 1, integrationBranch: branch,
     sourcePublication: { version: 1, mode: "required", remote: "origin" },
     requiredLandingVerification: (gates?.(root) ?? [prefixGate?.(root) ?? gate]).map((script) => ({ executable: "bun", args: ["-e", script] })),
@@ -174,19 +182,35 @@ export async function fixture(migrations = false, release = false, deployments?:
         targetProbe: { executable: "bun", args: ["-e", resetProbe(root)] },
       },
     } : {}),
-  }));
-  commitSeed(seed, origin);
-  if (release) git(["--git-dir", origin, "branch", "release", branch]);
-  cloneAuthor(origin, author, branch);
+  });
+  const cacheable = !policyText.includes(root);
+  if (cacheable) {
+    const key = `${homedir()}:${branch}:${release}:${policyText}`;
+    let pending = queueRepoTemplates.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const templatesRoot = join(homedir(), ".fixture-templates-rq");
+        await mkdir(templatesRoot, { recursive: true });
+        const dir = await realpath(await mkdtemp(join(templatesRoot, "rq-")));
+        const tplOrigin = join(dir, "origin.git");
+        const tplAuthor = join(dir, "author");
+        await buildRepo(tplOrigin, tplAuthor, join(dir, "seed"), branch, policyText, release);
+        return { origin: tplOrigin, author: tplAuthor };
+      })();
+      queueRepoTemplates.set(key, pending);
+    }
+    await copyRepo(await pending, origin, author);
+  } else {
+    await buildRepo(origin, author, seed, branch, policyText, release);
+  }
   const otherOrigin = join(root, "other.git");
   const otherAuthor = join(root, "other-author");
   async function seedRepository(name: string, repositoryOrigin: string, repositoryAuthor: string) {
-    const repositorySeed = join(root, `${name}-seed`);
-    await mkdir(repositorySeed);
-    git(["init", "-q", "--bare", "-b", "main", repositoryOrigin]);
-    await writeFile(join(repositorySeed, "slipjay.json"), await readFile(join(seed, "slipjay.json"), "utf8"));
-    commitSeed(repositorySeed, repositoryOrigin);
-    cloneAuthor(repositoryOrigin, repositoryAuthor, "main");
+    if (branch === "main" && !release) {
+      await copyRepo({ origin, author }, repositoryOrigin, repositoryAuthor);
+      return;
+    }
+    await buildRepo(repositoryOrigin, repositoryAuthor, join(root, `${name}-seed`), "main", policyText, false);
   }
   if (other) await seedRepository("other", otherOrigin, otherAuthor);
   const authors: Record<string, string> = {};

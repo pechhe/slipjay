@@ -21,7 +21,7 @@ test("pressure retirement preserves unlanded tracked source and ignored source t
     const config = defaultDiskConfig();
     config.floor = { bytes: 40, percent: 0 }; config.ballast.bytes = 0; config.scratchRoots = []; config.regenerable = [];
     const outcome = await hostDisk({ config, integrationRoots: async () => [f.repo], readUsage: async () => ({ percent: 1, freeBytes: existsSync(w.workspacePath) ? 10 : 40 }),
-      host: { readDir: async () => [], sizeOf: async () => 100, workspaceRows: async () => [{ path: w.workspacePath, class: "workspace", action: "keep", reason: "no dependency trees installed", sizeBytes: 100, owner: w.current.name, retirable: true, idleSince: 0 }] },
+      host: { dockerVolumes: async () => [], loopImages: async () => [], readDir: async () => [], sizeOf: async () => 100, workspaceRows: async () => [{ path: w.workspacePath, class: "workspace", action: "keep", reason: "no dependency trees installed", sizeBytes: 100, owner: w.current.name, retirable: true, idleSince: 0 }] },
     });
     assert.ok(outcome.state === "applied");
     assert.equal(outcome.results.find((row) => row.path === w.workspacePath)!.outcome, "removed");

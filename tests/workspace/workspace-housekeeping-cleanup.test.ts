@@ -40,7 +40,7 @@ test("an edit made after cleanup's checks is kept, not orphaned by the forget", 
   }
 }, 120_000);
 
-test("landing removes its own workspace, naming any other process that holds it", async () => {
+test("landing removes its own workspace, names live holders, and the CLI's own cwd does not keep it", async () => {
   const f = await project();
   const holder = { dispose: () => {}, pid: 0 };
   try {
@@ -65,27 +65,21 @@ test("landing removes its own workspace, naming any other process that holds it"
       assert.ok(existsSync(held.workspacePath));
       holder.dispose();
       assert.equal((await cleanupLandedWorkspace(held.workspacePath)).cleaned, true, "slipjay cleanup still works as before");
+
+      // The CLI's own working directory inside the workspace does not keep it after `slipjay land`.
+      const cliWorkspace = await createWorkspace("cli", f.repo);
+      await writeFile(join(cliWorkspace.workspacePath, "cli.txt"), "cli\n");
+      jj(cliWorkspace.workspacePath, ["describe", "-m", "Add cli"]);
+      const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
+        execFile("bun", [cli, "land"], { cwd: cliWorkspace.workspacePath, env: runner.env }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
+      });
+      assert.equal(JSON.parse(stdout).ok, true, stderr);
+      assert.match(stderr, /in the background/);
+      // Released after the verdict by the detached housekeeping, which ignores the CLI's own processes.
+      await vi.waitFor(() => assert.equal(existsSync(cliWorkspace.workspacePath), false), { timeout: 120_000, interval: 50 });
     });
   } finally {
     holder.dispose();
-    await f.dispose();
-  }
-}, 180_000);
-
-test("the CLI's own working directory inside the workspace does not keep it after `slipjay land`", async () => {
-  const f = await project();
-  try {
-    const workspace = await createWorkspace("cli", f.repo);
-    await writeFile(join(workspace.workspacePath, "cli.txt"), "cli\n");
-    jj(workspace.workspacePath, ["describe", "-m", "Add cli"]);
-    const { stdout, stderr } = await withTestRunner(f, ({ env }) => new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
-      execFile("bun", [cli, "land"], { cwd: workspace.workspacePath, env }, (error, out, err) => (error ? reject(Object.assign(error, { stderr: err })) : resolveRun({ stdout: out, stderr: err })));
-    }));
-    assert.equal(JSON.parse(stdout).ok, true, stderr);
-    assert.match(stderr, /in the background/);
-    // Released after the verdict by the detached housekeeping, which ignores the CLI's own processes.
-    await vi.waitFor(() => assert.equal(existsSync(workspace.workspacePath), false), { timeout: 120_000, interval: 100 });
-  } finally {
     await f.dispose();
   }
 }, 180_000);

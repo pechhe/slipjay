@@ -43,11 +43,10 @@ test("a red five-landing batch names landings 2 and 4 separately, routes each on
     // Five landings inside the interval: none queues a check of its own.
     clock = promotedAt + 60_000;
     for (const file of ["one.txt", "break-a", "three.txt", "break-b", "needs-a.txt"]) {
-      const id = f.submit(await f.candidate(file));
-      await f.land(id);
-      landings.push(id);
-      await settle(f);
+      await f.seedLanded({ [file]: `${file}\n` }, `Add ${file}`);
+      landings.push(f.log.landings(REPO).at(-1)!.operationId);
     }
+    await settle(f);
     assert.equal(f.log.verifications(REPO).length, 1, "only the first batch was checked");
     const commits = landings.map((id) => (f.log.operation(id)!.result as Extract<OperationEvent, { type: "landed" }>).commitId);
 

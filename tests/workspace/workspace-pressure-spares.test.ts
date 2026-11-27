@@ -20,7 +20,7 @@ test("pressure actually removes a pool spare above the configured allowance", as
     const records = await spareRecords(f.repo);
     const outcome = await hostDisk({ config, integrationRoots: async () => [f.repo],
       readUsage: async () => ({ percent: 1, freeBytes: (await spareRecords(f.repo)).length > 1 ? 10 : 40 }),
-      host: { readDir: async () => [], sizeOf: async () => 100, workspaceRows: async () => records.map((record) => ({ path: record.workspacePath, class: "workspace", action: "keep", reason: "a pool spare", owner: record.workspaceName, sizeBytes: 100, spare: true, repository: f.repo })) },
+      host: { dockerVolumes: async () => [], loopImages: async () => [], readDir: async () => [], sizeOf: async () => 100, workspaceRows: async () => records.map((record) => ({ path: record.workspacePath, class: "workspace", action: "keep", reason: "a pool spare", owner: record.workspaceName, sizeBytes: 100, spare: true, repository: f.repo })) },
     });
     assert.ok(outcome.state === "applied");
     assert.equal((await spareRecords(f.repo)).length, 1);

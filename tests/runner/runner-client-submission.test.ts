@@ -60,9 +60,10 @@ test("a wrong token is refused clearly before publishing or submitting", async (
 
 
 test("an explicit submission refusal is not described as an unknown transport outcome", async () => {
-  for (const status of [400, 401, 409, 503] as const) {
-    const f = await fixture(false, false, status);
-    try {
+  const f = await fixture(false, false, 400);
+  try {
+    for (const status of [400, 401, 409, 503] as const) {
+      f.setSubmissionRefusal(status);
       await assert.rejects(landThroughRunner(f.cwd, f.options), (error: unknown) => {
         assert.ok(error instanceof LandingNotSubmitted);
         assert.doesNotMatch(error.message, /unknown/);
@@ -72,8 +73,8 @@ test("an explicit submission refusal is not described as an unknown transport ou
       assert.equal(f.log.events().filter((row) => row.event.type === "submitted").length, 0);
       const context = (await workspaceJj.workspaceContext(f.cwd))!;
       assert.deepEqual((await workspaceMetadata(context.current.name))!.pendingLandingRequests, {});
-    } finally { await f.dispose(); }
-  }
+    }
+  } finally { await f.dispose(); }
 });
 
 test("a running older candidate racing the POST does not leave a pending request for the refused source", async () => {
@@ -125,14 +126,14 @@ test("a landing the runner finds would conflict is reported as not submitted, wi
 test("a follow-up fact the runner is slow to acknowledge does not end the landing", async () => {
   const f = await fixture();
   try {
-    // The fact's acknowledgement outlasts its 5s budget, as on a runner under load.
-    f.delayEventPost(6000);
-    const running = landThroughRunner(f.cwd, f.options);
+    // The fact's acknowledgement outlasts its timeout budget, as on a runner under load.
+    f.delayEventPost(400);
+    const running = landThroughRunner(f.cwd, { ...f.options, factTimeoutMs: 150 });
     await waitFor(() => f.log.events().some((stored) => stored.event.type === "client" && stored.event.fact.kind === "land_follow"));
     const op = f.log.openOperations()[0]!;
     const state = await Promise.race([
       running.then(() => "followed", (error: unknown) => `rejected: ${error instanceof Error ? error.message : String(error)}`),
-      new Promise((resolve) => setTimeout(() => resolve("still following"), 5500)),
+      new Promise((resolve) => setTimeout(() => resolve("still following"), 300)),
     ]);
     assert.equal(state, "still following");
     f.append(op.id, { type: "cancelled", reason: "fixture done" });

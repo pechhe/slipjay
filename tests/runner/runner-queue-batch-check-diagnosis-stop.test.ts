@@ -45,12 +45,9 @@ serialTest("a confirm stops an in-flight diagnosis without cancelling the red ba
     await settle(f);
     const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
     clock = promotedAt + 60_000;
-    await f.land(f.submit(await f.candidate("break-a")));
-    const older = f.main();
-    const second = f.submit(await f.candidate("second.txt"));
-    await f.land(second);
+    const older = await f.seedLanded({ "break-a": "break-a\n" }, "Add break-a");
+    const head = await f.seedLanded({ "second.txt": "second.txt\n" }, "Add second.txt");
     heldCommit = older;
-    const head = f.main();
     clock = promotedAt + 31 * 60_000;
     await f.queue.recover();
     f.queue.wake();
@@ -62,14 +59,8 @@ serialTest("a confirm stops an in-flight diagnosis without cancelling the red ba
       return probeStarted || undefined;
     }, preemptionWaitMs);
 
-    const third = f.submit(await f.candidate("third.txt"));
-    f.queue.wake();
-    await until(() => f.log.operation(third)?.result?.type === "landed" || undefined, preemptionWaitMs);
-    const newest = f.main();
-    const fourth = f.submit(await f.candidate("fourth.txt"));
-    f.queue.wake();
-    await until(() => f.log.operation(fourth)?.result?.type === "landed" || undefined, preemptionWaitMs);
-    const latest = f.main();
+    const newest = await f.seedLanded({ "third.txt": "third.txt\n" }, "Add third.txt");
+    const latest = await f.seedLanded({ "fourth.txt": "fourth.txt\n" }, "Add fourth.txt");
     f.log.append(RUNNER_CONTROL_ID, { type: "paused", by: "test" });
     const first = await f.queue.requestBatchCheck(REPO, newest);
     const next = await f.queue.requestBatchCheck(REPO, older);

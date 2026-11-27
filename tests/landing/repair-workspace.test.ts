@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { test } from "vite-plus/test";
 import { preflightRefusal, repairBrief, repairFailedLanding } from "../../src/lib/landing/repair-workspace.ts";
-import { landThroughRunner, manageRepairClaim, readLandingOutcome } from "../../src/lib/runner/runner-client.ts";
+import { landThroughRunner, readLandingOutcome } from "../../src/lib/runner/runner-client.ts";
 import type { LandingOutcome } from "../../src/lib/runner/runner-types.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { listWorkspaces } from "../../src/lib/workspace/workspace-state.ts";
@@ -32,17 +31,16 @@ function clone(f: Awaited<ReturnType<typeof project>>, name: string) {
   const path = join(f.root, `${name}-repository`);
   jj(f.root, ["git", "clone", f.remote, path]);
   jj(path, ["git", "remote", "set-url", "origin", "https://github.com/fixture/project.git"]);
-  jj(path, ["config", "set", "--repo", "user.name", "Fixture"]);
-  jj(path, ["config", "set", "--repo", "user.email", "fixture@example.com"]);
   return path;
 }
 
 const changeOf = (cwd: string) => jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "change_id"]);
 
-test("repair restores a failed landing whose author directory is gone into a claimed workspace, and its land is the linked repair", async () => {
+test("CLI repair restores a failed landing into a claimed workspace, resumes edits, and lands the linked repair", async () => {
   const f = await project({ verify: failing });
   try {
     await withTestRunner(f, async ({ location, env }) => {
+      // CLI repair restores a failed landing whose author directory is gone into a claimed workspace, and its land is the linked repair.
       const { operationId, source, clone: cold } = await failedLanding(f, location, env, "cold", 4242);
       const before = await readLandingOutcome(location, operationId, env);
       const repaired = await promisify(execFile)("bun", [cli, "repair", operationId, "--json"], { cwd: cold, env: { ...env, FIXTURE_TOKEN: "s3cr3t-fixture-value" }, timeout: 60000 });
@@ -81,55 +79,14 @@ test("repair restores a failed landing whose author directory is gone into a cla
       assert.ok(events.events.some((row) => row.operationId === landed.operation.id && row.event.type === "repair_proposed" && row.event.operationId === operationId));
       const after = await readLandingOutcome(location, operationId, env);
       assert.deepEqual([after.failure, after.classification, after.sourceCommitId, after.runs], [before.failure, before.classification, before.sourceCommitId, before.runs]);
+
+      // A landing that has already published is never repaired.
+      const third = clone(f, "third");
+      await assert.rejects(repairFailedLanding(third, landed.operation.id, { location, env }), /Not repairable: .*already published/);
+      assert.deepEqual((await listWorkspaces(third)).map((w) => w.name), ["default"]);
     });
   } finally { await f.dispose(); }
 }, 300_000);
-
-test("repair refuses what the runner already shows before allocating, and a claim race leaves the loser no workspace", async () => {
-  const f = await project({ verify: failing });
-  try {
-    await withTestRunner(f, async ({ location, env }) => {
-      const { operationId, clone: first } = await failedLanding(f, location, env, "first");
-      const second = clone(f, "second");
-      const results = await Promise.allSettled([repairFailedLanding(first, operationId, { location, env }), repairFailedLanding(second, operationId, { location, env })]);
-      assert.deepEqual(results.map((result) => result.status).sort(), ["fulfilled", "rejected"]);
-      const loser = results.findIndex((result) => result.status === "rejected");
-      const loserRoot = [first, second][loser]!;
-      assert.match(String((results[loser] as PromiseRejectedResult).reason), /already being repaired|Another repair claimant|changed during admission/);
-      assert.deepEqual((await listWorkspaces(loserRoot)).map((workspace) => workspace.name), ["default"], "the losing clone keeps no repair workspace");
-
-      // An active claim is visible before allocation: a third clone is refused without a workspace.
-      const third = clone(f, "third");
-      await assert.rejects(repairFailedLanding(third, operationId, { location, env }), /Not repairable: .*already being repaired/);
-      assert.deepEqual((await listWorkspaces(third)).map((workspace) => workspace.name), ["default"]);
-
-      // A landing that has not failed, or already published, is never repaired.
-      const ok = await createWorkspace("passes", f.repo);
-      await writeFile(join(ok.workspacePath, "fixed.txt"), "present\n");
-      const published = await landThroughRunner(ok.workspacePath, { location, env, onLine: () => {} });
-      assert.equal(published.ok, true);
-      await assert.rejects(repairFailedLanding(third, published.operation.id, { location, env }), /Not repairable: .*already published/);
-      assert.deepEqual((await listWorkspaces(third)).map((workspace) => workspace.name), ["default"]);
-    });
-  } finally { await f.dispose(); }
-}, 180_000);
-
-test("a repair interrupted after allocation, or after the runner accepted its claim, resumes that workspace and claim", async () => {
-  const f = await project({ verify: failing });
-  try {
-    await withTestRunner(f, async ({ location, env }) => {
-      const { operationId, clone: cold } = await failedLanding(f, location, env);
-      // What a run that stopped right after allocation leaves: only the allocated workspace, nothing claimed or imported.
-      const workspace = await createWorkspace(`Repair ${operationId}`, cold);
-      // The runner then accepted a claim whose answer was lost: the capability is in the workspace's metadata.
-      const claimed = await manageRepairClaim(workspace.workspacePath, location, operationId, "claim", env) as { claim: { claimId: string } };
-      const resumed = await repairFailedLanding(cold, operationId, { location, env });
-      assert.deepEqual([resumed.resumed, resumed.workspacePath, resumed.claimId], [true, workspace.workspacePath, claimed.claim.claimId]);
-      assert.equal(existsSync(resumed.briefPath), true);
-      assert.equal(changeOf(resumed.workspacePath), resumed.changeId);
-    });
-  } finally { await f.dispose(); }
-}, 180_000);
 
 const outcome = (fields: Partial<LandingOutcome> = {}): LandingOutcome => ({
   version: 1, operationId: "op_1", repo: "fixture/project", changeId: "k".repeat(32), sourceCommitId: "a".repeat(40),

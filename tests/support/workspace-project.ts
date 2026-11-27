@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { cpSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
@@ -17,9 +17,48 @@ if (homedir() === userInfo().homedir) {
 export const jj = (cwd: string, args: string[]) => execFileSync("jj", ["--color=never", ...args], { cwd, encoding: "utf8" }).trim();
 
 // A disposable project with a bare `origin`, landing policy and a verification
-// check (Node source; a landing gate never runs a shell) that records which checkout it verified.
-/** Node source appending the verified checkout's path to `verified`. */
+// check (a landing gate never runs a shell) that records which checkout it verified.
+/** JS source appending the verified checkout's path to `verified`. */
 export const recordCheckout = (verified: string) => `require("node:fs").appendFileSync(${JSON.stringify(verified)}, process.cwd() + "\\n")`;
+
+type ProjectTemplate = { remote: string; repo: string };
+const projectTemplates = new Map<string, Promise<ProjectTemplate>>();
+
+async function buildProjectRepo(
+  root: string,
+  options: { ignore?: string; generatedPaths?: unknown; verify?: (verified: string) => string; shallow?: boolean; postIntegration?: Record<string, unknown>; policyPath?: "slipjay.json" | "slipway.json"; policy?: Record<string, unknown> },
+  verifyScript: string,
+): Promise<ProjectTemplate> {
+  const repo = join(root, "repo");
+  const remote = join(root, "remote.git");
+  await mkdir(join(repo, dirname(options.policyPath ?? "slipjay.json")), { recursive: true });
+  const git = (args: string[], cwd = repo) => execFileSync("git", args, { cwd, stdio: "pipe" });
+  git(["init", "-q", "--bare", "-b", "main", remote], root);
+  // Seed the real origin directly instead of pushing from a throwaway checkout.
+  const seed = (args: string[]) => git(["--git-dir", remote, "--work-tree", repo, ...args]);
+  // A shallow primary needs history below its boundary.
+  if (options.shallow) seed(["commit", "-q", "--allow-empty", "-m", "Before the shallow boundary"]);
+  await writeFile(join(repo, "README.md"), "fixture\n");
+  if (options.ignore) await writeFile(join(repo, ".gitignore"), options.ignore);
+  await writeFile(join(repo, options.policyPath ?? "slipjay.json"), JSON.stringify({
+    version: 1, integrationBranch: "main",
+    sourcePublication: { version: 1, mode: "required", remote: "origin" },
+    requiredLandingVerification: [{ executable: "bun", args: ["-e", verifyScript] }],
+    ...(options.generatedPaths === undefined ? {} : { generatedPaths: options.generatedPaths }),
+    ...(options.postIntegration === undefined ? {} : { postIntegration: options.postIntegration }),
+    ...options.policy,
+  }));
+  seed(["add", "."]);
+  seed(["commit", "-qm", "Initial"]);
+  await rm(repo, { recursive: true, force: true });
+  // Plain Git commits in fixture consumers must advance main. JJ clone detaches
+  // HEAD, so retain Git clone + JJ init for both normal and shallow checkouts.
+  git(["clone", "-q", ...options.shallow ? ["--depth", "1", `file://${remote}`] : [remote], repo], root);
+  fixtureJjConfig();
+  jj(repo, ["git", "init", "--colocate"]);
+  jj(repo, ["bookmark", "track", "main", "--remote", "origin"]);
+  return { remote, repo };
+}
 
 /**
  * `shallow` makes the colocated primary `.git` a depth-1 clone of `origin` (as
@@ -43,34 +82,32 @@ export async function project(options: { ignore?: string; generatedPaths?: unkno
   const repo = join(root, "repo");
   const remote = join(root, "remote.git");
   const verified = join(root, "verified.log");
-  await mkdir(join(repo, dirname(options.policyPath ?? "slipjay.json")), { recursive: true });
-  const git = (args: string[], cwd = repo) => execFileSync("git", args, { cwd, stdio: "pipe" });
-  git(["init", "-q", "--bare", "-b", "main", remote], root);
-  // Both supported test entry points give Git children the Fixture identity in
-  // their disposable HOME, including commits written directly into this origin.
-  // Seed the real origin directly instead of pushing from a throwaway checkout.
-  const seed = (args: string[]) => git(["--git-dir", remote, "--work-tree", repo, ...args]);
-  // A shallow primary needs history below its boundary.
-  if (options.shallow) seed(["commit", "-q", "--allow-empty", "-m", "Before the shallow boundary"]);
-  await writeFile(join(repo, "README.md"), "fixture\n");
-  if (options.ignore) await writeFile(join(repo, ".gitignore"), options.ignore);
-  await writeFile(join(repo, options.policyPath ?? "slipjay.json"), JSON.stringify({
-    version: 1, integrationBranch: "main",
-    sourcePublication: { version: 1, mode: "required", remote: "origin" },
-    requiredLandingVerification: [{ executable: "bun", args: ["-e", options.verify?.(verified) ?? recordCheckout(verified)] }],
-    ...(options.generatedPaths === undefined ? {} : { generatedPaths: options.generatedPaths }),
-    ...(options.postIntegration === undefined ? {} : { postIntegration: options.postIntegration }),
-    ...options.policy,
-  }));
-  seed(["add", "."]);
-  seed(["commit", "-qm", "Initial"]);
-  await rm(repo, { recursive: true, force: true });
-  // Plain Git commits in fixture consumers must advance main. JJ clone detaches
-  // HEAD, so retain Git clone + JJ init for both normal and shallow checkouts.
-  git(["clone", "-q", ...options.shallow ? ["--depth", "1", `file://${remote}`] : [remote], repo], root);
-  fixtureJjConfig();
-  jj(repo, ["git", "init", "--colocate"]);
-  jj(repo, ["bookmark", "track", "main", "--remote", "origin"]);
+  if (options.verify) {
+    await buildProjectRepo(root, options, options.verify(verified));
+  } else {
+    const key = `${homedir()}:${JSON.stringify({
+      ignore: options.ignore, generatedPaths: options.generatedPaths, shallow: options.shallow,
+      postIntegration: options.postIntegration, policyPath: options.policyPath, policy: options.policy,
+    })}`;
+    let pending = projectTemplates.get(key);
+    if (!pending) {
+      pending = (async () => {
+        const templatesRoot = join(homedir(), ".fixture-templates");
+        await mkdir(templatesRoot, { recursive: true });
+        const templateDir = await realpath(await mkdtemp(join(templatesRoot, "project-")));
+        const built = await buildProjectRepo(templateDir, options, "");
+        await rm(join(built.repo, ".jj", "repo", "config-id"), { force: true });
+        return built;
+      })();
+      projectTemplates.set(key, pending);
+    }
+    const template = await pending;
+    cpSync(template.remote, remote, { recursive: true });
+    cpSync(template.repo, repo, { recursive: true });
+    const gitConfigPath = join(repo, ".git", "config");
+    await writeFile(gitConfigPath, (await readFile(gitConfigPath, "utf8")).replaceAll(template.remote, remote));
+    fixtureJjConfig();
+  }
   const remoteFile = (path: string) => execFileSync("git", ["--git-dir", remote, "show", `main:${path}`], { encoding: "utf8" });
   return { root, repo, remote, verified, remoteFile, dispose: async () => { await drainFixtureWorkers(root); await stopFixtureProcesses(root); await rm(root, { recursive: true, force: true }); } };
 }

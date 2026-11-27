@@ -45,7 +45,7 @@ test("a landing waiting for its scheduled promotion starts building fifteen minu
     const first = s.prebuilt().length;
     const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
     const due = nextPromotionAt(schedule(30), promotedAt, promotedAt);
-    clock = due - 15 * 60_000 - 1_500;
+    clock = due - 15 * 60_000 - 100;
     await f.land(f.submit(await f.candidate("two.txt")));
     await settle(f);
     const head = f.log.lastLanded(REPO)!.commitId;
@@ -79,10 +79,8 @@ for (const configured of [true, false]) test(`successive red batches do not re-r
     await settle(f);
     const promotedAt = Date.parse(f.log.releases(REPO)[0]!.submittedAt);
     clock = promotedAt + 60_000;
-    await f.land(f.submit(await f.candidate("broken.txt")));
-    const culprit = f.main();
-    await f.land(f.submit(await f.candidate("second.txt")));
-    const head = f.main();
+    const culprit = await f.seedLanded({ "broken.txt": "broken.txt\n" }, "Add broken.txt");
+    const head = await f.seedLanded({ "second.txt": "second.txt\n" }, "Add second.txt");
     clock = promotedAt + 31 * 60_000;
     await f.queue.recover();
     await settle(f);
@@ -91,9 +89,9 @@ for (const configured of [true, false]) test(`successive red batches do not re-r
     assert.equal(s.prebuilt().filter((line) => line.includes(culprit)).length, 1);
     assert.deepEqual(routed, [culprit]);
 
-    await f.land(f.submit(await f.candidate("third.txt")));
+    const newest = await f.seedLanded({ "third.txt": "third.txt\n" }, "Add third.txt");
+    await f.queue.recover();
     await settle(f);
-    const newest = f.main();
     const [check] = f.log.verifications(REPO, newest);
     assert.equal(check?.status, "failed");
     assert.equal(s.prebuilt().filter((line) => line.includes(culprit)).length, 1, "historical build was not spawned again");

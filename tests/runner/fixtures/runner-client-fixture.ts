@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { access, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, vi } from "vite-plus/test";
-import { createWorkspace } from "../../../src/lib/workspace/workspace-create.ts";
+import { metadataHome, workspaceHome } from "../../../src/lib/workspace/workspace-paths.ts";
+import { metadataPath } from "../../../src/lib/workspace/workspace-state.ts";
 import { createRunnerHandler } from "../../../src/lib/runner/runner-api.ts";
 import type { KillOutcome, Operation, OperationEvent, StoredEvent } from "../../../src/lib/runner/runner-types.ts";
 import { serveRunner } from "../../../src/lib/runner/runner-http.ts";
@@ -15,8 +17,19 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
   const f = await project();
   const transport = await configureLocalGithubTransport(f);
   try {
-    const workspace = await createWorkspace("runner client fixture", f.repo);
-    const cwd = workspace.workspacePath;
+    const workspaceName = `fixture-client-${randomUUID().slice(0, 8)}`;
+    const cwd = join(workspaceHome(), workspaceName);
+    await mkdir(workspaceHome(), { recursive: true, mode: 0o700 });
+    await mkdir(metadataHome(), { recursive: true, mode: 0o700 });
+    jj(f.repo, ["workspace", "add", "--name", workspaceName, "-r", "main", cwd]);
+    const [baseRevision, changeId] = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", 'parents.map(|p| p.commit_id()).join(",") ++ " " ++ change_id']).split(" ");
+    const creationOp = jj(cwd, ["op", "log", "-n", "1", "--no-graph", "-T", "self.id()"]);
+    const now = new Date().toISOString();
+    await writeFile(metadataPath(workspaceName), JSON.stringify({
+      version: 1, workspaceName, workspacePath: cwd, integrationRoot: f.repo, task: "runner client fixture",
+      implementationChangeId: changeId, workspaceCreationOperationId: creationOp, workspaceCreationName: workspaceName,
+      workspaceCreationPath: cwd, adoptionBase: baseRevision, lastActivityAt: now, updatedAt: now,
+    }, null, 2), { mode: 0o600 });
     await writeFile(join(cwd, "change.txt"), "candidate\n");
     jj(cwd, ["describe", "-m", "Implement candidate"]);
     const commit = jj(cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
@@ -43,6 +56,7 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     let failNextSubmission: "lost" | "unreceived" | undefined;
     // The next submission is refused with an error and no operation, as a pre-queue refusal is; `before` runs as the runner answers.
     let refuseNextSubmission: (() => void) | undefined;
+    let submissionRefusalStatus: number | undefined = typeof loseSubmissionResponse === "number" ? loseSubmissionResponse : undefined;
     const route = async (request: Request) => {
       const isEventPost = request.method === "POST" && new URL(request.url).pathname.endsWith("/events");
       const heldFact = isEventPost ? ((await request.clone().json()) as { fact?: { kind?: string } }).fact?.kind === "land_follow" : false;
@@ -57,8 +71,8 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
       }
       const isSubmission = request.method === "POST" && new URL(request.url).pathname.endsWith("/operations");
       if (isSubmission) requestIds.push((await request.clone().json() as { requestId: string }).requestId);
-      if (isSubmission && typeof loseSubmissionResponse === "number")
-        return Response.json({ error: "fixture refusal" }, { status: loseSubmissionResponse });
+      if (isSubmission && submissionRefusalStatus !== undefined)
+        return Response.json({ error: "fixture refusal" }, { status: submissionRefusalStatus });
       if (isSubmission && refuseNextSubmission) { refuseNextSubmission(); refuseNextSubmission = undefined; return Response.json({ error: "fixture refusal before queuing" }, { status: 409 }); }
       const failing = isSubmission ? failNextSubmission : undefined;
       if (failing) failNextSubmission = undefined;
@@ -87,12 +101,13 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
     const lines: string[] = [];
     const options = { location: server.url, env: { ...process.env, SLIPJAY_RUNNER_TOKEN: "test-token" },
       onLine: (line: string) => { lines.push(line); } };
-    return { ...f, cwd, workspaceName: workspace.current.name, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
+    return { ...f, cwd, workspaceName, commit, change, log, append, server, lines, options, streamRequests, droppedSeq: () => droppedSeq, goDown,
       setKill: (outcome: KillOutcome) => { killed = outcome; },
       killRequests, requestIds,
       delayEventPost: (ms: number) => { eventPostDelayMs = ms; },
       failNextSubmission: (how: "lost" | "unreceived") => { failNextSubmission = how; },
       refuseNextSubmission: (before: () => void = () => {}) => { refuseNextSubmission = before; },
+      setSubmissionRefusal: (status: number | undefined) => { submissionRefusalStatus = status; },
       dispose: async () => {
         try { await server.close(); log.close(); }
         finally { try { transport.restore(); } finally { await f.dispose(); } }
@@ -106,4 +121,4 @@ export async function fixture(dropStream = false, racedSubmission = false, loseS
 // Generous because a runner-client step spawns jj, which takes tens of seconds on a loaded host; it returns as soon as the condition holds.
 export const waitFor = (condition: () => unknown) => vi.waitFor(() => assert.ok(condition()), { timeout: 90_000, interval: 20 });
 /** The landing releases its checkout after its verdict, in a detached child: wait until it is gone. */
-export const released = (path: string) => vi.waitFor(() => assert.rejects(access(path), { code: "ENOENT" }), { timeout: 120_000, interval: 100 });
+export const released = (path: string) => vi.waitFor(() => assert.rejects(access(path), { code: "ENOENT" }), { timeout: 120_000, interval: 20 });

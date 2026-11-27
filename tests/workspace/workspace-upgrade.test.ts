@@ -527,7 +527,7 @@ test("a runner upgrade never restarts a unit that runs something else, and says 
   } finally { await f.dispose(); }
 });
 
-test("the hourly pass upgrades the client first and reports it", async () => {
+test("the hourly pass upgrades only the client on a host without a managed runner and reports it", async () => {
   const f = await project();
   try {
     const commit = await landSlipjayTree(f, "9.9.9");
@@ -536,11 +536,13 @@ test("the hourly pass upgrades the client first and reports it", async () => {
     // The pass runs the real upgrade, dependency install included; the fixture tree has nothing to fetch.
     const run = spawnSync("bun", [cli, "maintain", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
     assert.equal(run.status, 0, run.stderr);
-    const reported = JSON.parse(run.stdout) as { upgrade: { slot: string; action: string; to: string } };
+    const reported = JSON.parse(run.stdout) as { upgrade: { slot: string; action: string; to: string }; runnerUpgrade?: unknown };
     assert.equal(reported.upgrade.slot, "client");
     assert.equal(reported.upgrade.action, "upgraded", run.stdout);
     assert.equal(reported.upgrade.to, commit);
     assert.equal(await readlink(currentSlotPath()), installPath(commit));
+    assert.equal("runnerUpgrade" in reported, false);
+    assert.equal(existsSync(runnerSlotPath()), false);
   } finally { await f.dispose(); }
 });
 
@@ -551,20 +553,6 @@ test.skipIf(!onLinux)("a managed runner install is one whose unit runs the runne
   assert.equal(await withPath((await stubSystemctl(runnerUnitArms(runnerSlotCommand()))).bin, hasManagedRunnerInstall), true);
   assert.equal(await withPath((await stubSystemctl(runnerUnitArms(clientCommand()))).bin, hasManagedRunnerInstall), false, "another path");
   assert.equal(await withPath((await stubSystemctl("  *) exit 1;;")).bin, hasManagedRunnerInstall), false, "unknown");
-});
-
-test("the hourly pass upgrades only the client on a host without a managed runner", async () => {
-  const f = await project();
-  try {
-    const commit = await landSlipjayTree(f, "9.9.9");
-    await setConfiguredUpgradeSource(f.repo);
-    const run = spawnSync("bun", [cli, "maintain", "--json"], { cwd: f.repo, env: process.env, encoding: "utf8", timeout: 120_000 });
-    assert.equal(run.status, 0, run.stderr);
-    const reported = JSON.parse(run.stdout) as { upgrade: { to: string }; runnerUpgrade?: unknown };
-    assert.equal(reported.upgrade.to, commit);
-    assert.equal("runnerUpgrade" in reported, false);
-    assert.equal(existsSync(runnerSlotPath()), false);
-  } finally { await f.dispose(); }
 });
 
 test.skipIf(!onLinux)("the hourly pass upgrades the runner slot too on a managed runner host", async () => {

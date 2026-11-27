@@ -2,16 +2,16 @@ import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createWorkspace } from "../../../src/lib/workspace/workspace-create.ts";
-import { jj, project } from "../../support/workspace-project.ts";
+import { jj, project, recordCheckout } from "../../support/workspace-project.ts";
 import { landThroughTestRunner } from "../../support/test-runner.ts";
 
 export const advance = (cwd: string, title: string) => { jj(cwd, ["commit", "-m", title]); jj(cwd, ["bookmark", "set", "main", "-r", "@-"]); jj(cwd, ["git", "push", "--bookmark", "main"]); };
 export async function write(root: string, path: string, value: string) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), value); }
 
 export async function fixture(generate: string) {
-  const f = await project({ ignore: "node_modules\n", policy: { migrationFinalization: {
+  const f = await project({ verify: recordCheckout, ignore: "node_modules\n", policy: { migrationFinalization: {
     mode: "late_bound_serialized", triggerPaths: ["schema"], artifactPaths: ["migrations"],
-    generate: { executable: "node", args: ["generate.mjs"] }, verify: { executable: "node", args: ["verify.mjs"] },
+    generate: { executable: "bun", args: ["generate.mjs"] }, verify: { executable: "bun", args: ["verify.mjs"] },
   } } });
   await write(f.repo, "schema/source", "old");
   await write(f.repo, "generate.mjs", generate);

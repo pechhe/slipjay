@@ -14,7 +14,7 @@ import { revisionFacts, workspaceContext } from "../../src/lib/infra/workspace-j
 import { workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { jj, project } from "../support/workspace-project.ts";
 import { landedHome } from "../../src/lib/workspace/workspace-paths.ts";
-import { isolateAdoptionFixtures, runCli, freezeLead, contribution, publishSource } from "./fixtures/workspace-adopt-fixture.ts";
+import { isolateAdoptionFixtures, freezeLead, contribution, publishSource } from "./fixtures/workspace-adopt-fixture.ts";
 import { seedWorkspace } from "./fixtures/workspace-generation.ts";
 
 isolateAdoptionFixtures();
@@ -42,7 +42,7 @@ for (const archival of ["cleanup", "prune"] as const) {
       assert.deepEqual(archived.adoptionCoverage, [{ workspaceName: helper.current.name, base, revisions: [revision] }]);
       assert.equal(await workspaceCoverage((await workspaceContext(helper.workspacePath))!, helper.current.name), "covered");
       assert.equal(await workspaceCoverage((await workspaceContext(review.workspacePath))!, review.current.name), "source-covered");
-      await runCli(f.repo, "remove", helper.workspacePath);
+      await removeWorkspace(f.repo, helper.current.name);
       await sweepDisposableWorkspaces(f.repo, { emptyIdleMs: 0, pruneState: false });
       assert.equal(existsSync(review.workspacePath), false);
     } finally { await f.dispose(); }
@@ -71,7 +71,7 @@ for (const path of ["remove", "prune", "cleanup", "new-work"] as const) {
       await removeWorkspace(f.repo, lead.current.name, { retainMaterial: true });
       await pruneWorkspaceState();
       assert.equal(await workspaceMetadata(lead.current.name), null);
-      if (path === "remove") await runCli(f.repo, "remove", helper.workspacePath);
+      if (path === "remove") await removeWorkspace(f.repo, helper.current.name);
       if (path === "prune") await sweepDisposableWorkspaces(f.repo, { emptyIdleMs: 0, issueClosed: () => false });
       if (path === "cleanup") assert.equal((await cleanupLandedWorkspace(helper.workspacePath)).cleaned, true);
       if (path === "new-work") {

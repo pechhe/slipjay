@@ -1,12 +1,21 @@
-import { withTestRunner } from "../support/test-runner.ts";
+import { landOnTestRunner, landThroughTestRunner, withTestRunner, type TestRunner } from "../support/test-runner.ts";
 import { project } from "../support/workspace-project.ts";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { onTestFailed, test } from "vite-plus/test";
 import { attachWorkspaceIssue } from "../../src/lib/workspace/workspace-state.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
-import { occupy, land } from "./fixtures/workspace-sweep-fixture.ts";
+import { occupy } from "./fixtures/workspace-sweep-fixture.ts";
 import { landedState } from "./fixtures/landed-state.ts";
+
+async function land(f: { root: string; repo: string; remote: string }, cwd: string, file: string, options: { keep?: boolean } = {}, runner?: TestRunner) {
+  await writeFile(join(cwd, file), `${file}\n`);
+  const result = runner ? await landOnTestRunner(runner, cwd, options) : await landThroughTestRunner(f, cwd, options);
+  assert.equal(result.ok, true, result.lines.join("\n"));
+  return result;
+}
 
 /**
  * Two landings sharing an in-process runner and joining the detached

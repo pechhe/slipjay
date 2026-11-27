@@ -12,6 +12,7 @@ import { frozenAdoptions, workspaceCoverage } from "../../src/lib/workspace/work
 import { jj, project } from "../support/workspace-project.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../../src/lib/landing/submission-adoptions.ts";
 import { isolateAdoptionFixtures, handoffFor, freezeLead, contribution, publishSource } from "./fixtures/workspace-adopt-fixture.ts";
+import { seedWorkspace } from "./fixtures/workspace-generation.ts";
 
 isolateAdoptionFixtures();
 
@@ -19,7 +20,7 @@ for (const removal of ["undo", "back-out"] as const) {
   test(`freeze drops an adoption removed by ${removal} and publication never covers its helper`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const { lead, helper, base, revision } = await contribution(f);
+      const { lead, helper, base, revision } = await contribution(f, seedWorkspace);
       await adoptWorkspace(lead.workspacePath, helper.workspacePath);
       if (removal === "undo") jj(lead.workspacePath, ["undo"]);
       else jj(lead.workspacePath, ["restore", "--from", base, "helper.txt"]);
@@ -43,7 +44,7 @@ for (const removal of ["undo", "back-out"] as const) {
 test("freeze consumes pending adoption once, replays it on retry, and does not resend it after publication", async () => {
   const f = await project({ policy: { spares: 0 } });
   try {
-    const { lead, helper, revision } = await contribution(f);
+    const { lead, helper, revision } = await contribution(f, seedWorkspace);
     await adoptWorkspace(lead.workspacePath, helper.workspacePath);
     await writeFile(join(lead.workspacePath, "helper.txt"), "reworked after adoption\n");
     const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
@@ -69,7 +70,7 @@ test("freeze consumes pending adoption once, replays it on retry, and does not r
 test("a replacement freeze carries unpublished adoptions and removes stale pending ownership", async () => {
   const f = await project({ policy: { spares: 0 } });
   try {
-    const { lead, helper, revision } = await contribution(f);
+    const { lead, helper, revision } = await contribution(f, seedWorkspace);
     await adoptWorkspace(lead.workspacePath, helper.workspacePath);
     const firstSource = (await revisionFacts(lead.workspacePath, "@")).commitId;
     await freezeLead(lead.workspacePath, firstSource, "failed");
@@ -97,7 +98,7 @@ test("a replacement freeze carries unpublished adoptions and removes stale pendi
 test("a queued replacement freezes both copies before submission and consumes the old one only on confirmed supersession", async () => {
   const f = await project({ policy: { spares: 0 } });
   try {
-    const { lead, helper, revision } = await contribution(f);
+    const { lead, helper, revision } = await contribution(f, seedWorkspace);
     await adoptWorkspace(lead.workspacePath, helper.workspacePath);
     const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
     const context = (await workspaceContext(lead.workspacePath))!;
@@ -139,7 +140,7 @@ test("a queued replacement freezes both copies before submission and consumes th
 test("an unaccepted replacement cannot resend a live or published predecessor's copied adoption", async () => {
   const f = await project({ policy: { spares: 0 } });
   try {
-    const { lead, helper, revision } = await contribution(f);
+    const { lead, helper, revision } = await contribution(f, seedWorkspace);
     await adoptWorkspace(lead.workspacePath, helper.workspacePath);
     const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
     const context = (await workspaceContext(lead.workspacePath))!;
@@ -173,7 +174,7 @@ test("an unaccepted replacement cannot resend a live or published predecessor's 
 test("frozen adoption records and handoffs share retention while unresolved submissions survive", async () => {
   const f = await project({ policy: { spares: 0 } });
   try {
-    const { lead } = await contribution(f);
+    const { lead } = await contribution(f, seedWorkspace);
     const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
     const keys = Array.from({ length: 40 }, (_, index) => `old-${index}`);
     const metadata = await workspaceMetadata(lead.current.name);

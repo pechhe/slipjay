@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { platform, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "vite-plus/test";
 
@@ -17,7 +17,21 @@ async function home(disk: unknown) {
   await writeFile(join(dir, ".slipjay", "config.json"), JSON.stringify({ disk }));
   return dir;
 }
-const cliRun = (dir: string, args: string[]) => spawnSync("bun", [cli, ...args], { cwd: dir, env: { ...process.env, HOME: dir }, encoding: "utf8", timeout: 60_000 });
+// Keep CLI tests off the real host's Docker daemon (`docker system df -v` takes ~12s/call on peach-box and
+// sanitizedProcessEnv strips DOCKER_HOST); Docker volume reading is unit-tested separately.
+function cliRun(dir: string, args: string[]) {
+  const stubBin = join(dir, ".stub-bin");
+  if (!existsSync(stubBin)) {
+    mkdirSync(stubBin, { recursive: true });
+    writeFileSync(join(stubBin, "docker"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  }
+  return spawnSync("bun", [cli, ...args], {
+    cwd: dir,
+    env: { ...process.env, HOME: dir, PATH: `${stubBin}${delimiter}${process.env.PATH ?? ""}` },
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+}
 const policy = (dir: string, thresholds: Record<string, number> = {}) => ({
   thresholds, ballast: { path: join(dir, "ballast"), bytes: 0 }, runRoot: join(dir, "runs"),
   scratchRoots: [{ path: join(dir, "tmp"), match: ["*-scratch"], ttlHours: 72 }], regenerable: [join(dir, "tmp", "cache")],

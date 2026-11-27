@@ -5,7 +5,7 @@ import type { createAuditScheduler } from "../release/audit-scheduler.ts";
 import type { runReset } from "../release/reset.ts";
 import type { ensureDeployCommit, ensureOnIntegrationBranch, prebuildRelease, runDeploy, schemaMayHaveChanged } from "../release/deploy.ts";
 import type { confirmRelease, passedVerification, planRelease, returnRelease, unverifiedCandidateReason, verifyRelease } from "../release/release.ts";
-import type { boundedKeys, boundedOutput, boundedTests, flakyVerifies, PREBUILD_KEY, runBatchCheck } from "../release/batch-check.ts";
+import type { createBatchOrchestrator } from "./queue-batch-orchestrator.ts";
 import type { machineBuildLease, machineConnections, machineVerification } from "./machine-verifier.ts";
 import type { hostMachine, openHostAttempt } from "./host-verifier.ts";
 
@@ -28,12 +28,7 @@ export type ReleaseCapability = {
 };
 
 export type BatchCapability = {
-  boundedKeys: typeof boundedKeys;
-  boundedOutput: typeof boundedOutput;
-  boundedTests: typeof boundedTests;
-  flakyVerifies: typeof flakyVerifies;
-  PREBUILD_KEY: typeof PREBUILD_KEY;
-  runBatchCheck: typeof runBatchCheck;
+  createBatchOrchestrator: typeof createBatchOrchestrator;
 };
 
 export type MaintenanceCapability = {

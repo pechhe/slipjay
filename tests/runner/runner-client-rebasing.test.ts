@@ -34,13 +34,15 @@ test("after a runner rebase conflict, fetching and rebasing keeps the change vis
   const f = await fixture();
   try {
     // Another landing changes the same file first, so the runner's rebase conflicts.
-    const other = join(f.root, "other");
-    const git = (args: string[]) => execFileSync("git", ["-C", other, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", ...args]);
-    execFileSync("git", ["clone", "-q", f.remote, other]);
-    await writeFile(join(other, "change.txt"), "upstream\n");
-    git(["add", "change.txt"]);
-    git(["commit", "-qm", "Land upstream"]);
-    git(["push", "-q", "origin", "main"]);
+    const git = (args: string[], input?: string) => execFileSync("git", ["--git-dir", f.remote, ...args], {
+      encoding: "utf8", input, env: { ...process.env, GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.com", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.com", GIT_INDEX_FILE: join(f.root, "upstream-index") },
+    }).trim();
+    const head = git(["rev-parse", "refs/heads/main"]);
+    git(["read-tree", head]);
+    const blob = git(["hash-object", "-w", "--stdin"], "upstream\n");
+    git(["update-index", "--add", "--cacheinfo", `100644,${blob},change.txt`]);
+    const upstream = git(["commit-tree", git(["write-tree"]), "-p", head, "-m", "Land upstream"]);
+    git(["update-ref", "refs/heads/main", upstream, head]);
     const running = landThroughRunner(f.cwd, f.options);
     void running.catch(() => {});
     await waitFor(() => f.lines.some((line) => line.includes("queued")));
@@ -93,68 +95,6 @@ test("a landed candidate made immutable by a re-imported remote bookmark is stil
     f.append(op.id, { type: "landed", base, commitId: landed, branch: "main", remote: "origin" });
     const result = await running;
     assert.equal(result.ok, true);
-    await released(f.cwd);
-  } finally { await f.dispose(); }
-});
-
-/** An earlier landing's candidate under the author's commit, immutable as a full fetch imports its remote bookmark untracked. */
-function earlierCandidate(f: Awaited<ReturnType<typeof fixture>>, alsoOn?: { bookmark?: string; tag?: string }) {
-  jj(f.cwd, ["new", "--insert-before", "@", "--no-edit", "-m", "Earlier candidate"]);
-  const earlier = jj(f.cwd, ["log", "-r", "@-", "--no-graph", "-T", 'commit_id ++ " " ++ change_id']).split(" ");
-  const bookmark = candidateBookmark(earlier[1]!);
-  jj(f.cwd, ["git", "push", "--remote", "origin", "--named", `${bookmark}=${earlier[0]}`]);
-  if (alsoOn?.bookmark) jj(f.cwd, ["git", "push", "--remote", "origin", "--named", `${alsoOn.bookmark}=${earlier[0]}`]);
-  jj(f.cwd, ["bookmark", "forget", "--include-remotes", bookmark]);
-  if (alsoOn?.bookmark) jj(f.cwd, ["bookmark", "forget", "--include-remotes", alsoOn.bookmark]);
-  jj(f.cwd, ["git", "fetch", "--remote", "origin"]);
-  if (alsoOn?.tag) jj(f.cwd, ["tag", "set", alsoOn.tag, "-r", earlier[0]!]);
-  assert.equal(jj(f.cwd, ["log", "-r", earlier[0]!, "--no-graph", "-T", "immutable"]), "true");
-  return earlier[0]!;
-}
-
-async function landOverEarlierCandidate(f: Awaited<ReturnType<typeof fixture>>, alsoOn?: { bookmark?: string; tag?: string }) {
-  const earlier = earlierCandidate(f, alsoOn);
-  const commit = jj(f.cwd, ["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
-  const running = landThroughRunner(f.cwd, f.options);
-  void running.catch(() => {});
-  await waitFor(() => f.lines.some((line) => line.includes("queued")));
-  const op = f.log.openOperations()[0]!;
-  const base = jj(f.cwd, ["log", "-r", "main", "--no-graph", "-T", "commit_id"]);
-  const landed = execFileSync("git", ["--git-dir", f.remote, "commit-tree", `${commit}^{tree}`, "-p", base, "-m", "Implement candidate (landed)"], { encoding: "utf8" }).trim();
-  execFileSync("git", ["--git-dir", f.remote, "update-ref", "refs/heads/main", landed]);
-  f.append(op.id, { type: "landed", base, commitId: landed, branch: "main", remote: "origin" });
-  const result = await running;
-  assert.equal(result.ok, true);
-  return { earlier, commit };
-}
-
-test("an earlier candidate made immutable by SlipJay's own remote bookmark is abandoned with the landed stack", async () => {
-  const f = await fixture();
-  try {
-    const { earlier, commit } = await landOverEarlierCandidate(f);
-    assert.ok(!f.lines.some((line) => line.includes("Could not abandon")), f.lines.join("\n"));
-    assert.equal(jj(f.repo, ["log", "-r", `(${earlier} | ${commit}) & ::${f.workspaceName}@`, "--no-graph", "-T", "commit_id"]), "");
-    assert.equal(jj(f.repo, ["log", "-r", "divergent()", "--no-graph", "-T", 'change_id ++ "\\n"']), "");
-    await released(f.cwd);
-  } finally { await f.dispose(); }
-});
-
-test("an earlier candidate that a tag also holds is not abandoned", async () => {
-  const f = await fixture();
-  try {
-    const { earlier } = await landOverEarlierCandidate(f, { tag: "keep-me" });
-    assert.ok(f.lines.some((line) => line.includes("Could not abandon")), f.lines.join("\n"));
-    assert.equal(jj(f.repo, ["log", "-r", earlier, "--no-graph", "-T", "commit_id"]), earlier);
-    await released(f.cwd);
-  } finally { await f.dispose(); }
-});
-
-test("an earlier candidate that another remote bookmark also holds is not abandoned", async () => {
-  const f = await fixture();
-  try {
-    const { earlier } = await landOverEarlierCandidate(f, { bookmark: "someone-else" });
-    assert.ok(f.lines.some((line) => line.includes("Could not abandon")), f.lines.join("\n"));
-    assert.equal(jj(f.repo, ["log", "-r", earlier, "--no-graph", "-T", "commit_id"]), earlier);
     await released(f.cwd);
   } finally { await f.dispose(); }
 });

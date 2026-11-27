@@ -631,6 +631,8 @@ type LandOptions = { direct?: boolean; skipPreflight?: boolean; handoff?: Submis
   submitOnly?: boolean;
   /** Follow this commit's submitted landing, or report its last outcome; never submit. */
   followOnly?: boolean;
+  /** Override the 5s timeout for best-effort client-fact telemetry (tests). */
+  factTimeoutMs?: number;
   onLine?(line: string): void; onStage?(stage: string): void; onOperation?(operationId: string): void; signal?: AbortSignal };
 /** A landing's detached housekeeping (`startLandedHousekeeping`): its process and log, or why it did not start. */
 type LandedHousekeeping = { started: boolean; pid?: number; logPath?: string; reason?: string };
@@ -858,7 +860,7 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
     }
     await rememberOperationRunner(operation.id, location);
     // A client fact is telemetry: a slow or unreachable runner must not end a landing it already holds.
-    await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached }).catch((error: unknown) =>
+    await postClientFact(baseUrl, token, operation.id, { kind: "land_follow", reattached }, undefined, options.factTimeoutMs).catch((error: unknown) =>
       onLine(`warning: the runner did not record this follow-up (${error instanceof Error ? error.message : String(error)}); the landing is still followed here`));
     options.onOperation?.(operation.id);
     // The runner holds a landing it has admitted (Build answers admission before the submission is acknowledged),
@@ -970,9 +972,9 @@ async function submitAndFollow(cwd: string, options: LandOptions, progress: { en
   } finally { connection.close(); }
 }
 
-async function postClientFact(baseUrl: string, token: string, id: string, fact: ClientFact, eventId: string = randomUUID()): Promise<void> {
+async function postClientFact(baseUrl: string, token: string, id: string, fact: ClientFact, eventId: string = randomUUID(), timeoutMs = 5000): Promise<void> {
   const response = await request(baseUrl, token, `/v1/operations/${encodeURIComponent(id)}/events`, { method: "POST",
-    signal: AbortSignal.timeout(5000), headers: { "content-type": "application/json" }, body: JSON.stringify({ id: eventId, fact }) });
+    signal: AbortSignal.timeout(timeoutMs), headers: { "content-type": "application/json" }, body: JSON.stringify({ id: eventId, fact }) });
   if (!response.ok) throw new Error(`Runner refused client event (${response.status})`);
   const acknowledgement = await response.json() as { event?: StoredEvent };
   if (acknowledgement.event?.event.type !== "client" || acknowledgement.event.event.id !== eventId)

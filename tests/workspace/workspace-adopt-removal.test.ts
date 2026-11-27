@@ -57,11 +57,17 @@ for (const resolution of ["closed", "discard", "unbound-cleanup"] as const) {
         assert.equal(existsSync(review.workspacePath), false);
         return;
       }
-      await assert.rejects(runCli(f.repo, "remove", review.workspacePath), /Issue|issue/);
-      await sweepDisposableWorkspaces(f.repo, { pruneState: false, emptyIdleMs: 0, issueClosed: () => false });
-      assert.equal(existsSync(review.workspacePath), true);
-      if (resolution === "closed") await sweepDisposableWorkspaces(f.repo, { pruneState: false, emptyIdleMs: 0, issueClosed: () => true });
-      else await runCli(f.repo, "remove", "--discard", review.workspacePath);
+      if (resolution === "closed") {
+        await assert.rejects(removeWorkspace(f.repo, review.current.name), /Issue|issue/);
+        await sweepDisposableWorkspaces(f.repo, { pruneState: false, emptyIdleMs: 0, issueClosed: () => false });
+        assert.equal(existsSync(review.workspacePath), true);
+        await sweepDisposableWorkspaces(f.repo, { pruneState: false, emptyIdleMs: 0, issueClosed: () => true });
+      } else {
+        await assert.rejects(runCli(f.repo, "remove", review.workspacePath), /Issue|issue/);
+        await sweepDisposableWorkspaces(f.repo, { pruneState: false, emptyIdleMs: 0, issueClosed: () => false });
+        assert.equal(existsSync(review.workspacePath), true);
+        await runCli(f.repo, "remove", "--discard", review.workspacePath);
+      }
       assert.equal(existsSync(review.workspacePath), false);
     } finally { await f.dispose(); }
   });
@@ -98,19 +104,20 @@ test("explicit discard retains pending runner facts and unique files", async () 
   } finally { await f.dispose(); }
 });
 
-for (const kind of ["unbound", "issue", "landed"] as const) {
-  test(`remove --discard explicitly removes ${kind} unlanded work`, async () => {
-    const f = await project({ policy: { spares: 0 } });
-    try {
+test("remove --discard explicitly removes unbound, issue, and landed unlanded work", async () => {
+  const f = await project({ policy: { spares: 0 } });
+  try {
+    for (const kind of ["unbound", "issue", "landed"] as const) {
       // A live landing's detached housekeeping holds the directory, so the landed
       // case seeds that state directly (see landedState's coverage contract).
       const workspace = kind === "landed" ? await landedState(f, `discard ${kind}`) : await createWorkspace(`discard ${kind}`, f.repo);
       if (kind === "issue") await attachWorkspaceIssue(workspace.workspacePath, 123);
       await writeFile(join(workspace.workspacePath, "new.txt"), "unlanded\n");
       jj(workspace.workspacePath, ["describe", "-m", "Unlanded work"]);
-      await assert.rejects(runCli(f.repo, "remove", workspace.workspacePath), /Kept/);
+      if (kind === "unbound") await assert.rejects(runCli(f.repo, "remove", workspace.workspacePath), /Kept/);
+      else await assert.rejects(removeWorkspace(f.repo, workspace.current.name), /unlanded work/);
       await runCli(f.repo, "remove", "--discard", workspace.workspacePath);
       assert.equal(existsSync(workspace.workspacePath), false);
-    } finally { await f.dispose(); }
-  }, 180_000);
-}
+    }
+  } finally { await f.dispose(); }
+}, 180_000);

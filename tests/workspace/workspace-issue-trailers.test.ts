@@ -11,37 +11,30 @@ import { removeWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts"
 import { jj, project } from "../support/workspace-project.ts";
 import { fixtureJjSetting, setFixtureJjSetting } from "../support/jj-user-config.ts";
 
-test.each(["attach", "bind"] as const)("an unclaimed spare refuses an item via %s without writing config or leaking a trailer", async (method) => {
+test("an unclaimed spare refuses an item via attach or bind without writing config or leaking a trailer", async () => {
   const f = await project({ policy: { tracker: "forge", spares: 1 } });
   try {
     const spare = await provisionSpare(f.repo);
-    assert.ok(spare.provisioned);
-    assert.ok("workspacePath" in spare);
-    assert.ok(spare.workspacePath);
-    assert.ok(spare.name);
-    const item = method === "attach" ? 6191 : 6192;
+    assert.ok(spare.provisioned && "workspacePath" in spare && spare.workspacePath && spare.name);
     const before = await workspaceMetadata(spare.name);
     const config = jj(spare.workspacePath, ["config", "list", "--workspace", KEY, "-T", "name"]);
-    const sparePath = spare.workspacePath;
-    const attach = () => method === "attach"
-      ? attachWorkspaceIssue(sparePath, item)
-      : createWorkspace("Item inside spare", sparePath, { issueNumber: item });
-    await assert.rejects(attach, new RegExp(`unclaimed pool spare.*slipjay start --integration --issue ${item}`));
-    assert.deepEqual(await workspaceMetadata(spare.name), before);
-    assert.equal(jj(spare.workspacePath, ["config", "list", "--workspace", KEY, "-T", "name"]), config);
     assert.equal(config, "");
+    await assert.rejects(() => attachWorkspaceIssue(spare.workspacePath!, 6191), /unclaimed pool spare.*slipjay start --integration --issue 6191/);
+    await assert.rejects(() => createWorkspace("Item inside spare", spare.workspacePath!, { issueNumber: 6192 }), /unclaimed pool spare.*slipjay start --integration --issue 6192/);
+    assert.deepEqual(await workspaceMetadata(spare.name), before);
+    assert.equal(jj(spare.workspacePath, ["config", "list", "--workspace", KEY, "-T", "name"]), "");
     jj(spare.workspacePath, ["describe", "-m", "Still a spare"]);
     assert.equal(description(spare.workspacePath), "Still a spare");
-    const claimed = await createWorkspace(`no-item-after-${method}`, f.repo);
+    const claimed = await createWorkspace("no-item-after-refusal", f.repo);
     assert.equal(claimed.workspacePath, spare.workspacePath);
     jj(claimed.workspacePath, ["describe", "-m", "Unbound claim"]);
     assert.equal(description(claimed.workspacePath), "Unbound claim");
     // The refusal is for an unclaimed spare only: a start that claims one for an item still gets its trailer.
     await provisionSpare(f.repo);
-    const forItem = await createWorkspace(`item-claims-spare-${method}`, f.repo, { issueNumber: item });
+    const forItem = await createWorkspace("item-claims-spare", f.repo, { issueNumber: 6191 });
     assert.equal(forItem.pooled, true);
     jj(forItem.workspacePath, ["describe", "-m", "Item claim"]);
-    assert.equal(description(forItem.workspacePath), `Item claim\n\nForge: #${item}`);
+    assert.equal(description(forItem.workspacePath), "Item claim\n\nForge: #6191");
   } finally { await f.dispose(); }
 }, 120_000);
 
@@ -110,7 +103,7 @@ test("describe and commit add the item with both messages and an editor", async 
     const a = await createWorkspace("editor-trailers", f.repo, { issueNumber: 6131 });
     const editor = join(f.root, "editor.cjs");
     await writeFile(editor, 'const fs = require("node:fs"); const path = process.argv[2]; fs.writeFileSync(path, fs.readFileSync(path, "utf8").replace(/^[^\\n]*/, "Edited subject"));');
-    const edit = ["--config", `ui.editor=${JSON.stringify(["node", editor])}`];
+    const edit = ["--config", `ui.editor=${JSON.stringify(["bun", editor])}`];
     jj(a.workspacePath, [...edit, "describe"]);
     assert.equal(description(a.workspacePath), "Edited subject\n\nForge: #6131");
     for (const args of [["commit", "-m", "Commit subject"], [...edit, "commit"]]) {
@@ -147,21 +140,25 @@ test.each(["release", "cleanup"] as const)("%s discards the item checkout: its n
   } finally { await f.dispose(); }
 }, 120_000);
 
-test.each(["scope", "write"] as const)("refused workspace config %s never blocks start or attachment", async (failure) => {
+test("refused workspace config scope or write never blocks start or attachment", async () => {
   const f = await project({ policy: { tracker: "build" } });
   const original = commands.jj;
+  let failure: "scope" | "write" = "scope";
   const spy = vi.spyOn(commands, "jj").mockImplementation(async (cwd, args, ...rest) => {
     if (args.includes("--workspace") && (failure === "scope" || args.includes("set"))) throw new Error("workspace config unavailable");
     return original(cwd, args, ...rest);
   });
   try {
-    const item = failure === "scope" ? 6161 : 6171;
-    const started = await createWorkspace(`config-refused-${failure}`, f.repo, { issueNumber: item });
-    jj(started.workspacePath, ["describe", "-m", "Still works"]);
-    assert.equal(description(started.workspacePath), "Still works");
-    const attached = await createWorkspace(`attach-config-refused-${failure}`, f.repo);
-    await attachWorkspaceIssue(attached.workspacePath, item + 1);
-    jj(attached.workspacePath, ["describe", "-m", "Still attaches"]);
-    assert.equal(description(attached.workspacePath), "Still attaches");
+    for (const mode of ["scope", "write"] as const) {
+      failure = mode;
+      const item = mode === "scope" ? 6161 : 6171;
+      const started = await createWorkspace(`config-refused-${mode}`, f.repo, { issueNumber: item });
+      jj(started.workspacePath, ["describe", "-m", "Still works"]);
+      assert.equal(description(started.workspacePath), "Still works");
+      const attached = await createWorkspace(`attach-config-refused-${mode}`, f.repo);
+      await attachWorkspaceIssue(attached.workspacePath, item + 1);
+      jj(attached.workspacePath, ["describe", "-m", "Still attaches"]);
+      assert.equal(description(attached.workspacePath), "Still attaches");
+    }
   } finally { spy.mockRestore(); await f.dispose(); }
 }, 120_000);

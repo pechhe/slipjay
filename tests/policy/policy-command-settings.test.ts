@@ -7,7 +7,7 @@ import { jj, project } from "../support/workspace-project.ts";
 import { withTestRunner } from "../support/test-runner.ts";
 import { slowGate } from "./fixtures/policy-command-fixture.ts";
 
-test("policy set lands settings without the landing check, and a second clone reads them after fetch", async () => {
+test("policy set refuses invalid fields, lands settings without the landing check, and a second clone reads them after fetch", async () => {
   const f = await project({ verify: slowGate, policy: { parallelExecution: true } });
   try {
     await withTestRunner(f, async ({ location, env }) => {
@@ -15,6 +15,18 @@ test("policy set lands settings without the landing check, and a second clone re
       assert.deepEqual(before.settings.spares, 1);
       assert.equal(before.settings.process, "standard");
       assert.deepEqual(before.retired, ["parallelExecution"]);
+
+      // Refusals and unrunnable checks leave the repository unchanged before any settings land.
+      const outside = await setPolicy(f.repo, { base: before.revision, patch: { releaseBranch: "release" }, location, env });
+      assert.deepEqual(outside.phase, "refused");
+      assert.match(outside.phase === "refused" ? outside.reason : "", /refused releaseBranch/);
+      const invalid = await setPolicy(f.repo, { base: before.revision, patch: { process: "minimal" }, location, env });
+      assert.equal(invalid.phase, "refused");
+      const missing = await setPolicy(f.repo, { base: before.revision, patch: { requiredLandingVerification: [{ executable: "slipjay-no-such-tool", args: [] }] }, location, env });
+      assert.equal(missing.phase, "rejected", JSON.stringify(missing));
+      assert.match(missing.phase === "rejected" ? missing.reason : "", /does not resolve on the runner host/);
+      assert.equal((await showPolicy(f.repo)).revision, before.revision);
+
       const started = Date.now();
       const result = await setPolicy(f.repo, { base: before.revision, patch: { spares: 3, process: "light" }, location, env });
       assert.equal(result.phase, "landed", JSON.stringify(result));
@@ -39,24 +51,6 @@ test("policy set lands settings without the landing check, and a second clone re
       const stale = await setPolicy(f.repo, { base: before.revision, patch: { spares: 2 }, location, env });
       assert.equal(stale.phase, "refused");
       assert.match(stale.phase === "refused" ? stale.reason : "", /Stale base/);
-    });
-  } finally { await f.dispose(); }
-}, 180_000);
-
-test("policy set refuses fields outside the settings and checks it cannot run, distinguishing refusal from failure", async () => {
-  const f = await project({ verify: slowGate });
-  try {
-    await withTestRunner(f, async ({ location, env }) => {
-      const { revision } = await showPolicy(f.repo);
-      const outside = await setPolicy(f.repo, { base: revision, patch: { releaseBranch: "release" }, location, env });
-      assert.deepEqual(outside.phase, "refused");
-      assert.match(outside.phase === "refused" ? outside.reason : "", /refused releaseBranch/);
-      const invalid = await setPolicy(f.repo, { base: revision, patch: { process: "minimal" }, location, env });
-      assert.equal(invalid.phase, "refused");
-      const missing = await setPolicy(f.repo, { base: revision, patch: { requiredLandingVerification: [{ executable: "slipjay-no-such-tool", args: [] }] }, location, env });
-      assert.equal(missing.phase, "rejected", JSON.stringify(missing));
-      assert.match(missing.phase === "rejected" ? missing.reason : "", /does not resolve on the runner host/);
-      assert.equal((await showPolicy(f.repo)).revision, revision);
     });
   } finally { await f.dispose(); }
 }, 180_000);

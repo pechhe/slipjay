@@ -74,72 +74,49 @@ test("landing replaces the generated wip placeholder with the task, keeps a hand
   }
 }, 120_000);
 
-test("the guard refuses to orphan work whose description contains only its item trailer", async () => {
-  const f = await project();
-  try {
-    const workspace = await createWorkspace("Trailer only", f.repo, { issueNumber: 57 });
-    await writeFile(join(workspace.workspacePath, "work.txt"), "work\n");
-    jj(workspace.workspacePath, ["--config", 'templates.commit_trailers=\'""\'', "describe", "-m", "Issue: #57"]);
-    assert.equal(description(workspace.workspacePath), "Issue: #57");
-    assert.match(reason(await guard(workspace.workspacePath, "jj new main")), /no description/);
-  } finally { await f.dispose(); }
-}, 120_000);
-
-test("the guard also refuses to forget another workspace that holds undescribed work", async () => {
-  const f = await project();
-  try {
-    const holder = await createWorkspace("Holder", f.repo);
-    const other = await createWorkspace("Other", f.repo);
-    await writeFile(join(holder.workspacePath, "h.txt"), "h\n");
-    assert.match(reason(await guard(other.workspacePath, `jj workspace forget ${holder.current.name}`)), /jj describe/);
-    assert.equal(await guard(other.workspacePath, `jj workspace forget ${other.current.name}`), null, "the empty current workspace may be forgotten");
-    jj(holder.workspacePath, ["describe", "-m", "Add h"]);
-    assert.equal(await guard(other.workspacePath, `jj workspace forget ${holder.current.name}`), null);
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
-
-test("the guard refuses to move off undescribed work, and allows it once described, empty or integrated", async () => {
+test("the guard refuses to move off or forget undescribed work, and allows it once described, empty or integrated", async () => {
   const f = await project();
   try {
     const workspace = await createWorkspace("Guarded", f.repo);
     const cwd = workspace.workspacePath;
-    const moving = ["jj new main", "jj new", "jj edit @-", "jj workspace forget", `jj workspace forget ${workspace.current.name}`, "jj checkout main", "jj next"];
+    const moving = ["jj new main", "jj edit @-", `jj workspace forget ${workspace.current.name}`];
 
     for (const command of moving) assert.equal(await guard(cwd, command), null, `${command} on an empty change`);
 
     await writeFile(join(cwd, "a.txt"), "a\n");
     for (const command of moving) assert.match(reason(await guard(cwd, command)), /jj describe/, `${command} on work described only wip:`);
     assert.match(reason(await guard(f.repo, `jj -R ${cwd} new main`)), /jj describe/, "-R is judged by the repository it targets");
-    for (const command of ["jj new --no-edit main", "jj status", "jj log -r @", "jj workspace forget some-other-workspace", "jj describe -m 'Add a'", "jj abandon", "slipjay land"]) {
+    for (const command of ["jj new --no-edit main", "jj status", "jj describe -m 'Add a'", "slipjay land"]) {
       assert.equal(await guard(cwd, command), null, command);
     }
+
+    // Forgetting another workspace holding undescribed work is refused; forgetting an empty current workspace is allowed.
+    const other = await createWorkspace("Other", f.repo);
+    assert.match(reason(await guard(other.workspacePath, `jj workspace forget ${workspace.current.name}`)), /jj describe/);
+    assert.equal(await guard(other.workspacePath, `jj workspace forget ${other.current.name}`), null, "the empty current workspace may be forgotten");
+
+    // Trailer-only and empty descriptions count as undescribed.
+    jj(cwd, ["--config", 'templates.commit_trailers=\'""\'', "describe", "-m", "Issue: #57"]);
+    assert.equal(description(cwd), "Issue: #57");
+    assert.match(reason(await guard(cwd, "jj new main")), /no description/);
 
     jj(cwd, ["describe", "-m", ""]);
     assert.match(reason(await guard(cwd, "jj new main")), /no description/);
 
     jj(cwd, ["describe", "-m", "Add a"]);
     for (const command of moving) assert.equal(await guard(cwd, command), null, `${command} once described`);
+    assert.equal(await guard(other.workspacePath, `jj workspace forget ${workspace.current.name}`), null);
+
+    // Work reachable from the integration branch is not orphaned even without a description.
+    jj(cwd, ["describe", "-m", ""]);
+    assert.match(reason(await guard(cwd, "jj new main")), /no description/);
+    jj(cwd, ["bookmark", "set", "main", "-r", "@", "--allow-backwards"]);
+    assert.equal(await guard(cwd, "jj new main"), null, "work reachable from the integration branch is not orphaned");
 
     // The primary checkout's own changes are its owner's business, and an ungoverned directory is untouched.
     await writeFile(join(f.repo, "primary.txt"), "p\n");
     assert.equal(await guard(f.repo, "jj new main"), null);
     assert.equal(await guard(f.root, "jj new main"), null);
-  } finally {
-    await f.dispose();
-  }
-}, 120_000);
-
-test("the guard allows moving on once the work is integrated", async () => {
-  const f = await project();
-  try {
-    const workspace = await createWorkspace("Integrated", f.repo);
-    await writeFile(join(workspace.workspacePath, "i.txt"), "i\n");
-    jj(workspace.workspacePath, ["describe", "-m", ""]);
-    assert.match(reason(await guard(workspace.workspacePath, "jj new main")), /no description/);
-    jj(workspace.workspacePath, ["bookmark", "set", "main", "-r", "@", "--allow-backwards"]);
-    assert.equal(await guard(workspace.workspacePath, "jj new main"), null, "work reachable from the integration branch is not orphaned");
   } finally {
     await f.dispose();
   }

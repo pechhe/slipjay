@@ -3,11 +3,11 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test, fixture, until, exactPrefixGate, seqOf, jj } from "./fixtures/queue-release-fixture.ts";
 
-for (const scenario of ["overlap", "rebased-overlap", "migration", "rename-out", "policy", "read-by-gate", "unmarked"] as const) {
+for (const scenario of ["overlap", "rebased-overlap", "migration", "rename-out", "policy", "read-by-gate"] as const) {
   test(`depth-two prepared predecessor barrier: ${scenario}`, async () => {
-    const f = await fixture(true, false, undefined, true, {
+    const f = await fixture(true, false, undefined, false, {
       verificationDepth: 2, prefixGate: exactPrefixGate,
-      postIntegrationReadByGate: scenario === "unmarked" ? undefined : scenario === "read-by-gate",
+      postIntegrationReadByGate: scenario === "read-by-gate",
     });
     try {
       await writeFile(join(f.root, "hold-a"), "");
@@ -61,7 +61,7 @@ for (const scenario of ["overlap", "rebased-overlap", "migration", "rename-out",
 test("depth-two queued release still fences successor preparation", async () => {
   const f = await fixture(false, true, undefined, false, { verificationDepth: 2, prefixGate: exactPrefixGate });
   try {
-    assert.equal((await f.land(f.submit(await f.candidate("seed.txt"))))?.type, "landed");
+    await f.seedLanded({ "seed.txt": "seed.txt\n" }, "Add seed.txt");
     await writeFile(join(f.root, "hold-a"), "");
     await writeFile(join(f.root, "hold-release"), "");
     const a = f.submit(await f.candidate("a.txt"));

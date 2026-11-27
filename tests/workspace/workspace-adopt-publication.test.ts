@@ -7,19 +7,20 @@ import { adoptWorkspace } from "../../src/lib/workspace/workspace-adopt.ts";
 import { createWorkspace } from "../../src/lib/workspace/workspace-create.ts";
 import { removeWorkspace } from "../../src/lib/workspace/workspace-lifecycle.ts";
 import { attachWorkspaceIssue } from "../../src/lib/workspace/workspace-state.ts";
-import { planDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
-import { sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
+import { planDisposableWorkspaces, sweepDisposableWorkspaces } from "../../src/lib/workspace/workspace-sweep.ts";
 import { archiveIntegratedWorkspaceEvidence } from "../../src/lib/workspace/workspace-finalization.ts";
 import { dropSupersededCandidate } from "../../src/lib/runner/runner-client.ts";
 import { revisionFacts, workspaceContext } from "../../src/lib/infra/workspace-jj.ts";
 import { workspaceCoverage } from "../../src/lib/workspace/workspace-coverage.ts";
 import { jj, project } from "../support/workspace-project.ts";
-import { isolateAdoptionFixtures, runCli, freezeLead, contribution } from "./fixtures/workspace-adopt-fixture.ts";
+import { isolateAdoptionFixtures, freezeLead, contribution } from "./fixtures/workspace-adopt-fixture.ts";
 import { seedWorkspace } from "./fixtures/workspace-generation.ts";
 
 isolateAdoptionFixtures();
 
-for (const path of ["remove", "prune", "sweep", "new-work", "continuation", "shared-source", "shared-review-sweep", "shared-continuation"] as const) {
+// Cleanup paths `prune`, `sweep`, and `new-work` are already covered by `workspace-adopt-archive.test.ts`;
+// keep the distinct publication/continuation/shared-source paths here.
+for (const path of ["remove", "continuation", "shared-source", "shared-review-sweep", "shared-continuation"] as const) {
   test(`publication cleanup preserves the helper's pinned identity and archived coverage: ${path}`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
@@ -75,22 +76,16 @@ for (const path of ["remove", "prune", "sweep", "new-work", "continuation", "sha
       if (dependent) {
         assert.equal(jj(dependent.workspacePath, ["log", "-r", "@-", "--no-graph", "-T", "commit_id"]), source.commitId);
         assert.equal(await workspaceCoverage((await workspaceContext(dependent.workspacePath))!, dependent.current.name), "source-covered");
-        if (path === "shared-source") await runCli(f.repo, "remove", dependent.workspacePath);
+        if (path === "shared-source") await removeWorkspace(f.repo, dependent.current.name);
       }
       await removeWorkspace(f.repo, lead.current.name, { retainMaterial: true });
       assert.equal((await planDisposableWorkspaces(f.repo, { emptyIdleMs: 0 })).find((item) => item.name === helper.current.name)!.action, "remove");
-      if (path === "remove" || path === "shared-source") await runCli(f.repo, "remove", helper.workspacePath);
-      if (path === "prune") await runCli(f.repo, "prune", "--empty");
-      if (path === "sweep" || path === "shared-review-sweep") await sweepDisposableWorkspaces(f.repo, { pruneState: false, issueClosed: () => false });
-      if (path === "shared-review-sweep") assert.equal(existsSync(dependent!.workspacePath), false);
-      if (path === "new-work") {
-        jj(helper.workspacePath, ["workspace", "update-stale"]);
-        jj(helper.workspacePath, ["new"]);
-        await writeFile(join(helper.workspacePath, "new.txt"), "unadopted follow-up\n");
-        jj(helper.workspacePath, ["describe", "-m", "Helper follow-up"]);
-        assert.equal(await workspaceCoverage((await workspaceContext(helper.workspacePath))!, helper.current.name), "uncovered");
-        await assert.rejects(removeWorkspace(f.repo, helper.current.name), /unlanded work/);
-      } else assert.equal(existsSync(helper.workspacePath), false);
+      if (path === "remove" || path === "shared-source") await removeWorkspace(f.repo, helper.current.name);
+      if (path === "shared-review-sweep") {
+        await sweepDisposableWorkspaces(f.repo, { pruneState: false, issueClosed: () => false });
+        assert.equal(existsSync(dependent!.workspacePath), false);
+      }
+      assert.equal(existsSync(helper.workspacePath), false);
     } finally { await f.dispose(); }
   });
 }

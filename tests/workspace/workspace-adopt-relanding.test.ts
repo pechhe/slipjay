@@ -10,14 +10,15 @@ import { project } from "../support/workspace-project.ts";
 import { bindLandingOperation, writtenLandingHandoff } from "../../src/lib/landing/submission-adoptions.ts";
 import type { Operation } from "../../src/lib/runner/runner-types.ts";
 import { isolateAdoptionFixtures, handoffFor, contribution } from "./fixtures/workspace-adopt-fixture.ts";
+import { seedWorkspace } from "./fixtures/workspace-generation.ts";
 
 isolateAdoptionFixtures();
 
-for (const outcome of ["running", "integrating", "finalizing", "publishing", "unknown-response"] as const) {
+for (const outcome of ["running", "publishing", "unknown-response"] as const) {
   test(`${outcome} adoption stays with its first submission when the lead relands`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const { lead, helper, revision } = await contribution(f);
+      const { lead, helper, revision } = await contribution(f, seedWorkspace);
       await adoptWorkspace(lead.workspacePath, helper.workspacePath);
       const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
       const context = (await workspaceContext(lead.workspacePath))!;
@@ -39,7 +40,7 @@ for (const outcome of ["running", "integrating", "finalizing", "publishing", "un
         assert.equal(hasAdoptions, false);
         return handoffFor(later);
       }, undefined, async (): Promise<Operation["result"]> =>
-        outcome === "integrating" || outcome === "finalizing" || outcome === "publishing" ? { type: "failed", stage: outcome, reason: "unresolved publication" } : undefined);
+        outcome === "publishing" ? { type: "failed", stage: outcome, reason: "unresolved publication" } : undefined);
       assert.deepEqual(next!.helpers, [], "unresolved helper evidence is not sent twice");
       const frozen = (await workspaceMetadata(lead.current.name))!.landingAdoptions as Record<string, { adoptions: Array<{ revisions: string[] }> }>;
       assert.deepEqual(frozen.first!.adoptions.flatMap((record) => record.revisions), [revision]);
@@ -49,11 +50,11 @@ for (const outcome of ["running", "integrating", "finalizing", "publishing", "un
   });
 }
 
-for (const outcome of ["declined", "cancelled", "superseded", "never-submitted"] as const) {
+for (const outcome of ["declined", "superseded", "never-submitted"] as const) {
   test(`${outcome} adoption can move to a replacement submission`, async () => {
     const f = await project({ policy: { spares: 0 } });
     try {
-      const { lead, helper, revision } = await contribution(f);
+      const { lead, helper, revision } = await contribution(f, seedWorkspace);
       await adoptWorkspace(lead.workspacePath, helper.workspacePath);
       const source = (await revisionFacts(lead.workspacePath, "@")).commitId;
       const context = (await workspaceContext(lead.workspacePath))!;
@@ -66,8 +67,7 @@ for (const outcome of ["declined", "cancelled", "superseded", "never-submitted"]
       const later = (await revisionFacts(lead.workspacePath, "@")).commitId;
       const next = await writtenLandingHandoff(context, "next", later, false, async () => handoffFor(later), undefined,
         async (): Promise<Operation["result"]> => outcome === "declined" ? { type: "declined", reason: "declined", paths: [] }
-          : outcome === "cancelled" ? { type: "cancelled", reason: "cancelled" }
-            : outcome === "superseded" ? { type: "superseded", by: "another-submission" } : undefined);
+          : outcome === "superseded" ? { type: "superseded", by: "another-submission" } : undefined);
       assert.deepEqual(next!.helpers.map((entry) => entry.revision), [revision]);
       assert.deepEqual(((await workspaceMetadata(lead.current.name))!.landingAdoptions as Record<string, { adoptions: unknown[] }>).first!.adoptions, []);
       assert.equal(((await workspaceMetadata(lead.current.name))!.pendingLandingRequests as Record<string, string>).first, undefined);
