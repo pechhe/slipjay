@@ -47,7 +47,8 @@ export const runnerConfigProblem = (config: RunnerConfig): string | null => {
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && repo.lane !== undefined)) return `Depth-two verification requires an isolated repository lane`;
   if (Object.values(config.repos).some((repo) => repo.screeningLanes !== undefined && !(Number.isSafeInteger(repo.screeningLanes) && repo.screeningLanes >= 0))) return `A repository's "screeningLanes" must be a whole number of at least 0`;
   if (Object.values(config.repos).some((repo) => repo.screeningLanes && (!repo.verifier || repo.lane !== undefined))) return `Screening lanes require a remote verifier and an isolated repository lane`;
-  if (Object.values(config.repos).some((repo) => repo.verifier !== undefined && repo.verifier !== "boat")) return `A repository's "verifier" can only be "boat"`;
+  if (Object.values(config.repos).some((repo) => repo.verifier !== undefined && repo.verifier !== "boat" && repo.verifier !== "machine")) return `A repository's "verifier" can only be "boat" or "machine"`;
+  if (Object.values(config.repos).some((repo) => repo.verifier === "machine" && repo.gateMachine === undefined)) return `A repository whose "verifier" is "machine" needs a "gateMachine"`;
   if (Object.values(config.repos).some((repo) => repo.hostPlaces !== undefined && repo.hostPlaces !== 0 && repo.hostPlaces !== 1)) return `A repository's "hostPlaces" must be 0 or 1`;
   if (Object.values(config.repos).some((repo) => repo.hostPlaces && !repo.verifier)) return `A repository's "hostPlaces" needs a "verifier": without one, every gate already runs on this host`;
   if (Object.values(config.repos).some((repo) => repo.verifier === "boat") && !config.boat?.image?.trim()) return `A repository verifies on boat, but the runner config's "boat.image" names no saved snapshot`;

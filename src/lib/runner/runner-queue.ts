@@ -239,7 +239,7 @@ export function createRunnerQueue(input: {
     if (!cap) throw new Error(`Runner queue ${String(key)} capability is not configured`);
     return cap;
   };
-  if (Object.values(config.repos).some((repo) => repo.verifier) && !remoteVerification) throw new Error("A repository names a remote verifier, but the runner has none");
+  if (Object.values(config.repos).some((repo) => repo.verifier === "boat") && !remoteVerification) throw new Error("A repository verifies on boat, but the runner has no boat verifier");
   if (Object.values(config.repos).some((repo) => repo.verificationDepth === 2 && !repo.verifier) && !executor.combinedLimits)
     throw new Error("Depth-two verification requires an executor with enforced combined resource limits");
   type BoatHold = { failures: number; timer?: ReturnType<typeof setTimeout>; controller?: AbortController };
@@ -1529,9 +1529,16 @@ export function createRunnerQueue(input: {
           // Recover in the background. This gate uses boat while health is unproven.
           for (const entry of places) void entry.recover?.([]).then(wakeMain).catch(() => undefined);
         }
+        machinePlaceDown(name, reason);
+        // A machine-only repository never opens boat: no gate command ran, so the landing returns to the queue a bounded
+        // number of times (see AWAITING_REMOTE_EXECUTOR) and then fails as infrastructure, never as a verdict on the source.
+        if (configuredRepository(config, operation.repo)?.verifier === "machine") {
+          progress(`warning: every ${name} gate place is down (${reason}); this repository never gates on boat, so the gate waits for the machine`);
+          remoteUnavailable = `${name}'s gate places are down: ${reason}`;
+          throw new Error(`Remote executor unavailable (machine ${name}): ${reason}`);
+        }
         // Boat is only for a place that is down, and it is never quiet: the landing says so, and so does the runner.
         progress(`warning: ${name}'s gate place is down (${reason}); this gate runs on a boat VM instead`);
-        machinePlaceDown(name, reason);
         const cause = "infrastructure" as const;
         append(operation.id, { type: "gate_fallback", placement: `machine:${name}`, cause, reason });
         if (boatHolds.has(operation.repo)) throw Object.assign(new Error(`Remote executor unavailable (boat): boat is held; ${reason}`), { boatUnavailable: true });
@@ -2744,7 +2751,7 @@ export function createRunnerQueue(input: {
         await executor.recover?.();
         await Promise.all([...Object.values(machinePlaces).flat(), ...Object.values(machineChecks).map((entry) => entry.place)].map((place) => place.recover?.([])));
         // Every attempt cleans its machine first, so a recovery that fails here is reported, never a reason to stop.
-        await remoteVerification?.recover?.(Object.entries(config.repos).flatMap(([repo, entry]) => entry.verifier ? [repo] : []))
+        await remoteVerification?.recover?.(Object.entries(config.repos).flatMap(([repo, entry]) => entry.verifier === "boat" ? [repo] : []))
           .catch((error: unknown) => console.error(`[runner] ${message(error)}`));
         await recoverRunning(); await reconcileHeld();
       })

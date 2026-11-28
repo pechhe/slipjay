@@ -522,6 +522,10 @@ running) for the next attempts to create them from the new image.
 
 #### Keeping the starting image
 
+A repository with `verifier: "machine"` never uses boat for its landing gates, so neither the starting
+image nor the readiness warnings below apply to its landings; boat remains only for what still names it
+(a boat-verifying repository, or a batch check whose pool has no free machine place).
+
 Boat deletes a stopped sandbox's data 14 days after it stops, and `boat fork <id>` forks a sandbox's
 latest snapshot, so an image named by sandbox id lapses unless someone restarts and stops it inside
 every 14 days. A saved snapshot outlasts that window: `slipjay-yardsmith-image`, saved from
@@ -636,7 +640,14 @@ needs `verifier`; 0 or omitted is boat only, and the place does not count agains
 A machine place's commands get the remote account's own `XDG_RUNTIME_DIR` (and `DBUS_SESSION_BUS_ADDRESS` when its bus
 socket exists), computed on the machine and never copied from the runner. Boat commands are unchanged.
 
-With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlaces: 1` (SJ-199):
+With `verifier: "machine"`, a repository gates only on its `gateMachine`'s places and never on boat: a gate that
+finds every place busy queues for the next one freed, and one that finds every place down returns to the queue twice
+(as for an unready boat VM) and then fails as infrastructure, "Remote executor unavailable (machine <name>)", with no
+gate command run. It needs no `boat.image`, and its landings print no boat readiness warning. pechhe/slipjay and
+pechhe/yardsmith gate this way on peach-box from 28 Nov 2026 (Henry: landings do not use boat).
+
+With `verifier: "boat"`, a repository can set `gateMachine` instead of `hostPlaces: 1` (SJ-199), and boat takes a
+gate whose machine place is down:
 
 ```json
 {

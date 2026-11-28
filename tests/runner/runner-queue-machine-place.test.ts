@@ -120,6 +120,33 @@ test("quarantined places use boat until recovery proves clean, then take gates w
   } finally { await f.dispose(); }
 });
 
+test("a machine-only repository never opens boat: a down place returns the landing to the queue, then fails it as infrastructure", async () => {
+  const p = places(); p.quarantine(true);
+  const f = await fixture(false, false, undefined, false, { ...options(p), remoteVerification: undefined, verifier: "machine" });
+  try {
+    const a = await f.land(f.submit(await f.candidate("a")));
+    assert.equal(a?.type, "failed", JSON.stringify(a));
+    assert.match(a?.type === "failed" ? a.reason : "", /Remote executor unavailable \(machine peach-box\)/);
+    assert.deepEqual(placements(f), [], "no gate opened, boat included");
+    assert.ok(!f.log.events().some(({ event }) => event.type === "progress" && /boat VM instead|boat cannot start/.test(event.line)));
+    assert.ok(f.log.events().some(({ event }) => event.type === "progress" && /never gates on boat, so the gate waits for the machine/.test(event.line)));
+    assert.ok(f.log.events().some(({ event }) => event.type === "yielded"), "returned to the queue before failing");
+    p.quarantine(false);
+    const b = await f.land(f.submit(await f.candidate("b")));
+    assert.equal(b?.type, "landed", JSON.stringify(b));
+    assert.deepEqual(placements(f), ["machine:peach-box"]);
+  } finally { await f.dispose(); }
+});
+
+test("a machine-only repository needs a gate machine and no boat image", () => {
+  const config: RunnerConfig = { jj: { "user.name": "Runner", "user.email": "runner@example.com" }, machines: { "peach-box": { ssh: "peach-box", account: "ubuntu", root: "/var/lib/slipjay-gates" } }, repos: { repo: { url: "url", verifier: "machine", gateMachine: "peach-box", screeningLanes: 1 } } };
+  assert.equal(runnerConfigProblem(config), null);
+  delete config.repos.repo!.gateMachine; delete config.repos.repo!.screeningLanes;
+  assert.match(runnerConfigProblem(config)!, /"verifier" is "machine" needs a "gateMachine"/);
+  config.repos.repo!.verifier = "vm" as "machine";
+  assert.match(runnerConfigProblem(config)!, /can only be "boat" or "machine"/);
+});
+
 test("machine configuration rejects unknown, host-combined and verifier-less places at load", () => {
   const config: RunnerConfig = { jj: { "user.name": "Runner", "user.email": "runner@example.com" }, boat: { image: "image" }, machines: { "peach-box": { ssh: "peach-box", account: "ubuntu", root: "/var/lib/slipjay-gates" } }, repos: { repo: { url: "url", verifier: "boat", gateMachine: "peach-box" } } };
   assert.equal(runnerConfigProblem(config), null);

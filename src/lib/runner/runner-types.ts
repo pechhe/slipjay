@@ -821,8 +821,12 @@ export type RunnerConfig = {
   repos: Record<string, { url: string; lane?: string; verificationDepth?: 1 | 2;
     /** Independent remote screens; absent or zero preserves ordered admission. */
     screeningLanes?: number;
-    /** Run the gate on a remote verifier (see `boat`) instead of this host. Depth two then needs no host budget. */
-    verifier?: "boat";
+    /**
+     * Run the gate on a remote verifier instead of this host. Depth two then needs no host budget. `boat` gates on a boat
+     * VM, or on `gateMachine` with boat for a place that is down; `machine` gates only on `gateMachine`'s places and never
+     * opens boat: a gate that finds every place down returns to the queue a bounded number of times, then fails.
+     */
+    verifier?: "boat" | "machine";
     /**
      * With `verifier`, 1 gives the repository one gate place on this host (SJ-189): a gate that finds it free when its
      * commands are about to run runs them here, in its runner checkout; any other opens the verifier as before. 0 or
